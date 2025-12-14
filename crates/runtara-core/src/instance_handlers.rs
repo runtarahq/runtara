@@ -1,0 +1,689 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Instance protocol handlers for runtara-core.
+//!
+//! These handlers process requests from instances (registration, checkpoints, events, signals, etc.)
+
+use std::time::Duration;
+
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use sqlx::PgPool;
+use tracing::{debug, info, instrument, warn};
+
+use runtara_protocol::instance_proto::{
+    CheckpointRequest, CheckpointResponse, GetCheckpointRequest, GetCheckpointResponse,
+    GetInstanceStatusRequest, GetInstanceStatusResponse, InstanceEvent, InstanceEventType,
+    InstanceStatus, PollSignalsRequest, PollSignalsResponse, RegisterInstanceRequest,
+    RegisterInstanceResponse, Signal, SignalAck, SignalType, SleepRequest, SleepResponse,
+};
+
+use crate::db::{self, EventRecord};
+use crate::error::CoreError;
+
+/// Sleep threshold in milliseconds. Sleeps shorter than this are done in-process.
+/// Sleeps longer than this are deferred to the wake queue.
+pub const IN_PROCESS_SLEEP_THRESHOLD_MS: u64 = 30_000; // 30 seconds
+
+/// Shared state for instance handlers.
+///
+/// Contains the database connection pool shared across all handlers.
+pub struct InstanceHandlerState {
+    /// PostgreSQL connection pool.
+    pub pool: PgPool,
+}
+
+impl InstanceHandlerState {
+    /// Create a new instance handler state with the given database pool.
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+// ============================================================================
+// Instance Registration
+// ============================================================================
+
+/// Handle instance registration request.
+///
+/// Registers an instance with Core, optionally resuming from a checkpoint.
+/// If the instance doesn't exist, it's created (self-registration).
+///
+/// # Errors
+///
+/// Returns an error response if:
+/// - `instance_id` or `tenant_id` is empty
+/// - A specified `checkpoint_id` doesn't exist
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
+pub async fn handle_register_instance(
+    state: &InstanceHandlerState,
+    request: RegisterInstanceRequest,
+) -> Result<RegisterInstanceResponse> {
+    info!(
+        tenant_id = %request.tenant_id,
+        resuming_from = ?request.checkpoint_id,
+        "Instance registering"
+    );
+
+    // 1. Validate instance_id is not empty
+    if request.instance_id.is_empty() {
+        return Ok(RegisterInstanceResponse {
+            success: false,
+            error: "instance_id is required".to_string(),
+        });
+    }
+
+    // 2. Validate tenant_id is not empty
+    if request.tenant_id.is_empty() {
+        return Ok(RegisterInstanceResponse {
+            success: false,
+            error: "tenant_id is required".to_string(),
+        });
+    }
+
+    // 3. If checkpoint_id provided, verify it exists
+    if let Some(ref cp_id) = request.checkpoint_id {
+        let checkpoint = db::load_checkpoint(&state.pool, &request.instance_id, cp_id).await;
+        match checkpoint {
+            Ok(Some(_)) => {
+                debug!(checkpoint_id = %cp_id, "Checkpoint found for resume");
+            }
+            Ok(None) => {
+                return Ok(RegisterInstanceResponse {
+                    success: false,
+                    error: format!("Checkpoint '{}' not found", cp_id),
+                });
+            }
+            Err(e) => {
+                return Ok(RegisterInstanceResponse {
+                    success: false,
+                    error: format!("Failed to verify checkpoint: {}", e),
+                });
+            }
+        }
+    }
+
+    // 4. Check if instance exists, create if not (self-registration)
+    let instance_exists = db::get_instance(&state.pool, &request.instance_id)
+        .await
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+
+    if !instance_exists {
+        // Self-registration: create instance record
+        info!("Instance not found, creating self-registered instance");
+        if let Err(e) = db::create_self_registered_instance(
+            &state.pool,
+            &request.instance_id,
+            &request.tenant_id,
+        )
+        .await
+        {
+            return Ok(RegisterInstanceResponse {
+                success: false,
+                error: format!("Failed to create instance: {}", e),
+            });
+        }
+    }
+
+    // 5. Update instance status to RUNNING
+    let started_at = Utc::now();
+    if let Err(e) = db::update_instance_status(
+        &state.pool,
+        &request.instance_id,
+        "running",
+        Some(started_at),
+    )
+    .await
+    {
+        return Ok(RegisterInstanceResponse {
+            success: false,
+            error: format!("Failed to update instance status: {}", e),
+        });
+    }
+
+    // 6. Insert started event
+    let event = EventRecord {
+        instance_id: request.instance_id.clone(),
+        event_type: "started".to_string(),
+        checkpoint_id: request.checkpoint_id.clone(),
+        payload: None,
+        created_at: started_at,
+    };
+    if let Err(e) = db::insert_event(&state.pool, &event).await {
+        warn!("Failed to insert started event: {}", e);
+        // Don't fail registration just because event logging failed
+    }
+
+    info!("Instance registered successfully");
+
+    Ok(RegisterInstanceResponse {
+        success: true,
+        error: String::new(),
+    })
+}
+
+// ============================================================================
+// Checkpointing (append-only log)
+// ============================================================================
+
+/// Checkpoint handler - combines save and load semantics.
+///
+/// - If checkpoint with this ID exists, returns the existing state (for resume)
+/// - If checkpoint doesn't exist, saves the state and returns empty (fresh execution)
+///
+/// Also serves as heartbeat - updates instance's last activity timestamp.
+/// Includes pending signal information so instance can react to cancel/pause.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+pub async fn handle_checkpoint(
+    state: &InstanceHandlerState,
+    request: CheckpointRequest,
+) -> Result<CheckpointResponse> {
+    debug!(
+        state_size = request.state.len(),
+        "Processing checkpoint request"
+    );
+
+    // 1. Validate instance exists and is running
+    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+    match instance {
+        Some(inst) => {
+            if inst.status != "running" {
+                return Err(CoreError::InvalidInstanceState {
+                    instance_id: request.instance_id.clone(),
+                    expected: "running".to_string(),
+                    actual: inst.status,
+                }
+                .into());
+            }
+        }
+        None => {
+            return Err(CoreError::InstanceNotFound {
+                instance_id: request.instance_id.clone(),
+            }
+            .into());
+        }
+    }
+
+    // 2. Check if checkpoint already exists
+    if let Some(existing) =
+        db::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id).await?
+    {
+        debug!(
+            checkpoint_id = %request.checkpoint_id,
+            state_size = existing.state.len(),
+            "Found existing checkpoint - returning for resume"
+        );
+
+        // Check for pending signal even when returning existing checkpoint
+        let pending_signal = get_pending_signal_type(&state.pool, &request.instance_id).await;
+
+        return Ok(CheckpointResponse {
+            found: true,
+            state: existing.state,
+            pending_signal,
+        });
+    }
+
+    // 3. Checkpoint doesn't exist - save new checkpoint
+    db::save_checkpoint(
+        &state.pool,
+        &request.instance_id,
+        &request.checkpoint_id,
+        &request.state,
+    )
+    .await?;
+
+    // 4. Update instance's current checkpoint_id
+    db::update_instance_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
+        .await?;
+
+    // 5. Check for pending signal to include in response
+    let pending_signal = get_pending_signal_type(&state.pool, &request.instance_id).await;
+
+    if pending_signal.is_some() {
+        debug!(signal = ?pending_signal, "Checkpoint saved with pending signal");
+    } else {
+        debug!("New checkpoint saved successfully");
+    }
+
+    Ok(CheckpointResponse {
+        found: false,
+        state: Vec::new(),
+        pending_signal,
+    })
+}
+
+/// Helper to get the pending signal type for an instance.
+async fn get_pending_signal_type(pool: &PgPool, instance_id: &str) -> Option<i32> {
+    match db::get_pending_signal(pool, instance_id).await {
+        Ok(Some(signal)) => {
+            let signal_type = match signal.signal_type.as_str() {
+                "cancel" => SignalType::SignalCancel,
+                "pause" => SignalType::SignalPause,
+                "resume" => SignalType::SignalResume,
+                _ => return None,
+            };
+            Some(signal_type.into())
+        }
+        _ => None,
+    }
+}
+
+/// Get checkpoint handler - read-only lookup without saving.
+///
+/// Returns the checkpoint state if found, or empty if not found.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+pub async fn handle_get_checkpoint(
+    state: &InstanceHandlerState,
+    request: GetCheckpointRequest,
+) -> Result<GetCheckpointResponse> {
+    debug!("Looking up checkpoint (read-only)");
+
+    // 1. Validate instance exists
+    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+    if instance.is_none() {
+        return Err(CoreError::InstanceNotFound {
+            instance_id: request.instance_id.clone(),
+        }
+        .into());
+    }
+
+    // 2. Look up checkpoint
+    if let Some(checkpoint) =
+        db::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id).await?
+    {
+        debug!(
+            checkpoint_id = %request.checkpoint_id,
+            state_size = checkpoint.state.len(),
+            "Checkpoint found"
+        );
+        return Ok(GetCheckpointResponse {
+            found: true,
+            state: checkpoint.state,
+        });
+    }
+
+    debug!(checkpoint_id = %request.checkpoint_id, "Checkpoint not found");
+    Ok(GetCheckpointResponse {
+        found: false,
+        state: Vec::new(),
+    })
+}
+
+// ============================================================================
+// Sleep/Wake
+// ============================================================================
+
+/// Handle durable sleep request.
+///
+/// Sleeps are handled differently based on duration:
+/// - **Short sleeps** (< 30s): Return `deferred: false`, instance sleeps in-process
+/// - **Long sleeps** (≥ 30s): Save checkpoint, schedule wake, return `deferred: true`
+///
+/// When `deferred: true`, the instance should exit cleanly. Core will wake it
+/// later by resuming from the checkpoint.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+pub async fn handle_sleep(
+    state: &InstanceHandlerState,
+    request: SleepRequest,
+) -> Result<SleepResponse> {
+    debug!(
+        duration_ms = request.duration_ms,
+        state_size = request.state.len(),
+        "Processing sleep request"
+    );
+
+    // Short sleeps: sleep in-process
+    if request.duration_ms < IN_PROCESS_SLEEP_THRESHOLD_MS {
+        debug!(duration_ms = request.duration_ms, "Sleeping in-process");
+        tokio::time::sleep(Duration::from_millis(request.duration_ms)).await;
+        return Ok(SleepResponse { deferred: false });
+    }
+
+    // Long sleeps: defer to wake queue
+    debug!(
+        duration_ms = request.duration_ms,
+        "Deferring sleep to wake queue"
+    );
+
+    // 1. Save checkpoint with state
+    db::save_checkpoint(
+        &state.pool,
+        &request.instance_id,
+        &request.checkpoint_id,
+        &request.state,
+    )
+    .await?;
+
+    // 2. Calculate wake time
+    let wake_at = Utc::now() + chrono::Duration::milliseconds(request.duration_ms as i64);
+
+    // 3. Add to wake queue (upsert)
+    db::schedule_wake(
+        &state.pool,
+        &request.instance_id,
+        &request.checkpoint_id,
+        wake_at,
+    )
+    .await?;
+
+    // 4. Update instance status to suspended
+    db::update_instance_status(&state.pool, &request.instance_id, "suspended", None).await?;
+
+    // 5. Update instance's current checkpoint_id
+    db::update_instance_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
+        .await?;
+
+    info!(
+        wake_at = %wake_at,
+        "Instance suspended, scheduled for wake"
+    );
+
+    Ok(SleepResponse { deferred: true })
+}
+
+// ============================================================================
+// Instance Events
+// ============================================================================
+
+/// Handle instance event (fire-and-forget).
+///
+/// Processes lifecycle events from instances:
+/// - **Heartbeat**: Update activity timestamp
+/// - **Completed**: Mark instance as completed, store output
+/// - **Failed**: Mark instance as failed, store error
+/// - **Suspended**: Mark instance as suspended
+///
+/// This is a fire-and-forget operation - no response is sent.
+#[instrument(skip(state, event), fields(instance_id = %event.instance_id))]
+pub async fn handle_instance_event(
+    state: &InstanceHandlerState,
+    event: InstanceEvent,
+) -> Result<()> {
+    debug!(
+        event_type = ?event.event_type,
+        checkpoint_id = ?event.checkpoint_id,
+        payload_size = event.payload.len(),
+        timestamp_ms = event.timestamp_ms,
+        "Received instance event"
+    );
+
+    // 1. Map proto event type to DB enum
+    let event_type = map_event_type(event.event_type());
+
+    // 2. Validate instance_id is not empty
+    if event.instance_id.is_empty() {
+        return Err(CoreError::ValidationError {
+            field: "instance_id".to_string(),
+            message: "instance_id is required".to_string(),
+        }
+        .into());
+    }
+
+    // 3. Determine timestamp
+    let created_at = DateTime::from_timestamp_millis(event.timestamp_ms).unwrap_or_else(Utc::now);
+
+    // 4. Insert event record
+    let event_record = EventRecord {
+        instance_id: event.instance_id.clone(),
+        event_type: event_type.to_string(),
+        checkpoint_id: event.checkpoint_id.clone(),
+        payload: if event.payload.is_empty() {
+            None
+        } else {
+            Some(event.payload.clone())
+        },
+        created_at,
+    };
+    db::insert_event(&state.pool, &event_record).await?;
+
+    // 5. Update instance status based on event type
+    match event.event_type() {
+        InstanceEventType::EventHeartbeat => {
+            // Heartbeat is just an "I'm alive" signal - no state changes needed
+            // The event was already logged above
+            debug!("Heartbeat received");
+        }
+        InstanceEventType::EventCompleted => {
+            let output = if event.payload.is_empty() {
+                None
+            } else {
+                Some(event.payload.as_slice())
+            };
+            db::complete_instance(&state.pool, &event.instance_id, output, None).await?;
+            info!("Instance completed successfully");
+        }
+        InstanceEventType::EventFailed => {
+            let error = if event.payload.is_empty() {
+                "Unknown error"
+            } else {
+                std::str::from_utf8(&event.payload).unwrap_or("Unknown error (binary payload)")
+            };
+            db::complete_instance(&state.pool, &event.instance_id, None, Some(error)).await?;
+            warn!(error = %error, "Instance failed");
+        }
+        InstanceEventType::EventSuspended => {
+            db::update_instance_status(&state.pool, &event.instance_id, "suspended", None).await?;
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Instance Status
+// ============================================================================
+
+/// Handle instance status query.
+///
+/// Returns the current status of an instance including:
+/// - Current status (pending, running, suspended, completed, failed, cancelled)
+/// - Last checkpoint ID
+/// - Start/finish timestamps
+/// - Output data (if completed) or error message (if failed)
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
+pub async fn handle_get_instance_status(
+    state: &InstanceHandlerState,
+    request: GetInstanceStatusRequest,
+) -> Result<GetInstanceStatusResponse> {
+    debug!("Getting instance status");
+
+    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+
+    match instance {
+        Some(inst) => {
+            let status = map_status(&inst.status);
+
+            Ok(GetInstanceStatusResponse {
+                instance_id: request.instance_id,
+                status: status.into(),
+                checkpoint_id: inst.checkpoint_id,
+                started_at_ms: inst.started_at.map(|t| t.timestamp_millis()).unwrap_or(0),
+                finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+                output: inst.output,
+                error: inst.error,
+            })
+        }
+        None => Ok(GetInstanceStatusResponse {
+            instance_id: request.instance_id,
+            status: InstanceStatus::StatusUnknown.into(),
+            checkpoint_id: None,
+            started_at_ms: 0,
+            finished_at_ms: None,
+            output: None,
+            error: Some("Instance not found".to_string()),
+        }),
+    }
+}
+
+// ============================================================================
+// Signal Polling (instance → core)
+// ============================================================================
+
+/// Handle signal polling request.
+///
+/// Returns the oldest pending signal for the instance, if any.
+/// Signals are: cancel, pause, resume.
+///
+/// Note: The checkpoint response also includes pending signals for efficiency.
+/// This endpoint is for explicit polling when not checkpointing.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
+pub async fn handle_poll_signals(
+    state: &InstanceHandlerState,
+    request: PollSignalsRequest,
+) -> Result<PollSignalsResponse> {
+    debug!("Instance polling for signals");
+
+    let pending = db::get_pending_signal(&state.pool, &request.instance_id).await?;
+
+    match pending {
+        Some(signal) => {
+            let signal_type = match signal.signal_type.as_str() {
+                "cancel" => SignalType::SignalCancel,
+                "pause" => SignalType::SignalPause,
+                "resume" => SignalType::SignalResume,
+                _ => {
+                    warn!(signal_type = %signal.signal_type, "Unknown signal type");
+                    return Ok(PollSignalsResponse { signal: None });
+                }
+            };
+
+            debug!(signal_type = ?signal_type, "Returning pending signal");
+
+            Ok(PollSignalsResponse {
+                signal: Some(Signal {
+                    instance_id: request.instance_id,
+                    signal_type: signal_type.into(),
+                    payload: signal.payload.unwrap_or_default(),
+                }),
+            })
+        }
+        None => Ok(PollSignalsResponse { signal: None }),
+    }
+}
+
+/// Handle signal acknowledgement (fire-and-forget).
+///
+/// Marks a signal as acknowledged by the instance.
+/// If acknowledging a cancel signal, also updates instance status to cancelled.
+#[instrument(skip(state, ack), fields(instance_id = %ack.instance_id))]
+pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<()> {
+    debug!(
+        signal_type = ?ack.signal_type,
+        acknowledged = ack.acknowledged,
+        "Received signal acknowledgement"
+    );
+
+    if ack.acknowledged {
+        // Mark signal as acknowledged
+        db::acknowledge_signal(&state.pool, &ack.instance_id).await?;
+
+        // Handle signal-specific side effects
+        match ack.signal_type() {
+            SignalType::SignalCancel => {
+                // Update instance status to cancelled
+                db::update_instance_status(&state.pool, &ack.instance_id, "cancelled", None)
+                    .await?;
+                info!("Instance cancelled");
+            }
+            SignalType::SignalPause => {
+                // Instance should checkpoint and suspend
+                debug!("Pause signal acknowledged");
+            }
+            SignalType::SignalResume => {
+                // Instance should resume execution
+                debug!("Resume signal acknowledged");
+            }
+        }
+    } else {
+        warn!("Signal was not acknowledged by instance");
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Map proto event type to database enum string.
+pub fn map_event_type(event_type: InstanceEventType) -> &'static str {
+    match event_type {
+        InstanceEventType::EventHeartbeat => "heartbeat",
+        InstanceEventType::EventCompleted => "completed",
+        InstanceEventType::EventFailed => "failed",
+        InstanceEventType::EventSuspended => "suspended",
+    }
+}
+
+/// Map database status string to proto enum.
+pub fn map_status(status: &str) -> InstanceStatus {
+    match status {
+        "pending" => InstanceStatus::StatusPending,
+        "running" => InstanceStatus::StatusRunning,
+        "suspended" => InstanceStatus::StatusSuspended,
+        "completed" => InstanceStatus::StatusCompleted,
+        "failed" => InstanceStatus::StatusFailed,
+        "cancelled" => InstanceStatus::StatusCancelled,
+        _ => InstanceStatus::StatusUnknown,
+    }
+}
+
+/// Map proto signal type to database enum string.
+pub fn map_signal_type(signal_type: SignalType) -> &'static str {
+    match signal_type {
+        SignalType::SignalCancel => "cancel",
+        SignalType::SignalPause => "pause",
+        SignalType::SignalResume => "resume",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sleep_threshold() {
+        // Document the threshold value and expected categorizations
+        assert_eq!(IN_PROCESS_SLEEP_THRESHOLD_MS, 30_000);
+        // Short sleeps (below threshold) are handled in-process
+        // Long sleeps (at or above threshold) trigger durable sleep with wake queue
+    }
+
+    #[test]
+    fn test_event_type_mapping() {
+        assert_eq!(
+            map_event_type(InstanceEventType::EventHeartbeat),
+            "heartbeat"
+        );
+        assert_eq!(
+            map_event_type(InstanceEventType::EventCompleted),
+            "completed"
+        );
+        assert_eq!(map_event_type(InstanceEventType::EventFailed), "failed");
+        assert_eq!(
+            map_event_type(InstanceEventType::EventSuspended),
+            "suspended"
+        );
+    }
+
+    #[test]
+    fn test_status_mapping_all_variants() {
+        assert_eq!(map_status("pending"), InstanceStatus::StatusPending);
+        assert_eq!(map_status("running"), InstanceStatus::StatusRunning);
+        assert_eq!(map_status("suspended"), InstanceStatus::StatusSuspended);
+        assert_eq!(map_status("completed"), InstanceStatus::StatusCompleted);
+        assert_eq!(map_status("failed"), InstanceStatus::StatusFailed);
+        assert_eq!(map_status("cancelled"), InstanceStatus::StatusCancelled);
+        assert_eq!(map_status("invalid"), InstanceStatus::StatusUnknown);
+        assert_eq!(map_status(""), InstanceStatus::StatusUnknown);
+    }
+
+    #[test]
+    fn test_signal_type_mapping() {
+        assert_eq!(map_signal_type(SignalType::SignalCancel), "cancel");
+        assert_eq!(map_signal_type(SignalType::SignalPause), "pause");
+        assert_eq!(map_signal_type(SignalType::SignalResume), "resume");
+    }
+}

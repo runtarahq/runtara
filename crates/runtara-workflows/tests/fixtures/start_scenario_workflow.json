@@ -1,0 +1,38 @@
+{
+  "name": "StartScenario Workflow",
+  "description": "A workflow that calls a child scenario using StartScenario step",
+  "steps": {
+    "call_child": {
+      "stepType": "StartScenario",
+      "id": "call_child",
+      "childScenarioId": "child_scenario",
+      "childVersion": "latest",
+      "inputMapping": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.input"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_child.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_child",
+  "executionPlan": [
+    {
+      "fromStep": "call_child",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

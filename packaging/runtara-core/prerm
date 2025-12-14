@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+# Stop the service before removal
+if systemctl is-active --quiet runtara-core.service; then
+    systemctl stop runtara-core.service
+fi
+
+# Disable the service
+if systemctl is-enabled --quiet runtara-core.service 2>/dev/null; then
+    systemctl disable runtara-core.service
+fi

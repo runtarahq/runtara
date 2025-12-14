@@ -1,0 +1,407 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! QUIC server helpers for runtara-core.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use quinn::{Endpoint, Incoming, RecvStream, SendStream, ServerConfig, TransportConfig};
+use thiserror::Error;
+use tracing::{debug, error, info, instrument, warn};
+
+use crate::frame::{Frame, FrameError, FramedStream, read_frame, write_frame};
+
+/// Errors that can occur in the QUIC server
+#[derive(Debug, Error)]
+pub enum ServerError {
+    #[error("bind error: {0}")]
+    Bind(#[from] std::io::Error),
+
+    #[error("connection error: {0}")]
+    Connection(#[from] quinn::ConnectionError),
+
+    #[error("frame error: {0}")]
+    Frame(#[from] FrameError),
+
+    #[error("TLS error: {0}")]
+    Tls(String),
+
+    #[error("server closed")]
+    Closed,
+}
+
+/// Configuration for the QUIC server
+#[derive(Debug, Clone)]
+pub struct RuntaraServerConfig {
+    /// Address to bind to
+    pub bind_addr: SocketAddr,
+    /// TLS certificate chain (PEM format)
+    pub cert_pem: Vec<u8>,
+    /// TLS private key (PEM format)
+    pub key_pem: Vec<u8>,
+    /// Maximum concurrent connections
+    pub max_connections: u32,
+    /// Maximum concurrent bidirectional streams per connection
+    pub max_bi_streams: u32,
+    /// Maximum concurrent unidirectional streams per connection
+    pub max_uni_streams: u32,
+    /// Idle timeout in milliseconds
+    pub idle_timeout_ms: u64,
+}
+
+impl Default for RuntaraServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: "0.0.0.0:7001".parse().unwrap(),
+            cert_pem: Vec::new(),
+            key_pem: Vec::new(),
+            max_connections: 10_000,
+            max_bi_streams: 100,
+            max_uni_streams: 100,
+            idle_timeout_ms: 30_000,
+        }
+    }
+}
+
+/// QUIC server for runtara-core
+pub struct RuntaraServer {
+    endpoint: Endpoint,
+}
+
+impl RuntaraServer {
+    /// Create a new server with the given configuration
+    pub fn new(config: RuntaraServerConfig) -> Result<Self, ServerError> {
+        let server_config = Self::build_server_config(&config)?;
+        let endpoint = Endpoint::server(server_config, config.bind_addr)?;
+
+        info!(addr = %config.bind_addr, "QUIC server bound");
+
+        Ok(Self { endpoint })
+    }
+
+    /// Create a server with self-signed certificate for local development
+    pub fn localhost(bind_addr: SocketAddr) -> Result<Self, ServerError> {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .map_err(|e| ServerError::Tls(e.to_string()))?;
+
+        let cert_pem = cert.cert.pem().into_bytes();
+        let key_pem = cert.key_pair.serialize_pem().into_bytes();
+
+        let config = RuntaraServerConfig {
+            bind_addr,
+            cert_pem,
+            key_pem,
+            ..Default::default()
+        };
+
+        Self::new(config)
+    }
+
+    fn build_server_config(config: &RuntaraServerConfig) -> Result<ServerConfig, ServerError> {
+        let certs = rustls_pemfile::certs(&mut config.cert_pem.as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ServerError::Tls(format!("failed to parse certificates: {}", e)))?;
+
+        let key = rustls_pemfile::private_key(&mut config.key_pem.as_slice())
+            .map_err(|e| ServerError::Tls(format!("failed to parse private key: {}", e)))?
+            .ok_or_else(|| ServerError::Tls("no private key found".to_string()))?;
+
+        let crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| ServerError::Tls(e.to_string()))?;
+
+        let mut transport = TransportConfig::default();
+        transport.max_idle_timeout(Some(
+            std::time::Duration::from_millis(config.idle_timeout_ms)
+                .try_into()
+                .unwrap(),
+        ));
+        transport.max_concurrent_bidi_streams(config.max_bi_streams.into());
+        transport.max_concurrent_uni_streams(config.max_uni_streams.into());
+
+        let mut server_config = ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(crypto)
+                .map_err(|e| ServerError::Tls(e.to_string()))?,
+        ));
+        server_config.transport_config(Arc::new(transport));
+
+        Ok(server_config)
+    }
+
+    /// Accept the next incoming connection
+    pub async fn accept(&self) -> Option<Incoming> {
+        self.endpoint.accept().await
+    }
+
+    /// Get the local address the server is bound to
+    pub fn local_addr(&self) -> Result<SocketAddr, ServerError> {
+        Ok(self.endpoint.local_addr()?)
+    }
+
+    /// Close the server
+    pub fn close(&self) {
+        self.endpoint.close(0u32.into(), b"server closing");
+    }
+
+    /// Run the server with a connection handler
+    #[instrument(skip(self, handler))]
+    pub async fn run<H, Fut>(&self, handler: H) -> Result<(), ServerError>
+    where
+        H: Fn(ConnectionHandler) -> Fut + Send + Sync + Clone + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        info!("QUIC server running");
+
+        while let Some(incoming) = self.accept().await {
+            let handler = handler.clone();
+
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(connection) => {
+                        let remote_addr = connection.remote_address();
+                        debug!(%remote_addr, "accepted connection");
+
+                        let conn_handler = ConnectionHandler::new(connection);
+                        handler(conn_handler).await;
+                    }
+                    Err(e) => {
+                        warn!("failed to accept connection: {}", e);
+                    }
+                }
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Handler for an individual QUIC connection
+pub struct ConnectionHandler {
+    connection: quinn::Connection,
+}
+
+impl ConnectionHandler {
+    pub fn new(connection: quinn::Connection) -> Self {
+        Self { connection }
+    }
+
+    /// Get the remote address of the connection
+    pub fn remote_address(&self) -> SocketAddr {
+        self.connection.remote_address()
+    }
+
+    /// Accept the next bidirectional stream
+    pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ServerError> {
+        Ok(self.connection.accept_bi().await?)
+    }
+
+    /// Accept the next unidirectional stream (for receiving)
+    pub async fn accept_uni(&self) -> Result<RecvStream, ServerError> {
+        Ok(self.connection.accept_uni().await?)
+    }
+
+    /// Open a bidirectional stream
+    pub async fn open_bi(&self) -> Result<(SendStream, RecvStream), ServerError> {
+        Ok(self.connection.open_bi().await?)
+    }
+
+    /// Open a unidirectional stream (for sending)
+    pub async fn open_uni(&self) -> Result<SendStream, ServerError> {
+        Ok(self.connection.open_uni().await?)
+    }
+
+    /// Run the connection handler with a stream handler
+    #[instrument(skip(self, handler), fields(remote = %self.remote_address()))]
+    pub async fn run<H, Fut>(&self, handler: H)
+    where
+        H: Fn(StreamHandler) -> Fut + Send + Sync + Clone + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        loop {
+            tokio::select! {
+                result = self.accept_bi() => {
+                    match result {
+                        Ok((send, recv)) => {
+                            let handler = handler.clone();
+                            tokio::spawn(async move {
+                                let stream_handler = StreamHandler::new(send, recv);
+                                handler(stream_handler).await;
+                            });
+                        }
+                        Err(e) => {
+                            match &e {
+                                ServerError::Connection(quinn::ConnectionError::ApplicationClosed(_)) |
+                                ServerError::Connection(quinn::ConnectionError::LocallyClosed) => {
+                                    debug!("connection closed");
+                                }
+                                _ => {
+                                    error!("error accepting stream: {}", e);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the connection is still open
+    pub fn is_open(&self) -> bool {
+        self.connection.close_reason().is_none()
+    }
+
+    /// Close the connection
+    pub fn close(&self, code: u32, reason: &[u8]) {
+        self.connection.close(code.into(), reason);
+    }
+}
+
+/// Handler for an individual QUIC stream (bidirectional)
+pub struct StreamHandler {
+    send: SendStream,
+    recv: RecvStream,
+}
+
+impl StreamHandler {
+    pub fn new(send: SendStream, recv: RecvStream) -> Self {
+        Self { send, recv }
+    }
+
+    /// Read the next frame from the stream
+    pub async fn read_frame(&mut self) -> Result<Frame, ServerError> {
+        Ok(read_frame(&mut self.recv).await?)
+    }
+
+    /// Write a frame to the stream
+    pub async fn write_frame(&mut self, frame: &Frame) -> Result<(), ServerError> {
+        Ok(write_frame(&mut self.send, frame).await?)
+    }
+
+    /// Handle a request/response pattern
+    pub async fn handle_request<Req, Resp, H, Fut>(&mut self, handler: H) -> Result<(), ServerError>
+    where
+        Req: prost::Message + Default,
+        Resp: prost::Message,
+        H: FnOnce(Req) -> Fut,
+        Fut: std::future::Future<Output = Result<Resp, ServerError>>,
+    {
+        // Read request
+        let request_frame = self.read_frame().await?;
+        let request: Req = request_frame.decode()?;
+
+        // Process and respond
+        match handler(request).await {
+            Ok(response) => {
+                let response_frame = Frame::response(&response)?;
+                self.write_frame(&response_frame).await?;
+            }
+            Err(e) => {
+                error!("request handler error: {}", e);
+                // Send error frame with empty payload
+                // The frame type itself indicates an error
+                let error_frame = Frame {
+                    message_type: crate::frame::MessageType::Error,
+                    payload: bytes::Bytes::new(),
+                };
+                self.write_frame(&error_frame).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Convert to a FramedStream for more complex patterns
+    pub fn into_framed(self) -> FramedStream<(SendStream, RecvStream)> {
+        FramedStream::new((self.send, self.recv))
+    }
+
+    /// Finish the send stream (signal no more data)
+    pub fn finish(&mut self) -> Result<(), ServerError> {
+        self.send
+            .finish()
+            .map_err(|e| ServerError::Frame(FrameError::Io(std::io::Error::other(e))))?;
+        Ok(())
+    }
+
+    /// Read raw bytes from the stream (for streaming uploads)
+    /// Returns the number of bytes read, or 0 if EOF
+    pub async fn read_bytes(&mut self, buf: &mut [u8]) -> Result<usize, ServerError> {
+        match self.recv.read(buf).await {
+            Ok(Some(n)) => Ok(n),
+            Ok(None) => Ok(0), // EOF
+            Err(e) => Err(ServerError::Frame(FrameError::Io(std::io::Error::other(
+                e.to_string(),
+            )))),
+        }
+    }
+
+    /// Read exact number of bytes from the stream
+    pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), ServerError> {
+        self.recv.read_exact(buf).await.map_err(|e| {
+            ServerError::Frame(FrameError::Io(std::io::Error::other(e.to_string())))
+        })?;
+        Ok(())
+    }
+
+    /// Read all remaining bytes from the stream until EOF (with size limit)
+    pub async fn read_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>, ServerError> {
+        self.recv
+            .read_to_end(size_limit)
+            .await
+            .map_err(|e| ServerError::Frame(FrameError::Io(std::io::Error::other(e.to_string()))))
+    }
+
+    /// Stream bytes to a writer (for large uploads without buffering all in memory)
+    pub async fn stream_to_writer<W: tokio::io::AsyncWrite + Unpin>(
+        &mut self,
+        writer: &mut W,
+        expected_size: Option<u64>,
+    ) -> Result<u64, ServerError> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut total = 0u64;
+        let mut buf = [0u8; 64 * 1024]; // 64KB chunks
+
+        loop {
+            let n = match self.recv.read(&mut buf).await {
+                Ok(Some(n)) => n,
+                Ok(None) => 0, // EOF
+                Err(e) => {
+                    return Err(ServerError::Frame(FrameError::Io(std::io::Error::other(
+                        e.to_string(),
+                    ))));
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n]).await?;
+            total += n as u64;
+        }
+
+        if let Some(expected) = expected_size
+            && total != expected
+        {
+            return Err(ServerError::Frame(FrameError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("Expected {} bytes, got {}", expected, total),
+            ))));
+        }
+
+        Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = RuntaraServerConfig::default();
+        assert_eq!(config.bind_addr, "0.0.0.0:7001".parse().unwrap());
+        assert_eq!(config.max_connections, 10_000);
+    }
+}

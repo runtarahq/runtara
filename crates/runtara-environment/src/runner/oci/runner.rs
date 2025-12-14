@@ -1,0 +1,879 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! OCI container runner implementation.
+//!
+//! Launches instance binaries via crun. Pure execution logic, no database access.
+//! Input/output is exchanged via files in the data directory:
+//! - Input: {DATA_DIR}/{tenant_id}/runs/{instance_id}/input.json
+//! - Output: {DATA_DIR}/{tenant_id}/runs/{instance_id}/output.json
+
+use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::fs;
+use tokio::process::Command;
+use tracing::{debug, error, info, warn};
+
+use super::bundle::{BundleConfig, BundleManager};
+use crate::runner::{
+    CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
+    RunnerHandle,
+};
+
+/// Parse an env var into a bool with a sensible default.
+fn parse_env_bool(var: &str, default: bool) -> bool {
+    std::env::var(var)
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
+}
+
+async fn read_cgroup_value(path: &str) -> Option<u64> {
+    tokio::fs::read_to_string(path)
+        .await
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// OCI runner configuration
+#[derive(Debug, Clone)]
+pub struct OciRunnerConfig {
+    /// Directory for OCI bundles
+    pub bundles_dir: PathBuf,
+    /// Data directory for instance I/O
+    pub data_dir: PathBuf,
+    /// Default execution timeout
+    pub default_timeout: Duration,
+    /// Whether to use systemd for cgroup management
+    pub use_systemd_cgroup: bool,
+    /// Bundle configuration
+    pub bundle_config: BundleConfig,
+    /// Skip TLS certificate verification (passed to instances)
+    pub skip_cert_verification: bool,
+}
+
+impl OciRunnerConfig {
+    /// Create configuration from environment variables
+    pub fn from_env() -> Self {
+        // Convert to absolute path for OCI container mounts
+        let data_dir_raw =
+            PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
+        let data_dir = if data_dir_raw.is_absolute() {
+            data_dir_raw
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&data_dir_raw))
+                .unwrap_or(data_dir_raw)
+        };
+        let default_bundles_dir = data_dir.join("bundles");
+
+        Self {
+            bundles_dir: std::env::var("BUNDLES_DIR")
+                .map(PathBuf::from)
+                .unwrap_or(default_bundles_dir),
+            data_dir,
+            default_timeout: Duration::from_secs(
+                std::env::var("EXECUTION_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(300),
+            ),
+            use_systemd_cgroup: parse_env_bool("USE_SYSTEMD_CGROUP", false),
+            bundle_config: BundleConfig::default(),
+            skip_cert_verification: parse_env_bool("RUNTARA_SKIP_CERT_VERIFICATION", false),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CgroupLocation {
+    V2 {
+        unified_path: String,
+    },
+    V1 {
+        memory_path: Option<String>,
+        cpu_path: Option<String>,
+    },
+}
+
+/// OCI container runner using crun.
+pub struct OciRunner {
+    config: OciRunnerConfig,
+    bundle_manager: BundleManager,
+}
+
+impl OciRunner {
+    /// Create a new OCI runner
+    pub fn new(config: OciRunnerConfig) -> Self {
+        let bundle_manager =
+            BundleManager::new(config.bundles_dir.clone(), config.bundle_config.clone());
+
+        Self {
+            config,
+            bundle_manager,
+        }
+    }
+
+    /// Create from environment variables
+    pub fn from_env() -> Self {
+        Self::new(OciRunnerConfig::from_env())
+    }
+
+    /// Get the bundle manager
+    pub fn bundle_manager(&self) -> &BundleManager {
+        &self.bundle_manager
+    }
+
+    /// Get the data directory
+    pub fn data_dir(&self) -> &Path {
+        &self.config.data_dir
+    }
+
+    /// Build environment variables for container
+    fn build_env(
+        &self,
+        instance_id: &str,
+        tenant_id: &str,
+        runtara_core_addr: &str,
+        checkpoint_id: Option<&str>,
+    ) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
+        env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
+        env.insert(
+            "RUNTARA_SERVER_ADDR".to_string(),
+            runtara_core_addr.to_string(),
+        );
+        env.insert(
+            "DATA_DIR".to_string(),
+            self.config.data_dir.to_string_lossy().to_string(),
+        );
+        if self.config.skip_cert_verification {
+            env.insert(
+                "RUNTARA_SKIP_CERT_VERIFICATION".to_string(),
+                "true".to_string(),
+            );
+        }
+        if let Some(cp_id) = checkpoint_id {
+            env.insert("RUNTARA_CHECKPOINT_ID".to_string(), cp_id.to_string());
+        }
+        env
+    }
+
+    /// Generate container ID from instance ID
+    fn container_id(&self, instance_id: &str) -> String {
+        format!("runtara_{}", &instance_id[..8.min(instance_id.len())])
+    }
+
+    /// Store input in file for instance to read
+    async fn store_input(&self, tenant_id: &str, instance_id: &str, input: &Value) -> Result<()> {
+        fs::create_dir_all(&self.config.data_dir).await?;
+
+        let run_dir = self
+            .config
+            .data_dir
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id);
+
+        fs::create_dir_all(&run_dir).await?;
+
+        let input_path = run_dir.join("input.json");
+        let value = serde_json::to_string_pretty(input)?;
+        fs::write(&input_path, &value).await?;
+
+        debug!(instance_id = %instance_id, path = %input_path.display(), "Stored input to file");
+        Ok(())
+    }
+
+    /// Load output from file (written by instance)
+    async fn load_output(&self, tenant_id: &str, instance_id: &str) -> Result<Value> {
+        let output_path = self
+            .config
+            .data_dir
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id)
+            .join("output.json");
+
+        match fs::read_to_string(&output_path).await {
+            Ok(json) => {
+                let output: Value = serde_json::from_str(&json)?;
+                Ok(output)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(RunnerError::OutputNotFound(instance_id.to_string()))
+            }
+            Err(e) => Err(RunnerError::Io(e)),
+        }
+    }
+
+    /// Load error from error.json file
+    async fn load_error(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
+        let run_dir = self
+            .config
+            .data_dir
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id);
+
+        // Try error.json first
+        let error_path = run_dir.join("error.json");
+        if let Ok(json) = fs::read_to_string(&error_path).await {
+            if let Ok(value) = serde_json::from_str::<Value>(&json) {
+                if let Some(error) = value.get("error").and_then(|e| e.as_str()) {
+                    return Some(error.to_string());
+                }
+            }
+        }
+
+        // Fallback to stderr.log
+        let stderr_path = run_dir.join("stderr.log");
+        if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
+            let stderr_trimmed = stderr_content.trim();
+            if !stderr_trimmed.is_empty() {
+                let lines: Vec<&str> = stderr_trimmed
+                    .lines()
+                    .filter(|line| {
+                        let line_lower = line.to_lowercase();
+                        !line_lower.contains("warning:")
+                            && !line_lower.starts_with("at ")
+                            && !line.trim().is_empty()
+                    })
+                    .take(10)
+                    .collect();
+
+                if !lines.is_empty() {
+                    let preview = lines.join("\n");
+                    let truncated = if preview.len() > 2000 {
+                        format!("{}...", &preview[..2000])
+                    } else {
+                        preview
+                    };
+                    return Some(format!("Execution failed:\n{}", truncated));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Clean up run directory after execution
+    async fn cleanup(&self, tenant_id: &str, instance_id: &str) {
+        let run_dir = self
+            .config
+            .data_dir
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id);
+
+        if let Err(e) = fs::remove_dir_all(&run_dir).await {
+            debug!(
+                instance_id = %instance_id,
+                path = %run_dir.display(),
+                error = %e,
+                "Failed to clean up run directory"
+            );
+        }
+        // Note: We no longer delete bundles here since they are shared per-image.
+        // Bundles are only deleted when the image itself is deleted.
+    }
+
+    /// Run crun container and wait for exit
+    ///
+    /// Uses the shared image bundle but with a per-instance config.json file.
+    async fn run_container(
+        &self,
+        bundle_path: &Path,
+        config_path: &Path,
+        instance_id: &str,
+        cancel_token: Option<CancelToken>,
+        timeout: Duration,
+    ) -> (Result<()>, ContainerMetrics) {
+        let container_id = self.container_id(instance_id);
+
+        // Build command with stderr capture
+        // Use --config to specify the per-instance config file while sharing the bundle's rootfs
+        let mut cmd = Command::new("crun");
+        cmd.arg("run");
+        if self.config.use_systemd_cgroup {
+            cmd.arg("--systemd-cgroup");
+        }
+        cmd.arg("--bundle").arg(bundle_path);
+        cmd.arg("--config").arg(config_path);
+        cmd.arg(&container_id);
+        cmd.stderr(std::process::Stdio::piped());
+
+        debug!(
+            bundle_path = %bundle_path.display(),
+            instance_id = %instance_id,
+            container_id = %container_id,
+            "Launching container"
+        );
+
+        // Spawn the process
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return (Err(RunnerError::Io(e)), ContainerMetrics::default()),
+        };
+
+        let stderr_handle = child.stderr.take();
+
+        // Wait for completion with timeout and cancellation check
+        let result = self
+            .wait_with_cancellation(
+                &mut child,
+                &container_id,
+                cancel_token,
+                timeout,
+                stderr_handle,
+            )
+            .await;
+
+        // Collect metrics BEFORE deleting the container
+        let metrics = self.collect_container_metrics(&container_id).await;
+
+        // Always try to clean up container
+        let _ = self.delete_container(&container_id).await;
+
+        (result, metrics)
+    }
+
+    /// Wait for child process with timeout and cancellation support
+    async fn wait_with_cancellation(
+        &self,
+        child: &mut tokio::process::Child,
+        container_id: &str,
+        cancel_token: Option<CancelToken>,
+        timeout_duration: Duration,
+        stderr_handle: Option<tokio::process::ChildStderr>,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        let poll_interval = Duration::from_millis(100);
+        let start = std::time::Instant::now();
+
+        loop {
+            // Check cancellation
+            if let Some(ref flag) = cancel_token {
+                if flag.load(Ordering::Relaxed) {
+                    warn!(container_id = %container_id, "Execution cancelled, killing container");
+                    let _ = self.kill_container(container_id).await;
+                    return Err(RunnerError::Cancelled);
+                }
+            }
+
+            // Check timeout
+            if start.elapsed() > timeout_duration {
+                warn!(container_id = %container_id, "Execution timed out, killing container");
+                let _ = self.kill_container(container_id).await;
+                return Err(RunnerError::Timeout);
+            }
+
+            // Try to get exit status (non-blocking)
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        info!(container_id = %container_id, "Container completed successfully");
+                        return Ok(());
+                    } else {
+                        let exit_code = status.code().unwrap_or(-1);
+
+                        let stderr = if let Some(mut handle) = stderr_handle {
+                            let mut buf = String::new();
+                            let _ = handle.read_to_string(&mut buf).await;
+                            buf.trim().to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        error!(container_id = %container_id, exit_code = exit_code, stderr = %stderr, "Container failed");
+                        return Err(RunnerError::ExitCode { exit_code, stderr });
+                    }
+                }
+                Ok(None) => {
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(e) => {
+                    error!(container_id = %container_id, error = %e, "Error waiting for container");
+                    return Err(RunnerError::Io(e));
+                }
+            }
+        }
+    }
+
+    /// Kill a running container
+    async fn kill_container(&self, container_id: &str) -> Result<()> {
+        let _ = Command::new("crun")
+            .args(["kill", container_id, "SIGKILL"])
+            .output()
+            .await;
+        Ok(())
+    }
+
+    /// Delete a container
+    async fn delete_container(&self, container_id: &str) -> Result<()> {
+        let _ = Command::new("crun")
+            .args(["delete", "--force", container_id])
+            .output()
+            .await;
+        Ok(())
+    }
+
+    /// Get the cgroup path(s) for a container from crun state
+    async fn get_container_cgroup_paths(&self, container_id: &str) -> Option<CgroupLocation> {
+        let output = Command::new("crun")
+            .args(["state", container_id])
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let state: Value = serde_json::from_slice(&output.stdout).ok()?;
+        let pid = state.get("pid")?.as_u64()?;
+        let cgroup_info = tokio::fs::read_to_string(format!("/proc/{}/cgroup", pid))
+            .await
+            .ok()?;
+
+        // cgroups v2 format: "0::/path/to/cgroup"
+        for line in cgroup_info.lines() {
+            if let Some(cgroup_path) = line.strip_prefix("0::") {
+                return Some(CgroupLocation::V2 {
+                    unified_path: format!("/sys/fs/cgroup{}", cgroup_path),
+                });
+            }
+        }
+
+        // cgroups v1 / hybrid
+        let mut memory_path = None;
+        let mut cpu_path = None;
+
+        for line in cgroup_info.lines() {
+            let mut parts = line.splitn(3, ':');
+            let _hierarchy = parts.next();
+            let controllers = match parts.next() {
+                Some(c) => c,
+                None => continue,
+            };
+            let path = parts.next().unwrap_or_default();
+
+            for controller in controllers.split(',') {
+                match controller {
+                    "memory" => {
+                        memory_path = Some(format!("/sys/fs/cgroup/{}{}", controllers, path));
+                    }
+                    "cpu" | "cpuacct" => {
+                        if cpu_path.is_none() {
+                            cpu_path = Some(format!("/sys/fs/cgroup/{}{}", controllers, path));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if memory_path.is_some() || cpu_path.is_some() {
+            Some(CgroupLocation::V1 {
+                memory_path,
+                cpu_path,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Collect resource metrics from container cgroup
+    async fn collect_container_metrics(&self, container_id: &str) -> ContainerMetrics {
+        let mut metrics = ContainerMetrics::default();
+
+        let Some(cgroup_paths) = self.get_container_cgroup_paths(container_id).await else {
+            debug!(container_id = %container_id, "Could not determine cgroup path for metrics");
+            return metrics;
+        };
+
+        match cgroup_paths {
+            CgroupLocation::V2 { unified_path } => {
+                if let Some(bytes) =
+                    read_cgroup_value(&format!("{}/memory.peak", unified_path)).await
+                {
+                    metrics.memory_peak_bytes = Some(bytes);
+                }
+                if let Some(bytes) =
+                    read_cgroup_value(&format!("{}/memory.current", unified_path)).await
+                {
+                    metrics.memory_current_bytes = Some(bytes);
+                }
+
+                if let Ok(content) =
+                    tokio::fs::read_to_string(format!("{}/cpu.stat", unified_path)).await
+                {
+                    for line in content.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() == 2 {
+                            if let Ok(value) = parts[1].parse::<u64>() {
+                                match parts[0] {
+                                    "usage_usec" => metrics.cpu_usage_usec = Some(value),
+                                    "user_usec" => metrics.cpu_user_usec = Some(value),
+                                    "system_usec" => metrics.cpu_system_usec = Some(value),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            CgroupLocation::V1 {
+                memory_path,
+                cpu_path,
+            } => {
+                if let Some(path) = memory_path {
+                    if let Some(bytes) =
+                        read_cgroup_value(&format!("{}/memory.max_usage_in_bytes", path)).await
+                    {
+                        metrics.memory_peak_bytes = Some(bytes);
+                    }
+                    if let Some(bytes) =
+                        read_cgroup_value(&format!("{}/memory.usage_in_bytes", path)).await
+                    {
+                        metrics.memory_current_bytes = Some(bytes);
+                    }
+                }
+
+                if let Some(path) = cpu_path {
+                    if let Some(usage_ns) =
+                        read_cgroup_value(&format!("{}/cpuacct.usage", path)).await
+                    {
+                        metrics.cpu_usage_usec = Some(usage_ns / 1_000);
+                    }
+                }
+            }
+        }
+
+        info!(
+            container_id = %container_id,
+            memory_peak_mb = ?metrics.memory_peak_bytes.map(|b| b / 1024 / 1024),
+            cpu_usage_ms = ?metrics.cpu_usage_usec.map(|u| u / 1000),
+            "Collected container metrics"
+        );
+
+        metrics
+    }
+
+    /// Check if a container is running via crun state
+    pub async fn is_container_running(&self, container_id: &str) -> bool {
+        let output = Command::new("crun")
+            .args(["state", container_id])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) => {
+                if !out.status.success() {
+                    return false;
+                }
+                if let Ok(state) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(status) = state.get("status").and_then(|v| v.as_str()) {
+                        return status == "running" || status == "created";
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Get container PID from crun state
+    pub async fn get_container_pid(&self, container_id: &str) -> Option<u32> {
+        let output = Command::new("crun")
+            .args(["state", container_id])
+            .output()
+            .await
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let state: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        state.get("pid")?.as_u64().map(|p| p as u32)
+    }
+}
+
+#[async_trait]
+impl Runner for OciRunner {
+    fn runner_type(&self) -> &'static str {
+        "oci"
+    }
+
+    async fn run(
+        &self,
+        options: &LaunchOptions,
+        cancel_token: Option<CancelToken>,
+    ) -> Result<LaunchResult> {
+        let start = std::time::Instant::now();
+
+        // Check bundle exists (shared per-image)
+        if !options.bundle_path.exists() {
+            return Err(RunnerError::BundleNotFound(
+                options.bundle_path.display().to_string(),
+            ));
+        }
+
+        // Store input to file for the instance to read
+        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+            .await?;
+
+        // Build environment variables for the instance
+        let mut env = self.build_env(
+            &options.instance_id,
+            &options.tenant_id,
+            &options.runtara_core_addr,
+            options.checkpoint_id.as_deref(),
+        );
+        // Also pass input as env var for generated workflow code
+        env.insert(
+            "INPUT_JSON".to_string(),
+            serde_json::to_string(&options.input).unwrap_or_default(),
+        );
+
+        // Generate per-instance config.json in the run directory
+        let run_dir = self
+            .config
+            .data_dir
+            .join(&options.tenant_id)
+            .join("runs")
+            .join(&options.instance_id);
+        let config_path = run_dir.join("config.json");
+        self.bundle_manager
+            .write_config_to_path(&config_path, &env, None)?;
+
+        // Launch container and wait for completion (using shared bundle + per-instance config)
+        let (result, metrics) = self
+            .run_container(
+                &options.bundle_path,
+                &config_path,
+                &options.instance_id,
+                cancel_token,
+                options.timeout,
+            )
+            .await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(()) => {
+                match self
+                    .load_output(&options.tenant_id, &options.instance_id)
+                    .await
+                {
+                    Ok(output) => {
+                        self.cleanup(&options.tenant_id, &options.instance_id).await;
+                        Ok(LaunchResult {
+                            instance_id: options.instance_id.clone(),
+                            success: true,
+                            output: Some(output),
+                            error: None,
+                            duration_ms,
+                            metrics,
+                        })
+                    }
+                    Err(e) => {
+                        self.cleanup(&options.tenant_id, &options.instance_id).await;
+                        Ok(LaunchResult {
+                            instance_id: options.instance_id.clone(),
+                            success: false,
+                            output: None,
+                            error: Some(format!("Failed to load output: {}", e)),
+                            duration_ms,
+                            metrics,
+                        })
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = match self
+                    .load_error(&options.tenant_id, &options.instance_id)
+                    .await
+                {
+                    Some(msg) => msg,
+                    None => e.to_string(),
+                };
+                self.cleanup(&options.tenant_id, &options.instance_id).await;
+                Ok(LaunchResult {
+                    instance_id: options.instance_id.clone(),
+                    success: false,
+                    output: None,
+                    error: Some(error_msg),
+                    duration_ms,
+                    metrics,
+                })
+            }
+        }
+    }
+
+    async fn launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
+        // Check bundle exists (shared per-image)
+        if !options.bundle_path.exists() {
+            return Err(RunnerError::BundleNotFound(
+                options.bundle_path.display().to_string(),
+            ));
+        }
+
+        // Store input to file
+        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+            .await?;
+
+        // Build environment variables
+        let mut env = self.build_env(
+            &options.instance_id,
+            &options.tenant_id,
+            &options.runtara_core_addr,
+            options.checkpoint_id.as_deref(),
+        );
+        // Also pass input as env var for generated workflow code
+        env.insert(
+            "INPUT_JSON".to_string(),
+            serde_json::to_string(&options.input).unwrap_or_default(),
+        );
+
+        // Generate container ID
+        let container_id = self.container_id(&options.instance_id);
+
+        let now = chrono::Utc::now();
+
+        // Build log file path for stderr redirection
+        let run_dir = self
+            .config
+            .data_dir
+            .join(&options.tenant_id)
+            .join("runs")
+            .join(&options.instance_id);
+        let log_path = run_dir.join("stderr.log");
+        let log_path_str = log_path.to_string_lossy().to_string();
+
+        // Generate per-instance config.json in the run directory
+        let config_path = run_dir.join("config.json");
+        self.bundle_manager
+            .write_config_to_path(&config_path, &env, Some(&log_path_str))?;
+
+        // Spawn crun with shared bundle + per-instance config
+        let mut cmd = Command::new("crun");
+        cmd.arg("run");
+        if self.config.use_systemd_cgroup {
+            cmd.arg("--systemd-cgroup");
+        }
+        cmd.arg("--bundle")
+            .arg(&options.bundle_path)
+            .arg("--config")
+            .arg(&config_path)
+            .arg(&container_id)
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null());
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                return Err(RunnerError::Io(e));
+            }
+        };
+
+        // Brief wait to detect immediate startup failures
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                let scenario_error = self
+                    .load_error(&options.tenant_id, &options.instance_id)
+                    .await;
+
+                let error_msg = if let Some(err) = scenario_error {
+                    err
+                } else {
+                    let mut stderr_msg = String::new();
+                    if let Some(mut stderr) = child.stderr.take() {
+                        use tokio::io::AsyncReadExt;
+                        let _ = stderr.read_to_string(&mut stderr_msg).await;
+                    }
+                    if stderr_msg.is_empty() {
+                        format!("crun exited with status: {}", status)
+                    } else {
+                        format!("crun failed: {}", stderr_msg.trim())
+                    }
+                };
+
+                error!(
+                    container_id = %container_id,
+                    instance_id = %options.instance_id,
+                    error = %error_msg,
+                    "Container failed to start"
+                );
+                return Err(RunnerError::StartFailed(error_msg));
+            }
+            Ok(Some(_status)) => {
+                info!(
+                    container_id = %container_id,
+                    instance_id = %options.instance_id,
+                    "Container completed quickly (within 100ms)"
+                );
+            }
+            Ok(None) => {
+                info!(
+                    container_id = %container_id,
+                    instance_id = %options.instance_id,
+                    bundle_path = %options.bundle_path.display(),
+                    "Launched container (detached)"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    container_id = %container_id,
+                    instance_id = %options.instance_id,
+                    error = %e,
+                    "Could not check crun status"
+                );
+            }
+        }
+
+        Ok(RunnerHandle {
+            handle_id: container_id,
+            instance_id: options.instance_id.clone(),
+            tenant_id: options.tenant_id.clone(),
+            started_at: now,
+        })
+    }
+
+    async fn is_running(&self, handle: &RunnerHandle) -> bool {
+        self.is_container_running(&handle.handle_id).await
+    }
+
+    async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
+        self.kill_container(&handle.handle_id).await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.delete_container(&handle.handle_id).await?;
+        Ok(())
+    }
+
+    async fn collect_result(
+        &self,
+        handle: &RunnerHandle,
+    ) -> (Option<Value>, Option<String>, ContainerMetrics) {
+        let metrics = self.collect_container_metrics(&handle.handle_id).await;
+        let _ = self.delete_container(&handle.handle_id).await;
+        let output = self
+            .load_output(&handle.tenant_id, &handle.instance_id)
+            .await
+            .ok();
+        let error = self
+            .load_error(&handle.tenant_id, &handle.instance_id)
+            .await;
+        self.cleanup(&handle.tenant_id, &handle.instance_id).await;
+        (output, error, metrics)
+    }
+}

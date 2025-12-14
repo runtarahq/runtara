@@ -1,0 +1,197 @@
+syntax = "proto3";
+package runtara.instance;
+
+// ============================================================================
+// Instance Protocol - Used by instances to communicate with runtara-core
+// ============================================================================
+
+// ============================================================================
+// Instance Registration (instance → core)
+// ============================================================================
+
+// Instance self-registers when it starts
+message RegisterInstanceRequest {
+  string instance_id = 1;
+  string tenant_id = 2;
+  optional string checkpoint_id = 3;  // Resuming from checkpoint (optional)
+}
+
+message RegisterInstanceResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// ============================================================================
+// Checkpointing (instance → core) - Append-only log
+// ============================================================================
+
+// Checkpoint operation - handles both save and resume:
+// - If checkpoint with this ID exists, returns existing state (for resume)
+// - If checkpoint doesn't exist, saves state and returns empty (fresh execution)
+//
+// Also serves as heartbeat - reports progress to core.
+message CheckpointRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;     // Opaque identifier for resume point
+  bytes state = 3;              // State to save (ignored if checkpoint exists)
+}
+
+message CheckpointResponse {
+  bool found = 1;               // true = existing checkpoint returned, false = new checkpoint saved
+  bytes state = 2;              // Existing state if found, empty if saved
+  optional SignalType pending_signal = 3;  // If a signal is pending (cancel, pause), included here
+                                           // Instance should handle signal after processing checkpoint
+}
+
+// Get checkpoint without saving - read-only lookup
+message GetCheckpointRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;     // Checkpoint ID to look up
+}
+
+message GetCheckpointResponse {
+  bool found = 1;               // true = checkpoint exists
+  bytes state = 2;              // Checkpoint state if found
+}
+
+// ============================================================================
+// Sleep/Wake (durable execution)
+// ============================================================================
+
+// Instance requests to sleep. Core decides if in-process or deferred.
+message SleepRequest {
+  string instance_id = 1;
+  uint64 duration_ms = 2;
+  string checkpoint_id = 3;     // Where to resume after wake
+  bytes state = 4;              // State to restore on wake
+}
+
+message SleepResponse {
+  bool deferred = 1;            // true = instance should exit, core will wake later
+                                // false = slept in-process, continue execution
+}
+
+// ============================================================================
+// Instance Events (instance → core, fire-and-forget)
+// ============================================================================
+
+message InstanceEvent {
+  string instance_id = 1;
+  InstanceEventType event_type = 2;
+  optional string checkpoint_id = 3;  // Current position (for PROGRESS)
+  bytes payload = 4;                  // Event-specific data (output, error, etc.)
+  int64 timestamp_ms = 5;
+}
+
+enum InstanceEventType {
+  EVENT_HEARTBEAT = 0;    // Simple "I'm alive" signal (no checkpoint)
+  EVENT_COMPLETED = 2;    // Instance finished successfully, payload = output
+  EVENT_FAILED = 3;       // Instance failed, payload = error details
+  EVENT_SUSPENDED = 4;    // Instance suspended (waiting for wake)
+  // Deprecated: EVENT_STARTED (use heartbeat), EVENT_PROGRESS (use checkpoint or heartbeat)
+}
+
+// Batch of events (for efficiency)
+message InstanceEventBatch {
+  repeated InstanceEvent events = 1;
+}
+
+// ============================================================================
+// Signals (instance polls for signals from core)
+// ============================================================================
+
+enum SignalType {
+  SIGNAL_CANCEL = 0;      // Cancel execution
+  SIGNAL_PAUSE = 1;       // Pause execution (checkpoint and wait)
+  SIGNAL_RESUME = 2;      // Resume paused execution
+}
+
+// Signal forwarded from core to instance
+message Signal {
+  string instance_id = 1;
+  SignalType signal_type = 2;
+  bytes payload = 3;
+}
+
+// Instance acknowledges received signal
+message SignalAck {
+  string instance_id = 1;
+  SignalType signal_type = 2;
+  bool acknowledged = 3;
+}
+
+// Instance polls for pending signals
+message PollSignalsRequest {
+  string instance_id = 1;
+}
+
+message PollSignalsResponse {
+  optional Signal signal = 1;   // Pending signal if any, or empty
+}
+
+// ============================================================================
+// Instance Status Query (instance can query its own status)
+// ============================================================================
+
+message GetInstanceStatusRequest {
+  string instance_id = 1;
+}
+
+message GetInstanceStatusResponse {
+  string instance_id = 1;
+  InstanceStatus status = 2;
+  optional string checkpoint_id = 3;  // Last known checkpoint
+  int64 started_at_ms = 4;
+  optional int64 finished_at_ms = 5;
+  optional bytes output = 6;          // If completed
+  optional string error = 7;          // If failed
+}
+
+enum InstanceStatus {
+  STATUS_UNKNOWN = 0;
+  STATUS_PENDING = 1;     // Queued, not yet started
+  STATUS_RUNNING = 2;     // Currently executing
+  STATUS_SUSPENDED = 3;   // Sleeping / waiting for wake
+  STATUS_COMPLETED = 4;   // Finished successfully
+  STATUS_FAILED = 5;      // Finished with error
+  STATUS_CANCELLED = 6;   // Cancelled by signal
+}
+
+// ============================================================================
+// RPC Wrapper (for multiplexing on single stream)
+// ============================================================================
+
+// Wrapper for all instance request types
+message RpcRequest {
+  oneof request {
+    RegisterInstanceRequest register_instance = 1;
+    SleepRequest sleep = 4;
+    InstanceEvent instance_event = 5;
+    InstanceEventBatch instance_event_batch = 6;
+    GetInstanceStatusRequest get_instance_status = 7;
+    CheckpointRequest checkpoint = 8;
+    GetCheckpointRequest get_checkpoint = 9;
+    PollSignalsRequest poll_signals = 10;
+    SignalAck signal_ack = 11;
+  }
+}
+
+// Wrapper for all instance response types
+message RpcResponse {
+  oneof response {
+    RegisterInstanceResponse register_instance = 1;
+    SleepResponse sleep = 4;
+    // InstanceEvent/Batch/SignalAck don't have responses (fire-and-forget)
+    GetInstanceStatusResponse get_instance_status = 7;
+    CheckpointResponse checkpoint = 8;
+    GetCheckpointResponse get_checkpoint = 9;
+    PollSignalsResponse poll_signals = 10;
+    RpcError error = 15;
+  }
+}
+
+// Generic RPC error
+message RpcError {
+  string code = 1;
+  string message = 2;
+}

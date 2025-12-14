@@ -1,0 +1,388 @@
+syntax = "proto3";
+package runtara.environment;
+
+// ============================================================================
+// Environment Protocol - Used by management clients to manage runtara-environment
+// ============================================================================
+//
+// Runtara Environment is the single entry point for:
+// - Image registry (create, list, delete images)
+// - Instance lifecycle (start, stop, resume, status)
+// - Signal proxying (pause, cancel - proxied to Core)
+//
+// Instances do NOT talk to Environment - they talk directly to Core.
+// Management SDK talks ONLY to Environment.
+
+// ============================================================================
+// Health Check
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  int64 uptime_ms = 3;
+  uint32 active_instances = 4;
+}
+
+// ============================================================================
+// Image Registry
+// ============================================================================
+
+enum RunnerType {
+  RUNNER_OCI = 0;     // OCI container runner (default)
+  RUNNER_NATIVE = 1;  // Native process runner
+  RUNNER_WASM = 2;    // WebAssembly runner
+}
+
+// Register a new image (small binary < 16MB)
+message RegisterImageRequest {
+  string tenant_id = 1;             // Tenant that owns this image
+  string name = 2;                  // Human-readable name (unique per tenant)
+  optional string description = 3;  // Optional description
+  bytes binary = 4;                 // Compiled binary content
+  RunnerType runner_type = 5;       // Type of runner to use (default: OCI)
+  optional bytes metadata = 6;      // Optional metadata (JSON)
+}
+
+message RegisterImageResponse {
+  bool success = 1;
+  string image_id = 2;              // Assigned image UUID
+  string error = 3;                 // Error if failed
+}
+
+// Register a new image (streaming for large binaries)
+// Protocol:
+// 1. Client sends RegisterImageStreamStart frame
+// 2. Client streams raw binary bytes (not protobuf-wrapped)
+// 3. Client calls finish() on send stream to signal end
+// 4. Server responds with RegisterImageResponse
+message RegisterImageStreamStart {
+  string tenant_id = 1;
+  string name = 2;
+  optional string description = 3;
+  uint64 binary_size = 4;           // Total size in bytes
+  RunnerType runner_type = 5;
+  optional bytes metadata = 6;
+  optional string sha256 = 7;       // Optional checksum for verification
+}
+
+message ListImagesRequest {
+  optional string tenant_id = 1;    // Filter by tenant
+  uint32 limit = 2;                 // Max results (default: 100)
+  uint32 offset = 3;                // Pagination offset
+}
+
+message ListImagesResponse {
+  repeated ImageSummary images = 1;
+  uint32 total_count = 2;
+}
+
+message ImageSummary {
+  string image_id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  optional string description = 4;
+  RunnerType runner_type = 5;
+  int64 created_at_ms = 6;
+}
+
+message GetImageRequest {
+  string image_id = 1;
+  string tenant_id = 2;  // Required for tenant isolation
+}
+
+message GetImageResponse {
+  bool found = 1;
+  optional ImageSummary image = 2;
+}
+
+message DeleteImageRequest {
+  string image_id = 1;
+  string tenant_id = 2;  // Required for tenant isolation
+}
+
+message DeleteImageResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// ============================================================================
+// Instance Lifecycle
+// ============================================================================
+
+enum InstanceStatus {
+  STATUS_UNKNOWN = 0;
+  STATUS_PENDING = 1;     // Queued, not yet started
+  STATUS_RUNNING = 2;     // Currently executing
+  STATUS_SUSPENDED = 3;   // Sleeping / paused, waiting for wake or resume
+  STATUS_COMPLETED = 4;   // Finished successfully
+  STATUS_FAILED = 5;      // Finished with error
+  STATUS_CANCELLED = 6;   // Cancelled by signal
+}
+
+// Start a new instance
+message StartInstanceRequest {
+  string image_id = 1;              // Image to launch
+  string tenant_id = 2;             // Tenant ID
+  optional string instance_id = 3;  // Optional custom instance ID (UUID generated if not provided)
+  bytes input = 4;                  // JSON input data
+  optional uint32 timeout_seconds = 5; // Execution timeout (default: 300)
+}
+
+message StartInstanceResponse {
+  bool success = 1;
+  string instance_id = 2;           // Created instance ID
+  string error = 3;                 // Error if failed
+}
+
+// Stop a running instance
+message StopInstanceRequest {
+  string instance_id = 1;
+  uint32 grace_period_seconds = 2;  // Grace period before force kill (default: 5)
+  string reason = 3;                // Reason for stopping
+}
+
+message StopInstanceResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Resume a suspended instance (after pause signal or durable sleep)
+message ResumeInstanceRequest {
+  string instance_id = 1;
+}
+
+message ResumeInstanceResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Get instance status
+message GetInstanceStatusRequest {
+  string instance_id = 1;
+}
+
+message GetInstanceStatusResponse {
+  string instance_id = 1;
+  InstanceStatus status = 2;
+  optional string checkpoint_id = 3;  // Last known checkpoint
+  int64 created_at_ms = 4;
+  optional int64 started_at_ms = 5;
+  optional int64 finished_at_ms = 6;
+  optional bytes output = 7;          // If completed
+  optional string error = 8;          // If failed
+  // Extended fields for detailed instance info
+  string image_id = 9;                // Image UUID used for this instance
+  string image_name = 10;             // Human-readable image name
+  string tenant_id = 11;              // Tenant that owns this instance
+  optional bytes input = 12;          // Input data provided when starting
+  optional int64 heartbeat_at_ms = 13; // Last heartbeat timestamp
+  uint32 retry_count = 14;            // Current retry attempt number
+  uint32 max_retries = 15;            // Maximum allowed retries
+}
+
+// List instances
+message ListInstancesRequest {
+  optional string tenant_id = 1;      // Filter by tenant
+  optional InstanceStatus status = 2; // Filter by status
+  uint32 limit = 3;                   // Max results (default: 100)
+  uint32 offset = 4;                  // Pagination offset
+  optional string image_id = 5;       // Filter by image UUID (exact match)
+  optional int64 created_after_ms = 6;  // Date range start (created_at >= value)
+  optional int64 created_before_ms = 7; // Date range end (created_at < value)
+  optional int64 finished_after_ms = 8; // Completion date range start (finished_at >= value)
+  optional int64 finished_before_ms = 9; // Completion date range end (finished_at < value)
+  optional string order_by = 10;      // Sort: created_at_desc, created_at_asc, finished_at_desc, finished_at_asc
+  optional string image_name_prefix = 11; // Filter by image name prefix (e.g., "scenario_id:")
+}
+
+message ListInstancesResponse {
+  repeated InstanceSummary instances = 1;
+  uint32 total_count = 2;
+}
+
+message InstanceSummary {
+  string instance_id = 1;
+  string tenant_id = 2;
+  string image_id = 3;
+  InstanceStatus status = 4;
+  int64 created_at_ms = 5;
+  optional int64 started_at_ms = 6;   // When execution started
+  optional int64 finished_at_ms = 7;  // When execution finished
+  bool has_error = 8;                 // Quick error indicator
+}
+
+// ============================================================================
+// Signals (Environment proxies to Core)
+// ============================================================================
+
+enum SignalType {
+  SIGNAL_CANCEL = 0;      // Cancel execution
+  SIGNAL_PAUSE = 1;       // Pause execution (checkpoint and wait)
+  SIGNAL_RESUME = 2;      // Resume paused execution
+}
+
+// Send signal to an instance (Environment proxies to Core)
+message SendSignalRequest {
+  string instance_id = 1;
+  SignalType signal_type = 2;
+  bytes payload = 3;            // Signal-specific data (e.g., cancel reason)
+}
+
+message SendSignalResponse {
+  bool success = 1;
+  string error = 2;             // Error if instance not found, etc.
+}
+
+// ============================================================================
+// Agent Testing
+// ============================================================================
+
+// Test a single agent capability (runs in OCI container)
+message TestCapabilityRequest {
+  string tenant_id = 1;           // Tenant ID for isolation
+  string agent_id = 2;            // Agent module name (e.g., "http", "utils", "transform")
+  string capability_id = 3;       // Capability ID (e.g., "http-request", "random-double")
+  bytes input = 4;                // JSON-encoded capability input
+  optional bytes connection = 5;  // Optional JSON-encoded connection credentials
+  optional uint32 timeout_ms = 6; // Execution timeout (default: 30000)
+}
+
+message TestCapabilityResponse {
+  bool success = 1;
+  bytes output = 2;               // JSON-encoded result on success
+  optional string error = 3;      // Error message on failure
+  uint64 execution_time_ms = 4;   // How long the capability took to execute
+}
+
+// List all available agents and their capabilities
+message ListAgentsRequest {
+  optional string tenant_id = 1;  // Reserved for future tenant-specific filtering
+}
+
+message ListAgentsResponse {
+  bytes agents_json = 1;          // JSON-encoded Vec<AgentInfo>
+}
+
+// Get details about a specific capability including input schema
+message GetCapabilityRequest {
+  string agent_id = 1;
+  string capability_id = 2;
+}
+
+message GetCapabilityResponse {
+  bool found = 1;
+  bytes capability_json = 2;      // JSON-encoded CapabilityInfo
+  bytes inputs_json = 3;          // JSON-encoded Vec<CapabilityField>
+}
+
+// ============================================================================
+// Checkpoints (proxied to Core)
+// ============================================================================
+
+// List checkpoints for an instance
+message ListCheckpointsRequest {
+  string instance_id = 1;
+  optional string checkpoint_id = 2;  // Filter by checkpoint_id
+  optional uint32 limit = 3;          // Max results (default: 100)
+  optional uint32 offset = 4;         // Pagination offset
+  optional int64 created_after_ms = 5;  // Filter checkpoints created after this time
+  optional int64 created_before_ms = 6; // Filter checkpoints created before this time
+}
+
+message ListCheckpointsResponse {
+  repeated CheckpointSummary checkpoints = 1;
+  uint32 total_count = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message CheckpointSummary {
+  string checkpoint_id = 1;
+  string instance_id = 2;
+  int64 created_at_ms = 3;
+  uint64 data_size_bytes = 4;         // Size of checkpoint data in bytes
+}
+
+// Get full checkpoint data
+message GetCheckpointRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;
+}
+
+message GetCheckpointResponse {
+  bool found = 1;
+  string checkpoint_id = 2;
+  string instance_id = 3;
+  int64 created_at_ms = 4;
+  bytes data = 5;                     // Checkpoint state data (JSON bytes)
+}
+
+// ============================================================================
+// RPC Wrapper (for multiplexing on single stream)
+// ============================================================================
+
+// Wrapper for all environment request types
+message RpcRequest {
+  oneof request {
+    HealthCheckRequest health_check = 1;
+    // Image registry
+    RegisterImageRequest register_image = 2;
+    RegisterImageStreamStart register_image_stream = 3;
+    ListImagesRequest list_images = 4;
+    GetImageRequest get_image = 5;
+    DeleteImageRequest delete_image = 6;
+    // Instance lifecycle
+    StartInstanceRequest start_instance = 7;
+    StopInstanceRequest stop_instance = 8;
+    ResumeInstanceRequest resume_instance = 9;
+    GetInstanceStatusRequest get_instance_status = 10;
+    ListInstancesRequest list_instances = 11;
+    // Signals (proxied to Core)
+    SendSignalRequest send_signal = 12;
+    // Agent testing
+    TestCapabilityRequest test_capability = 13;
+    ListAgentsRequest list_agents = 14;
+    GetCapabilityRequest get_capability = 15;
+    // Checkpoints (proxied to Core)
+    ListCheckpointsRequest list_checkpoints = 17;
+    GetCheckpointRequest get_checkpoint = 18;
+  }
+}
+
+// Wrapper for all environment response types
+message RpcResponse {
+  oneof response {
+    HealthCheckResponse health_check = 1;
+    // Image registry
+    RegisterImageResponse register_image = 2;
+    ListImagesResponse list_images = 4;
+    GetImageResponse get_image = 5;
+    DeleteImageResponse delete_image = 6;
+    // Instance lifecycle
+    StartInstanceResponse start_instance = 7;
+    StopInstanceResponse stop_instance = 8;
+    ResumeInstanceResponse resume_instance = 9;
+    GetInstanceStatusResponse get_instance_status = 10;
+    ListInstancesResponse list_instances = 11;
+    // Signals
+    SendSignalResponse send_signal = 12;
+    // Agent testing
+    TestCapabilityResponse test_capability = 13;
+    ListAgentsResponse list_agents = 14;
+    GetCapabilityResponse get_capability = 16;
+    // Generic error
+    RpcError error = 15;
+    // Checkpoints
+    ListCheckpointsResponse list_checkpoints = 17;
+    GetCheckpointResponse get_checkpoint = 18;
+  }
+}
+
+// Generic RPC error
+message RpcError {
+  string code = 1;
+  string message = 2;
+}

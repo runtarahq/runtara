@@ -1,0 +1,13 @@
+[package]
+name = "runtara-sdk-macros"
+version = "0.1.20"
+edition = "2024"
+description = "Proc macros for runtara-sdk"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"

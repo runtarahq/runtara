@@ -1,0 +1,21 @@
+{
+  "name": "Simple Passthrough",
+  "description": "A simple workflow that passes input directly to output",
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "data.input"
+        }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

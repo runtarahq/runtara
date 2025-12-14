@@ -1,0 +1,8 @@
+Package: runtara-core
+Version: ${VERSION}
+Architecture: amd64
+Maintainer: SyncMyOrders <support@syncmyorders.com>
+Depends: libpq5
+Description: Runtara Core - Durable Execution Engine
+ Manages checkpoints, signals, and instance state for durable workflows.
+ Provides QUIC servers for instance and management communication.

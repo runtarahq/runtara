@@ -1,0 +1,1010 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Environment QUIC server.
+//!
+//! Handles requests from Management SDK for image and instance management.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::Result;
+use tracing::{debug, error, info, warn};
+
+use runtara_protocol::environment_proto::{
+    self, RpcError, RpcRequest, RpcResponse, rpc_request::Request, rpc_response::Response,
+};
+use runtara_protocol::frame::Frame;
+use runtara_protocol::server::{ConnectionHandler, RuntaraServer, StreamHandler};
+
+use crate::db;
+use crate::handlers::{
+    EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest, ResumeInstanceRequest,
+    StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, handle_get_capability,
+    handle_health_check, handle_list_agents, handle_register_image, handle_resume_instance,
+    handle_start_instance, handle_stop_instance, handle_test_capability,
+};
+use crate::image_registry::{ImageRegistry, RunnerType};
+
+/// Run the Environment QUIC server.
+pub async fn run_environment_server(
+    bind_addr: SocketAddr,
+    state: Arc<EnvironmentHandlerState>,
+) -> Result<()> {
+    let server = RuntaraServer::localhost(bind_addr)?;
+
+    info!(addr = %bind_addr, "Environment QUIC server starting");
+
+    server
+        .run(move |conn: ConnectionHandler| {
+            let state = state.clone();
+            async move {
+                handle_connection(conn, state).await;
+            }
+        })
+        .await?;
+
+    Ok(())
+}
+
+/// Handle a single connection.
+async fn handle_connection(conn: ConnectionHandler, state: Arc<EnvironmentHandlerState>) {
+    info!(remote = %conn.remote_address(), "New environment connection accepted");
+
+    conn.run(move |stream: StreamHandler| {
+        let state = state.clone();
+        async move {
+            if let Err(e) = handle_stream(stream, state).await {
+                error!("Stream error: {}", e);
+            }
+        }
+    })
+    .await;
+
+    debug!("Environment connection closed");
+}
+
+/// Handle a single stream (request/response).
+async fn handle_stream(
+    mut stream: StreamHandler,
+    state: Arc<EnvironmentHandlerState>,
+) -> Result<()> {
+    // Read request frame
+    let request_frame = stream.read_frame().await?;
+
+    // Decode as RpcRequest wrapper
+    let rpc_request: RpcRequest = request_frame.decode()?;
+
+    let request = match rpc_request.request {
+        Some(req) => req,
+        None => {
+            warn!("Received empty RpcRequest");
+            let response = RpcResponse {
+                response: Some(Response::Error(RpcError {
+                    code: "EMPTY_REQUEST".to_string(),
+                    message: "RpcRequest contained no request".to_string(),
+                })),
+            };
+            stream.write_frame(&Frame::response(&response)?).await?;
+            stream.finish()?;
+            return Ok(());
+        }
+    };
+
+    debug!(
+        "Received environment request: {:?}",
+        std::mem::discriminant(&request)
+    );
+
+    // Route to appropriate handler
+    let response = match request {
+        Request::HealthCheck(_) => {
+            match handle_health_check(&state).await {
+                Ok(resp) => Response::HealthCheck(environment_proto::HealthCheckResponse {
+                    healthy: resp.healthy,
+                    version: resp.version,
+                    uptime_ms: resp.uptime_ms,
+                    active_instances: 0, // TODO: count from container registry
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "HEALTH_CHECK_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::RegisterImage(req) => {
+            let runner_type = convert_runner_type(req.runner_type());
+            let handler_req = RegisterImageRequest {
+                tenant_id: req.tenant_id,
+                name: req.name,
+                description: req.description,
+                binary: req.binary,
+                runner_type,
+                metadata: req.metadata.and_then(|b| serde_json::from_slice(&b).ok()),
+            };
+            match handle_register_image(&state, handler_req).await {
+                Ok(resp) => Response::RegisterImage(environment_proto::RegisterImageResponse {
+                    success: resp.success,
+                    image_id: resp.image_id,
+                    error: resp.error.unwrap_or_default(),
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "REGISTER_IMAGE_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::RegisterImageStream(req) => {
+            // Handle streaming image registration
+            match handle_register_image_stream(&mut stream, &state, req).await {
+                Ok(resp) => Response::RegisterImage(resp),
+                Err(e) => Response::Error(RpcError {
+                    code: "REGISTER_IMAGE_STREAM_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::ListImages(req) => match handle_list_images(&state, req).await {
+            Ok(resp) => Response::ListImages(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_IMAGES_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::GetImage(req) => match handle_get_image(&state, req).await {
+            Ok(resp) => Response::GetImage(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "GET_IMAGE_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::DeleteImage(req) => match handle_delete_image(&state, req).await {
+            Ok(resp) => Response::DeleteImage(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "DELETE_IMAGE_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::StartInstance(req) => {
+            let handler_req = StartInstanceRequest {
+                image_id: req.image_id,
+                tenant_id: req.tenant_id,
+                instance_id: req.instance_id,
+                input: serde_json::from_slice(&req.input).ok(),
+                timeout_seconds: req.timeout_seconds.map(|t| t as u64),
+            };
+            match handle_start_instance(&state, handler_req).await {
+                Ok(resp) => Response::StartInstance(environment_proto::StartInstanceResponse {
+                    success: resp.success,
+                    instance_id: resp.instance_id,
+                    error: resp.error.unwrap_or_default(),
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "START_INSTANCE_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::StopInstance(req) => {
+            let handler_req = StopInstanceRequest {
+                instance_id: req.instance_id,
+                reason: req.reason,
+                grace_period_seconds: req.grace_period_seconds as u64,
+            };
+            match handle_stop_instance(&state, handler_req).await {
+                Ok(resp) => Response::StopInstance(environment_proto::StopInstanceResponse {
+                    success: resp.success,
+                    error: resp.error.unwrap_or_default(),
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "STOP_INSTANCE_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::ResumeInstance(req) => {
+            let handler_req = ResumeInstanceRequest {
+                instance_id: req.instance_id,
+            };
+            match handle_resume_instance(&state, handler_req).await {
+                Ok(resp) => Response::ResumeInstance(environment_proto::ResumeInstanceResponse {
+                    success: resp.success,
+                    error: resp.error.unwrap_or_default(),
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "RESUME_INSTANCE_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::GetInstanceStatus(req) => match handle_get_instance_status(&state, req).await {
+            Ok(resp) => Response::GetInstanceStatus(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "GET_INSTANCE_STATUS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::ListInstances(req) => match handle_list_instances(&state, req).await {
+            Ok(resp) => Response::ListInstances(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_INSTANCES_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::SendSignal(req) => match handle_send_signal(&state, req).await {
+            Ok(resp) => Response::SendSignal(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "SEND_SIGNAL_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::TestCapability(req) => {
+            let handler_req = TestCapabilityRequest {
+                tenant_id: req.tenant_id,
+                agent_id: req.agent_id,
+                capability_id: req.capability_id,
+                input: serde_json::from_slice(&req.input).unwrap_or_default(),
+                connection: req.connection.and_then(|b| serde_json::from_slice(&b).ok()),
+                timeout_ms: req.timeout_ms,
+            };
+            match handle_test_capability(&state, handler_req).await {
+                Ok(resp) => Response::TestCapability(environment_proto::TestCapabilityResponse {
+                    success: resp.success,
+                    output: resp
+                        .output
+                        .map(|v| serde_json::to_vec(&v).unwrap_or_default())
+                        .unwrap_or_default(),
+                    error: resp.error,
+                    execution_time_ms: resp.execution_time_ms,
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "TEST_CAPABILITY_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::ListAgents(_req) => match handle_list_agents(&state).await {
+            Ok(resp) => Response::ListAgents(environment_proto::ListAgentsResponse {
+                agents_json: resp.agents_json,
+            }),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_AGENTS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::GetCapability(req) => {
+            let handler_req = GetCapabilityRequest {
+                agent_id: req.agent_id,
+                capability_id: req.capability_id,
+            };
+            match handle_get_capability(&state, handler_req).await {
+                Ok(resp) => Response::GetCapability(environment_proto::GetCapabilityResponse {
+                    found: resp.found,
+                    capability_json: resp.capability_json,
+                    inputs_json: resp.inputs_json,
+                }),
+                Err(e) => Response::Error(RpcError {
+                    code: "GET_CAPABILITY_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
+            }
+        }
+
+        Request::ListCheckpoints(req) => match handle_list_checkpoints(&state, req).await {
+            Ok(resp) => Response::ListCheckpoints(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_CHECKPOINTS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+
+        Request::GetCheckpoint(req) => match handle_get_checkpoint(&state, req).await {
+            Ok(resp) => Response::GetCheckpoint(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "GET_CHECKPOINT_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+    };
+
+    // Send response
+    let rpc_response = RpcResponse {
+        response: Some(response),
+    };
+    stream.write_frame(&Frame::response(&rpc_response)?).await?;
+    stream.finish()?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Helper Handlers (these convert proto types to/from internal types)
+// ============================================================================
+
+fn convert_runner_type(proto_type: environment_proto::RunnerType) -> RunnerType {
+    match proto_type {
+        environment_proto::RunnerType::RunnerOci => RunnerType::Oci,
+        environment_proto::RunnerType::RunnerNative => RunnerType::Native,
+        environment_proto::RunnerType::RunnerWasm => RunnerType::Wasm,
+    }
+}
+
+fn convert_runner_type_to_proto(runner_type: RunnerType) -> i32 {
+    match runner_type {
+        RunnerType::Oci => environment_proto::RunnerType::RunnerOci as i32,
+        RunnerType::Native => environment_proto::RunnerType::RunnerNative as i32,
+        RunnerType::Wasm => environment_proto::RunnerType::RunnerWasm as i32,
+    }
+}
+
+fn convert_instance_status(status: &str) -> i32 {
+    match status {
+        "pending" => environment_proto::InstanceStatus::StatusPending as i32,
+        "running" => environment_proto::InstanceStatus::StatusRunning as i32,
+        "suspended" | "sleeping" => environment_proto::InstanceStatus::StatusSuspended as i32,
+        "completed" => environment_proto::InstanceStatus::StatusCompleted as i32,
+        "failed" => environment_proto::InstanceStatus::StatusFailed as i32,
+        "cancelled" => environment_proto::InstanceStatus::StatusCancelled as i32,
+        _ => environment_proto::InstanceStatus::StatusUnknown as i32,
+    }
+}
+
+async fn handle_register_image_stream(
+    stream: &mut StreamHandler,
+    state: &EnvironmentHandlerState,
+    req: environment_proto::RegisterImageStreamStart,
+) -> Result<environment_proto::RegisterImageResponse, crate::error::Error> {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    info!(
+        tenant_id = %req.tenant_id,
+        name = %req.name,
+        binary_size = req.binary_size,
+        "Streaming image registration started"
+    );
+
+    // Create temp file for binary
+    let image_id = uuid::Uuid::new_v4().to_string();
+    let images_dir = state.data_dir.join("images").join(&image_id);
+    let binary_path = images_dir.join("binary");
+    let bundle_path = images_dir.join("bundle");
+
+    std::fs::create_dir_all(&images_dir)?;
+
+    // Stream binary data to file
+    let mut file = std::fs::File::create(&binary_path)?;
+    let mut hasher = Sha256::new();
+    let mut total_bytes = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+
+    loop {
+        let n = stream
+            .read_bytes(&mut buf)
+            .await
+            .map_err(|e| crate::error::Error::Other(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])?;
+        hasher.update(&buf[..n]);
+        total_bytes += n as u64;
+    }
+
+    drop(file);
+
+    // Verify checksum if provided
+    if let Some(expected_sha256) = &req.sha256 {
+        let actual_sha256 = format!("{:x}", hasher.finalize());
+        if &actual_sha256 != expected_sha256 {
+            let _ = std::fs::remove_dir_all(&images_dir);
+            return Ok(environment_proto::RegisterImageResponse {
+                success: false,
+                image_id: String::new(),
+                error: format!(
+                    "Checksum mismatch: expected {}, got {}",
+                    expected_sha256, actual_sha256
+                ),
+            });
+        }
+    }
+
+    // Verify size
+    if req.binary_size > 0 && total_bytes != req.binary_size {
+        let _ = std::fs::remove_dir_all(&images_dir);
+        return Ok(environment_proto::RegisterImageResponse {
+            success: false,
+            image_id: String::new(),
+            error: format!(
+                "Size mismatch: expected {}, got {}",
+                req.binary_size, total_bytes
+            ),
+        });
+    }
+
+    // Make binary executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Create OCI bundle if needed
+    let runner_type = convert_runner_type(req.runner_type());
+    let bundle_path_str = if runner_type == RunnerType::Oci {
+        if let Err(e) = crate::runner::oci::create_bundle_at_path(&bundle_path, &binary_path) {
+            let _ = std::fs::remove_dir_all(&images_dir);
+            return Ok(environment_proto::RegisterImageResponse {
+                success: false,
+                image_id: String::new(),
+                error: format!("Failed to create OCI bundle: {}", e),
+            });
+        }
+        Some(bundle_path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    // Build image
+    let mut builder = crate::image_registry::ImageBuilder::new(
+        &req.tenant_id,
+        &req.name,
+        binary_path.to_string_lossy(),
+    )
+    .runner_type(runner_type);
+
+    if let Some(desc) = &req.description {
+        builder = builder.description(desc);
+    }
+
+    if let Some(bp) = &bundle_path_str {
+        builder = builder.bundle_path(bp);
+    }
+
+    if let Some(meta) = &req.metadata {
+        if let Ok(json) = serde_json::from_slice(meta) {
+            builder = builder.metadata(json);
+        }
+    }
+
+    let mut image = builder.build();
+    image.image_id = image_id.clone();
+
+    // Register in database
+    let image_registry = ImageRegistry::new(state.pool.clone());
+    if let Err(e) = image_registry.register(&image).await {
+        let _ = std::fs::remove_dir_all(&images_dir);
+        return Ok(environment_proto::RegisterImageResponse {
+            success: false,
+            image_id: String::new(),
+            error: format!("Failed to register image: {}", e),
+        });
+    }
+
+    info!(image_id = %image_id, bytes = total_bytes, "Streaming image registration complete");
+
+    Ok(environment_proto::RegisterImageResponse {
+        success: true,
+        image_id,
+        error: String::new(),
+    })
+}
+
+async fn handle_list_images(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::ListImagesRequest,
+) -> Result<environment_proto::ListImagesResponse, crate::error::Error> {
+    let image_registry = ImageRegistry::new(state.pool.clone());
+
+    let limit = if req.limit == 0 {
+        100
+    } else {
+        req.limit as i64
+    };
+    let offset = req.offset as i64;
+
+    let images = if let Some(tenant_id) = &req.tenant_id {
+        image_registry
+            .list_by_tenant(tenant_id, limit, offset)
+            .await?
+    } else {
+        image_registry.list_all(limit, offset).await?
+    };
+
+    let summaries = images
+        .into_iter()
+        .map(|img| environment_proto::ImageSummary {
+            image_id: img.image_id.to_string(),
+            tenant_id: img.tenant_id,
+            name: img.name,
+            description: img.description,
+            runner_type: convert_runner_type_to_proto(img.runner_type).into(),
+            created_at_ms: img.created_at.timestamp_millis(),
+        })
+        .collect();
+
+    Ok(environment_proto::ListImagesResponse {
+        images: summaries,
+        total_count: 0, // TODO: count query
+    })
+}
+
+async fn handle_get_image(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::GetImageRequest,
+) -> Result<environment_proto::GetImageResponse, crate::error::Error> {
+    let image_registry = ImageRegistry::new(state.pool.clone());
+
+    if req.image_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "image_id is required".to_string(),
+        ));
+    }
+
+    match image_registry.get(&req.image_id).await? {
+        Some(img) => {
+            // Verify tenant owns this image (multi-tenant isolation)
+            // Return "not found" for tenant mismatch to avoid leaking existence
+            if img.tenant_id != req.tenant_id {
+                debug!(
+                    image_id = %req.image_id,
+                    image_tenant = %img.tenant_id,
+                    request_tenant = %req.tenant_id,
+                    "GetImage: tenant mismatch, returning not found"
+                );
+                return Ok(environment_proto::GetImageResponse {
+                    found: false,
+                    image: None,
+                });
+            }
+
+            Ok(environment_proto::GetImageResponse {
+                found: true,
+                image: Some(environment_proto::ImageSummary {
+                    image_id: img.image_id.to_string(),
+                    tenant_id: img.tenant_id,
+                    name: img.name,
+                    description: img.description,
+                    runner_type: convert_runner_type_to_proto(img.runner_type).into(),
+                    created_at_ms: img.created_at.timestamp_millis(),
+                }),
+            })
+        }
+        None => Ok(environment_proto::GetImageResponse {
+            found: false,
+            image: None,
+        }),
+    }
+}
+
+async fn handle_delete_image(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::DeleteImageRequest,
+) -> Result<environment_proto::DeleteImageResponse, crate::error::Error> {
+    let image_registry = ImageRegistry::new(state.pool.clone());
+
+    if req.image_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "image_id is required".to_string(),
+        ));
+    }
+
+    // Get image to find file paths
+    if let Some(img) = image_registry.get(&req.image_id).await? {
+        // Verify tenant owns this image (multi-tenant isolation)
+        // Return "not found" for tenant mismatch to avoid leaking existence
+        if img.tenant_id != req.tenant_id {
+            debug!(
+                image_id = %req.image_id,
+                image_tenant = %img.tenant_id,
+                request_tenant = %req.tenant_id,
+                "DeleteImage: tenant mismatch, returning not found"
+            );
+            return Ok(environment_proto::DeleteImageResponse {
+                success: false,
+                error: format!("Image '{}' not found", req.image_id),
+            });
+        }
+
+        // Delete from database
+        image_registry.delete(&req.image_id).await?;
+
+        // Delete files
+        let images_dir = state.data_dir.join("images").join(&req.image_id);
+        let _ = std::fs::remove_dir_all(&images_dir);
+
+        Ok(environment_proto::DeleteImageResponse {
+            success: true,
+            error: String::new(),
+        })
+    } else {
+        Ok(environment_proto::DeleteImageResponse {
+            success: false,
+            error: format!("Image '{}' not found", req.image_id),
+        })
+    }
+}
+
+async fn handle_get_instance_status(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::GetInstanceStatusRequest,
+) -> Result<environment_proto::GetInstanceStatusResponse, crate::error::Error> {
+    match db::get_instance_full(&state.pool, &req.instance_id).await? {
+        Some(inst) => Ok(environment_proto::GetInstanceStatusResponse {
+            instance_id: inst.instance_id,
+            status: convert_instance_status(&inst.status),
+            checkpoint_id: inst.checkpoint_id,
+            created_at_ms: inst.created_at.timestamp_millis(),
+            started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
+            finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+            output: inst
+                .output
+                .map(|v| serde_json::to_vec(&v).unwrap_or_default()),
+            error: inst.error,
+            // Extended fields
+            image_id: inst.image_id.unwrap_or_default(),
+            image_name: inst.image_name.unwrap_or_default(),
+            tenant_id: inst.tenant_id,
+            input: inst
+                .input
+                .map(|v| serde_json::to_vec(&v).unwrap_or_default()),
+            heartbeat_at_ms: inst.heartbeat_at.map(|t| t.timestamp_millis()),
+            retry_count: inst.retry_count as u32,
+            max_retries: inst.max_retries as u32,
+        }),
+        None => Ok(environment_proto::GetInstanceStatusResponse {
+            instance_id: req.instance_id,
+            status: environment_proto::InstanceStatus::StatusUnknown as i32,
+            checkpoint_id: None,
+            created_at_ms: 0,
+            started_at_ms: None,
+            finished_at_ms: None,
+            output: None,
+            error: Some("Instance not found".to_string()),
+            // Extended fields - defaults for not found
+            image_id: String::new(),
+            image_name: String::new(),
+            tenant_id: String::new(),
+            input: None,
+            heartbeat_at_ms: None,
+            retry_count: 0,
+            max_retries: 0,
+        }),
+    }
+}
+
+async fn handle_list_instances(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::ListInstancesRequest,
+) -> Result<environment_proto::ListInstancesResponse, crate::error::Error> {
+    use chrono::TimeZone;
+
+    let limit = if req.limit == 0 {
+        100
+    } else {
+        req.limit as i64
+    };
+    let offset = req.offset as i64;
+
+    // Convert status enum to string
+    let status = req
+        .status
+        .and_then(|s| match environment_proto::InstanceStatus::try_from(s) {
+            Ok(environment_proto::InstanceStatus::StatusPending) => Some("pending".to_string()),
+            Ok(environment_proto::InstanceStatus::StatusRunning) => Some("running".to_string()),
+            Ok(environment_proto::InstanceStatus::StatusSuspended) => Some("suspended".to_string()),
+            Ok(environment_proto::InstanceStatus::StatusCompleted) => Some("completed".to_string()),
+            Ok(environment_proto::InstanceStatus::StatusFailed) => Some("failed".to_string()),
+            Ok(environment_proto::InstanceStatus::StatusCancelled) => Some("cancelled".to_string()),
+            _ => None,
+        });
+
+    // Use image_id directly as string
+    let image_id = req.image_id.filter(|id| !id.is_empty());
+
+    // Convert milliseconds to DateTime
+    let created_after = req
+        .created_after_ms
+        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
+    let created_before = req
+        .created_before_ms
+        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
+    let finished_after = req
+        .finished_after_ms
+        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
+    let finished_before = req
+        .finished_before_ms
+        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single());
+
+    let options = db::ListInstancesOptions {
+        tenant_id: req.tenant_id,
+        status,
+        image_id,
+        image_name_prefix: req.image_name_prefix,
+        created_after,
+        created_before,
+        finished_after,
+        finished_before,
+        order_by: req.order_by,
+        limit,
+        offset,
+    };
+
+    let instances = db::list_instances(&state.pool, &options).await?;
+    let total_count = db::count_instances(&state.pool, &options).await? as u32;
+
+    let summaries = instances
+        .into_iter()
+        .map(|inst| environment_proto::InstanceSummary {
+            instance_id: inst.instance_id,
+            tenant_id: inst.tenant_id,
+            image_id: inst.image_id.unwrap_or_default(),
+            status: convert_instance_status(&inst.status),
+            created_at_ms: inst.created_at.timestamp_millis(),
+            started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
+            finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
+            has_error: inst.error.is_some(),
+        })
+        .collect();
+
+    Ok(environment_proto::ListInstancesResponse {
+        instances: summaries,
+        total_count,
+    })
+}
+
+async fn handle_send_signal(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::SendSignalRequest,
+) -> Result<environment_proto::SendSignalResponse, crate::error::Error> {
+    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
+
+    info!(
+        instance_id = %req.instance_id,
+        signal_type = ?req.signal_type,
+        "Proxying signal to Core"
+    );
+
+    // Parse core address as SocketAddr
+    let server_addr: std::net::SocketAddr = state
+        .core_addr
+        .parse()
+        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
+
+    // Create client to proxy to Core
+    let client_config = RuntaraClientConfig {
+        server_addr,
+        server_name: "localhost".to_string(),
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
+    let client = RuntaraClient::new(client_config)
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+    client
+        .connect()
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    // Convert signal type
+    let signal_type = match environment_proto::SignalType::try_from(req.signal_type) {
+        Ok(environment_proto::SignalType::SignalCancel) => {
+            management_proto::SignalType::SignalCancel as i32
+        }
+        Ok(environment_proto::SignalType::SignalPause) => {
+            management_proto::SignalType::SignalPause as i32
+        }
+        Ok(environment_proto::SignalType::SignalResume) => {
+            management_proto::SignalType::SignalResume as i32
+        }
+        Err(_) => {
+            warn!(
+                signal_type = req.signal_type,
+                "Unknown signal type received"
+            );
+            return Err(crate::error::Error::InvalidRequest(format!(
+                "Unknown signal type: {}",
+                req.signal_type
+            )));
+        }
+    };
+
+    // Build management request
+    let mgmt_request = management_proto::RpcRequest {
+        request: Some(management_proto::rpc_request::Request::SendSignal(
+            management_proto::SendSignalRequest {
+                instance_id: req.instance_id.clone(),
+                signal_type,
+                payload: req.payload,
+            },
+        )),
+    };
+
+    // Send request
+    let response: management_proto::RpcResponse = client
+        .request(&mgmt_request)
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    match response.response {
+        Some(management_proto::rpc_response::Response::SendSignal(resp)) => {
+            Ok(environment_proto::SendSignalResponse {
+                success: resp.success,
+                error: resp.error,
+            })
+        }
+        Some(management_proto::rpc_response::Response::Error(e)) => {
+            Ok(environment_proto::SendSignalResponse {
+                success: false,
+                error: format!("{}: {}", e.code, e.message),
+            })
+        }
+        _ => Ok(environment_proto::SendSignalResponse {
+            success: false,
+            error: "Unexpected response from Core".to_string(),
+        }),
+    }
+}
+
+async fn handle_list_checkpoints(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::ListCheckpointsRequest,
+) -> Result<environment_proto::ListCheckpointsResponse, crate::error::Error> {
+    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
+
+    debug!(
+        instance_id = %req.instance_id,
+        checkpoint_id_filter = ?req.checkpoint_id,
+        limit = ?req.limit,
+        offset = ?req.offset,
+        "Proxying list_checkpoints to Core"
+    );
+
+    // Parse core address as SocketAddr
+    let server_addr: std::net::SocketAddr = state
+        .core_addr
+        .parse()
+        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
+
+    // Create client to proxy to Core
+    let client_config = RuntaraClientConfig {
+        server_addr,
+        server_name: "localhost".to_string(),
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
+    let client = RuntaraClient::new(client_config)
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+    client
+        .connect()
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    // Build management request
+    let mgmt_request = management_proto::RpcRequest {
+        request: Some(management_proto::rpc_request::Request::ListCheckpoints(
+            management_proto::ListCheckpointsRequest {
+                instance_id: req.instance_id.clone(),
+                checkpoint_id: req.checkpoint_id,
+                limit: req.limit,
+                offset: req.offset,
+                created_after_ms: req.created_after_ms,
+                created_before_ms: req.created_before_ms,
+            },
+        )),
+    };
+
+    // Send request
+    let response: management_proto::RpcResponse = client
+        .request(&mgmt_request)
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    match response.response {
+        Some(management_proto::rpc_response::Response::ListCheckpoints(resp)) => {
+            // Convert management proto checkpoints to environment proto
+            let checkpoints = resp
+                .checkpoints
+                .into_iter()
+                .map(|cp| environment_proto::CheckpointSummary {
+                    checkpoint_id: cp.checkpoint_id,
+                    instance_id: cp.instance_id,
+                    created_at_ms: cp.created_at_ms,
+                    data_size_bytes: cp.data_size_bytes,
+                })
+                .collect();
+
+            Ok(environment_proto::ListCheckpointsResponse {
+                checkpoints,
+                total_count: resp.total_count,
+                limit: resp.limit,
+                offset: resp.offset,
+            })
+        }
+        Some(management_proto::rpc_response::Response::Error(e)) => Err(
+            crate::error::Error::CoreProxy(format!("{}: {}", e.code, e.message)),
+        ),
+        _ => Err(crate::error::Error::CoreProxy(
+            "Unexpected response from Core".to_string(),
+        )),
+    }
+}
+
+async fn handle_get_checkpoint(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::GetCheckpointRequest,
+) -> Result<environment_proto::GetCheckpointResponse, crate::error::Error> {
+    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
+
+    debug!(
+        instance_id = %req.instance_id,
+        checkpoint_id = %req.checkpoint_id,
+        "Proxying get_checkpoint to Core"
+    );
+
+    // Parse core address as SocketAddr
+    let server_addr: std::net::SocketAddr = state
+        .core_addr
+        .parse()
+        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
+
+    // Create client to proxy to Core
+    let client_config = RuntaraClientConfig {
+        server_addr,
+        server_name: "localhost".to_string(),
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
+    let client = RuntaraClient::new(client_config)
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+    client
+        .connect()
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    // Build management request
+    let mgmt_request = management_proto::RpcRequest {
+        request: Some(management_proto::rpc_request::Request::GetCheckpoint(
+            management_proto::GetCheckpointRequest {
+                instance_id: req.instance_id.clone(),
+                checkpoint_id: req.checkpoint_id.clone(),
+            },
+        )),
+    };
+
+    // Send request
+    let response: management_proto::RpcResponse = client
+        .request(&mgmt_request)
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    match response.response {
+        Some(management_proto::rpc_response::Response::GetCheckpoint(resp)) => {
+            Ok(environment_proto::GetCheckpointResponse {
+                found: resp.found,
+                checkpoint_id: resp.checkpoint_id,
+                instance_id: resp.instance_id,
+                created_at_ms: resp.created_at_ms,
+                data: resp.data,
+            })
+        }
+        Some(management_proto::rpc_response::Response::Error(e)) => Err(
+            crate::error::Error::CoreProxy(format!("{}: {}", e.code, e.message)),
+        ),
+        _ => Err(crate::error::Error::CoreProxy(
+            "Unexpected response from Core".to_string(),
+        )),
+    }
+}

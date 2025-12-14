@@ -1,0 +1,221 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! StartScenario step emitter.
+//!
+//! The StartScenario step executes a nested child scenario.
+//! When a child scenario's ExecutionGraph is available in the EmitContext,
+//! it will be recursively emitted and embedded into the parent scenario.
+//! The entire child scenario result is checkpointed via runtara-sdk.
+
+use proc_macro2::TokenStream;
+use quote::quote;
+
+use super::super::context::EmitContext;
+use super::super::mapping;
+use super::super::program;
+use runtara_dsl::{ExecutionGraph, StartScenarioStep};
+
+/// Emit code for a StartScenario step.
+///
+/// If the child scenario's ExecutionGraph is available in the EmitContext,
+/// it will be recursively emitted as an embedded function. Otherwise,
+/// a placeholder/warning is generated.
+pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> TokenStream {
+    let step_id = &step.id;
+    let step_name = step.name.as_deref().unwrap_or("Unnamed");
+    let child_scenario_id = &step.child_scenario_id;
+    let debug_mode = ctx.debug_mode;
+
+    // Check if we have the child scenario's graph
+    if let Some(child_graph) = ctx.get_child_scenario(step_id).cloned() {
+        // We have the child graph - emit embedded version
+        emit_with_embedded_child(step, &child_graph, ctx)
+    } else {
+        // No child graph available - emit placeholder
+        emit_placeholder(step_id, step_name, child_scenario_id, debug_mode, ctx)
+    }
+}
+
+/// Emit a StartScenario step with an embedded child scenario.
+fn emit_with_embedded_child(
+    step: &StartScenarioStep,
+    child_graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> TokenStream {
+    let step_id = &step.id;
+    let step_name = step.name.as_deref().unwrap_or("Unnamed");
+    let child_scenario_id = &step.child_scenario_id;
+    let debug_mode = ctx.debug_mode;
+
+    // Do all mutable operations first
+    let step_var = ctx.declare_step(step_id);
+    let source_var = ctx.temp_var("source");
+    let child_inputs_var = ctx.temp_var("child_inputs");
+    let child_fn_name = ctx.temp_var(&format!(
+        "execute_child_{}",
+        EmitContext::sanitize_ident(step_id)
+    ));
+
+    // Clone immutable references
+    let steps_context = ctx.steps_context_var.clone();
+
+    // Build the source for input mapping
+    let build_source = mapping::emit_build_source(ctx);
+
+    // Generate input mapping for child scenario
+    let inputs_code = if let Some(ref input_mapping) = step.input_mapping {
+        if !input_mapping.is_empty() {
+            let mapping_code = mapping::emit_input_mapping(input_mapping, ctx, &source_var);
+            quote! { #mapping_code }
+        } else {
+            quote! { serde_json::Value::Object(serde_json::Map::new()) }
+        }
+    } else {
+        quote! { serde_json::Value::Object(serde_json::Map::new()) }
+    };
+
+    // Generate the embedded child scenario function using shared recursive emitter
+    let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx);
+
+    let debug_log = if debug_mode {
+        quote! {
+            eprintln!("  -> Executing embedded child scenario: {}", #child_scenario_id);
+        }
+    } else {
+        quote! {}
+    };
+
+    // Cache key for the child scenario checkpoint
+    let cache_key = format!("start_scenario::{}", step_id);
+
+    quote! {
+        // Define the embedded child scenario function
+        #child_fn_code
+
+        let #source_var = #build_source;
+        let #child_inputs_var = #inputs_code;
+
+        #debug_log
+
+        // Prepare child scenario inputs
+        // All mapped inputs become child's data (myParam1 -> data.myParam1)
+        // Child variables are always isolated - never inherited from parent
+        let child_scenario_inputs = ScenarioInputs {
+            data: Arc::new(#child_inputs_var.clone()),
+            variables: Arc::new(serde_json::Value::Object(serde_json::Map::new())),
+        };
+
+        // Use SDK checkpoint to check for cached result
+        let #step_var: serde_json::Value = {
+            let __sdk = sdk().lock().await;
+
+            match __sdk.get_checkpoint(#cache_key).await {
+                Ok(Some(cached_bytes)) => {
+                    // Found cached result - deserialize and return
+                    drop(__sdk);
+                    match serde_json::from_slice::<serde_json::Value>(&cached_bytes) {
+                        Ok(cached_value) => cached_value,
+                        Err(e) => {
+                            return Err(format!("StartScenario step {} failed to deserialize cached result: {}", #step_id, e));
+                        }
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    drop(__sdk);
+
+                    // Execute child scenario
+                    let child_result = #child_fn_name(Arc::new(child_scenario_inputs)).await
+                        .map_err(|e| format!("Child scenario {} failed: {}", #child_scenario_id, e))?;
+
+                    let result = serde_json::json!({
+                        "stepId": #step_id,
+                        "stepName": #step_name,
+                        "stepType": "StartScenario",
+                        "childScenarioId": #child_scenario_id,
+                        "outputs": child_result
+                    });
+
+                    // Save checkpoint after execution
+                    let result_bytes = serde_json::to_vec(&result)
+                        .map_err(|e| format!("StartScenario step {} failed to serialize result: {}", #step_id, e))?;
+
+                    let __sdk = sdk().lock().await;
+                    if let Err(e) = __sdk.checkpoint(#cache_key, &result_bytes).await {
+                        eprintln!("WARN: StartScenario step {} checkpoint save failed: {}", #step_id, e);
+                    }
+
+                    result
+                }
+            }
+        };
+
+        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // Check for cancellation after child scenario completes
+        {
+            let mut __sdk = sdk().lock().await;
+            if let Err(e) = __sdk.check_cancelled().await {
+                return Err(format!("StartScenario step {} cancelled: {}", #step_id, e));
+            }
+        }
+    }
+}
+
+/// Emit a placeholder for when child scenario is not available.
+fn emit_placeholder(
+    step_id: &str,
+    step_name: &str,
+    child_scenario_id: &str,
+    debug_mode: bool,
+    ctx: &mut EmitContext,
+) -> TokenStream {
+    // Do all mutable operations first
+    let step_var = ctx.declare_step(step_id);
+    let source_var = ctx.temp_var("source");
+
+    // Clone immutable references
+    let steps_context = ctx.steps_context_var.clone();
+
+    // Build the source for input mapping
+    let build_source = mapping::emit_build_source(ctx);
+
+    let debug_log = if debug_mode {
+        quote! {
+            eprintln!("  -> Child scenario {} not embedded (placeholder)", #child_scenario_id);
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        let #source_var = #build_source;
+
+        #debug_log
+
+        // Placeholder: child scenario not available at compile time
+        let child_result = {
+            eprintln!("WARNING: Child scenario {} not embedded - returning empty result", #child_scenario_id);
+            serde_json::json!({
+                "warning": format!("Child scenario {} was not available at compile time", #child_scenario_id)
+            })
+        };
+
+        let #step_var = serde_json::json!({
+            "stepId": #step_id,
+            "stepName": #step_name,
+            "stepType": "StartScenario",
+            "childScenarioId": #child_scenario_id,
+            "outputs": child_result
+        });
+
+        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // Check for cancellation after step completes
+        {
+            let mut __sdk = sdk().lock().await;
+            if let Err(e) = __sdk.check_cancelled().await {
+                return Err(format!("StartScenario step {} cancelled: {}", #step_id, e));
+            }
+        }
+    }
+}

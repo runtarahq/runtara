@@ -1,0 +1,41 @@
+{
+  "name": "Delay Workflow",
+  "description": "A workflow that uses a delay to test durable sleep recovery",
+  "steps": {
+    "delay": {
+      "stepType": "Agent",
+      "id": "delay",
+      "agentId": "utils",
+      "capabilityId": "delay-in-ms",
+      "inputMapping": {
+        "delay_value": {
+          "valueType": "reference",
+          "value": "data.input.delay_ms"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": {
+            "status": "completed_after_delay",
+            "message": "Workflow completed successfully after delay"
+          }
+        }
+      }
+    }
+  },
+  "entryPoint": "delay",
+  "executionPlan": [
+    {
+      "fromStep": "delay",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

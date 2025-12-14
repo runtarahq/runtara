@@ -1,0 +1,44 @@
+{
+  "name": "Child Scenario",
+  "description": "A simple child scenario that can be called by StartScenario",
+  "steps": {
+    "transform": {
+      "stepType": "Agent",
+      "id": "transform",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "childOutput": "$.childInput"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "transform",
+  "executionPlan": [
+    {
+      "fromStep": "transform",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

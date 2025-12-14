@@ -1,0 +1,35 @@
+[package]
+name = "runtara-sdk"
+edition.workspace = true
+version.workspace = true
+description = "High-level SDK for instance communication with runtara-core"
+
+[dependencies]
+# Protocol layer
+runtara-protocol = { path = "../runtara-protocol" }
+
+# Macros
+runtara-sdk-macros = { path = "../runtara-sdk-macros" }
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "time"] }
+
+# Serialization
+prost = "0.13"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = "2"
+
+# Observability
+tracing = "0.1"
+
+# Time
+chrono = { workspace = true }
+
+# Global registry
+once_cell = "1.20"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

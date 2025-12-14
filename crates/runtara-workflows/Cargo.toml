@@ -1,0 +1,22 @@
+[package]
+name = "runtara-workflows"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+runtara-dsl = { path = "../runtara-dsl" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing", "printing"] }
+
+[[bin]]
+name = "runtara-compile"
+path = "src/bin/compile.rs"
+
+[dev-dependencies]
+tempfile = "3"

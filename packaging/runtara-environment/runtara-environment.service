@@ -1,0 +1,15 @@
+[Unit]
+Description=Runtara Environment - Instance Lifecycle Manager
+After=network.target postgresql.service runtara-core.service
+
+[Service]
+Type=simple
+User=runtara
+Group=runtara
+EnvironmentFile=/etc/runtara/environment.conf
+ExecStart=/usr/bin/runtara-environment
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

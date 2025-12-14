@@ -1,0 +1,259 @@
+syntax = "proto3";
+package runtara.management;
+
+// ============================================================================
+// Management Protocol - Used by external clients to manage runtara-core
+// ============================================================================
+
+// ============================================================================
+// Health Check
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string version = 2;
+  int64 uptime_ms = 3;
+  uint32 active_instances = 4;
+}
+
+// ============================================================================
+// Send Signal to Instance (external → core → instance)
+// ============================================================================
+
+enum SignalType {
+  SIGNAL_CANCEL = 0;      // Cancel execution
+  SIGNAL_PAUSE = 1;       // Pause execution (checkpoint and wait)
+  SIGNAL_RESUME = 2;      // Resume paused execution
+}
+
+// External client requests core to send a signal to an instance
+message SendSignalRequest {
+  string instance_id = 1;
+  SignalType signal_type = 2;
+  bytes payload = 3;            // Signal-specific data (e.g., cancel reason)
+}
+
+message SendSignalResponse {
+  bool success = 1;
+  string error = 2;             // Error if instance not found, not connected, etc.
+}
+
+// ============================================================================
+// Instance Status Query (management can query any instance)
+// ============================================================================
+
+message GetInstanceStatusRequest {
+  string instance_id = 1;
+}
+
+message GetInstanceStatusResponse {
+  string instance_id = 1;
+  InstanceStatus status = 2;
+  optional string checkpoint_id = 3;  // Last known checkpoint
+  int64 started_at_ms = 4;
+  optional int64 finished_at_ms = 5;
+  optional bytes output = 6;          // If completed
+  optional string error = 7;          // If failed
+}
+
+enum InstanceStatus {
+  STATUS_UNKNOWN = 0;
+  STATUS_PENDING = 1;     // Queued, not yet started
+  STATUS_RUNNING = 2;     // Currently executing
+  STATUS_SUSPENDED = 3;   // Sleeping / waiting for wake
+  STATUS_COMPLETED = 4;   // Finished successfully
+  STATUS_FAILED = 5;      // Finished with error
+  STATUS_CANCELLED = 6;   // Cancelled by signal
+}
+
+// ============================================================================
+// List Instances
+// ============================================================================
+
+message ListInstancesRequest {
+  optional string tenant_id = 1;      // Filter by tenant
+  optional InstanceStatus status = 2; // Filter by status
+  uint32 limit = 3;                   // Max results (default: 100)
+  uint32 offset = 4;                  // Pagination offset
+}
+
+message ListInstancesResponse {
+  repeated InstanceSummary instances = 1;
+  uint32 total_count = 2;
+}
+
+message InstanceSummary {
+  string instance_id = 1;
+  string tenant_id = 2;
+  InstanceStatus status = 3;
+  int64 created_at_ms = 4;
+}
+
+// ============================================================================
+// Start Instance
+// ============================================================================
+
+message StartInstanceRequest {
+  string image_id = 1;              // Image to launch
+  string tenant_id = 2;             // Tenant ID
+  optional string instance_id = 3;  // Optional custom instance ID (UUID generated if not provided)
+  bytes input = 4;                  // JSON input data
+  optional uint32 timeout_seconds = 5; // Execution timeout (default: 300)
+}
+
+message StartInstanceResponse {
+  bool success = 1;
+  string instance_id = 2;           // Created instance ID
+  string error = 3;                 // Error if failed
+}
+
+// ============================================================================
+// Stop Instance
+// ============================================================================
+
+message StopInstanceRequest {
+  string instance_id = 1;           // Instance to stop
+  uint32 grace_period_seconds = 2;  // Grace period before force kill (default: 5)
+  string reason = 3;                // Reason for stopping
+}
+
+message StopInstanceResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// ============================================================================
+// Register Image
+// ============================================================================
+
+enum RunnerType {
+  RUNNER_OCI = 0;     // OCI container runner (default)
+  RUNNER_NATIVE = 1;  // Native process runner
+  RUNNER_WASM = 2;    // WebAssembly runner
+}
+
+// Legacy single-frame registration (for small binaries < 16MB)
+message RegisterImageRequest {
+  string tenant_id = 1;             // Tenant that owns this image
+  string name = 2;                  // Human-readable name (unique per tenant)
+  optional string description = 3;  // Optional description
+  bytes binary = 4;                 // Compiled binary content
+  RunnerType runner_type = 5;       // Type of runner to use (default: OCI)
+  optional bytes metadata = 6;      // Optional metadata (JSON)
+}
+
+message RegisterImageResponse {
+  bool success = 1;
+  string image_id = 2;              // Assigned image UUID
+  string error = 3;                 // Error if failed
+}
+
+// ============================================================================
+// Register Image (Streaming) - For large binaries
+// ============================================================================
+//
+// Protocol:
+// 1. Client sends RegisterImageStreamStart frame
+// 2. Client streams raw binary bytes (not protobuf-wrapped)
+// 3. Client calls finish() on send stream to signal end of binary data
+// 4. Server responds with RegisterImageResponse
+//
+// This allows uploading arbitrarily large binaries without memory constraints.
+
+message RegisterImageStreamStart {
+  string tenant_id = 1;             // Tenant that owns this image
+  string name = 2;                  // Human-readable name (unique per tenant)
+  optional string description = 3;  // Optional description
+  uint64 binary_size = 4;           // Total size of binary in bytes
+  RunnerType runner_type = 5;       // Type of runner to use (default: OCI)
+  optional bytes metadata = 6;      // Optional metadata (JSON)
+  optional string sha256 = 7;       // Optional SHA256 checksum for verification
+}
+
+// ============================================================================
+// Checkpoints
+// ============================================================================
+
+// List checkpoints for an instance
+message ListCheckpointsRequest {
+  string instance_id = 1;
+  optional string checkpoint_id = 2;  // Filter by checkpoint_id
+  optional uint32 limit = 3;          // Max results (default: 100)
+  optional uint32 offset = 4;         // Pagination offset
+  optional int64 created_after_ms = 5;  // Filter checkpoints created after this time
+  optional int64 created_before_ms = 6; // Filter checkpoints created before this time
+}
+
+message ListCheckpointsResponse {
+  repeated CheckpointSummary checkpoints = 1;
+  uint32 total_count = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message CheckpointSummary {
+  string checkpoint_id = 1;
+  string instance_id = 2;
+  int64 created_at_ms = 3;
+  uint64 data_size_bytes = 4;         // Size of checkpoint data in bytes
+}
+
+// Get full checkpoint data
+message GetCheckpointRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;
+}
+
+message GetCheckpointResponse {
+  bool found = 1;
+  string checkpoint_id = 2;
+  string instance_id = 3;
+  int64 created_at_ms = 4;
+  bytes data = 5;                     // Checkpoint state data (JSON bytes)
+}
+
+// ============================================================================
+// RPC Wrapper (for multiplexing on single stream)
+// ============================================================================
+
+// Wrapper for all management request types
+message RpcRequest {
+  oneof request {
+    HealthCheckRequest health_check = 1;
+    SendSignalRequest send_signal = 2;
+    GetInstanceStatusRequest get_instance_status = 3;
+    ListInstancesRequest list_instances = 4;
+    StartInstanceRequest start_instance = 5;
+    StopInstanceRequest stop_instance = 6;
+    RegisterImageRequest register_image = 7;
+    RegisterImageStreamStart register_image_stream = 8;  // Streaming upload
+    // Checkpoints
+    ListCheckpointsRequest list_checkpoints = 9;
+    GetCheckpointRequest get_checkpoint = 10;
+  }
+}
+
+// Wrapper for all management response types
+message RpcResponse {
+  oneof response {
+    HealthCheckResponse health_check = 1;
+    SendSignalResponse send_signal = 2;
+    GetInstanceStatusResponse get_instance_status = 3;
+    ListInstancesResponse list_instances = 4;
+    StartInstanceResponse start_instance = 5;
+    StopInstanceResponse stop_instance = 6;
+    RegisterImageResponse register_image = 7;
+    RpcError error = 15;
+    // Checkpoints
+    ListCheckpointsResponse list_checkpoints = 9;
+    GetCheckpointResponse get_checkpoint = 10;
+  }
+}
+
+// Generic RPC error
+message RpcError {
+  string code = 1;
+  string message = 2;
+}

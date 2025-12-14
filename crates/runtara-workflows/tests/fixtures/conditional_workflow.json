@@ -1,0 +1,60 @@
+{
+  "name": "Conditional Workflow",
+  "description": "A workflow that demonstrates conditional branching",
+  "steps": {
+    "check": {
+      "stepType": "Conditional",
+      "id": "check",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          {
+            "valueType": "reference",
+            "value": "data.flag"
+          },
+          {
+            "valueType": "immediate",
+            "value": true
+          }
+        ]
+      }
+    },
+    "true_finish": {
+      "stepType": "Finish",
+      "id": "true_finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "yes"
+        }
+      }
+    },
+    "false_finish": {
+      "stepType": "Finish",
+      "id": "false_finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "no"
+        }
+      }
+    }
+  },
+  "entryPoint": "check",
+  "executionPlan": [
+    {
+      "fromStep": "check",
+      "toStep": "true_finish",
+      "label": "true"
+    },
+    {
+      "fromStep": "check",
+      "toStep": "false_finish",
+      "label": "false"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

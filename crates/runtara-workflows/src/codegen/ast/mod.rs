@@ -1,0 +1,147 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! AST-based code generation for workflow compilation.
+//!
+//! This module generates Rust source code using syn/quote for type-safe
+//! AST construction instead of string templating.
+
+pub mod context;
+pub mod mapping;
+pub mod program;
+pub mod steps;
+
+use proc_macro2::TokenStream;
+use quote::quote;
+use std::collections::HashMap;
+
+use context::EmitContext;
+use runtara_dsl::ExecutionGraph;
+
+/// Compile an execution graph to Rust source code.
+///
+/// This is the main entry point for AST-based code generation.
+pub fn compile(graph: &ExecutionGraph, debug_mode: bool) -> String {
+    compile_with_children(graph, debug_mode, HashMap::new(), None, None)
+}
+
+/// Compile an execution graph with child scenarios.
+///
+/// # Arguments
+/// * `graph` - The main execution graph
+/// * `debug_mode` - Whether to include debug instrumentation
+/// * `child_scenarios` - Map of step_id -> child ExecutionGraph for StartScenario steps
+/// * `connection_service_url` - Optional URL for fetching connections at runtime
+/// * `tenant_id` - Optional tenant ID for connection service requests
+///
+/// # Returns
+/// Generated Rust source code as a string
+pub fn compile_with_children(
+    graph: &ExecutionGraph,
+    debug_mode: bool,
+    child_scenarios: HashMap<String, ExecutionGraph>,
+    connection_service_url: Option<String>,
+    tenant_id: Option<String>,
+) -> String {
+    let ctx = EmitContext::with_child_scenarios(
+        debug_mode,
+        child_scenarios,
+        connection_service_url,
+        tenant_id,
+    );
+    let tokens = program::emit_program(graph, &mut { ctx });
+    tokens.to_string()
+}
+
+/// Convert a serde_json::Value to a TokenStream that constructs it.
+pub fn json_to_tokens(value: &serde_json::Value) -> TokenStream {
+    match value {
+        serde_json::Value::Null => {
+            quote! { serde_json::Value::Null }
+        }
+        serde_json::Value::Bool(b) => {
+            quote! { serde_json::Value::Bool(#b) }
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                quote! { serde_json::Value::Number(serde_json::Number::from(#i)) }
+            } else if let Some(u) = n.as_u64() {
+                quote! { serde_json::Value::Number(serde_json::Number::from(#u)) }
+            } else if let Some(f) = n.as_f64() {
+                quote! {
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(#f).unwrap_or_else(|| serde_json::Number::from(0))
+                    )
+                }
+            } else {
+                quote! { serde_json::Value::Number(serde_json::Number::from(0)) }
+            }
+        }
+        serde_json::Value::String(s) => {
+            quote! { serde_json::Value::String(#s.to_string()) }
+        }
+        serde_json::Value::Array(arr) => {
+            let items: Vec<TokenStream> = arr.iter().map(json_to_tokens).collect();
+            quote! { serde_json::Value::Array(vec![#(#items),*]) }
+        }
+        serde_json::Value::Object(map) => {
+            let entries: Vec<TokenStream> = map
+                .iter()
+                .map(|(k, v)| {
+                    let val_tokens = json_to_tokens(v);
+                    quote! { (#k.to_string(), #val_tokens) }
+                })
+                .collect();
+            quote! {
+                serde_json::Value::Object(
+                    vec![#(#entries),*].into_iter().collect()
+                )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_json_to_tokens_null() {
+        let tokens = json_to_tokens(&json!(null));
+        assert!(tokens.to_string().contains("Null"));
+    }
+
+    #[test]
+    fn test_json_to_tokens_bool() {
+        let tokens = json_to_tokens(&json!(true));
+        assert!(tokens.to_string().contains("Bool"));
+        assert!(tokens.to_string().contains("true"));
+    }
+
+    #[test]
+    fn test_json_to_tokens_number() {
+        let tokens = json_to_tokens(&json!(42));
+        assert!(tokens.to_string().contains("Number"));
+        assert!(tokens.to_string().contains("42"));
+    }
+
+    #[test]
+    fn test_json_to_tokens_string() {
+        let tokens = json_to_tokens(&json!("hello"));
+        assert!(tokens.to_string().contains("String"));
+        assert!(tokens.to_string().contains("hello"));
+    }
+
+    #[test]
+    fn test_json_to_tokens_array() {
+        let tokens = json_to_tokens(&json!([1, 2, 3]));
+        assert!(tokens.to_string().contains("Array"));
+    }
+
+    #[test]
+    fn test_json_to_tokens_object() {
+        let tokens = json_to_tokens(&json!({"key": "value"}));
+        assert!(tokens.to_string().contains("Object"));
+        assert!(tokens.to_string().contains("key"));
+    }
+}

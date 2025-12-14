@@ -1,0 +1,35 @@
+#!/bin/bash
+set -e
+
+# Create runtara user and group if they don't exist
+if ! getent group runtara > /dev/null 2>&1; then
+    groupadd --system runtara
+fi
+
+if ! getent passwd runtara > /dev/null 2>&1; then
+    useradd --system --gid runtara --no-create-home --shell /usr/sbin/nologin runtara
+fi
+
+# Create config directory if it doesn't exist
+mkdir -p /etc/runtara
+chown root:runtara /etc/runtara
+chmod 750 /etc/runtara
+
+# Create data directory
+mkdir -p /var/lib/runtara
+chown runtara:runtara /var/lib/runtara
+chmod 750 /var/lib/runtara
+
+# Set permissions on config file
+if [ -f /etc/runtara/environment.conf ]; then
+    chown root:runtara /etc/runtara/environment.conf
+    chmod 640 /etc/runtara/environment.conf
+fi
+
+# Reload systemd and enable service
+systemctl daemon-reload
+systemctl enable runtara-environment.service
+
+echo "Runtara Environment installed successfully."
+echo "Edit /etc/runtara/environment.conf to configure the service."
+echo "Start with: systemctl start runtara-environment"

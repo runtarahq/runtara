@@ -1,0 +1,27 @@
+# Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "runtara-test-harness"
+description = "Test harness binary for executing agent capabilities in isolation"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "runtara-test-harness"
+path = "src/main.rs"
+
+[dependencies]
+# Workflow standard library (includes all agents)
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib" }
+
+# DSL types for agent metadata
+runtara-dsl = { path = "../runtara-dsl" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

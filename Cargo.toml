@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/runtara-core",
+    "crates/runtara-environment",
+    "crates/runtara-protocol",
+    "crates/runtara-management-sdk",
+    "crates/runtara-sdk",
+    "crates/runtara-sdk-macros",
+    "crates/durable-example",
+    # Workflow compilation library
+    "crates/runtara-dsl",
+    "crates/runtara-workflows",
+    "crates/runtara-agents",
+    "crates/runtara-workflow-stdlib",
+    "crates/runtara-agent-macro",
+    # Agent testing
+    "crates/runtara-test-harness",
+    # TUI monitoring
+    "crates/runtara-tui",
+]
+default-members = ["crates/runtara-core"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.20"
+license = "AGPL-3.0-or-later"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+sha2 = "0.10"
+# Vendored OpenSSL for musl static builds
+openssl = { version = "0.10", features = ["vendored"] }

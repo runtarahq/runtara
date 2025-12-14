@@ -1,0 +1,28 @@
+[package]
+name = "runtara-workflow-stdlib"
+version.workspace = true
+edition.workspace = true
+description = "Unified library for workflow binaries - combines agents and runtime"
+
+[lib]
+name = "runtara_workflow_stdlib"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# Core dependencies
+runtara-agents = { path = "../runtara-agents" }
+runtara-sdk = { path = "../runtara-sdk" }
+
+# Re-exported for workflows
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# For stderr redirection in generated workflows
+libc = "0.2"
+
+# HTTP client for connection fetching
+ureq = "2.12"

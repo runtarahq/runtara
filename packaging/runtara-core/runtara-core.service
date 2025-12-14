@@ -1,0 +1,15 @@
+[Unit]
+Description=Runtara Core - Durable Execution Engine
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=runtara
+Group=runtara
+EnvironmentFile=/etc/runtara/core.conf
+ExecStart=/usr/bin/runtara-core
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

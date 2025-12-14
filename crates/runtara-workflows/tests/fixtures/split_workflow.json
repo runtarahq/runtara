@@ -1,0 +1,77 @@
+{
+  "name": "Split Workflow",
+  "description": "A workflow that iterates over an array using Split step",
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
+        "sequential": true
+      },
+      "subgraph": {
+        "name": "Item Processing",
+        "steps": {
+          "transform": {
+            "stepType": "Agent",
+            "id": "transform",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "item"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "processed": "$.value"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "result": {
+                "valueType": "reference",
+                "value": "steps.transform.outputs"
+              }
+            }
+          }
+        },
+        "entryPoint": "transform",
+        "executionPlan": [
+          {
+            "fromStep": "transform",
+            "toStep": "finish"
+          }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": {
+          "valueType": "reference",
+          "value": "steps.split.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    {
+      "fromStep": "split",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

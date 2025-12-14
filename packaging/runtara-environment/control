@@ -1,0 +1,8 @@
+Package: runtara-environment
+Version: ${VERSION}
+Architecture: amd64
+Maintainer: SyncMyOrders <support@syncmyorders.com>
+Depends: libpq5
+Description: Runtara Environment - Instance Lifecycle Manager
+ Manages instance lifecycle, image registry, and wake scheduling.
+ Executes workflow instances via OCI containers.

@@ -1,0 +1,153 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - "v[0-9]+.[0-9]+.[0-9]+"
+            - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: 1
+    SQLX_OFFLINE: true
+
+jobs:
+    create-release:
+        name: Create Release
+        runs-on: ubuntu-latest
+        outputs:
+            upload_url: ${{ steps.create_release.outputs.upload_url }}
+            version: ${{ steps.get_version.outputs.version }}
+
+        steps:
+            - name: Get version from tag
+              id: get_version
+              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+            - name: Create GitHub Release
+              id: create_release
+              uses: actions/create-release@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  tag_name: ${{ github.ref }}
+                  release_name: Release ${{ steps.get_version.outputs.version }}
+                  draft: false
+                  prerelease: ${{ contains(github.ref, '-') }}
+
+    build-release:
+        name: Build Release Binaries
+        needs: create-release
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Install protoc
+              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+            - name: Setup Rust toolchain
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+
+            - name: Build release binaries
+              run: cargo build --release -p runtara-core -p runtara-environment
+
+            - name: Strip binaries
+              run: |
+                  strip target/release/runtara-core
+                  strip target/release/runtara-environment
+
+            - name: Create tarballs
+              run: |
+                  cd target/release
+                  tar czf runtara-core-${{ needs.create-release.outputs.version }}-x86_64-linux.tar.gz runtara-core
+                  tar czf runtara-environment-${{ needs.create-release.outputs.version }}-x86_64-linux.tar.gz runtara-environment
+
+            - name: Upload runtara-core tarball
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ needs.create-release.outputs.upload_url }}
+                  asset_path: ./target/release/runtara-core-${{ needs.create-release.outputs.version }}-x86_64-linux.tar.gz
+                  asset_name: runtara-core-${{ needs.create-release.outputs.version }}-x86_64-linux.tar.gz
+                  asset_content_type: application/gzip
+
+            - name: Upload runtara-environment tarball
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ needs.create-release.outputs.upload_url }}
+                  asset_path: ./target/release/runtara-environment-${{ needs.create-release.outputs.version }}-x86_64-linux.tar.gz
+                  asset_name: runtara-environment-${{ needs.create-release.outputs.version }}-x86_64-linux.tar.gz
+                  asset_content_type: application/gzip
+
+            - name: Upload binary artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: binaries-${{ needs.create-release.outputs.version }}
+                  path: |
+                      target/release/runtara-core
+                      target/release/runtara-environment
+                  retention-days: 7
+
+    build-deb:
+        name: Build DEB Packages
+        needs: [create-release, build-release]
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Download binary artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: binaries-${{ needs.create-release.outputs.version }}
+                  path: target/release/
+
+            - name: Make binaries executable
+              run: |
+                  chmod +x target/release/runtara-core
+                  chmod +x target/release/runtara-environment
+
+            - name: Build runtara-core .deb
+              env:
+                  VERSION: ${{ needs.create-release.outputs.version }}
+              run: ./scripts/build-deb.sh runtara-core
+
+            - name: Build runtara-environment .deb
+              env:
+                  VERSION: ${{ needs.create-release.outputs.version }}
+              run: ./scripts/build-deb.sh runtara-environment
+
+            - name: Upload runtara-core DEB to Release
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ needs.create-release.outputs.upload_url }}
+                  asset_path: ./target/runtara-core_${{ needs.create-release.outputs.version }}_amd64.deb
+                  asset_name: runtara-core_${{ needs.create-release.outputs.version }}_amd64.deb
+                  asset_content_type: application/vnd.debian.binary-package
+
+            - name: Upload runtara-environment DEB to Release
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ needs.create-release.outputs.upload_url }}
+                  asset_path: ./target/runtara-environment_${{ needs.create-release.outputs.version }}_amd64.deb
+                  asset_name: runtara-environment_${{ needs.create-release.outputs.version }}_amd64.deb
+                  asset_content_type: application/vnd.debian.binary-package
+
+            - name: Upload DEB artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: deb-packages-${{ needs.create-release.outputs.version }}
+                  path: |
+                      target/runtara-core_${{ needs.create-release.outputs.version }}_amd64.deb
+                      target/runtara-environment_${{ needs.create-release.outputs.version }}_amd64.deb
+                  retention-days: 30
