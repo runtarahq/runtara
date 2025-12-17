@@ -15,8 +15,8 @@ crate-type = ["rlib"]
 
 [dependencies]
 # Core dependencies
-runtara-agents = { path = "../runtara-agents", version = "0.1" }
-runtara-sdk = { path = "../runtara-sdk", version = "0.1" }
+runtara-agents = { path = "../runtara-agents", version = "1.0" }
+runtara-sdk = { path = "../runtara-sdk", version = "1.0" }
 
 # Re-exported for workflows
 serde = { workspace = true }

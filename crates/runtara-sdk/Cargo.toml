@@ -10,10 +10,10 @@ categories = ["asynchronous", "development-tools"]
 
 [dependencies]
 # Protocol layer
-runtara-protocol = { path = "../runtara-protocol", version = "0.1" }
+runtara-protocol = { path = "../runtara-protocol", version = "1.0" }
 
 # Macros
-runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "0.1" }
+runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "1.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "time"] }

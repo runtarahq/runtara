@@ -23,7 +23,10 @@ if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
     exit 1
 fi
 
-echo "Updating version to $VERSION"
+# Extract major.minor for version constraints
+MAJOR_MINOR=$(echo "$VERSION" | sed 's/\([0-9]*\.[0-9]*\).*/\1/')
+
+echo "Updating version to $VERSION (constraints will use $MAJOR_MINOR)"
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,18 +35,32 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
 # Update workspace version in root Cargo.toml
-# All crates use version.workspace = true, so we only need to update the root
 echo "Updating workspace version in Cargo.toml..."
 sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
 
+# Update path dependency version constraints in all crate Cargo.toml files
+# These are lines like: runtara-protocol = { path = "../runtara-protocol", version = "0.1" }
+echo "Updating path dependency version constraints..."
+
+CRATE_TOMLS=$(find crates -name "Cargo.toml")
+for toml in $CRATE_TOMLS; do
+    # Update version constraints for runtara-* path dependencies
+    # Match pattern: runtara-xxx = { path = "...", version = "X.Y" }
+    if grep -q 'runtara-.*path.*version' "$toml"; then
+        echo "  Updating $toml"
+        sed -i "s/\(runtara-[a-z-]*\s*=\s*{[^}]*version\s*=\s*\)\"[0-9.]*\"/\1\"$MAJOR_MINOR\"/" "$toml"
+    fi
+done
+
+echo ""
 echo "Version updated to $VERSION"
+echo "Path dependency constraints updated to $MAJOR_MINOR"
 echo ""
-echo "Updated files:"
-echo "  - Cargo.toml (workspace version)"
-echo ""
-echo "All crates inherit version from workspace.package.version"
 
 # Verify the changes
-echo ""
 echo "Verification:"
+echo "  Workspace version:"
 grep -n "^version = " Cargo.toml | head -1
+echo ""
+echo "  Sample path dependency constraint:"
+grep -h "runtara-.*version" crates/*/Cargo.toml | head -1 || echo "  (none found)"

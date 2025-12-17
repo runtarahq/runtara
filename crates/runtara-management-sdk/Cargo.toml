@@ -9,7 +9,7 @@ keywords = ["durable", "workflow", "management", "sdk"]
 categories = ["asynchronous", "development-tools"]
 
 [dependencies]
-runtara-protocol = { path = "../runtara-protocol", version = "0.1" }
+runtara-protocol = { path = "../runtara-protocol", version = "1.0" }
 tokio = { version = "1", features = ["sync", "time", "io-util", "rt-multi-thread", "macros"] }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 serde = { workspace = true }
