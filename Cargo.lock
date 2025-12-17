@@ -501,7 +501,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "durable-example"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "reqwest",
  "runtara-sdk",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "base64",
  "chrono",
@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2094,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "inventory",
  "schemars",
@@ -2106,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-management-sdk"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "chrono",
  "prost",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-protocol"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "bytes",
  "prost",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "chrono",
  "once_cell",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk-macros"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-test-harness"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "runtara-dsl",
  "runtara-workflow-stdlib",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-tui"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2213,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "libc",
  "runtara-agents",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "1.0.22"
+version = "1.0.24"
 dependencies = [
  "proc-macro2",
  "quote",
