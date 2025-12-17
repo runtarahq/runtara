@@ -1,9 +1,10 @@
 [package]
 name = "runtara-tui"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition = "2021"  # Using 2021 edition for TUI dependency compatibility
 description = "Terminal UI for monitoring Runtara instances and images"
-license = "AGPL-3.0-or-later"
+license.workspace = true
+publish = false
 
 [[bin]]
 name = "runtara-tui"

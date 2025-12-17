@@ -151,3 +151,66 @@ jobs:
                       target/runtara-core_${{ needs.create-release.outputs.version }}_amd64.deb
                       target/runtara-environment_${{ needs.create-release.outputs.version }}_amd64.deb
                   retention-days: 30
+
+    publish-crates:
+        name: Publish to crates.io
+        needs: create-release
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Install protoc
+              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+            - name: Setup Rust toolchain
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+
+            - name: Update versions from tag
+              run: ./scripts/update-version.sh ${{ needs.create-release.outputs.version }}
+
+            - name: Publish crates to crates.io
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+              run: |
+                  # Publish in dependency order with delays for crates.io index updates
+                  # Layer 1: No internal dependencies
+                  echo "Publishing runtara-dsl..."
+                  cargo publish -p runtara-dsl --allow-dirty
+                  sleep 30
+
+                  echo "Publishing runtara-agent-macro..."
+                  cargo publish -p runtara-agent-macro --allow-dirty
+                  sleep 30
+
+                  echo "Publishing runtara-protocol..."
+                  cargo publish -p runtara-protocol --allow-dirty
+                  sleep 30
+
+                  echo "Publishing runtara-sdk-macros..."
+                  cargo publish -p runtara-sdk-macros --allow-dirty
+                  sleep 30
+
+                  # Layer 2: Depend on layer 1
+                  echo "Publishing runtara-agents..."
+                  cargo publish -p runtara-agents --allow-dirty
+                  sleep 30
+
+                  echo "Publishing runtara-sdk..."
+                  cargo publish -p runtara-sdk --allow-dirty
+                  sleep 30
+
+                  echo "Publishing runtara-workflows..."
+                  cargo publish -p runtara-workflows --allow-dirty
+                  sleep 30
+
+                  # Layer 3: Depend on layer 2
+                  echo "Publishing runtara-workflow-stdlib..."
+                  cargo publish -p runtara-workflow-stdlib --allow-dirty
+                  sleep 30
+
+                  echo "Publishing runtara-management-sdk..."
+                  cargo publish -p runtara-management-sdk --allow-dirty
+
+                  echo "All crates published successfully!"

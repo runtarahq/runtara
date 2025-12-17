@@ -1,7 +1,12 @@
 [package]
 name = "runtara-protocol"
-edition.workspace = true
 version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol layer for runtara (QUIC transport and Protobuf messages)"
+keywords = ["durable", "workflow", "protocol", "quic"]
+categories = ["network-programming"]
 
 [dependencies]
 prost = "0.13"

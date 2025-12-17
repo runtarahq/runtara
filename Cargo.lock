@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "0.1.0"
+version = "0.1.20"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "0.1.0"
+version = "0.1.20"
 dependencies = [
  "base64",
  "chrono",
@@ -2094,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "0.1.0"
+version = "0.1.20"
 dependencies = [
  "inventory",
  "schemars",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-tui"
-version = "0.1.0"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "0.1.0"
+version = "0.1.20"
 dependencies = [
  "proc-macro2",
  "quote",

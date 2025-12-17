@@ -1,11 +1,15 @@
 [package]
 name = "runtara-management-sdk"
-edition.workspace = true
 version.workspace = true
-description = "High-level SDK for managing runtara-core instances"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SDK for managing runtara instances (start, stop, signals, images)"
+keywords = ["durable", "workflow", "management", "sdk"]
+categories = ["asynchronous", "development-tools"]
 
 [dependencies]
-runtara-protocol = { path = "../runtara-protocol" }
+runtara-protocol = { path = "../runtara-protocol", version = "0.1" }
 tokio = { version = "1", features = ["sync", "time", "io-util", "rt-multi-thread", "macros"] }
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 serde = { workspace = true }

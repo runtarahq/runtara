@@ -2,7 +2,11 @@
 name = "runtara-workflow-stdlib"
 version.workspace = true
 edition.workspace = true
-description = "Unified library for workflow binaries - combines agents and runtime"
+license.workspace = true
+repository.workspace = true
+description = "Standard library for runtara workflow binaries - combines agents and runtime"
+keywords = ["durable", "workflow", "stdlib", "agents"]
+categories = ["asynchronous", "development-tools"]
 
 [lib]
 name = "runtara_workflow_stdlib"
@@ -11,8 +15,8 @@ crate-type = ["rlib"]
 
 [dependencies]
 # Core dependencies
-runtara-agents = { path = "../runtara-agents" }
-runtara-sdk = { path = "../runtara-sdk" }
+runtara-agents = { path = "../runtara-agents", version = "0.1" }
+runtara-sdk = { path = "../runtara-sdk", version = "0.1" }
 
 # Re-exported for workflows
 serde = { workspace = true }

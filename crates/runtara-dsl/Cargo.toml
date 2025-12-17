@@ -1,7 +1,12 @@
 [package]
 name = "runtara-dsl"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DSL for agent metadata definitions in runtara workflows"
+keywords = ["durable", "workflow", "dsl", "agents"]
+categories = ["development-tools"]
 
 [features]
 default = []

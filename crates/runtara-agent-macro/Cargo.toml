@@ -1,7 +1,12 @@
 [package]
 name = "runtara-agent-macro"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc macros for runtara agent definitions"
+keywords = ["durable", "workflow", "macro", "agents"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

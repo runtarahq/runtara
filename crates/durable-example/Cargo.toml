@@ -3,6 +3,7 @@ name = "durable-example"
 description = "Example applications showcasing runtara-sdk use-cases"
 edition.workspace = true
 version.workspace = true
+publish = false
 
 [dependencies]
 runtara-sdk = { path = "../runtara-sdk" }

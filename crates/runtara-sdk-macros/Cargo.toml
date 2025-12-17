@@ -1,8 +1,12 @@
 [package]
 name = "runtara-sdk-macros"
-version = "0.1.20"
-edition = "2024"
-description = "Proc macros for runtara-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc macros for runtara-sdk (#[durable] attribute)"
+keywords = ["durable", "workflow", "macro", "checkpoint"]
+categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true

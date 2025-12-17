@@ -7,6 +7,7 @@ description = "Test harness binary for executing agent capabilities in isolation
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "runtara-test-harness"

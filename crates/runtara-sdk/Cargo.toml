@@ -1,15 +1,19 @@
 [package]
 name = "runtara-sdk"
-edition.workspace = true
 version.workspace = true
-description = "High-level SDK for instance communication with runtara-core"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-level SDK for building durable workflows with runtara"
+keywords = ["durable", "workflow", "sdk", "checkpoint"]
+categories = ["asynchronous", "development-tools"]
 
 [dependencies]
 # Protocol layer
-runtara-protocol = { path = "../runtara-protocol" }
+runtara-protocol = { path = "../runtara-protocol", version = "0.1" }
 
 # Macros
-runtara-sdk-macros = { path = "../runtara-sdk-macros" }
+runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "0.1" }
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "time"] }

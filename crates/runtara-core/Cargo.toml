@@ -2,6 +2,7 @@
 name = "runtara-core"
 edition.workspace = true
 version.workspace = true
+publish = false
 
 [lib]
 name = "runtara_core"

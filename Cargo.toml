@@ -25,6 +25,10 @@ default-members = ["crates/runtara-core"]
 edition = "2024"
 version = "0.1.20"
 license = "AGPL-3.0-or-later"
+repository = "https://github.com/runtara/runtara"
+homepage = "https://runtara.dev"
+keywords = ["durable", "workflow", "checkpoint", "execution"]
+categories = ["asynchronous", "development-tools"]
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
