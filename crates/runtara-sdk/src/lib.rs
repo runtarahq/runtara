@@ -86,23 +86,19 @@
 //!
 //! # Durable Sleep
 //!
-//! The SDK supports durable sleep that survives instance restarts:
+//! The SDK supports durable sleep:
 //!
 //! ```ignore
 //! use std::time::Duration;
 //!
-//! let result = sdk.sleep(
-//!     Duration::from_secs(3600),  // 1 hour
+//! // Sleep is always handled in-process
+//! sdk.sleep(
+//!     Duration::from_secs(60),    // duration
 //!     "after-sleep",              // checkpoint ID for resume
 //!     &serialized_state,          // state to restore
 //! ).await?;
 //!
-//! if result.deferred {
-//!     // Sleep was too long - instance should exit
-//!     // Core will wake us later and we'll resume from "after-sleep"
-//!     return Ok(());
-//! }
-//! // Short sleep completed in-process, continue execution
+//! // Continue execution after sleep completes
 //! ```
 //!
 //! # Signal Handling
@@ -176,7 +172,7 @@ pub use config::SdkConfig;
 pub use error::{Result, SdkError};
 pub use types::{
     CheckpointResult, CustomSignal, InstanceStatus, RetryConfig, RetryStrategy, Signal, SignalType,
-    SleepResult, StatusResponse,
+    StatusResponse,
 };
 
 // Global SDK registry for #[durable] macro

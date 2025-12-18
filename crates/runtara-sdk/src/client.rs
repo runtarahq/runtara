@@ -19,7 +19,7 @@ use crate::events::{
     build_completed_event, build_failed_event, build_heartbeat_event, build_suspended_event,
 };
 use crate::signals::from_proto_signal;
-use crate::types::{CheckpointResult, Signal, SignalType, SleepResult, StatusResponse};
+use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 
 /// High-level SDK client for instance communication with runtara-core.
 ///
@@ -351,12 +351,7 @@ impl RuntaraSdk {
     /// Sleep is always handled in-process. Managed environments may hibernate
     /// the container later if it stays idle.
     #[instrument(skip(self, state), fields(instance_id = %self.config.instance_id, duration_ms = duration.as_millis() as u64))]
-    pub async fn sleep(
-        &self,
-        duration: Duration,
-        checkpoint_id: &str,
-        state: &[u8],
-    ) -> Result<SleepResult> {
+    pub async fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         debug!("Requesting sleep");
 
         let request = SleepRequest {
@@ -373,15 +368,9 @@ impl RuntaraSdk {
         let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
 
         match rpc_response.response {
-            Some(rpc_response::Response::Sleep(resp)) => {
-                if resp.deferred {
-                    info!("Sleep deferred - instance should exit");
-                } else {
-                    debug!("Sleep completed in-process");
-                }
-                Ok(SleepResult {
-                    deferred: resp.deferred,
-                })
+            Some(rpc_response::Response::Sleep(_)) => {
+                debug!("Sleep completed");
+                Ok(())
             }
             Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
                 code: e.code,

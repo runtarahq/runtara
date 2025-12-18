@@ -4,7 +4,7 @@
 
 use runtara_sdk::{
     CheckpointResult, InstanceStatus, RuntaraSdk, SdkConfig, SdkError, Signal, SignalType,
-    SleepResult, StatusResponse,
+    StatusResponse,
 };
 use std::net::SocketAddr;
 
@@ -275,38 +275,6 @@ fn test_checkpoint_result_debug() {
     assert!(debug_str.contains("found"));
     assert!(debug_str.contains("true"));
     assert!(debug_str.contains("Cancel"));
-}
-
-// ============================================================================
-// SleepResult Tests
-// ============================================================================
-
-#[test]
-fn test_sleep_result_deferred() {
-    let deferred = SleepResult { deferred: true };
-    assert!(deferred.deferred);
-
-    let not_deferred = SleepResult { deferred: false };
-    assert!(!not_deferred.deferred);
-}
-
-#[test]
-fn test_sleep_result_copy() {
-    let original = SleepResult { deferred: true };
-    let copied = original;
-    let another = original;
-
-    assert_eq!(original.deferred, copied.deferred);
-    assert_eq!(original.deferred, another.deferred);
-}
-
-#[test]
-fn test_sleep_result_debug() {
-    let result = SleepResult { deferred: true };
-    let debug_str = format!("{:?}", result);
-
-    assert!(debug_str.contains("deferred"));
-    assert!(debug_str.contains("true"));
 }
 
 // ============================================================================

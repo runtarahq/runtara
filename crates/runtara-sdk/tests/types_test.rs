@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Type tests for runtara-sdk.
 
-use runtara_sdk::{CheckpointResult, InstanceStatus, Signal, SignalType, SleepResult};
+use runtara_sdk::{CheckpointResult, InstanceStatus, Signal, SignalType};
 
 fn sig(signal_type: SignalType) -> Signal {
     Signal {
@@ -134,15 +134,6 @@ fn test_checkpoint_result_should_exit() {
 }
 
 #[test]
-fn test_sleep_result_deferred() {
-    let deferred = SleepResult { deferred: true };
-    assert!(deferred.deferred);
-
-    let not_deferred = SleepResult { deferred: false };
-    assert!(!not_deferred.deferred);
-}
-
-#[test]
 fn test_instance_status_debug() {
     let status = InstanceStatus::Running;
     let debug_str = format!("{:?}", status);
@@ -195,14 +186,4 @@ fn test_checkpoint_result_clone() {
     assert_eq!(original.found, cloned.found);
     assert_eq!(original.state, cloned.state);
     assert_eq!(original.pending_signal, cloned.pending_signal);
-}
-
-#[test]
-fn test_sleep_result_copy() {
-    let original = SleepResult { deferred: true };
-    let copied = original;
-    let another = original; // Should compile because SleepResult implements Copy
-
-    assert_eq!(original.deferred, copied.deferred);
-    assert_eq!(original.deferred, another.deferred);
 }

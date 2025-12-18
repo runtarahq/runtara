@@ -5,8 +5,7 @@
 //! This example shows:
 //! - Starting a multi-phase task
 //! - Using `sdk.sleep()` between phases
-//! - Handling deferred sleep (when instance should exit)
-//! - State preservation across sleep/wake cycles
+//! - State preservation across phases
 //!
 //! Run with: cargo run -p durable-example --bin sleep_example
 
@@ -15,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{info, warn};
 
-/// State preserved across sleep/wake cycles.
+/// State preserved across phases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowState {
     /// Current phase of the multi-phase workflow
@@ -85,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Initialize state (checkpointing in loop handles resume)
+    // Initialize state
     info!("Starting new workflow");
     let mut state = WorkflowState::new(4); // 4-phase workflow
 
@@ -112,17 +111,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // If not the last phase, sleep before continuing
         if state.current_phase < state.total_phases {
-            // Checkpoint ID for when we wake up
+            // Checkpoint ID for this sleep point
             let wake_checkpoint_id = format!("phase-{}-complete", phase);
             let state_bytes = serde_json::to_vec(&state)?;
 
-            // Sleep durations vary by phase to demonstrate different behaviors:
-            // - Short sleeps (< 30s): Handled in-process, returns immediately
-            // - Long sleeps (>= 30s): Deferred - instance should exit and be woken later
+            // Vary sleep durations by phase
             let sleep_duration = match phase {
-                0 => Duration::from_secs(2),  // Short sleep - in-process
-                1 => Duration::from_secs(3),  // Short sleep - in-process
-                2 => Duration::from_secs(60), // Long sleep - would be deferred
+                0 => Duration::from_secs(2),
+                1 => Duration::from_secs(3),
+                2 => Duration::from_secs(60),
                 _ => Duration::from_secs(1),
             };
 
@@ -132,40 +129,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Requesting sleep between phases"
             );
 
-            let sleep_result = sdk
-                .sleep(sleep_duration, &wake_checkpoint_id, &state_bytes)
+            // Sleep is always handled in-process
+            sdk.sleep(sleep_duration, &wake_checkpoint_id, &state_bytes)
                 .await?;
 
-            if sleep_result.deferred {
-                // Long sleep: Core will wake us later
-                // Instance should exit gracefully
-                info!(
-                    checkpoint_id = %wake_checkpoint_id,
-                    "Sleep deferred - instance exiting. Will resume from checkpoint."
-                );
-
-                // In a real scenario, the instance would exit here.
-                // runtara-core will restart the instance after the sleep duration
-                // and we'll resume from the checkpoint.
-                println!("\n[DEFERRED SLEEP] Instance would exit now.");
-                println!(
-                    "After {} seconds, runtara-core would:",
-                    sleep_duration.as_secs()
-                );
-                println!("  1. Restart the instance");
-                println!("  2. Instance loads checkpoint '{}'", wake_checkpoint_id);
-                println!("  3. Workflow resumes from phase {}\n", state.current_phase);
-
-                // For demo purposes, we'll continue anyway
-                // In production: return Ok(());
-            } else {
-                // Short sleep: Completed in-process
-                info!("Sleep completed in-process, continuing");
-            }
+            info!("Sleep completed in-process, continuing");
         }
 
-        // Save progress checkpoint using checkpoint()
-        // (checkpoint() saves state - returns None for fresh save, Some for existing)
+        // Save progress checkpoint
         let checkpoint_id = format!("phase-{}-complete", phase);
         let state_bytes = serde_json::to_vec(&state)?;
         let _ = sdk.checkpoint(&checkpoint_id, &state_bytes).await?;
@@ -212,38 +183,21 @@ fn demonstrate_sleep_workflow() {
     println!("Durable Sleep Overview:");
     println!("  - Workflows often need to wait (rate limits, scheduling, etc.)");
     println!("  - Regular tokio::sleep loses state if process crashes");
-    println!("  - Durable sleep saves state, allows instance to exit, then resume\n");
+    println!("  - sdk.sleep() integrates with checkpointing for durability\n");
 
     println!("1. Request Sleep with Checkpoint:");
-    println!("   let sleep_result = sdk.sleep(");
-    println!("       Duration::from_secs(3600),  // 1 hour");
-    println!("       \"after-sleep\",              // checkpoint ID");
-    println!("       &state_bytes,               // state to restore");
+    println!("   sdk.sleep(");
+    println!("       Duration::from_secs(60),      // duration");
+    println!("       \"after-sleep\",                // checkpoint ID");
+    println!("       &state_bytes,                 // state to restore");
     println!("   ).await?;\n");
 
-    println!("2. Handle Sleep Result:");
-    println!("   if sleep_result.deferred {{");
-    println!("       // Long sleep - instance should exit");
-    println!("       // runtara-core will wake us after duration");
-    println!("       return Ok(());");
-    println!("   }}");
-    println!("   // Short sleep - completed in-process, continue\n");
-
-    println!("3. On Wake (Instance Restart):");
-    println!("   // checkpoint() handles resume automatically:");
-    println!("   // Returns Some(existing_state) if checkpoint exists");
-    println!("   // Returns None if fresh execution\n");
-
-    println!("Sleep Behavior:");
-    println!("   | Duration     | Behavior                              |");
-    println!("   |--------------|---------------------------------------|");
-    println!("   | < 30 seconds | In-process (blocks, returns deferred=false) |");
-    println!("   | >= 30 seconds| Deferred (save state, exit, wake later)     |\n");
+    println!("2. Sleep completes in-process, workflow continues\n");
 
     println!("Use Cases:");
-    println!("   - Rate limit backoff (wait 5 minutes before retry)");
-    println!("   - Scheduled workflows (run daily at midnight)");
-    println!("   - Long-running batch jobs with delays\n");
+    println!("   - Rate limit backoff (wait before retry)");
+    println!("   - Delays between batch processing steps");
+    println!("   - Throttling API calls\n");
 
     println!("--- End Demo Mode ---\n");
 }

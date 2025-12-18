@@ -95,14 +95,6 @@ pub struct Signal {
     pub checkpoint_id: Option<String>,
 }
 
-/// Sleep response indicating whether sleep was deferred.
-#[derive(Debug, Clone, Copy)]
-pub struct SleepResult {
-    /// If true, instance should exit - core will wake it later.
-    /// If false, sleep completed in-process, continue execution.
-    pub deferred: bool,
-}
-
 /// Checkpoint response with signal information.
 ///
 /// The checkpoint API now returns pending signal information along with the

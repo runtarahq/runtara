@@ -57,7 +57,7 @@
 //! | `RegisterInstance` | Self-register on startup, optionally resume from checkpoint |
 //! | `Checkpoint` | Save state (or return existing if checkpoint_id exists) + signal delivery |
 //! | `GetCheckpoint` | Read-only checkpoint lookup |
-//! | `Sleep` | Durable sleep - short sleeps in-process, long sleeps deferred to wake queue |
+//! | `Sleep` | Durable sleep - always handled in-process |
 //! | `InstanceEvent` | Fire-and-forget events (heartbeat, completed, failed, suspended) |
 //! | `GetInstanceStatus` | Query instance status |
 //! | `PollSignals` | Poll for pending cancel/pause/resume signals |
@@ -71,12 +71,10 @@
 //! 2. **Subsequent calls with same checkpoint_id**: Returns existing state (for resume)
 //! 3. **Signal delivery**: Returns pending signals in response for efficient poll-free detection
 //!
-//! ## Sleep Threshold
+//! ## Sleep Behavior
 //!
-//! Sleeps are handled differently based on duration:
-//!
-//! - **< 30 seconds**: Sleep in-process, return `deferred: false`
-//! - **≥ 30 seconds**: Save checkpoint, schedule wake, return `deferred: true` (instance should exit)
+//! All sleeps are handled in-process by runtara-core. Managed environments
+//! (runtara-environment) may hibernate containers separately based on idleness.
 //!
 //! # Management Protocol (Port 8003)
 //!

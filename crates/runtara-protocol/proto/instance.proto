@@ -58,7 +58,7 @@ message GetCheckpointResponse {
 // Sleep/Wake (durable execution)
 // ============================================================================
 
-// Instance requests to sleep. Core decides if in-process or deferred.
+// Instance requests to sleep. Sleep is always handled in-process.
 message SleepRequest {
   string instance_id = 1;
   uint64 duration_ms = 2;
@@ -66,10 +66,9 @@ message SleepRequest {
   bytes state = 4;              // State to restore on wake
 }
 
-message SleepResponse {
-  bool deferred = 1;            // true = instance should exit, core will wake later
-                                // false = slept in-process, continue execution
-}
+// Empty response - sleep always completes in-process.
+// Managed environments may hibernate containers separately based on idleness.
+message SleepResponse {}
 
 // ============================================================================
 // Instance Events (instance → core, fire-and-forget)

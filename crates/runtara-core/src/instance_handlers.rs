@@ -361,7 +361,7 @@ pub async fn handle_sleep(
 
     // Always sleep in-process; environment may hibernate managed instances separately.
     tokio::time::sleep(Duration::from_millis(request.duration_ms)).await;
-    Ok(SleepResponse { deferred: false })
+    Ok(SleepResponse {})
 }
 
 // ============================================================================
