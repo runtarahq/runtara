@@ -88,6 +88,8 @@ The crate includes Protobuf definitions for:
 - **Environment Protocol** (`environment.proto`): Management SDK to runtara-environment
   - Image registration, instance lifecycle, status queries
 - **Management Protocol** (`management.proto`): Internal communication between environment and core
+  - Health, signals, instance status, checkpoint listing/fetch
+  - Instance lifecycle and image registration are **not** exposed here; they live in `environment.proto`
 
 ## Related Crates
 

@@ -150,15 +150,6 @@ async fn handle_stream(mut stream: StreamHandler, state: Arc<ManagementServerSta
                 message: e.to_string(),
             }),
         },
-
-        // Start/stop/register operations have moved to Environment
-        Request::StartInstance(_)
-        | Request::StopInstance(_)
-        | Request::RegisterImage(_)
-        | Request::RegisterImageStream(_) => Response::Error(RpcError {
-            code: "NOT_IMPLEMENTED".to_string(),
-            message: "This operation has moved to runtara-environment".to_string(),
-        }),
     };
 
     // Send response

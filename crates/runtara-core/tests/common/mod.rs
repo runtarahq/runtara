@@ -384,11 +384,3 @@ pub fn wrap_list_instances(
         request: Some(runtara_protocol::management_proto::rpc_request::Request::ListInstances(req)),
     }
 }
-
-pub fn wrap_register_image(
-    req: runtara_protocol::management_proto::RegisterImageRequest,
-) -> runtara_protocol::management_proto::RpcRequest {
-    runtara_protocol::management_proto::RpcRequest {
-        request: Some(runtara_protocol::management_proto::rpc_request::Request::RegisterImage(req)),
-    }
-}
