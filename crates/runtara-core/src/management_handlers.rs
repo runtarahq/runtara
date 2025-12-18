@@ -22,7 +22,7 @@ use runtara_protocol::management_proto::{
     SendSignalResponse, SignalType,
 };
 
-use crate::db;
+use crate::persistence;
 
 /// Shared state for management handlers.
 ///
@@ -71,11 +71,11 @@ pub async fn handle_health_check(
     debug!("Health check requested");
 
     // 1. Check database connectivity
-    let db_healthy = db::health_check_db(&state.pool).await.unwrap_or(false);
+    let db_healthy = persistence::health_check_db(&state.pool).await.unwrap_or(false);
 
     // 2. Count active instances
     let active_instances = if db_healthy {
-        db::count_active_instances(&state.pool).await.unwrap_or(0)
+        persistence::count_active_instances(&state.pool).await.unwrap_or(0)
     } else {
         0
     };
@@ -109,7 +109,7 @@ pub async fn handle_send_signal(
     );
 
     // 1. Validate instance exists
-    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
     let instance = match instance {
         Some(inst) => inst,
         None => {
@@ -138,7 +138,7 @@ pub async fn handle_send_signal(
     let signal_type = map_signal_type(request.signal_type());
 
     // 4. Insert pending signal (upsert - one signal per instance)
-    db::insert_signal(
+    persistence::insert_signal(
         &state.pool,
         &request.instance_id,
         signal_type,
@@ -169,7 +169,7 @@ pub async fn handle_send_custom_signal(
     );
 
     // Validate instance exists
-    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
     let Some(inst) = instance else {
         return Ok(SendCustomSignalResponse {
             success: false,
@@ -186,7 +186,7 @@ pub async fn handle_send_custom_signal(
     }
 
     // Store pending custom signal (upsert)
-    db::insert_custom_signal(
+    persistence::insert_custom_signal(
         &state.pool,
         &request.instance_id,
         &request.checkpoint_id,
@@ -220,7 +220,7 @@ pub async fn handle_get_instance_status(
 ) -> Result<GetInstanceStatusResponse> {
     debug!("Getting instance status via management API");
 
-    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
 
     match instance {
         Some(inst) => {
@@ -277,7 +277,7 @@ pub async fn handle_list_instances(
         "Listing instances"
     );
 
-    let instances = db::list_instances(
+    let instances = persistence::list_instances(
         &state.pool,
         request.tenant_id.as_deref(),
         status_filter.as_deref(),
@@ -335,7 +335,7 @@ pub async fn handle_list_checkpoints(
     let offset = request.offset.unwrap_or(0) as i64;
 
     // Get checkpoints from database
-    let checkpoints = db::list_checkpoints(
+    let checkpoints = persistence::list_checkpoints(
         &state.pool,
         &request.instance_id,
         request.checkpoint_id.as_deref(),
@@ -347,7 +347,7 @@ pub async fn handle_list_checkpoints(
     .await?;
 
     // Get total count for pagination
-    let total_count = db::count_checkpoints(
+    let total_count = persistence::count_checkpoints(
         &state.pool,
         &request.instance_id,
         request.checkpoint_id.as_deref(),
@@ -385,8 +385,12 @@ pub async fn handle_get_checkpoint(
 ) -> Result<GetCheckpointResponse> {
     debug!("Getting checkpoint");
 
-    let checkpoint =
-        db::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id).await?;
+    let checkpoint = persistence::load_checkpoint(
+        &state.pool,
+        &request.instance_id,
+        &request.checkpoint_id,
+    )
+    .await?;
 
     match checkpoint {
         Some(cp) => Ok(GetCheckpointResponse {

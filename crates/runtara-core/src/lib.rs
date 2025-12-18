@@ -160,8 +160,8 @@
 /// Server configuration loaded from environment variables.
 pub mod config;
 
-/// PostgreSQL database operations for instances, checkpoints, events, and signals.
-pub mod db;
+/// Persistence layer for instances, checkpoints, events, and signals.
+pub mod persistence;
 
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;

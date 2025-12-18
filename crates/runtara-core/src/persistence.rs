@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Database operations for runtara-core.
+//! Persistence operations for runtara-core.
 //!
-//! Provides all database access functions for instances, checkpoints, events, and signals.
+//! Provides all durable storage access functions for instances, checkpoints, events, and signals.
 
 #![allow(dead_code)] // Fields and functions used in tests and by handlers
 
