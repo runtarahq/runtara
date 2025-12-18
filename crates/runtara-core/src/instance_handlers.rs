@@ -20,8 +20,8 @@ use runtara_protocol::instance_proto::{
     SleepResponse,
 };
 
-use crate::persistence::{self, EventRecord};
 use crate::error::CoreError;
+use crate::persistence::{self, EventRecord};
 
 /// Shared state for instance handlers.
 ///
@@ -205,12 +205,9 @@ pub async fn handle_checkpoint(
     }
 
     // 2. Check if checkpoint already exists
-    if let Some(existing) = persistence::load_checkpoint(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-    )
-    .await?
+    if let Some(existing) =
+        persistence::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
+            .await?
     {
         debug!(
             checkpoint_id = %request.checkpoint_id,
@@ -331,12 +328,9 @@ pub async fn handle_get_checkpoint(
     }
 
     // 2. Look up checkpoint
-    if let Some(checkpoint) = persistence::load_checkpoint(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-    )
-    .await?
+    if let Some(checkpoint) =
+        persistence::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
+            .await?
     {
         debug!(
             checkpoint_id = %request.checkpoint_id,
@@ -462,13 +456,8 @@ pub async fn handle_instance_event(
             warn!(error = %error, "Instance failed");
         }
         InstanceEventType::EventSuspended => {
-            persistence::update_instance_status(
-                &state.pool,
-                &event.instance_id,
-                "suspended",
-                None,
-            )
-            .await?;
+            persistence::update_instance_status(&state.pool, &event.instance_id, "suspended", None)
+                .await?;
         }
     }
 
@@ -604,8 +593,13 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
         match ack.signal_type() {
             SignalType::SignalCancel => {
                 // Update instance status to cancelled
-                persistence::update_instance_status(&state.pool, &ack.instance_id, "cancelled", None)
-                    .await?;
+                persistence::update_instance_status(
+                    &state.pool,
+                    &ack.instance_id,
+                    "cancelled",
+                    None,
+                )
+                .await?;
                 info!("Instance cancelled");
             }
             SignalType::SignalPause => {

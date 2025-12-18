@@ -71,11 +71,15 @@ pub async fn handle_health_check(
     debug!("Health check requested");
 
     // 1. Check database connectivity
-    let db_healthy = persistence::health_check_db(&state.pool).await.unwrap_or(false);
+    let db_healthy = persistence::health_check_db(&state.pool)
+        .await
+        .unwrap_or(false);
 
     // 2. Count active instances
     let active_instances = if db_healthy {
-        persistence::count_active_instances(&state.pool).await.unwrap_or(0)
+        persistence::count_active_instances(&state.pool)
+            .await
+            .unwrap_or(0)
     } else {
         0
     };
@@ -385,12 +389,9 @@ pub async fn handle_get_checkpoint(
 ) -> Result<GetCheckpointResponse> {
     debug!("Getting checkpoint");
 
-    let checkpoint = persistence::load_checkpoint(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-    )
-    .await?;
+    let checkpoint =
+        persistence::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
+            .await?;
 
     match checkpoint {
         Some(cp) => Ok(GetCheckpointResponse {
