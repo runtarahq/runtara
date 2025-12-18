@@ -11,7 +11,7 @@
 //! Note: Image registration and instance start/stop are now handled by Environment.
 
 use anyhow::Result;
-use sqlx::PgPool;
+use std::sync::Arc;
 use tracing::{debug, info, instrument};
 
 use runtara_protocol::management_proto::{
@@ -22,14 +22,14 @@ use runtara_protocol::management_proto::{
     SendSignalResponse, SignalType,
 };
 
-use crate::persistence;
+use crate::persistence::Persistence;
 
 /// Shared state for management handlers.
 ///
 /// Contains database connection and server metadata for health checks.
 pub struct ManagementHandlerState {
-    /// PostgreSQL connection pool.
-    pub pool: PgPool,
+    /// Persistence implementation.
+    pub persistence: Arc<dyn Persistence>,
     /// When the server started (for uptime calculation).
     pub start_time: std::time::Instant,
     /// Server version string.
@@ -38,9 +38,9 @@ pub struct ManagementHandlerState {
 
 impl ManagementHandlerState {
     /// Create a new management handler state with the given database pool.
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(persistence: Arc<dyn Persistence>) -> Self {
         Self {
-            pool,
+            persistence,
             start_time: std::time::Instant::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -71,15 +71,15 @@ pub async fn handle_health_check(
     debug!("Health check requested");
 
     // 1. Check database connectivity
-    let db_healthy = persistence::health_check_db(&state.pool)
-        .await
-        .unwrap_or(false);
+    let db_healthy = state.persistence.health_check_db().await.unwrap_or(false);
 
     // 2. Count active instances
-    let active_instances = if db_healthy {
-        persistence::count_active_instances(&state.pool)
+    let active_instances: u32 = if db_healthy {
+        state
+            .persistence
+            .count_active_instances()
             .await
-            .unwrap_or(0)
+            .unwrap_or(0) as u32
     } else {
         0
     };
@@ -113,7 +113,7 @@ pub async fn handle_send_signal(
     );
 
     // 1. Validate instance exists
-    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = state.persistence.get_instance(&request.instance_id).await?;
     let instance = match instance {
         Some(inst) => inst,
         None => {
@@ -142,13 +142,10 @@ pub async fn handle_send_signal(
     let signal_type = map_signal_type(request.signal_type());
 
     // 4. Insert pending signal (upsert - one signal per instance)
-    persistence::insert_signal(
-        &state.pool,
-        &request.instance_id,
-        signal_type,
-        &request.payload,
-    )
-    .await?;
+    state
+        .persistence
+        .insert_signal(&request.instance_id, signal_type, &request.payload)
+        .await?;
 
     info!("Signal stored successfully");
 
@@ -173,7 +170,7 @@ pub async fn handle_send_custom_signal(
     );
 
     // Validate instance exists
-    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = state.persistence.get_instance(&request.instance_id).await?;
     let Some(inst) = instance else {
         return Ok(SendCustomSignalResponse {
             success: false,
@@ -190,13 +187,14 @@ pub async fn handle_send_custom_signal(
     }
 
     // Store pending custom signal (upsert)
-    persistence::insert_custom_signal(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-        &request.payload,
-    )
-    .await?;
+    state
+        .persistence
+        .insert_custom_signal(
+            &request.instance_id,
+            &request.checkpoint_id,
+            &request.payload,
+        )
+        .await?;
 
     info!(
         instance_status = %inst.status,
@@ -224,7 +222,7 @@ pub async fn handle_get_instance_status(
 ) -> Result<GetInstanceStatusResponse> {
     debug!("Getting instance status via management API");
 
-    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = state.persistence.get_instance(&request.instance_id).await?;
 
     match instance {
         Some(inst) => {
@@ -281,14 +279,15 @@ pub async fn handle_list_instances(
         "Listing instances"
     );
 
-    let instances = persistence::list_instances(
-        &state.pool,
-        request.tenant_id.as_deref(),
-        status_filter.as_deref(),
-        request.limit as i64,
-        request.offset as i64,
-    )
-    .await?;
+    let instances = state
+        .persistence
+        .list_instances(
+            request.tenant_id.as_deref(),
+            status_filter.as_deref(),
+            request.limit as i64,
+            request.offset as i64,
+        )
+        .await?;
 
     let instance_summaries: Vec<InstanceSummary> = instances
         .into_iter()
@@ -339,26 +338,28 @@ pub async fn handle_list_checkpoints(
     let offset = request.offset.unwrap_or(0) as i64;
 
     // Get checkpoints from database
-    let checkpoints = persistence::list_checkpoints(
-        &state.pool,
-        &request.instance_id,
-        request.checkpoint_id.as_deref(),
-        limit,
-        offset,
-        created_after,
-        created_before,
-    )
-    .await?;
+    let checkpoints = state
+        .persistence
+        .list_checkpoints(
+            &request.instance_id,
+            request.checkpoint_id.as_deref(),
+            limit,
+            offset,
+            created_after,
+            created_before,
+        )
+        .await?;
 
     // Get total count for pagination
-    let total_count = persistence::count_checkpoints(
-        &state.pool,
-        &request.instance_id,
-        request.checkpoint_id.as_deref(),
-        created_after,
-        created_before,
-    )
-    .await?;
+    let total_count = state
+        .persistence
+        .count_checkpoints(
+            &request.instance_id,
+            request.checkpoint_id.as_deref(),
+            created_after,
+            created_before,
+        )
+        .await?;
 
     // Convert to proto summaries
     let summaries: Vec<CheckpointSummary> = checkpoints
@@ -389,9 +390,10 @@ pub async fn handle_get_checkpoint(
 ) -> Result<GetCheckpointResponse> {
     debug!("Getting checkpoint");
 
-    let checkpoint =
-        persistence::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
-            .await?;
+    let checkpoint = state
+        .persistence
+        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .await?;
 
     match checkpoint {
         Some(cp) => Ok(GetCheckpointResponse {

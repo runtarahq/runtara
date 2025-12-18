@@ -4,11 +4,10 @@
 //!
 //! These handlers process requests from instances (registration, checkpoints, events, signals, etc.)
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
 use tracing::{debug, info, instrument, warn};
 
 use runtara_protocol::instance_proto as proto;
@@ -21,20 +20,20 @@ use runtara_protocol::instance_proto::{
 };
 
 use crate::error::CoreError;
-use crate::persistence::{self, EventRecord};
+use crate::persistence::{EventRecord, Persistence};
 
 /// Shared state for instance handlers.
 ///
-/// Contains the database connection pool shared across all handlers.
+/// Contains the persistence implementation shared across all handlers.
 pub struct InstanceHandlerState {
-    /// PostgreSQL connection pool.
-    pub pool: PgPool,
+    /// Persistence implementation.
+    pub persistence: Arc<dyn Persistence>,
 }
 
 impl InstanceHandlerState {
-    /// Create a new instance handler state with the given database pool.
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    /// Create a new instance handler state with the given persistence backend.
+    pub fn new(persistence: Arc<dyn Persistence>) -> Self {
+        Self { persistence }
     }
 }
 
@@ -81,8 +80,10 @@ pub async fn handle_register_instance(
 
     // 3. If checkpoint_id provided, verify it exists
     if let Some(ref cp_id) = request.checkpoint_id {
-        let checkpoint =
-            persistence::load_checkpoint(&state.pool, &request.instance_id, cp_id).await;
+        let checkpoint = state
+            .persistence
+            .load_checkpoint(&request.instance_id, cp_id)
+            .await;
         match checkpoint {
             Ok(Some(_)) => {
                 debug!(checkpoint_id = %cp_id, "Checkpoint found for resume");
@@ -103,7 +104,9 @@ pub async fn handle_register_instance(
     }
 
     // 4. Check if instance exists, create if not (self-registration)
-    let instance_exists = persistence::get_instance(&state.pool, &request.instance_id)
+    let instance_exists = state
+        .persistence
+        .get_instance(&request.instance_id)
         .await
         .map(|opt| opt.is_some())
         .unwrap_or(false);
@@ -111,12 +114,10 @@ pub async fn handle_register_instance(
     if !instance_exists {
         // Self-registration: create instance record
         info!("Instance not found, creating self-registered instance");
-        if let Err(e) = persistence::create_self_registered_instance(
-            &state.pool,
-            &request.instance_id,
-            &request.tenant_id,
-        )
-        .await
+        if let Err(e) = state
+            .persistence
+            .register_instance(&request.instance_id, &request.tenant_id)
+            .await
         {
             return Ok(RegisterInstanceResponse {
                 success: false,
@@ -127,13 +128,10 @@ pub async fn handle_register_instance(
 
     // 5. Update instance status to RUNNING
     let started_at = Utc::now();
-    if let Err(e) = persistence::update_instance_status(
-        &state.pool,
-        &request.instance_id,
-        "running",
-        Some(started_at),
-    )
-    .await
+    if let Err(e) = state
+        .persistence
+        .update_instance_status(&request.instance_id, "running", Some(started_at))
+        .await
     {
         return Ok(RegisterInstanceResponse {
             success: false,
@@ -149,7 +147,7 @@ pub async fn handle_register_instance(
         payload: None,
         created_at: started_at,
     };
-    if let Err(e) = persistence::insert_event(&state.pool, &event).await {
+    if let Err(e) = state.persistence.insert_event(&event).await {
         warn!("Failed to insert started event: {}", e);
         // Don't fail registration just because event logging failed
     }
@@ -184,7 +182,7 @@ pub async fn handle_checkpoint(
     );
 
     // 1. Validate instance exists and is running
-    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = state.persistence.get_instance(&request.instance_id).await?;
     match instance {
         Some(inst) => {
             if inst.status != "running" {
@@ -205,9 +203,10 @@ pub async fn handle_checkpoint(
     }
 
     // 2. Check if checkpoint already exists
-    if let Some(existing) =
-        persistence::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
-            .await?
+    if let Some(existing) = state
+        .persistence
+        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .await?
     {
         debug!(
             checkpoint_id = %request.checkpoint_id,
@@ -216,18 +215,17 @@ pub async fn handle_checkpoint(
         );
 
         // Check for pending signal even when returning existing checkpoint
-        let pending_signal = get_pending_signal(&state.pool, &request.instance_id).await;
-        let custom_signal = persistence::take_pending_custom_signal(
-            &state.pool,
-            &request.instance_id,
-            &request.checkpoint_id,
-        )
-        .await?
-        .map(|sig| Signal {
-            instance_id: request.instance_id.clone(),
-            signal_type: SignalType::SignalResume.into(), // Custom signals are scoped; type is unused
-            payload: sig.payload.unwrap_or_default(),
-        });
+        let pending_signal =
+            get_pending_signal(state.persistence.as_ref(), &request.instance_id).await;
+        let custom_signal = state
+            .persistence
+            .take_pending_custom_signal(&request.instance_id, &request.checkpoint_id)
+            .await?
+            .map(|sig| Signal {
+                instance_id: request.instance_id.clone(),
+                signal_type: SignalType::SignalResume.into(), // Custom signals are scoped; type is unused
+                payload: sig.payload.unwrap_or_default(),
+            });
 
         return Ok(CheckpointResponse {
             found: true,
@@ -241,34 +239,27 @@ pub async fn handle_checkpoint(
     }
 
     // 3. Checkpoint doesn't exist - save new checkpoint
-    persistence::save_checkpoint(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-        &request.state,
-    )
-    .await?;
+    state
+        .persistence
+        .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
+        .await?;
 
     // 4. Update instance's current checkpoint_id
-    persistence::update_instance_checkpoint(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-    )
-    .await?;
+    state
+        .persistence
+        .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .await?;
 
     // 5. Check for pending signals to include in response
-    let pending_signal = get_pending_signal(&state.pool, &request.instance_id).await;
-    let custom_signal = persistence::take_pending_custom_signal(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-    )
-    .await?
-    .map(|sig| proto::CustomSignal {
-        checkpoint_id: request.checkpoint_id.clone(),
-        payload: sig.payload.unwrap_or_default(),
-    });
+    let pending_signal = get_pending_signal(state.persistence.as_ref(), &request.instance_id).await;
+    let custom_signal = state
+        .persistence
+        .take_pending_custom_signal(&request.instance_id, &request.checkpoint_id)
+        .await?
+        .map(|sig| proto::CustomSignal {
+            checkpoint_id: request.checkpoint_id.clone(),
+            payload: sig.payload.unwrap_or_default(),
+        });
 
     if pending_signal.is_some() || custom_signal.is_some() {
         debug!(
@@ -289,8 +280,8 @@ pub async fn handle_checkpoint(
 }
 
 /// Helper to get the pending instance-wide signal for an instance.
-async fn get_pending_signal(pool: &PgPool, instance_id: &str) -> Option<Signal> {
-    match persistence::get_pending_signal(pool, instance_id).await {
+async fn get_pending_signal(persistence: &dyn Persistence, instance_id: &str) -> Option<Signal> {
+    match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal)) => {
             let signal_type = match signal.signal_type.as_str() {
                 "cancel" => SignalType::SignalCancel,
@@ -319,7 +310,7 @@ pub async fn handle_get_checkpoint(
     debug!("Looking up checkpoint (read-only)");
 
     // 1. Validate instance exists
-    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = state.persistence.get_instance(&request.instance_id).await?;
     if instance.is_none() {
         return Err(CoreError::InstanceNotFound {
             instance_id: request.instance_id.clone(),
@@ -328,9 +319,10 @@ pub async fn handle_get_checkpoint(
     }
 
     // 2. Look up checkpoint
-    if let Some(checkpoint) =
-        persistence::load_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
-            .await?
+    if let Some(checkpoint) = state
+        .persistence
+        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .await?
     {
         debug!(
             checkpoint_id = %request.checkpoint_id,
@@ -427,7 +419,7 @@ pub async fn handle_instance_event(
         },
         created_at,
     };
-    persistence::insert_event(&state.pool, &event_record).await?;
+    state.persistence.insert_event(&event_record).await?;
 
     // 5. Update instance status based on event type
     match event.event_type() {
@@ -442,7 +434,10 @@ pub async fn handle_instance_event(
             } else {
                 Some(event.payload.as_slice())
             };
-            persistence::complete_instance(&state.pool, &event.instance_id, output, None).await?;
+            state
+                .persistence
+                .complete_instance(&event.instance_id, output, None)
+                .await?;
             info!("Instance completed successfully");
         }
         InstanceEventType::EventFailed => {
@@ -451,12 +446,16 @@ pub async fn handle_instance_event(
             } else {
                 std::str::from_utf8(&event.payload).unwrap_or("Unknown error (binary payload)")
             };
-            persistence::complete_instance(&state.pool, &event.instance_id, None, Some(error))
+            state
+                .persistence
+                .complete_instance(&event.instance_id, None, Some(error))
                 .await?;
             warn!(error = %error, "Instance failed");
         }
         InstanceEventType::EventSuspended => {
-            persistence::update_instance_status(&state.pool, &event.instance_id, "suspended", None)
+            state
+                .persistence
+                .update_instance_status(&event.instance_id, "suspended", None)
                 .await?;
         }
     }
@@ -482,7 +481,7 @@ pub async fn handle_get_instance_status(
 ) -> Result<GetInstanceStatusResponse> {
     debug!("Getting instance status");
 
-    let instance = persistence::get_instance(&state.pool, &request.instance_id).await?;
+    let instance = state.persistence.get_instance(&request.instance_id).await?;
 
     match instance {
         Some(inst) => {
@@ -528,9 +527,14 @@ pub async fn handle_poll_signals(
 ) -> Result<PollSignalsResponse> {
     debug!("Instance polling for signals");
 
-    let pending = persistence::get_pending_signal(&state.pool, &request.instance_id).await?;
+    let pending = state
+        .persistence
+        .get_pending_signal(&request.instance_id)
+        .await?;
     let custom = if let Some(checkpoint_id) = request.checkpoint_id.as_deref() {
-        persistence::take_pending_custom_signal(&state.pool, &request.instance_id, checkpoint_id)
+        state
+            .persistence
+            .take_pending_custom_signal(&request.instance_id, checkpoint_id)
             .await?
     } else {
         None
@@ -587,19 +591,19 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
 
     if ack.acknowledged {
         // Mark signal as acknowledged
-        persistence::acknowledge_signal(&state.pool, &ack.instance_id).await?;
+        state
+            .persistence
+            .acknowledge_signal(&ack.instance_id)
+            .await?;
 
         // Handle signal-specific side effects
         match ack.signal_type() {
             SignalType::SignalCancel => {
                 // Update instance status to cancelled
-                persistence::update_instance_status(
-                    &state.pool,
-                    &ack.instance_id,
-                    "cancelled",
-                    None,
-                )
-                .await?;
+                state
+                    .persistence
+                    .update_instance_status(&ack.instance_id, "cancelled", None)
+                    .await?;
                 info!("Instance cancelled");
             }
             SignalType::SignalPause => {
@@ -642,14 +646,15 @@ pub async fn handle_retry_attempt(
     );
 
     // Save retry attempt record for audit trail
-    persistence::save_retry_attempt(
-        &state.pool,
-        &event.instance_id,
-        &event.checkpoint_id,
-        event.attempt_number as i32,
-        event.error_message.as_deref(),
-    )
-    .await?;
+    state
+        .persistence
+        .save_retry_attempt(
+            &event.instance_id,
+            &event.checkpoint_id,
+            event.attempt_number as i32,
+            event.error_message.as_deref(),
+        )
+        .await?;
 
     debug!(attempt = event.attempt_number, "Retry attempt recorded");
 

@@ -8,6 +8,7 @@ use runtara_core::management_handlers::{
     ManagementHandlerState, handle_get_instance_status, handle_health_check, handle_list_instances,
     handle_send_signal, map_signal_type, map_status,
 };
+use runtara_core::persistence::PostgresPersistence;
 use runtara_protocol::management_proto::{
     GetInstanceStatusRequest, HealthCheckRequest, InstanceStatus, ListInstancesRequest,
     SendSignalRequest, SignalType,
@@ -38,7 +39,8 @@ async fn get_test_pool() -> Option<PgPool> {
 
 /// Create test handler state
 fn create_test_state(pool: PgPool) -> ManagementHandlerState {
-    ManagementHandlerState::new(pool)
+    let persistence = std::sync::Arc::new(PostgresPersistence::new(pool));
+    ManagementHandlerState::new(persistence)
 }
 
 /// Create a test instance directly in the database

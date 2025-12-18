@@ -10,7 +10,21 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::Persistence;
 use crate::error::CoreError;
+
+/// PostgreSQL-backed persistence implementation.
+#[derive(Clone)]
+pub struct PostgresPersistence {
+    pool: PgPool,
+}
+
+impl PostgresPersistence {
+    /// Create a new Postgres-backed persistence implementation.
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
 
 // ============================================================================
 // Record Types
@@ -23,8 +37,6 @@ pub struct InstanceRecord {
     pub instance_id: String,
     /// Tenant identifier for multi-tenancy isolation.
     pub tenant_id: String,
-    /// UUID of the workflow definition (image).
-    pub definition_id: Uuid,
     /// Version of the workflow definition.
     pub definition_version: i32,
     /// Current status (pending, running, suspended, completed, failed, cancelled).
@@ -131,17 +143,15 @@ pub async fn create_instance(
     pool: &PgPool,
     instance_id: &str,
     tenant_id: &str,
-    definition_id: &Uuid,
 ) -> Result<(), CoreError> {
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, definition_id, definition_version, status, created_at)
-        VALUES ($1, $2, $3, 1, 'pending'::instance_status, NOW())
+        INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at)
+        VALUES ($1, $2, 1, 'pending'::instance_status, NOW())
         "#,
     )
     .bind(instance_id)
     .bind(tenant_id)
-    .bind(definition_id)
     .execute(pool)
     .await?;
 
@@ -154,26 +164,6 @@ pub const SELF_REGISTERED_DEFINITION_ID: Uuid = Uuid::from_u128(0);
 
 /// Create a self-registered instance record.
 /// Used when an instance registers itself without being started via the management API.
-pub async fn create_self_registered_instance(
-    pool: &PgPool,
-    instance_id: &str,
-    tenant_id: &str,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        INSERT INTO instances (instance_id, tenant_id, definition_id, definition_version, status, created_at)
-        VALUES ($1, $2, $3, 1, 'pending'::instance_status, NOW())
-        "#,
-    )
-    .bind(instance_id)
-    .bind(tenant_id)
-    .bind(SELF_REGISTERED_DEFINITION_ID)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 /// Get an instance by ID.
 pub async fn get_instance(
     pool: &PgPool,
@@ -181,7 +171,7 @@ pub async fn get_instance(
 ) -> Result<Option<InstanceRecord>, CoreError> {
     let record = sqlx::query_as::<_, InstanceRecord>(
         r#"
-        SELECT instance_id, tenant_id, definition_id, definition_version,
+        SELECT instance_id, tenant_id, definition_version,
                status::text as status, checkpoint_id, attempt, max_attempts,
                created_at, started_at, finished_at, output, error
         FROM instances
@@ -740,7 +730,7 @@ pub async fn acknowledge_signal(pool: &PgPool, instance_id: &str) -> Result<(), 
 // ============================================================================
 
 /// Count active instances (running or suspended).
-pub async fn count_active_instances(pool: &PgPool) -> Result<u32, CoreError> {
+pub async fn count_active_instances(pool: &PgPool) -> Result<i64, CoreError> {
     let row: (i64,) = sqlx::query_as(
         r#"
         SELECT COUNT(*)
@@ -751,7 +741,175 @@ pub async fn count_active_instances(pool: &PgPool) -> Result<u32, CoreError> {
     .fetch_one(pool)
     .await?;
 
-    Ok(row.0 as u32)
+    Ok(row.0)
+}
+
+#[async_trait::async_trait]
+impl Persistence for PostgresPersistence {
+    async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
+        create_instance(&self.pool, instance_id, tenant_id).await
+    }
+
+    async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
+        get_instance(&self.pool, instance_id).await
+    }
+
+    async fn update_instance_status(
+        &self,
+        instance_id: &str,
+        status: &str,
+        started_at: Option<DateTime<Utc>>,
+    ) -> Result<(), CoreError> {
+        update_instance_status(&self.pool, instance_id, status, started_at).await
+    }
+
+    async fn update_instance_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<(), CoreError> {
+        update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
+    }
+
+    async fn complete_instance(
+        &self,
+        instance_id: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+    ) -> Result<(), CoreError> {
+        complete_instance(&self.pool, instance_id, output, error).await
+    }
+
+    async fn save_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<(), CoreError> {
+        save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
+    }
+
+    async fn load_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<CheckpointRecord>, CoreError> {
+        load_checkpoint(&self.pool, instance_id, checkpoint_id).await
+    }
+
+    async fn list_checkpoints(
+        &self,
+        instance_id: &str,
+        checkpoint_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+        created_after: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
+    ) -> Result<Vec<CheckpointRecord>, CoreError> {
+        list_checkpoints(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            limit,
+            offset,
+            created_after,
+            created_before,
+        )
+        .await
+    }
+
+    async fn count_checkpoints(
+        &self,
+        instance_id: &str,
+        checkpoint_id: Option<&str>,
+        created_after: Option<DateTime<Utc>>,
+        created_before: Option<DateTime<Utc>>,
+    ) -> Result<i64, CoreError> {
+        count_checkpoints(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            created_after,
+            created_before,
+        )
+        .await
+    }
+
+    async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
+        insert_event(&self.pool, event).await
+    }
+
+    async fn insert_signal(
+        &self,
+        instance_id: &str,
+        signal_type: &str,
+        payload: &[u8],
+    ) -> Result<(), CoreError> {
+        insert_signal(&self.pool, instance_id, signal_type, payload).await
+    }
+
+    async fn get_pending_signal(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<SignalRecord>, CoreError> {
+        get_pending_signal(&self.pool, instance_id).await
+    }
+
+    async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
+        acknowledge_signal(&self.pool, instance_id).await
+    }
+
+    async fn insert_custom_signal(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        payload: &[u8],
+    ) -> Result<(), CoreError> {
+        insert_custom_signal(&self.pool, instance_id, checkpoint_id, payload).await
+    }
+
+    async fn take_pending_custom_signal(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<CustomSignalRecord>, CoreError> {
+        take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
+    }
+
+    async fn save_retry_attempt(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        error_message: Option<&str>,
+    ) -> Result<(), CoreError> {
+        save_retry_attempt(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            attempt,
+            error_message,
+        )
+        .await
+    }
+
+    async fn list_instances(
+        &self,
+        tenant_id: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        list_instances(&self.pool, tenant_id, status, limit, offset).await
+    }
+
+    async fn health_check_db(&self) -> Result<bool, CoreError> {
+        health_check_db(&self.pool).await
+    }
+
+    async fn count_active_instances(&self) -> Result<i64, CoreError> {
+        count_active_instances(&self.pool).await
+    }
 }
 
 /// Check database health.
@@ -770,7 +928,7 @@ pub async fn list_instances(
 ) -> Result<Vec<InstanceRecord>, CoreError> {
     let mut query = String::from(
         r#"
-        SELECT instance_id, tenant_id, definition_id, definition_version,
+        SELECT instance_id, tenant_id, definition_version,
                status::text as status, checkpoint_id, attempt, max_attempts,
                created_at, started_at, finished_at, output, error
         FROM instances
@@ -828,16 +986,14 @@ mod tests {
 
     // Helper to create a test instance
     async fn create_test_instance(pool: &PgPool, instance_id: Uuid, tenant_id: &str) {
-        let definition_id = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO instances (instance_id, tenant_id, definition_id, definition_version, status)
-            VALUES ($1, $2, $3, 1, 'pending')
+            INSERT INTO instances (instance_id, tenant_id, definition_version, status)
+            VALUES ($1, $2, 1, 'pending')
             "#,
         )
         .bind(instance_id)
         .bind(tenant_id)
-        .bind(definition_id)
         .execute(pool)
         .await
         .expect("Failed to create test instance");

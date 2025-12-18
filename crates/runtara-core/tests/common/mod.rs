@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use runtara_core::instance_handlers::InstanceHandlerState;
 use runtara_core::management_handlers::ManagementHandlerState;
+use runtara_core::persistence::PostgresPersistence;
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -56,8 +57,9 @@ impl TestContext {
         drop(listener2);
 
         // 4. Create handler states
-        let instance_state = Arc::new(InstanceHandlerState::new(pool.clone()));
-        let management_state = Arc::new(ManagementHandlerState::new(pool.clone()));
+        let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+        let instance_state = Arc::new(InstanceHandlerState::new(persistence.clone()));
+        let management_state = Arc::new(ManagementHandlerState::new(persistence.clone()));
 
         // 5. Start instance server in background
         let instance_server_state = instance_state.clone();

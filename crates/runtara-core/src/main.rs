@@ -19,6 +19,7 @@ use tracing::{error, info};
 use runtara_core::config::Config;
 use runtara_core::instance_handlers::InstanceHandlerState;
 use runtara_core::management_handlers::ManagementHandlerState;
+use runtara_core::persistence::PostgresPersistence;
 use runtara_core::server;
 
 #[tokio::main]
@@ -62,9 +63,10 @@ async fn main() -> Result<()> {
     let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
     info!(result = row.0, "Database health check passed");
 
-    // Create shared handler states
-    let instance_state = Arc::new(InstanceHandlerState::new(pool.clone()));
-    let management_state = Arc::new(ManagementHandlerState::new(pool.clone()));
+    // Create persistence backend and shared handler states
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let instance_state = Arc::new(InstanceHandlerState::new(persistence.clone()));
+    let management_state = Arc::new(ManagementHandlerState::new(persistence.clone()));
 
     info!("Running database migrations...");
     sqlx::migrate!("./migrations").run(&pool).await?;
