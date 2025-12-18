@@ -175,7 +175,8 @@ pub use client::RuntaraSdk;
 pub use config::SdkConfig;
 pub use error::{Result, SdkError};
 pub use types::{
-    CheckpointResult, InstanceStatus, Signal, SignalType, SleepResult, StatusResponse,
+    CheckpointResult, InstanceStatus, RetryConfig, RetryStrategy, Signal, SignalType, SleepResult,
+    StatusResponse,
 };
 
 // Global SDK registry for #[durable] macro

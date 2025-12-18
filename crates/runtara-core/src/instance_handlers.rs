@@ -15,7 +15,8 @@ use runtara_protocol::instance_proto::{
     CheckpointRequest, CheckpointResponse, GetCheckpointRequest, GetCheckpointResponse,
     GetInstanceStatusRequest, GetInstanceStatusResponse, InstanceEvent, InstanceEventType,
     InstanceStatus, PollSignalsRequest, PollSignalsResponse, RegisterInstanceRequest,
-    RegisterInstanceResponse, Signal, SignalAck, SignalType, SleepRequest, SleepResponse,
+    RegisterInstanceResponse, RetryAttemptEvent, Signal, SignalAck, SignalType, SleepRequest,
+    SleepResponse,
 };
 
 use crate::db::{self, EventRecord};
@@ -599,6 +600,44 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
     } else {
         warn!("Signal was not acknowledged by instance");
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Retry Tracking
+// ============================================================================
+
+/// Handle retry attempt event (fire-and-forget).
+///
+/// Records a retry attempt for audit trail. Retry attempts are stored
+/// in the checkpoints table with `is_retry_attempt=true`.
+///
+/// This is sent by the SDK when a durable function fails and is about
+/// to be retried (before the backoff delay).
+#[instrument(skip(state, event), fields(instance_id = %event.instance_id, checkpoint_id = %event.checkpoint_id))]
+pub async fn handle_retry_attempt(
+    state: &InstanceHandlerState,
+    event: RetryAttemptEvent,
+) -> Result<()> {
+    debug!(
+        attempt = event.attempt_number,
+        error = ?event.error_message,
+        timestamp_ms = event.timestamp_ms,
+        "Recording retry attempt"
+    );
+
+    // Save retry attempt record for audit trail
+    db::save_retry_attempt(
+        &state.pool,
+        &event.instance_id,
+        &event.checkpoint_id,
+        event.attempt_number as i32,
+        event.error_message.as_deref(),
+    )
+    .await?;
+
+    debug!(attempt = event.attempt_number, "Retry attempt recorded");
 
     Ok(())
 }

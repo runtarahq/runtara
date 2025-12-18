@@ -97,6 +97,20 @@ message InstanceEventBatch {
 }
 
 // ============================================================================
+// Retry Tracking (instance → core, fire-and-forget)
+// ============================================================================
+
+// Records a retry attempt for audit trail.
+// Sent when a durable function fails and is about to be retried.
+message RetryAttemptEvent {
+  string instance_id = 1;
+  string checkpoint_id = 2;       // The durable function's cache key
+  uint32 attempt_number = 3;      // 1-indexed retry attempt number
+  int64 timestamp_ms = 4;         // When the attempt started
+  optional string error_message = 5;  // Error from previous attempt (if retrying)
+}
+
+// ============================================================================
 // Signals (instance polls for signals from core)
 // ============================================================================
 
@@ -173,6 +187,7 @@ message RpcRequest {
     GetCheckpointRequest get_checkpoint = 9;
     PollSignalsRequest poll_signals = 10;
     SignalAck signal_ack = 11;
+    RetryAttemptEvent retry_attempt = 12;
   }
 }
 

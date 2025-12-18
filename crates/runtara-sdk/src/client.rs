@@ -528,6 +528,49 @@ impl RuntaraSdk {
         Ok(())
     }
 
+    // ========== Retry Tracking ==========
+
+    /// Record a retry attempt for audit trail.
+    ///
+    /// This is a fire-and-forget operation that records a retry attempt
+    /// in the checkpoint history. Called by the `#[durable]` macro when
+    /// a function fails and is about to be retried.
+    ///
+    /// # Arguments
+    ///
+    /// * `checkpoint_id` - The durable function's cache key
+    /// * `attempt_number` - The 1-indexed retry attempt number
+    /// * `error_message` - Error message from the previous failed attempt
+    #[instrument(skip(self), fields(instance_id = %self.config.instance_id, checkpoint_id = %checkpoint_id, attempt = attempt_number))]
+    pub async fn record_retry_attempt(
+        &self,
+        checkpoint_id: &str,
+        attempt_number: u32,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        debug!("Recording retry attempt");
+
+        let timestamp_ms = chrono::Utc::now().timestamp_millis();
+
+        let event = proto::RetryAttemptEvent {
+            instance_id: self.config.instance_id.clone(),
+            checkpoint_id: checkpoint_id.to_string(),
+            attempt_number,
+            timestamp_ms,
+            error_message: error_message.map(|s| s.to_string()),
+        };
+
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::RetryAttempt(event)),
+        };
+
+        // Fire-and-forget - no response expected
+        self.client.send_fire_and_forget(&rpc_request).await?;
+
+        debug!(attempt = attempt_number, "Retry attempt recorded");
+        Ok(())
+    }
+
     // ========== Status ==========
 
     /// Get the current status of this instance.

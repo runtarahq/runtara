@@ -18,8 +18,8 @@ use runtara_protocol::server::{ConnectionHandler, RuntaraServer, StreamHandler};
 
 use crate::instance_handlers::{
     InstanceHandlerState, handle_checkpoint, handle_get_checkpoint, handle_get_instance_status,
-    handle_instance_event, handle_poll_signals, handle_register_instance, handle_signal_ack,
-    handle_sleep,
+    handle_instance_event, handle_poll_signals, handle_register_instance, handle_retry_attempt,
+    handle_signal_ack, handle_sleep,
 };
 
 /// Shared state for instance server
@@ -168,6 +168,15 @@ async fn handle_stream(mut stream: StreamHandler, state: Arc<InstanceServerState
             // Signal acknowledgements are fire-and-forget
             if let Err(e) = handle_signal_ack(&state, ack).await {
                 error!("Failed to handle signal ack: {}", e);
+            }
+            stream.finish()?;
+            return Ok(());
+        }
+
+        Request::RetryAttempt(event) => {
+            // Retry attempt events are fire-and-forget (audit trail)
+            if let Err(e) = handle_retry_attempt(&state, event).await {
+                error!("Failed to handle retry attempt event: {}", e);
             }
             stream.finish()?;
             return Ok(());

@@ -400,6 +400,87 @@ pub async fn list_checkpoints(
     Ok(records)
 }
 
+/// Retry attempt record from the database.
+/// These are stored in the checkpoints table with is_retry_attempt = true.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RetryAttemptRecord {
+    /// Database primary key.
+    pub id: i64,
+    /// Instance this retry attempt belongs to.
+    pub instance_id: String,
+    /// Base checkpoint identifier (the durable function's cache key).
+    pub checkpoint_id: String,
+    /// Retry attempt number (1-indexed).
+    pub attempt_number: i32,
+    /// Error message from this attempt.
+    pub error_message: Option<String>,
+    /// When the retry attempt was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Save a retry attempt record for audit trail.
+/// Retry attempts are stored in the checkpoints table with a unique checkpoint_id.
+pub async fn save_retry_attempt(
+    pool: &PgPool,
+    instance_id: &str,
+    checkpoint_id: &str,
+    attempt_number: i32,
+    error_message: Option<&str>,
+) -> Result<(), CoreError> {
+    // Create a unique checkpoint_id for this retry attempt
+    let retry_checkpoint_id = format!("{}::retry::{}", checkpoint_id, attempt_number);
+
+    sqlx::query(
+        r#"
+        INSERT INTO checkpoints (instance_id, checkpoint_id, state, is_retry_attempt, attempt_number, error_message, created_at)
+        VALUES ($1, $2, '', true, $3, $4, NOW())
+        ON CONFLICT (instance_id, checkpoint_id) DO UPDATE
+        SET attempt_number = EXCLUDED.attempt_number,
+            error_message = EXCLUDED.error_message,
+            created_at = NOW()
+        "#,
+    )
+    .bind(instance_id)
+    .bind(&retry_checkpoint_id)
+    .bind(attempt_number)
+    .bind(error_message)
+    .execute(pool)
+    .await
+    .map_err(|e| CoreError::CheckpointSaveFailed {
+        instance_id: instance_id.to_string(),
+        reason: e.to_string(),
+    })?;
+
+    Ok(())
+}
+
+/// Load retry history for a checkpoint (for debugging/audit).
+/// Returns all retry attempts for the given base checkpoint_id.
+pub async fn load_retry_history(
+    pool: &PgPool,
+    instance_id: &str,
+    checkpoint_id: &str,
+) -> Result<Vec<RetryAttemptRecord>, CoreError> {
+    let pattern = format!("{}::retry::%", checkpoint_id);
+
+    let records = sqlx::query_as::<_, RetryAttemptRecord>(
+        r#"
+        SELECT id, instance_id, checkpoint_id, attempt_number, error_message, created_at
+        FROM checkpoints
+        WHERE instance_id = $1
+          AND checkpoint_id LIKE $2
+          AND is_retry_attempt = true
+        ORDER BY attempt_number ASC
+        "#,
+    )
+    .bind(instance_id)
+    .bind(&pattern)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records)
+}
+
 /// Count checkpoints for an instance with filtering.
 pub async fn count_checkpoints(
     pool: &PgPool,

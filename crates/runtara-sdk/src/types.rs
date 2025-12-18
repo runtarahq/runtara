@@ -177,6 +177,74 @@ impl From<proto::GetInstanceStatusResponse> for StatusResponse {
     }
 }
 
+// ============================================================================
+// Retry Configuration
+// ============================================================================
+
+/// Retry strategy for durable functions.
+///
+/// Determines how delay between retry attempts is calculated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetryStrategy {
+    /// Exponential backoff: delay * 2^(attempt-1)
+    ///
+    /// First retry: delay * 1
+    /// Second retry: delay * 2
+    /// Third retry: delay * 4
+    /// ...
+    #[default]
+    ExponentialBackoff,
+}
+
+/// Configuration for retry behavior in durable functions.
+///
+/// Used by the `#[durable]` macro to control retry logic:
+/// ```ignore
+/// #[durable(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
+/// pub async fn my_function(...) -> Result<T, E> { ... }
+/// ```
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts (0 = no retries, just one attempt).
+    pub max_retries: u32,
+    /// Base delay between retries in milliseconds.
+    pub delay_ms: u64,
+    /// Retry strategy for calculating delays.
+    pub strategy: RetryStrategy,
+}
+
+impl RetryConfig {
+    /// Create a new retry configuration.
+    pub fn new(max_retries: u32, delay_ms: u64, strategy: RetryStrategy) -> Self {
+        Self {
+            max_retries,
+            delay_ms,
+            strategy,
+        }
+    }
+
+    /// Calculate delay for a given attempt (1-indexed).
+    ///
+    /// Returns the duration to wait before the given retry attempt.
+    /// Attempt 1 is the first retry (after the initial failure).
+    pub fn delay_for_attempt(&self, attempt: u32) -> std::time::Duration {
+        let multiplier = match self.strategy {
+            RetryStrategy::ExponentialBackoff => 2u64.saturating_pow(attempt.saturating_sub(1)),
+        };
+        std::time::Duration::from_millis(self.delay_ms.saturating_mul(multiplier))
+    }
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 0,
+            delay_ms: 1000,
+            strategy: RetryStrategy::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +271,41 @@ mod tests {
             proto::SignalType::from(SignalType::Pause),
             proto::SignalType::SignalPause
         );
+    }
+
+    #[test]
+    fn test_retry_config_default() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 0);
+        assert_eq!(config.delay_ms, 1000);
+        assert_eq!(config.strategy, RetryStrategy::ExponentialBackoff);
+    }
+
+    #[test]
+    fn test_retry_config_delay_calculation() {
+        let config = RetryConfig::new(3, 100, RetryStrategy::ExponentialBackoff);
+
+        // Attempt 1 (first retry): 100ms * 2^0 = 100ms
+        assert_eq!(
+            config.delay_for_attempt(1),
+            std::time::Duration::from_millis(100)
+        );
+
+        // Attempt 2 (second retry): 100ms * 2^1 = 200ms
+        assert_eq!(
+            config.delay_for_attempt(2),
+            std::time::Duration::from_millis(200)
+        );
+
+        // Attempt 3 (third retry): 100ms * 2^2 = 400ms
+        assert_eq!(
+            config.delay_for_attempt(3),
+            std::time::Duration::from_millis(400)
+        );
+    }
+
+    #[test]
+    fn test_retry_strategy_default() {
+        assert_eq!(RetryStrategy::default(), RetryStrategy::ExponentialBackoff);
     }
 }
