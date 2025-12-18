@@ -10,7 +10,7 @@ pub(crate) fn from_proto_signal(signal: proto::Signal) -> Signal {
     Signal {
         signal_type: SignalType::from(signal.signal_type),
         payload: signal.payload,
-        checkpoint_id: signal.checkpoint_id,
+        checkpoint_id: None,
     }
 }
 
@@ -24,12 +24,11 @@ mod tests {
             instance_id: "test".to_string(),
             signal_type: proto::SignalType::SignalCancel.into(),
             payload: b"reason".to_vec(),
-            checkpoint_id: Some("cp-1".to_string()),
         };
 
         let signal = from_proto_signal(proto_signal);
         assert_eq!(signal.signal_type, SignalType::Cancel);
         assert_eq!(signal.payload, b"reason".to_vec());
-        assert_eq!(signal.checkpoint_id.as_deref(), Some("cp-1"));
+        assert!(signal.checkpoint_id.is_none());
     }
 }
