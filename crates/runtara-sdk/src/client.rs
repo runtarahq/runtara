@@ -253,18 +253,33 @@ impl RuntaraSdk {
 
         match rpc_response.response {
             Some(rpc_response::Response::Checkpoint(resp)) => {
-                let pending_signal = resp.pending_signal.map(SignalType::from);
+                let pending_signal = resp.pending_signal.map(crate::signals::from_proto_signal);
+                let custom_signal = resp.custom_signal.map(|sig| crate::types::CustomSignal {
+                    checkpoint_id: sig.checkpoint_id,
+                    payload: sig.payload,
+                });
 
                 if resp.found {
-                    debug!(checkpoint_id = %checkpoint_id, pending_signal = ?pending_signal, "Found existing checkpoint - returning for resume");
+                    debug!(
+                        checkpoint_id = %checkpoint_id,
+                        has_pending_signal = pending_signal.is_some(),
+                        has_custom_signal = custom_signal.is_some(),
+                        "Found existing checkpoint - returning for resume"
+                    );
                 } else {
-                    debug!(checkpoint_id = %checkpoint_id, pending_signal = ?pending_signal, "New checkpoint saved");
+                    debug!(
+                        checkpoint_id = %checkpoint_id,
+                        has_pending_signal = pending_signal.is_some(),
+                        has_custom_signal = custom_signal.is_some(),
+                        "New checkpoint saved"
+                    );
                 }
 
                 Ok(CheckpointResult {
                     found: resp.found,
                     state: resp.state,
                     pending_signal,
+                    custom_signal,
                 })
             }
             Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
@@ -333,11 +348,8 @@ impl RuntaraSdk {
 
     /// Request to sleep for the specified duration.
     ///
-    /// For short sleeps (< 30s by default), the core will sleep in-process and
-    /// return immediately. For long sleeps, the core will checkpoint state and
-    /// the instance should exit.
-    ///
-    /// Returns `SleepResult` indicating whether sleep was deferred.
+    /// Sleep is always handled in-process. Managed environments may hibernate
+    /// the container later if it stays idle.
     #[instrument(skip(self, state), fields(instance_id = %self.config.instance_id, duration_ms = duration.as_millis() as u64))]
     pub async fn sleep(
         &self,
@@ -450,6 +462,7 @@ impl RuntaraSdk {
 
         let request = PollSignalsRequest {
             instance_id: self.config.instance_id.clone(),
+            checkpoint_id: None,
         };
 
         let rpc_request = RpcRequest {
@@ -459,14 +472,25 @@ impl RuntaraSdk {
         let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
 
         match rpc_response.response {
-            Some(rpc_response::Response::PollSignals(resp)) => match resp.signal {
-                Some(signal) => {
+            Some(rpc_response::Response::PollSignals(resp)) => {
+                if let Some(signal) = resp.signal {
                     let sdk_signal = from_proto_signal(signal);
                     debug!(signal_type = ?sdk_signal.signal_type, "Signal received");
-                    Ok(Some(sdk_signal))
+                    return Ok(Some(sdk_signal));
                 }
-                None => Ok(None),
-            },
+
+                if let Some(custom) = resp.custom_signal {
+                    let sdk_signal = Signal {
+                        signal_type: SignalType::Resume, // custom signals are scoped; type unused here
+                        payload: custom.payload,
+                        checkpoint_id: Some(custom.checkpoint_id),
+                    };
+                    debug!("Custom signal received for checkpoint");
+                    return Ok(Some(sdk_signal));
+                }
+
+                Ok(None)
+            }
             Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
                 code: e.code,
                 message: e.message,

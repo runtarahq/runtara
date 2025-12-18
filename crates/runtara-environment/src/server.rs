@@ -248,6 +248,13 @@ async fn handle_stream(
                 message: e.to_string(),
             }),
         },
+        Request::SendCustomSignal(req) => match handle_send_custom_signal(&state, req).await {
+            Ok(resp) => Response::SendCustomSignal(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "SEND_CUSTOM_SIGNAL_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
 
         Request::TestCapability(req) => {
             let handler_req = TestCapabilityRequest {
@@ -852,6 +859,71 @@ async fn handle_send_signal(
             })
         }
         _ => Ok(environment_proto::SendSignalResponse {
+            success: false,
+            error: "Unexpected response from Core".to_string(),
+        }),
+    }
+}
+
+async fn handle_send_custom_signal(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::SendCustomSignalRequest,
+) -> Result<environment_proto::SendCustomSignalResponse, crate::error::Error> {
+    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
+
+    info!(
+        instance_id = %req.instance_id,
+        checkpoint_id = %req.checkpoint_id,
+        "Proxying custom signal to Core"
+    );
+
+    let server_addr: std::net::SocketAddr = state
+        .core_addr
+        .parse()
+        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
+
+    let client_config = RuntaraClientConfig {
+        server_addr,
+        server_name: "localhost".to_string(),
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
+    let client = RuntaraClient::new(client_config)
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+    client
+        .connect()
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    let mgmt_request = management_proto::RpcRequest {
+        request: Some(management_proto::rpc_request::Request::SendCustomSignal(
+            management_proto::SendCustomSignalRequest {
+                instance_id: req.instance_id.clone(),
+                checkpoint_id: req.checkpoint_id.clone(),
+                payload: req.payload,
+            },
+        )),
+    };
+
+    let response: management_proto::RpcResponse = client
+        .request(&mgmt_request)
+        .await
+        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
+
+    match response.response {
+        Some(management_proto::rpc_response::Response::SendCustomSignal(resp)) => {
+            Ok(environment_proto::SendCustomSignalResponse {
+                success: resp.success,
+                error: resp.error,
+            })
+        }
+        Some(management_proto::rpc_response::Response::Error(e)) => {
+            Ok(environment_proto::SendCustomSignalResponse {
+                success: false,
+                error: format!("{}: {}", e.code, e.message),
+            })
+        }
+        _ => Ok(environment_proto::SendCustomSignalResponse {
             success: false,
             error: "Unexpected response from Core".to_string(),
         }),

@@ -34,6 +34,7 @@ async fn test_signal_send_poll_ack_flow() {
     // 1. Initially no signals
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -166,6 +167,7 @@ async fn test_all_signal_types() {
         // Poll and verify type
         let poll_req = instance_proto::PollSignalsRequest {
             instance_id: instance_id.to_string(),
+            checkpoint_id: None,
         };
         let resp: instance_proto::RpcResponse = ctx
             .instance_client
@@ -261,6 +263,7 @@ async fn test_signal_empty_payload() {
     // Poll and verify empty payload
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -295,6 +298,7 @@ async fn test_poll_invalid_instance() {
     // Poll for signals on non-existent instance
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: Uuid::new_v4().to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -345,6 +349,7 @@ async fn test_signal_not_acknowledged() {
     // Poll
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     ctx.instance_client
         .request::<_, instance_proto::RpcResponse>(&wrap_poll_signals(poll_req.clone()))

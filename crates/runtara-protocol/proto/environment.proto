@@ -236,6 +236,18 @@ message SendSignalResponse {
   string error = 2;             // Error if instance not found, etc.
 }
 
+// Send custom signal scoped to a checkpoint/wait key
+message SendCustomSignalRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;
+  bytes payload = 3;
+}
+
+message SendCustomSignalResponse {
+  bool success = 1;
+  string error = 2;
+}
+
 // ============================================================================
 // Agent Testing
 // ============================================================================
@@ -342,6 +354,7 @@ message RpcRequest {
     ListInstancesRequest list_instances = 11;
     // Signals (proxied to Core)
     SendSignalRequest send_signal = 12;
+    SendCustomSignalRequest send_custom_signal = 19;
     // Agent testing
     TestCapabilityRequest test_capability = 13;
     ListAgentsRequest list_agents = 14;
@@ -369,6 +382,7 @@ message RpcResponse {
     ListInstancesResponse list_instances = 11;
     // Signals
     SendSignalResponse send_signal = 12;
+    SendCustomSignalResponse send_custom_signal = 19;
     // Agent testing
     TestCapabilityResponse test_capability = 13;
     ListAgentsResponse list_agents = 14;

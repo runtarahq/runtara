@@ -18,7 +18,8 @@ use runtara_protocol::management_proto::{
     CheckpointSummary, GetCheckpointRequest, GetCheckpointResponse, GetInstanceStatusRequest,
     GetInstanceStatusResponse, HealthCheckRequest, HealthCheckResponse, InstanceStatus,
     InstanceSummary, ListCheckpointsRequest, ListCheckpointsResponse, ListInstancesRequest,
-    ListInstancesResponse, SendSignalRequest, SendSignalResponse, SignalType,
+    ListInstancesResponse, SendCustomSignalRequest, SendCustomSignalResponse, SendSignalRequest,
+    SendSignalResponse, SignalType,
 };
 
 use crate::db;
@@ -148,6 +149,57 @@ pub async fn handle_send_signal(
     info!("Signal stored successfully");
 
     Ok(SendSignalResponse {
+        success: true,
+        error: String::new(),
+    })
+}
+
+/// Handle custom checkpoint-scoped signal delivery from Environment.
+///
+/// Stores a pending custom signal for the instance/checkpoint. The waiting
+/// checkpoint will receive it on next checkpoint/poll call.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+pub async fn handle_send_custom_signal(
+    state: &ManagementHandlerState,
+    request: SendCustomSignalRequest,
+) -> Result<SendCustomSignalResponse> {
+    info!(
+        checkpoint_id = %request.checkpoint_id,
+        "Received custom signal request"
+    );
+
+    // Validate instance exists
+    let instance = db::get_instance(&state.pool, &request.instance_id).await?;
+    let Some(inst) = instance else {
+        return Ok(SendCustomSignalResponse {
+            success: false,
+            error: format!("Instance '{}' not found", request.instance_id),
+        });
+    };
+
+    // Validate checkpoint_id
+    if request.checkpoint_id.is_empty() {
+        return Ok(SendCustomSignalResponse {
+            success: false,
+            error: "checkpoint_id is required".to_string(),
+        });
+    }
+
+    // Store pending custom signal (upsert)
+    db::insert_custom_signal(
+        &state.pool,
+        &request.instance_id,
+        &request.checkpoint_id,
+        &request.payload,
+    )
+    .await?;
+
+    info!(
+        instance_status = %inst.status,
+        "Custom signal stored successfully"
+    );
+
+    Ok(SendCustomSignalResponse {
         success: true,
         error: String::new(),
     })

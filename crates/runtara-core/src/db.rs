@@ -92,6 +92,19 @@ pub struct SignalRecord {
     pub acknowledged_at: Option<DateTime<Utc>>,
 }
 
+/// Pending custom signal scoped to a specific checkpoint.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CustomSignalRecord {
+    /// Instance this signal is for.
+    pub instance_id: String,
+    /// Target checkpoint/wait key.
+    pub checkpoint_id: String,
+    /// Optional payload.
+    pub payload: Option<Vec<u8>>,
+    /// When the signal was created.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Wake queue entry from the database.
 ///
 /// Represents a scheduled wake-up for a suspended instance (durable sleep).
@@ -635,6 +648,37 @@ pub async fn insert_signal(
     Ok(())
 }
 
+/// Insert or update a pending custom signal scoped to a checkpoint.
+pub async fn insert_custom_signal(
+    pool: &PgPool,
+    instance_id: &str,
+    checkpoint_id: &str,
+    payload: &[u8],
+) -> Result<(), CoreError> {
+    let payload_opt = if payload.is_empty() {
+        None
+    } else {
+        Some(payload)
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO pending_checkpoint_signals (instance_id, checkpoint_id, payload, created_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (instance_id, checkpoint_id) DO UPDATE
+        SET payload = EXCLUDED.payload,
+            created_at = NOW()
+        "#,
+    )
+    .bind(instance_id)
+    .bind(checkpoint_id)
+    .bind(payload_opt)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Get pending signal for an instance (not yet acknowledged).
 pub async fn get_pending_signal(
     pool: &PgPool,
@@ -648,6 +692,27 @@ pub async fn get_pending_signal(
         "#,
     )
     .bind(instance_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(record)
+}
+
+/// Take a pending custom signal for a checkpoint (delete and return it).
+pub async fn take_pending_custom_signal(
+    pool: &PgPool,
+    instance_id: &str,
+    checkpoint_id: &str,
+) -> Result<Option<CustomSignalRecord>, CoreError> {
+    let record = sqlx::query_as::<_, CustomSignalRecord>(
+        r#"
+        DELETE FROM pending_checkpoint_signals
+        WHERE instance_id = $1 AND checkpoint_id = $2
+        RETURNING instance_id, checkpoint_id, payload, created_at
+        "#,
+    )
+    .bind(instance_id)
+    .bind(checkpoint_id)
     .fetch_optional(pool)
     .await?;
 
@@ -1236,6 +1301,37 @@ mod tests {
 
         // Should no longer return as pending
         let signal = get_pending_signal(&pool, &instance_id.to_string())
+            .await
+            .unwrap();
+        assert!(signal.is_none());
+
+        cleanup_test_instance(&pool, instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_insert_and_take_custom_signal() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("Skipping test: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        let instance_id = Uuid::new_v4();
+        create_test_instance(&pool, instance_id, "test-tenant").await;
+
+        insert_custom_signal(&pool, &instance_id.to_string(), "wait-1", b"custom-payload")
+            .await
+            .unwrap();
+
+        // First take should retrieve and delete
+        let signal = take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+            .await
+            .unwrap()
+            .expect("custom signal should exist");
+        assert_eq!(signal.checkpoint_id, "wait-1");
+        assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
+
+        // Second take should return none
+        let signal = take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
             .await
             .unwrap();
         assert!(signal.is_none());

@@ -39,8 +39,8 @@ message CheckpointRequest {
 message CheckpointResponse {
   bool found = 1;               // true = existing checkpoint returned, false = new checkpoint saved
   bytes state = 2;              // Existing state if found, empty if saved
-  optional SignalType pending_signal = 3;  // If a signal is pending (cancel, pause), included here
-                                           // Instance should handle signal after processing checkpoint
+  optional Signal pending_signal = 3;      // Instance-wide signal (cancel/pause/resume) if pending
+  optional CustomSignal custom_signal = 4; // Checkpoint-scoped custom signal (if matching checkpoint_id)
 }
 
 // Get checkpoint without saving - read-only lookup
@@ -127,6 +127,12 @@ message Signal {
   bytes payload = 3;
 }
 
+// Custom signal targeted at a specific checkpoint_id (wait key)
+message CustomSignal {
+  string checkpoint_id = 1;
+  bytes payload = 2;
+}
+
 // Instance acknowledges received signal
 message SignalAck {
   string instance_id = 1;
@@ -137,10 +143,13 @@ message SignalAck {
 // Instance polls for pending signals
 message PollSignalsRequest {
   string instance_id = 1;
+  // Optional checkpoint_id to fetch a custom signal scoped to a specific wait/checkpoint
+  optional string checkpoint_id = 2;
 }
 
 message PollSignalsResponse {
-  optional Signal signal = 1;   // Pending signal if any, or empty
+  optional Signal signal = 1;         // Pending instance-wide signal if any, or empty
+  optional CustomSignal custom_signal = 2; // Pending checkpoint-scoped custom signal (if checkpoint_id was provided)
 }
 
 // ============================================================================

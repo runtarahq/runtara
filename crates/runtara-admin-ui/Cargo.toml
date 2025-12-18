@@ -1,0 +1,12 @@
+[package]
+name = "runtara-admin-ui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+leptos = { version = "0.8.14", features = ["csr"] }

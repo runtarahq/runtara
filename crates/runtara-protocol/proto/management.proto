@@ -43,6 +43,18 @@ message SendSignalResponse {
   string error = 2;             // Error if instance not found, not connected, etc.
 }
 
+// Send custom signal scoped to a checkpoint/wait key
+message SendCustomSignalRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;     // Target checkpoint/wait key
+  bytes payload = 3;            // Signal payload
+}
+
+message SendCustomSignalResponse {
+  bool success = 1;
+  string error = 2;
+}
+
 // ============================================================================
 // Instance Status Query (environment can query any instance)
 // ============================================================================
@@ -145,6 +157,7 @@ message RpcRequest {
   oneof request {
     HealthCheckRequest health_check = 1;
     SendSignalRequest send_signal = 2;
+    SendCustomSignalRequest send_custom_signal = 11;
     GetInstanceStatusRequest get_instance_status = 3;
     ListInstancesRequest list_instances = 4;
     // Checkpoints
@@ -158,6 +171,7 @@ message RpcResponse {
   oneof response {
     HealthCheckResponse health_check = 1;
     SendSignalResponse send_signal = 2;
+    SendCustomSignalResponse send_custom_signal = 11;
     GetInstanceStatusResponse get_instance_status = 3;
     ListInstancesResponse list_instances = 4;
     RpcError error = 15;

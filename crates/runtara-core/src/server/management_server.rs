@@ -26,7 +26,7 @@ use runtara_protocol::server::{ConnectionHandler, RuntaraServer, StreamHandler};
 
 use crate::management_handlers::{
     ManagementHandlerState, handle_get_checkpoint, handle_get_instance_status, handle_health_check,
-    handle_list_checkpoints, handle_list_instances, handle_send_signal,
+    handle_list_checkpoints, handle_list_instances, handle_send_custom_signal, handle_send_signal,
 };
 
 /// Shared state for management server
@@ -115,6 +115,13 @@ async fn handle_stream(mut stream: StreamHandler, state: Arc<ManagementServerSta
             Ok(resp) => Response::SendSignal(resp),
             Err(e) => Response::Error(RpcError {
                 code: "SEND_SIGNAL_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+        Request::SendCustomSignal(req) => match handle_send_custom_signal(&state, req).await {
+            Ok(resp) => Response::SendCustomSignal(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "SEND_CUSTOM_SIGNAL_ERROR".to_string(),
                 message: e.to_string(),
             }),
         },

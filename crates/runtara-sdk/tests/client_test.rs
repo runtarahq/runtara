@@ -8,6 +8,14 @@ use runtara_sdk::{
 };
 use std::net::SocketAddr;
 
+fn sig(signal_type: SignalType) -> Signal {
+    Signal {
+        signal_type,
+        payload: vec![],
+        checkpoint_id: None,
+    }
+}
+
 // ============================================================================
 // SdkConfig Unit Tests
 // ============================================================================
@@ -162,6 +170,7 @@ fn test_checkpoint_result_existing_state() {
         found: true,
         state: vec![1, 2, 3, 4],
         pending_signal: None,
+        custom_signal: None,
     };
 
     assert!(result.existing_state().is_some());
@@ -174,6 +183,7 @@ fn test_checkpoint_result_no_existing_state() {
         found: false,
         state: vec![],
         pending_signal: None,
+        custom_signal: None,
     };
 
     assert!(result.existing_state().is_none());
@@ -184,7 +194,8 @@ fn test_checkpoint_result_should_cancel() {
     let cancel_result = CheckpointResult {
         found: false,
         state: vec![],
-        pending_signal: Some(SignalType::Cancel),
+        pending_signal: Some(sig(SignalType::Cancel)),
+        custom_signal: None,
     };
 
     assert!(cancel_result.should_cancel());
@@ -197,7 +208,8 @@ fn test_checkpoint_result_should_pause() {
     let pause_result = CheckpointResult {
         found: false,
         state: vec![],
-        pending_signal: Some(SignalType::Pause),
+        pending_signal: Some(sig(SignalType::Pause)),
+        custom_signal: None,
     };
 
     assert!(pause_result.should_pause());
@@ -210,7 +222,8 @@ fn test_checkpoint_result_should_not_exit_on_resume() {
     let resume_result = CheckpointResult {
         found: false,
         state: vec![],
-        pending_signal: Some(SignalType::Resume),
+        pending_signal: Some(sig(SignalType::Resume)),
+        custom_signal: None,
     };
 
     assert!(!resume_result.should_pause());
@@ -224,6 +237,7 @@ fn test_checkpoint_result_no_signal() {
         found: true,
         state: vec![1, 2],
         pending_signal: None,
+        custom_signal: None,
     };
 
     assert!(!no_signal.should_cancel());
@@ -236,7 +250,8 @@ fn test_checkpoint_result_clone() {
     let original = CheckpointResult {
         found: true,
         state: vec![10, 20, 30],
-        pending_signal: Some(SignalType::Pause),
+        pending_signal: Some(sig(SignalType::Pause)),
+        custom_signal: None,
     };
 
     let cloned = original.clone();
@@ -251,7 +266,8 @@ fn test_checkpoint_result_debug() {
     let result = CheckpointResult {
         found: true,
         state: vec![1, 2, 3],
-        pending_signal: Some(SignalType::Cancel),
+        pending_signal: Some(sig(SignalType::Cancel)),
+        custom_signal: None,
     };
 
     let debug_str = format!("{:?}", result);
@@ -397,6 +413,7 @@ fn test_signal_creation() {
     let signal = Signal {
         signal_type: SignalType::Cancel,
         payload: b"cancel reason".to_vec(),
+        checkpoint_id: None,
     };
 
     assert_eq!(signal.signal_type, SignalType::Cancel);
@@ -408,6 +425,7 @@ fn test_signal_empty_payload() {
     let signal = Signal {
         signal_type: SignalType::Resume,
         payload: vec![],
+        checkpoint_id: None,
     };
 
     assert!(signal.payload.is_empty());
@@ -418,6 +436,7 @@ fn test_signal_debug() {
     let signal = Signal {
         signal_type: SignalType::Pause,
         payload: b"test payload".to_vec(),
+        checkpoint_id: None,
     };
 
     let debug_str = format!("{:?}", signal);
@@ -430,6 +449,7 @@ fn test_signal_clone() {
     let original = Signal {
         signal_type: SignalType::Cancel,
         payload: b"original".to_vec(),
+        checkpoint_id: None,
     };
 
     let cloned = original.clone();

@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tracing::{debug, info, instrument, warn};
 
+use runtara_protocol::instance_proto as proto;
 use runtara_protocol::instance_proto::{
     CheckpointRequest, CheckpointResponse, GetCheckpointRequest, GetCheckpointResponse,
     GetInstanceStatusRequest, GetInstanceStatusResponse, InstanceEvent, InstanceEventType,
@@ -21,10 +22,6 @@ use runtara_protocol::instance_proto::{
 
 use crate::db::{self, EventRecord};
 use crate::error::CoreError;
-
-/// Sleep threshold in milliseconds. Sleeps shorter than this are done in-process.
-/// Sleeps longer than this are deferred to the wake queue.
-pub const IN_PROCESS_SLEEP_THRESHOLD_MS: u64 = 30_000; // 30 seconds
 
 /// Shared state for instance handlers.
 ///
@@ -217,12 +214,27 @@ pub async fn handle_checkpoint(
         );
 
         // Check for pending signal even when returning existing checkpoint
-        let pending_signal = get_pending_signal_type(&state.pool, &request.instance_id).await;
+        let pending_signal = get_pending_signal(&state.pool, &request.instance_id).await;
+        let custom_signal = db::take_pending_custom_signal(
+            &state.pool,
+            &request.instance_id,
+            &request.checkpoint_id,
+        )
+        .await?
+        .map(|sig| Signal {
+            instance_id: request.instance_id.clone(),
+            signal_type: SignalType::SignalResume.into(), // Custom signals are scoped; type is unused
+            payload: sig.payload.unwrap_or_default(),
+        });
 
         return Ok(CheckpointResponse {
             found: true,
             state: existing.state,
             pending_signal,
+            custom_signal: custom_signal.map(|sig| proto::CustomSignal {
+                checkpoint_id: request.checkpoint_id.clone(),
+                payload: sig.payload,
+            }),
         });
     }
 
@@ -239,11 +251,22 @@ pub async fn handle_checkpoint(
     db::update_instance_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
         .await?;
 
-    // 5. Check for pending signal to include in response
-    let pending_signal = get_pending_signal_type(&state.pool, &request.instance_id).await;
+    // 5. Check for pending signals to include in response
+    let pending_signal = get_pending_signal(&state.pool, &request.instance_id).await;
+    let custom_signal =
+        db::take_pending_custom_signal(&state.pool, &request.instance_id, &request.checkpoint_id)
+            .await?
+            .map(|sig| proto::CustomSignal {
+                checkpoint_id: request.checkpoint_id.clone(),
+                payload: sig.payload.unwrap_or_default(),
+            });
 
-    if pending_signal.is_some() {
-        debug!(signal = ?pending_signal, "Checkpoint saved with pending signal");
+    if pending_signal.is_some() || custom_signal.is_some() {
+        debug!(
+            ?pending_signal,
+            has_custom = custom_signal.is_some(),
+            "Checkpoint saved with pending signal"
+        );
     } else {
         debug!("New checkpoint saved successfully");
     }
@@ -252,11 +275,12 @@ pub async fn handle_checkpoint(
         found: false,
         state: Vec::new(),
         pending_signal,
+        custom_signal,
     })
 }
 
-/// Helper to get the pending signal type for an instance.
-async fn get_pending_signal_type(pool: &PgPool, instance_id: &str) -> Option<i32> {
+/// Helper to get the pending instance-wide signal for an instance.
+async fn get_pending_signal(pool: &PgPool, instance_id: &str) -> Option<Signal> {
     match db::get_pending_signal(pool, instance_id).await {
         Ok(Some(signal)) => {
             let signal_type = match signal.signal_type.as_str() {
@@ -265,7 +289,11 @@ async fn get_pending_signal_type(pool: &PgPool, instance_id: &str) -> Option<i32
                 "resume" => SignalType::SignalResume,
                 _ => return None,
             };
-            Some(signal_type.into())
+            Some(Signal {
+                instance_id: instance_id.to_string(),
+                signal_type: signal_type.into(),
+                payload: signal.payload.unwrap_or_default(),
+            })
         }
         _ => None,
     }
@@ -318,15 +346,11 @@ pub async fn handle_get_checkpoint(
 
 /// Handle durable sleep request.
 ///
-/// Sleeps are handled differently based on duration:
-/// - **Short sleeps** (< 30s): Return `deferred: false`, instance sleeps in-process
-/// - **Long sleeps** (≥ 30s): Save checkpoint, schedule wake, return `deferred: true`
-///
-/// When `deferred: true`, the instance should exit cleanly. Core will wake it
-/// later by resuming from the checkpoint.
-#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+/// Sleeps are always handled in-process. Managed environments may hibernate
+/// the container separately based on idleness.
+#[instrument(skip(_state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_sleep(
-    state: &InstanceHandlerState,
+    _state: &InstanceHandlerState,
     request: SleepRequest,
 ) -> Result<SleepResponse> {
     debug!(
@@ -335,53 +359,9 @@ pub async fn handle_sleep(
         "Processing sleep request"
     );
 
-    // Short sleeps: sleep in-process
-    if request.duration_ms < IN_PROCESS_SLEEP_THRESHOLD_MS {
-        debug!(duration_ms = request.duration_ms, "Sleeping in-process");
-        tokio::time::sleep(Duration::from_millis(request.duration_ms)).await;
-        return Ok(SleepResponse { deferred: false });
-    }
-
-    // Long sleeps: defer to wake queue
-    debug!(
-        duration_ms = request.duration_ms,
-        "Deferring sleep to wake queue"
-    );
-
-    // 1. Save checkpoint with state
-    db::save_checkpoint(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-        &request.state,
-    )
-    .await?;
-
-    // 2. Calculate wake time
-    let wake_at = Utc::now() + chrono::Duration::milliseconds(request.duration_ms as i64);
-
-    // 3. Add to wake queue (upsert)
-    db::schedule_wake(
-        &state.pool,
-        &request.instance_id,
-        &request.checkpoint_id,
-        wake_at,
-    )
-    .await?;
-
-    // 4. Update instance status to suspended
-    db::update_instance_status(&state.pool, &request.instance_id, "suspended", None).await?;
-
-    // 5. Update instance's current checkpoint_id
-    db::update_instance_checkpoint(&state.pool, &request.instance_id, &request.checkpoint_id)
-        .await?;
-
-    info!(
-        wake_at = %wake_at,
-        "Instance suspended, scheduled for wake"
-    );
-
-    Ok(SleepResponse { deferred: true })
+    // Always sleep in-process; environment may hibernate managed instances separately.
+    tokio::time::sleep(Duration::from_millis(request.duration_ms)).await;
+    Ok(SleepResponse { deferred: false })
 }
 
 // ============================================================================
@@ -537,31 +517,47 @@ pub async fn handle_poll_signals(
     debug!("Instance polling for signals");
 
     let pending = db::get_pending_signal(&state.pool, &request.instance_id).await?;
+    let custom = if let Some(checkpoint_id) = request.checkpoint_id.as_deref() {
+        db::take_pending_custom_signal(&state.pool, &request.instance_id, checkpoint_id).await?
+    } else {
+        None
+    };
 
-    match pending {
-        Some(signal) => {
-            let signal_type = match signal.signal_type.as_str() {
-                "cancel" => SignalType::SignalCancel,
-                "pause" => SignalType::SignalPause,
-                "resume" => SignalType::SignalResume,
-                _ => {
-                    warn!(signal_type = %signal.signal_type, "Unknown signal type");
-                    return Ok(PollSignalsResponse { signal: None });
-                }
-            };
+    let signal = pending.map(|sig| {
+        let signal_type = match sig.signal_type.as_str() {
+            "cancel" => SignalType::SignalCancel,
+            "pause" => SignalType::SignalPause,
+            "resume" => SignalType::SignalResume,
+            _ => {
+                warn!(signal_type = %sig.signal_type, "Unknown signal type");
+                SignalType::SignalCancel
+            }
+        };
 
-            debug!(signal_type = ?signal_type, "Returning pending signal");
-
-            Ok(PollSignalsResponse {
-                signal: Some(Signal {
-                    instance_id: request.instance_id,
-                    signal_type: signal_type.into(),
-                    payload: signal.payload.unwrap_or_default(),
-                }),
-            })
+        Signal {
+            instance_id: request.instance_id.clone(),
+            signal_type: signal_type.into(),
+            payload: sig.payload.unwrap_or_default(),
         }
-        None => Ok(PollSignalsResponse { signal: None }),
+    });
+
+    let custom_signal = custom.map(|sig| proto::CustomSignal {
+        checkpoint_id: sig.checkpoint_id,
+        payload: sig.payload.unwrap_or_default(),
+    });
+
+    if signal.is_some() || custom_signal.is_some() {
+        debug!(
+            has_global = signal.is_some(),
+            has_custom = custom_signal.is_some(),
+            "Returning pending signals"
+        );
     }
+
+    Ok(PollSignalsResponse {
+        signal,
+        custom_signal,
+    })
 }
 
 /// Handle signal acknowledgement (fire-and-forget).
@@ -681,14 +677,6 @@ pub fn map_signal_type(signal_type: SignalType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_sleep_threshold() {
-        // Document the threshold value and expected categorizations
-        assert_eq!(IN_PROCESS_SLEEP_THRESHOLD_MS, 30_000);
-        // Short sleeps (below threshold) are handled in-process
-        // Long sleeps (at or above threshold) trigger durable sleep with wake queue
-    }
 
     #[test]
     fn test_event_type_mapping() {

@@ -85,12 +85,14 @@ impl From<SignalType> for proto::SignalType {
 }
 
 /// A signal received from runtara-core.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signal {
     /// The type of signal
     pub signal_type: SignalType,
     /// Signal-specific payload data
     pub payload: Vec<u8>,
+    /// Optional checkpoint_id when representing a custom signal
+    pub checkpoint_id: Option<String>,
 }
 
 /// Sleep response indicating whether sleep was deferred.
@@ -106,16 +108,27 @@ pub struct SleepResult {
 /// The checkpoint API now returns pending signal information along with the
 /// checkpoint state. This allows instances to efficiently check for cancel/pause
 /// signals during checkpoint operations without additional RPC calls.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointResult {
     /// If true, an existing checkpoint was found and state is returned.
     /// If false, a new checkpoint was saved.
     pub found: bool,
     /// Checkpoint state (existing state if found, empty if saved).
     pub state: Vec<u8>,
-    /// Pending signal type if any (cancel, pause).
+    /// Pending instance-wide signal if any (cancel, pause, resume).
     /// Instance should handle this signal after processing the checkpoint.
-    pub pending_signal: Option<SignalType>,
+    pub pending_signal: Option<Signal>,
+    /// Pending checkpoint-scoped custom signal (if waiting on a specific checkpoint_id).
+    pub custom_signal: Option<CustomSignal>,
+}
+
+/// Custom signal targeted to a specific checkpoint/wait key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomSignal {
+    /// Target checkpoint/wait key
+    pub checkpoint_id: String,
+    /// Signal payload
+    pub payload: Vec<u8>,
 }
 
 impl CheckpointResult {
@@ -127,18 +140,24 @@ impl CheckpointResult {
 
     /// Check if the instance should pause.
     pub fn should_pause(&self) -> bool {
-        self.pending_signal == Some(SignalType::Pause)
+        matches!(
+            self.pending_signal.as_ref().map(|s| s.signal_type),
+            Some(SignalType::Pause)
+        )
     }
 
     /// Check if the instance should cancel.
     pub fn should_cancel(&self) -> bool {
-        self.pending_signal == Some(SignalType::Cancel)
+        matches!(
+            self.pending_signal.as_ref().map(|s| s.signal_type),
+            Some(SignalType::Cancel)
+        )
     }
 
     /// Check if the instance should exit due to a signal.
     pub fn should_exit(&self) -> bool {
         matches!(
-            self.pending_signal,
+            self.pending_signal.as_ref().map(|s| s.signal_type),
             Some(SignalType::Pause) | Some(SignalType::Cancel)
         )
     }

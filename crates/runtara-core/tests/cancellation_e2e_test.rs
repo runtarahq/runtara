@@ -52,6 +52,7 @@ async fn test_cancel_running_instance() {
     // Poll and acknowledge via instance client
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -219,6 +220,7 @@ async fn test_cancel_with_reason() {
     // Poll and verify payload
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -271,6 +273,7 @@ async fn test_cancel_clears_on_ack() {
     // Poll
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -546,6 +549,7 @@ async fn test_cancel_replaces_pending_signal() {
     // Poll - should only get cancel
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
@@ -602,6 +606,7 @@ async fn test_pause_and_resume_flow() {
     // Poll and verify pause
     let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
