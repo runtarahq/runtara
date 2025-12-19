@@ -11,6 +11,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "runtara-core"
 path = "src/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["server"]
+
+# Full server mode with QUIC transport (for running runtara-core as a service)
+server = ["dep:quinn", "dep:runtara-protocol", "dep:dotenvy"]
 
 [dependencies]
 # Async runtime
@@ -19,14 +26,14 @@ tokio = { version = "1", features = ["full"] }
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "sqlite", "uuid", "chrono", "macros", "migrate"] }
 
-# QUIC transport
-quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+# QUIC transport (optional, for server mode)
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"], optional = true }
 
-# Protocol
-runtara-protocol = { path = "../runtara-protocol" }
+# Protocol (optional, for server mode)
+runtara-protocol = { path = "../runtara-protocol", optional = true }
 
-# Configuration
-dotenvy = "0.15"
+# Configuration (optional, for server mode)
+dotenvy = { version = "0.15", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

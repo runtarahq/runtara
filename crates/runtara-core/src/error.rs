@@ -6,6 +6,7 @@
 
 #![allow(dead_code)] // Variants and methods used in tests and for future expansion
 
+#[cfg(feature = "server")]
 use runtara_protocol::instance_proto::RpcError;
 use std::fmt;
 
@@ -83,6 +84,7 @@ pub enum CoreError {
 
 impl CoreError {
     /// Convert this error to an RpcError for protocol responses.
+    #[cfg(feature = "server")]
     pub fn to_rpc_error(&self) -> RpcError {
         RpcError {
             code: self.error_code().to_string(),
@@ -195,6 +197,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "server")]
     fn test_core_error_to_rpc_error_codes() {
         let test_cases = vec![
             (

@@ -8,6 +8,7 @@ members = [
     "crates/runtara-sdk",
     "crates/runtara-sdk-macros",
     "crates/durable-example",
+    "crates/durable-examples-embedded",
     # Workflow compilation library
     "crates/runtara-dsl",
     "crates/runtara-workflows",

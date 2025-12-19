@@ -144,17 +144,21 @@
 
 #![deny(missing_docs)]
 
-/// Server configuration loaded from environment variables.
-pub mod config;
-
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;
 
 /// Error types for Core operations with RPC error code mapping.
 pub mod error;
 
+// Server-mode modules (require QUIC transport)
+#[cfg(feature = "server")]
+/// Server configuration loaded from environment variables.
+pub mod config;
+
+#[cfg(feature = "server")]
 /// Instance protocol handlers (registration, checkpoints, events, signals).
 pub mod instance_handlers;
 
+#[cfg(feature = "server")]
 /// QUIC server implementation for the instance protocol.
 pub mod server;

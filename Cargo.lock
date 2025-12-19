@@ -514,6 +514,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "durable-examples-embedded"
+version = "1.0.24"
+dependencies = [
+ "runtara-core",
+ "runtara-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,19 @@
+[package]
+name = "durable-examples-embedded"
+description = "Example applications showcasing embedded runtara-sdk with SQLite persistence"
+edition.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+runtara-sdk = { path = "../runtara-sdk", default-features = false, features = ["embedded"] }
+runtara-core = { path = "../runtara-core", default-features = false }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "basic_embedded_example"
+path = "src/bin/basic_embedded_example.rs"

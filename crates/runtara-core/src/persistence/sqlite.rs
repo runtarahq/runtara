@@ -1,13 +1,18 @@
 //! SQLite-backed persistence implementation.
 
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 
 use crate::error::CoreError;
 
 use super::{
     CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, Persistence, SignalRecord,
 };
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
 /// SQLite-backed persistence provider.
 #[derive(Clone)]
@@ -16,9 +21,65 @@ pub struct SqlitePersistence {
 }
 
 impl SqlitePersistence {
-    /// Create a new SQLite persistence provider.
+    /// Create a new SQLite persistence provider from an existing pool.
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Create and initialize a new SQLite persistence from a file path.
+    ///
+    /// This convenience constructor handles all setup:
+    /// - Creates parent directories if they don't exist
+    /// - Creates the database file if it doesn't exist
+    /// - Connects to the database with sensible defaults
+    /// - Runs all migrations
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the SQLite database file (e.g., ".data/app.db")
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let persistence = SqlitePersistence::from_path(".data/embedded.db").await?;
+    /// ```
+    pub async fn from_path(path: impl AsRef<Path>) -> Result<Self, CoreError> {
+        let path = path.as_ref();
+
+        // Create parent directories if needed
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| CoreError::DatabaseError {
+                operation: "create_dir".to_string(),
+                details: format!("Failed to create directory {:?}: {}", parent, e),
+            })?;
+        }
+
+        // Build connection URL
+        let path_str = path.to_string_lossy();
+        let url = format!("sqlite:{}?mode=rwc", path_str);
+
+        // Create pool with reasonable defaults
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+            .map_err(|e| CoreError::DatabaseError {
+                operation: "connect".to_string(),
+                details: format!("Failed to connect to SQLite at {:?}: {}", path, e),
+            })?;
+
+        // Run migrations
+        MIGRATOR
+            .run(&pool)
+            .await
+            .map_err(|e| CoreError::DatabaseError {
+                operation: "migrate".to_string(),
+                details: format!("Failed to run migrations: {}", e),
+            })?;
+
+        Ok(Self { pool })
     }
 }
 
@@ -524,10 +585,7 @@ impl Persistence for SqlitePersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
     use uuid::Uuid;
-
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
     /// Create an in-memory SQLite pool for testing.
     async fn test_pool() -> SqlitePool {
