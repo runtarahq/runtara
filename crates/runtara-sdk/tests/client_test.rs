@@ -1,6 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Tests for SDK client module.
+//!
+//! These tests are specific to the QUIC backend.
+
+#![cfg(feature = "quic")]
 
 use runtara_sdk::{
     CheckpointResult, InstanceStatus, RuntaraSdk, SdkConfig, SdkError, Signal, SignalType,
@@ -475,19 +479,16 @@ fn test_sdk_error_unexpected_response() {
 #[test]
 fn test_status_response_creation() {
     let response = StatusResponse {
-        instance_id: "inst-running".to_string(),
+        found: true,
         status: InstanceStatus::Running,
         checkpoint_id: Some("cp-123".to_string()),
-        started_at_ms: 1234567890,
-        finished_at_ms: None,
         output: Some(vec![1, 2, 3]),
         error: None,
     };
 
+    assert!(response.found);
     assert_eq!(response.status, InstanceStatus::Running);
     assert_eq!(response.checkpoint_id, Some("cp-123".to_string()));
-    assert_eq!(response.started_at_ms, 1234567890);
-    assert!(response.finished_at_ms.is_none());
     assert_eq!(response.output, Some(vec![1, 2, 3]));
     assert!(response.error.is_none());
 }
@@ -495,28 +496,23 @@ fn test_status_response_creation() {
 #[test]
 fn test_status_response_failed() {
     let response = StatusResponse {
-        instance_id: "inst-failed".to_string(),
+        found: true,
         status: InstanceStatus::Failed,
         checkpoint_id: None,
-        started_at_ms: 1000,
-        finished_at_ms: Some(2000),
         output: None,
         error: Some("connection timeout".to_string()),
     };
 
     assert_eq!(response.status, InstanceStatus::Failed);
     assert!(response.error.is_some());
-    assert!(response.finished_at_ms.is_some());
 }
 
 #[test]
 fn test_status_response_debug() {
     let response = StatusResponse {
-        instance_id: "inst-debug".to_string(),
+        found: true,
         status: InstanceStatus::Completed,
         checkpoint_id: Some("final-checkpoint".to_string()),
-        started_at_ms: 1000,
-        finished_at_ms: Some(5000),
         output: None,
         error: None,
     };
@@ -529,11 +525,9 @@ fn test_status_response_debug() {
 #[test]
 fn test_status_response_clone() {
     let original = StatusResponse {
-        instance_id: "inst-clone".to_string(),
+        found: true,
         status: InstanceStatus::Running,
         checkpoint_id: Some("cp-1".to_string()),
-        started_at_ms: 100,
-        finished_at_ms: None,
         output: Some(vec![1, 2, 3]),
         error: None,
     };

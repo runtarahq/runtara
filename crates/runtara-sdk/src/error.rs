@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! SDK-specific error types.
 
+#[cfg(feature = "quic")]
 use runtara_protocol::ClientError;
 use thiserror::Error;
 
@@ -13,6 +14,7 @@ pub enum SdkError {
     Config(String),
 
     /// Connection to runtara-core failed
+    #[cfg(feature = "quic")]
     #[error("connection error: {0}")]
     Connection(#[from] ClientError),
 
@@ -64,6 +66,10 @@ pub enum SdkError {
     /// Unexpected response from server
     #[error("unexpected response: {0}")]
     UnexpectedResponse(String),
+
+    /// Internal SDK error
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl From<prost::DecodeError> for SdkError {

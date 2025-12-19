@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! High-level types for the SDK.
 
+#[cfg(feature = "quic")]
 use runtara_protocol::instance_proto as proto;
 
 /// Instance status as returned by status queries.
@@ -23,6 +24,7 @@ pub enum InstanceStatus {
     Cancelled,
 }
 
+#[cfg(feature = "quic")]
 impl From<proto::InstanceStatus> for InstanceStatus {
     fn from(status: proto::InstanceStatus) -> Self {
         match status {
@@ -37,6 +39,7 @@ impl From<proto::InstanceStatus> for InstanceStatus {
     }
 }
 
+#[cfg(feature = "quic")]
 impl From<i32> for InstanceStatus {
     fn from(value: i32) -> Self {
         proto::InstanceStatus::try_from(value)
@@ -56,6 +59,7 @@ pub enum SignalType {
     Resume,
 }
 
+#[cfg(feature = "quic")]
 impl From<proto::SignalType> for SignalType {
     fn from(signal: proto::SignalType) -> Self {
         match signal {
@@ -66,6 +70,7 @@ impl From<proto::SignalType> for SignalType {
     }
 }
 
+#[cfg(feature = "quic")]
 impl From<i32> for SignalType {
     fn from(value: i32) -> Self {
         proto::SignalType::try_from(value)
@@ -74,6 +79,7 @@ impl From<i32> for SignalType {
     }
 }
 
+#[cfg(feature = "quic")]
 impl From<SignalType> for proto::SignalType {
     fn from(signal: SignalType) -> Self {
         match signal {
@@ -158,30 +164,25 @@ impl CheckpointResult {
 /// Instance status response with full details.
 #[derive(Debug, Clone)]
 pub struct StatusResponse {
-    /// Instance ID
-    pub instance_id: String,
+    /// Whether the instance was found
+    pub found: bool,
     /// Current status
     pub status: InstanceStatus,
     /// Last known checkpoint ID
     pub checkpoint_id: Option<String>,
-    /// When the instance started (milliseconds since epoch)
-    pub started_at_ms: i64,
-    /// When the instance finished (milliseconds since epoch)
-    pub finished_at_ms: Option<i64>,
     /// Output data if completed
     pub output: Option<Vec<u8>>,
     /// Error message if failed
     pub error: Option<String>,
 }
 
+#[cfg(feature = "quic")]
 impl From<proto::GetInstanceStatusResponse> for StatusResponse {
     fn from(resp: proto::GetInstanceStatusResponse) -> Self {
         Self {
-            instance_id: resp.instance_id,
+            found: true,
             status: resp.status.into(),
             checkpoint_id: resp.checkpoint_id,
-            started_at_ms: resp.started_at_ms,
-            finished_at_ms: resp.finished_at_ms,
             output: resp.output,
             error: resp.error,
         }
@@ -260,6 +261,7 @@ impl Default for RetryConfig {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "quic")]
     #[test]
     fn test_instance_status_conversion() {
         assert_eq!(
@@ -272,6 +274,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "quic")]
     #[test]
     fn test_signal_type_conversion() {
         assert_eq!(

@@ -8,15 +8,28 @@ description = "High-level SDK for building durable workflows with runtara"
 keywords = ["durable", "workflow", "sdk", "checkpoint"]
 categories = ["asynchronous", "development-tools"]
 
+[features]
+default = ["quic"]
+
+# QUIC-based communication with runtara-core (default)
+quic = ["dep:runtara-protocol"]
+
+# Embedded mode - direct persistence layer access without QUIC
+embedded = ["dep:runtara-core"]
+
 [dependencies]
-# Protocol layer
-runtara-protocol = { path = "../runtara-protocol", version = "1.0" }
+# Protocol layer (optional, for QUIC mode)
+runtara-protocol = { path = "../runtara-protocol", version = "1.0", optional = true }
+
+# Core (optional, for embedded mode)
+runtara-core = { path = "../runtara-core", version = "1.0", optional = true }
 
 # Macros
 runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "1.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "time"] }
+async-trait = "0.1"
 
 # Serialization
 prost = "0.13"

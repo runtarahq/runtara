@@ -158,22 +158,30 @@
 //! let sdk = RuntaraSdk::new(config)?;
 //! ```
 
+mod backend;
 mod client;
-mod config;
 mod error;
-mod events;
 mod registry;
-mod signals;
 mod types;
+
+#[cfg(feature = "quic")]
+mod config;
+#[cfg(feature = "quic")]
+mod events;
+#[cfg(feature = "quic")]
+mod signals;
 
 // Main types
 pub use client::RuntaraSdk;
-pub use config::SdkConfig;
 pub use error::{Result, SdkError};
 pub use types::{
     CheckpointResult, CustomSignal, InstanceStatus, RetryConfig, RetryStrategy, Signal, SignalType,
     StatusResponse,
 };
+
+// QUIC-specific exports
+#[cfg(feature = "quic")]
+pub use config::SdkConfig;
 
 // Global SDK registry for #[durable] macro
 pub use registry::{register_sdk, sdk, try_sdk};
@@ -182,4 +190,9 @@ pub use registry::{register_sdk, sdk, try_sdk};
 pub use runtara_sdk_macros::durable;
 
 // Re-export protocol client config for advanced usage
+#[cfg(feature = "quic")]
 pub use runtara_protocol::RuntaraClientConfig;
+
+// Re-export persistence trait for embedded mode
+#[cfg(feature = "embedded")]
+pub use runtara_core::persistence::Persistence;

@@ -1,6 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Type tests for runtara-sdk.
+//!
+//! These tests are specific to the QUIC backend (proto conversions).
+
+#![cfg(feature = "quic")]
 
 use runtara_sdk::{CheckpointResult, InstanceStatus, Signal, SignalType};
 

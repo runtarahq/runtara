@@ -2,31 +2,38 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Main SDK client for instance communication with runtara-core.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "quic")]
+use std::time::Instant;
 
+use tracing::{info, instrument};
+
+#[cfg(feature = "quic")]
 use runtara_protocol::instance_proto::{
-    self as proto, CheckpointRequest as ProtoCheckpointRequest,
-    GetCheckpointRequest as ProtoGetCheckpointRequest, GetInstanceStatusRequest,
-    PollSignalsRequest, RegisterInstanceRequest, RpcRequest, RpcResponse, SignalAck, SleepRequest,
+    self as proto, PollSignalsRequest, RpcRequest, RpcResponse, SignalAck, SleepRequest,
     rpc_request, rpc_response,
 };
-use runtara_protocol::{RuntaraClient, RuntaraClientConfig};
-use tracing::{debug, info, instrument, warn};
 
+use crate::backend::SdkBackend;
+#[cfg(feature = "quic")]
 use crate::config::SdkConfig;
-use crate::error::{Result, SdkError};
-use crate::events::{
-    build_completed_event, build_failed_event, build_heartbeat_event, build_suspended_event,
-};
+use crate::error::Result;
+#[cfg(feature = "quic")]
+use crate::error::SdkError;
+#[cfg(feature = "quic")]
 use crate::signals::from_proto_signal;
-use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
+use crate::types::{CheckpointResult, StatusResponse};
+#[cfg(feature = "quic")]
+use crate::types::{Signal, SignalType};
+#[cfg(feature = "quic")]
+use tracing::debug;
 
 /// High-level SDK client for instance communication with runtara-core.
 ///
-/// This client wraps `RuntaraClient` and provides ergonomic methods
+/// This client wraps a backend (QUIC or embedded) and provides ergonomic methods
 /// for all instance lifecycle operations.
 ///
-/// # Example
+/// # Example (QUIC mode)
 ///
 /// ```ignore
 /// use runtara_sdk::RuntaraSdk;
@@ -49,48 +56,71 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 ///
 /// sdk.completed(b"result").await?;
 /// ```
+///
+/// # Example (Embedded mode)
+///
+/// ```ignore
+/// use runtara_sdk::RuntaraSdk;
+/// use std::sync::Arc;
+///
+/// // Create persistence layer (e.g., SQLite or PostgreSQL)
+/// let persistence: Arc<dyn Persistence> = create_persistence().await?;
+///
+/// let mut sdk = RuntaraSdk::embedded(persistence, "my-instance", "my-tenant");
+/// sdk.connect().await?;  // No-op for embedded
+/// sdk.register(None).await?;
+///
+/// // Same checkpoint API works with embedded mode
+/// for i in 0..items.len() {
+///     let state = serde_json::to_vec(&my_state)?;
+///     let result = sdk.checkpoint(&format!("item-{}", i), &state).await?;
+///     // ...
+/// }
+///
+/// sdk.completed(b"result").await?;
+/// ```
 pub struct RuntaraSdk {
-    /// Low-level protocol client
-    client: RuntaraClient,
-    /// Configuration
-    config: SdkConfig,
+    /// Backend implementation (QUIC or embedded)
+    backend: Box<dyn SdkBackend>,
     /// Registration state
     registered: bool,
-    /// Last signal poll time (for rate limiting)
+    /// Last signal poll time (for rate limiting) - only used with QUIC
+    #[cfg(feature = "quic")]
     last_signal_poll: Instant,
-    /// Cached pending signal (if any)
+    /// Cached pending signal (if any) - only used with QUIC
+    #[cfg(feature = "quic")]
     pending_signal: Option<Signal>,
+    /// Signal poll interval (ms) - only used with QUIC
+    #[cfg(feature = "quic")]
+    signal_poll_interval_ms: u64,
 }
 
 impl RuntaraSdk {
-    // ========== Construction ==========
+    // ========== QUIC Construction ==========
 
     /// Create a new SDK instance with the given configuration.
+    ///
+    /// This creates a QUIC-based SDK that connects to runtara-core over the network.
+    #[cfg(feature = "quic")]
     pub fn new(config: SdkConfig) -> Result<Self> {
-        let client_config = RuntaraClientConfig {
-            server_addr: config.server_addr,
-            server_name: config.server_name.clone(),
-            enable_0rtt: true,
-            dangerous_skip_cert_verification: config.skip_cert_verification,
-            keep_alive_interval_ms: 10_000,
-            idle_timeout_ms: config.request_timeout_ms,
-            connect_timeout_ms: config.connect_timeout_ms,
-        };
+        use crate::backend::quic::QuicBackend;
 
-        let client = RuntaraClient::new(client_config)?;
+        let signal_poll_interval_ms = config.signal_poll_interval_ms;
+        let backend = QuicBackend::new(&config)?;
 
         Ok(Self {
-            client,
-            config,
+            backend: Box::new(backend),
             registered: false,
             last_signal_poll: Instant::now() - Duration::from_secs(60), // Allow immediate first poll
             pending_signal: None,
+            signal_poll_interval_ms,
         })
     }
 
     /// Create an SDK instance from environment variables.
     ///
     /// See [`SdkConfig::from_env`] for required and optional environment variables.
+    #[cfg(feature = "quic")]
     pub fn from_env() -> Result<Self> {
         let config = SdkConfig::from_env()?;
         Self::new(config)
@@ -99,10 +129,43 @@ impl RuntaraSdk {
     /// Create an SDK instance for local development.
     ///
     /// This connects to `127.0.0.1:8001` with TLS verification disabled.
+    #[cfg(feature = "quic")]
     pub fn localhost(instance_id: impl Into<String>, tenant_id: impl Into<String>) -> Result<Self> {
         let config = SdkConfig::localhost(instance_id, tenant_id);
         Self::new(config)
     }
+
+    // ========== Embedded Construction ==========
+
+    /// Create an embedded SDK instance with direct database access.
+    ///
+    /// This bypasses QUIC and communicates directly with the persistence layer.
+    /// Ideal for embedding runtara-core within the same process.
+    ///
+    /// Note: Signals and durable sleep are not supported in embedded mode.
+    #[cfg(feature = "embedded")]
+    pub fn embedded(
+        persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+        instance_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+    ) -> Self {
+        use crate::backend::embedded::EmbeddedBackend;
+
+        let backend = EmbeddedBackend::new(persistence, instance_id, tenant_id);
+
+        Self {
+            backend: Box::new(backend),
+            registered: false,
+            #[cfg(feature = "quic")]
+            last_signal_poll: Instant::now() - Duration::from_secs(60),
+            #[cfg(feature = "quic")]
+            pending_signal: None,
+            #[cfg(feature = "quic")]
+            signal_poll_interval_ms: 1_000,
+        }
+    }
+
+    // ========== Initialization ==========
 
     /// Initialize SDK: connect, register, and make available globally for #[durable].
     ///
@@ -128,7 +191,7 @@ impl RuntaraSdk {
     ///     Ok(())
     /// }
     /// ```
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn init(mut self, checkpoint_id: Option<&str>) -> Result<()> {
         self.connect().await?;
         self.register(checkpoint_id).await?;
@@ -140,22 +203,22 @@ impl RuntaraSdk {
     // ========== Connection ==========
 
     /// Connect to runtara-core.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn connect(&self) -> Result<()> {
         info!("Connecting to runtara-core");
-        self.client.connect().await?;
+        self.backend.connect().await?;
         info!("Connected to runtara-core");
         Ok(())
     }
 
     /// Check if connected to runtara-core.
     pub async fn is_connected(&self) -> bool {
-        self.client.is_connected().await
+        self.backend.is_connected().await
     }
 
     /// Close the connection to runtara-core.
     pub async fn close(&self) {
-        self.client.close().await;
+        self.backend.close().await;
     }
 
     // ========== Registration ==========
@@ -164,37 +227,12 @@ impl RuntaraSdk {
     ///
     /// This should be called at instance startup. If `checkpoint_id` is provided,
     /// the instance is resuming from a checkpoint.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn register(&mut self, checkpoint_id: Option<&str>) -> Result<()> {
-        let request = RegisterInstanceRequest {
-            instance_id: self.config.instance_id.clone(),
-            tenant_id: self.config.tenant_id.clone(),
-            checkpoint_id: checkpoint_id.map(|s| s.to_string()),
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::RegisterInstance(request)),
-        };
-
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(rpc_response::Response::RegisterInstance(resp)) => {
-                if !resp.success {
-                    return Err(SdkError::Registration(resp.error));
-                }
-                self.registered = true;
-                info!("Instance registered with runtara-core");
-                Ok(())
-            }
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected RegisterInstanceResponse".to_string(),
-            )),
-        }
+        self.backend.register(checkpoint_id).await?;
+        self.registered = true;
+        info!("Instance registered");
+        Ok(())
     }
 
     // ========== Checkpointing ==========
@@ -235,61 +273,9 @@ impl RuntaraSdk {
     ///     process_item(&items[i]);
     /// }
     /// ```
-    #[instrument(skip(self, state), fields(instance_id = %self.config.instance_id, checkpoint_id = %checkpoint_id, state_size = state.len()))]
+    #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, state_size = state.len()))]
     pub async fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
-        debug!("Checkpoint request");
-
-        let request = ProtoCheckpointRequest {
-            instance_id: self.config.instance_id.clone(),
-            checkpoint_id: checkpoint_id.to_string(),
-            state: state.to_vec(),
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::Checkpoint(request)),
-        };
-
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(rpc_response::Response::Checkpoint(resp)) => {
-                let pending_signal = resp.pending_signal.map(crate::signals::from_proto_signal);
-                let custom_signal = resp.custom_signal.map(|sig| crate::types::CustomSignal {
-                    checkpoint_id: sig.checkpoint_id,
-                    payload: sig.payload,
-                });
-
-                if resp.found {
-                    debug!(
-                        checkpoint_id = %checkpoint_id,
-                        has_pending_signal = pending_signal.is_some(),
-                        has_custom_signal = custom_signal.is_some(),
-                        "Found existing checkpoint - returning for resume"
-                    );
-                } else {
-                    debug!(
-                        checkpoint_id = %checkpoint_id,
-                        has_pending_signal = pending_signal.is_some(),
-                        has_custom_signal = custom_signal.is_some(),
-                        "New checkpoint saved"
-                    );
-                }
-
-                Ok(CheckpointResult {
-                    found: resp.found,
-                    state: resp.state,
-                    pending_signal,
-                    custom_signal,
-                })
-            }
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected CheckpointResponse".to_string(),
-            )),
-        }
+        self.backend.checkpoint(checkpoint_id, state).await
     }
 
     /// Get a checkpoint by ID without saving (read-only lookup).
@@ -309,77 +295,72 @@ impl RuntaraSdk {
     /// let state = serde_json::to_vec(&result)?;
     /// sdk.checkpoint("my-operation", &state).await?;
     /// ```
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id, checkpoint_id = %checkpoint_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
     pub async fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
-        debug!("Get checkpoint request (read-only)");
-
-        let request = ProtoGetCheckpointRequest {
-            instance_id: self.config.instance_id.clone(),
-            checkpoint_id: checkpoint_id.to_string(),
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::GetCheckpoint(request)),
-        };
-
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(rpc_response::Response::GetCheckpoint(resp)) => {
-                if resp.found {
-                    debug!(checkpoint_id = %checkpoint_id, "Checkpoint found");
-                    Ok(Some(resp.state))
-                } else {
-                    debug!(checkpoint_id = %checkpoint_id, "Checkpoint not found");
-                    Ok(None)
-                }
-            }
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetCheckpointResponse".to_string(),
-            )),
-        }
+        self.backend.get_checkpoint(checkpoint_id).await
     }
 
     // ========== Sleep/Wake ==========
 
     /// Request to sleep for the specified duration.
     ///
-    /// Sleep is always handled in-process. Managed environments may hibernate
-    /// the container later if it stays idle.
-    #[instrument(skip(self, state), fields(instance_id = %self.config.instance_id, duration_ms = duration.as_millis() as u64))]
+    /// In QUIC mode, this notifies the server and the server may track the wake time.
+    /// In embedded mode, this is a simple in-process sleep using tokio.
+    ///
+    /// For both modes, the sleep saves a checkpoint with the provided state before sleeping,
+    /// which allows the instance to resume correctly after the sleep completes.
+    #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64))]
     pub async fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
-        debug!("Requesting sleep");
+        // First, save a checkpoint so we can resume correctly
+        self.backend.checkpoint(checkpoint_id, state).await?;
 
-        let request = SleepRequest {
-            instance_id: self.config.instance_id.clone(),
-            duration_ms: duration.as_millis() as u64,
-            checkpoint_id: checkpoint_id.to_string(),
-            state: state.to_vec(),
-        };
+        #[cfg(feature = "quic")]
+        {
+            use crate::backend::quic::QuicBackend;
 
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::Sleep(request)),
-        };
+            // If we have a QUIC backend, try to use server-side sleep tracking
+            if let Some(backend) = self.backend.as_any().downcast_ref::<QuicBackend>() {
+                debug!("Requesting QUIC sleep");
 
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
+                let request = SleepRequest {
+                    instance_id: self.backend.instance_id().to_string(),
+                    duration_ms: duration.as_millis() as u64,
+                    checkpoint_id: checkpoint_id.to_string(),
+                    state: state.to_vec(),
+                };
 
-        match rpc_response.response {
-            Some(rpc_response::Response::Sleep(_)) => {
-                debug!("Sleep completed");
-                Ok(())
+                let rpc_request = RpcRequest {
+                    request: Some(rpc_request::Request::Sleep(request)),
+                };
+
+                let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
+
+                match rpc_response.response {
+                    Some(rpc_response::Response::Sleep(_)) => {
+                        debug!("QUIC sleep completed");
+                        return Ok(());
+                    }
+                    Some(rpc_response::Response::Error(e)) => {
+                        return Err(SdkError::Server {
+                            code: e.code,
+                            message: e.message,
+                        });
+                    }
+                    _ => {
+                        return Err(SdkError::UnexpectedResponse(
+                            "expected SleepResponse".to_string(),
+                        ));
+                    }
+                }
             }
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected SleepResponse".to_string(),
-            )),
         }
+
+        // For embedded mode (or if QUIC downcast failed), use in-process sleep
+        info!(duration_ms = duration.as_millis(), "In-process sleep");
+        tokio::time::sleep(duration).await;
+        info!("Sleep completed");
+
+        Ok(())
     }
 
     // ========== Events ==========
@@ -388,48 +369,39 @@ impl RuntaraSdk {
     ///
     /// Use this for progress reporting without checkpointing.
     /// For durable progress, use `checkpoint()` instead.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn heartbeat(&self) -> Result<()> {
-        let event = build_heartbeat_event(&self.config.instance_id);
-        self.send_event(event).await?;
-        debug!("Heartbeat sent");
-        Ok(())
+        self.backend.heartbeat().await
     }
 
     /// Send a completed event with output.
-    #[instrument(skip(self, output), fields(instance_id = %self.config.instance_id, output_size = output.len()))]
+    #[instrument(skip(self, output), fields(instance_id = %self.backend.instance_id(), output_size = output.len()))]
     pub async fn completed(&self, output: &[u8]) -> Result<()> {
-        let event = build_completed_event(&self.config.instance_id, output.to_vec());
-        self.send_event(event).await?;
-        info!("Completed event sent");
-        Ok(())
+        self.backend.completed(output).await
     }
 
     /// Send a failed event with error message.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn failed(&self, error: &str) -> Result<()> {
-        let event = build_failed_event(&self.config.instance_id, error);
-        self.send_event(event).await?;
-        warn!(error = %error, "Failed event sent");
-        Ok(())
+        self.backend.failed(error).await
     }
 
     /// Send a suspended event.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn suspended(&self) -> Result<()> {
-        let event = build_suspended_event(&self.config.instance_id);
-        self.send_event(event).await?;
-        info!("Suspended event sent");
-        Ok(())
+        self.backend.suspended().await
     }
 
-    // ========== Signals ==========
+    // ========== Signals (QUIC only) ==========
 
     /// Poll for pending signals.
     ///
     /// Rate-limited to avoid hammering the server.
     /// Returns `Some(Signal)` if a signal is pending, `None` otherwise.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn poll_signal(&mut self) -> Result<Option<Signal>> {
         // Check cached signal first
         if self.pending_signal.is_some() {
@@ -437,7 +409,7 @@ impl RuntaraSdk {
         }
 
         // Rate limit
-        let poll_interval = Duration::from_millis(self.config.signal_poll_interval_ms);
+        let poll_interval = Duration::from_millis(self.signal_poll_interval_ms);
         if self.last_signal_poll.elapsed() < poll_interval {
             return Ok(None);
         }
@@ -446,11 +418,22 @@ impl RuntaraSdk {
     }
 
     /// Force poll for signals (ignoring rate limit).
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
     pub async fn poll_signal_now(&mut self) -> Result<Option<Signal>> {
+        use crate::backend::quic::QuicBackend;
+
         self.last_signal_poll = Instant::now();
 
+        let backend = self
+            .backend
+            .as_any()
+            .downcast_ref::<QuicBackend>()
+            .ok_or_else(|| SdkError::Internal("poll_signal() requires QUIC backend".to_string()))?;
+
         let request = PollSignalsRequest {
-            instance_id: self.config.instance_id.clone(),
+            instance_id: self.backend.instance_id().to_string(),
             checkpoint_id: None,
         };
 
@@ -458,7 +441,7 @@ impl RuntaraSdk {
             request: Some(rpc_request::Request::PollSignals(request)),
         };
 
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
+        let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
 
         match rpc_response.response {
             Some(rpc_response::Response::PollSignals(resp)) => {
@@ -491,20 +474,36 @@ impl RuntaraSdk {
     }
 
     /// Acknowledge a received signal.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn acknowledge_signal(
         &self,
         signal_type: SignalType,
         acknowledged: bool,
     ) -> Result<()> {
+        use crate::backend::quic::QuicBackend;
+
+        let backend = self
+            .backend
+            .as_any()
+            .downcast_ref::<QuicBackend>()
+            .ok_or_else(|| {
+                SdkError::Internal("acknowledge_signal() requires QUIC backend".to_string())
+            })?;
+
         let request = SignalAck {
-            instance_id: self.config.instance_id.clone(),
+            instance_id: self.backend.instance_id().to_string(),
             signal_type: proto::SignalType::from(signal_type).into(),
             acknowledged,
         };
 
-        // SignalAck is fire-and-forget, send via event mechanism
-        self.send_signal_ack(request).await?;
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::SignalAck(request)),
+        };
+
+        backend.client().send_fire_and_forget(&rpc_request).await?;
         debug!("Signal acknowledged");
         Ok(())
     }
@@ -518,6 +517,9 @@ impl RuntaraSdk {
     ///     // process item...
     /// }
     /// ```
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
     pub async fn check_cancelled(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             if signal.signal_type == SignalType::Cancel {
@@ -530,6 +532,9 @@ impl RuntaraSdk {
     }
 
     /// Check for pause and return error if paused.
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
     pub async fn check_paused(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             if signal.signal_type == SignalType::Pause {
@@ -554,46 +559,42 @@ impl RuntaraSdk {
     /// * `checkpoint_id` - The durable function's cache key
     /// * `attempt_number` - The 1-indexed retry attempt number
     /// * `error_message` - Error message from the previous failed attempt
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id, checkpoint_id = %checkpoint_id, attempt = attempt_number))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, attempt = attempt_number))]
     pub async fn record_retry_attempt(
         &self,
         checkpoint_id: &str,
         attempt_number: u32,
         error_message: Option<&str>,
     ) -> Result<()> {
-        debug!("Recording retry attempt");
-
-        let timestamp_ms = chrono::Utc::now().timestamp_millis();
-
-        let event = proto::RetryAttemptEvent {
-            instance_id: self.config.instance_id.clone(),
-            checkpoint_id: checkpoint_id.to_string(),
-            attempt_number,
-            timestamp_ms,
-            error_message: error_message.map(|s| s.to_string()),
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::RetryAttempt(event)),
-        };
-
-        // Fire-and-forget - no response expected
-        self.client.send_fire_and_forget(&rpc_request).await?;
-
-        debug!(attempt = attempt_number, "Retry attempt recorded");
-        Ok(())
+        self.backend
+            .record_retry_attempt(checkpoint_id, attempt_number, error_message)
+            .await
     }
 
     // ========== Status ==========
 
     /// Get the current status of this instance.
-    #[instrument(skip(self), fields(instance_id = %self.config.instance_id))]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn get_status(&self) -> Result<StatusResponse> {
-        self.get_instance_status(&self.config.instance_id).await
+        self.backend.get_status().await
     }
 
     /// Get the status of another instance.
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
+        use crate::backend::quic::QuicBackend;
+        use runtara_protocol::instance_proto::GetInstanceStatusRequest;
+
+        let backend = self
+            .backend
+            .as_any()
+            .downcast_ref::<QuicBackend>()
+            .ok_or_else(|| {
+                SdkError::Internal("get_instance_status() requires QUIC backend".to_string())
+            })?;
+
         let request = GetInstanceStatusRequest {
             instance_id: instance_id.to_string(),
         };
@@ -602,7 +603,7 @@ impl RuntaraSdk {
             request: Some(rpc_request::Request::GetInstanceStatus(request)),
         };
 
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
+        let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
 
         match rpc_response.response {
             Some(rpc_response::Response::GetInstanceStatus(resp)) => Ok(StatusResponse::from(resp)),
@@ -620,48 +621,26 @@ impl RuntaraSdk {
 
     /// Get the instance ID.
     pub fn instance_id(&self) -> &str {
-        &self.config.instance_id
+        self.backend.instance_id()
     }
 
     /// Get the tenant ID.
     pub fn tenant_id(&self) -> &str {
-        &self.config.tenant_id
+        self.backend.tenant_id()
     }
 
     /// Check if the instance is registered.
     pub fn is_registered(&self) -> bool {
         self.registered
     }
-
-    // ========== Internal ==========
-
-    /// Send an event (fire-and-forget).
-    async fn send_event(&self, event: proto::InstanceEvent) -> Result<()> {
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::InstanceEvent(event)),
-        };
-
-        // Events are fire-and-forget - no response expected from server
-        self.client.send_fire_and_forget(&rpc_request).await?;
-        Ok(())
-    }
-
-    /// Send a signal acknowledgment (fire-and-forget).
-    async fn send_signal_ack(&self, ack: SignalAck) -> Result<()> {
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::SignalAck(ack)),
-        };
-
-        // Signal acks are fire-and-forget - no response expected
-        self.client.send_fire_and_forget(&rpc_request).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "quic")]
     use super::*;
 
+    #[cfg(feature = "quic")]
     #[test]
     fn test_sdk_creation() {
         // Note: This test may fail if the UDP socket cannot be bound (e.g., in sandboxed environments)
@@ -675,6 +654,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "quic")]
     #[test]
     fn test_config_creation() {
         let config = SdkConfig::localhost("test-instance", "test-tenant");

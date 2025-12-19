@@ -2164,9 +2164,11 @@ dependencies = [
 name = "runtara-sdk"
 version = "1.0.24"
 dependencies = [
+ "async-trait",
  "chrono",
  "once_cell",
  "prost",
+ "runtara-core",
  "runtara-protocol",
  "runtara-sdk-macros",
  "serde",
