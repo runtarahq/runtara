@@ -6,6 +6,8 @@
 //! - `quic`: QUIC-based communication with runtara-core (default)
 //! - `embedded`: Direct database calls for embedded deployments
 
+#![allow(dead_code)] // Sleep methods reserved for future durable sleep implementation
+
 #[cfg(feature = "quic")]
 pub mod quic;
 
