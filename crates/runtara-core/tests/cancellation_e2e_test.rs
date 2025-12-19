@@ -6,7 +6,6 @@ mod common;
 
 use common::*;
 use runtara_protocol::instance_proto;
-use runtara_protocol::management_proto;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -26,28 +25,13 @@ async fn test_cancel_running_instance() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
-    // Send cancel signal via management client
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: b"user requested".to_vec(),
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(r.success, "Send signal should succeed: {}", r.error);
-        }
-        _ => panic!("Unexpected response"),
-    }
+    // Send cancel signal via persistence
+    let result = ctx
+        .send_signal(&instance_id, "cancel", b"user requested")
+        .await;
+    assert!(result.is_ok(), "Send signal should succeed");
+    assert!(result.unwrap(), "Should return true for valid instance");
 
     // Poll and acknowledge via instance client
     let poll_req = instance_proto::PollSignalsRequest {
@@ -110,31 +94,12 @@ async fn test_cancel_suspended_instance() {
         .await
         .unwrap();
 
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
-
-    // Send cancel signal via management client
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(
-                r.success,
-                "Should be able to send cancel to suspended instance"
-            );
-        }
-        _ => panic!("Unexpected response"),
-    }
+    // Send cancel signal via persistence
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    assert!(
+        result.is_ok() && result.unwrap(),
+        "Should be able to send cancel to suspended instance"
+    );
 
     // Verify signal is stored
     assert!(ctx.has_pending_signal(&instance_id).await);
@@ -154,21 +119,11 @@ async fn test_cancel_signal_persists() {
     let instance_id = Uuid::new_v4();
     ctx.create_running_instance(&instance_id, "test-tenant")
         .await;
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
 
     // Send cancel signal
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "cancel", &[])
         .await
-        .unwrap();
+        .expect("Send should succeed");
 
     // Don't poll - just verify it's in the database
     assert!(
@@ -199,23 +154,13 @@ async fn test_cancel_with_reason() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     let reason = b"User requested cancellation via API";
 
     // Send cancel with payload
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: reason.to_vec(),
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "cancel", reason)
         .await
-        .unwrap();
+        .expect("Send should succeed");
 
     // Poll and verify payload
     let poll_req = instance_proto::PollSignalsRequest {
@@ -254,21 +199,11 @@ async fn test_cancel_clears_on_ack() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // Send cancel
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "cancel", &[])
         .await
-        .unwrap();
+        .expect("Send should succeed");
 
     // Poll
     let poll_req = instance_proto::PollSignalsRequest {
@@ -325,32 +260,15 @@ async fn test_cancel_instance_not_found() {
     };
 
     let instance_id = Uuid::new_v4(); // Not created
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
 
     // Try to send cancel to non-existent instance
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(!r.success, "Should fail for non-existent instance");
-            assert!(
-                r.error.contains("not found"),
-                "Error should mention not found"
-            );
-        }
-        _ => panic!("Unexpected response"),
-    }
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    // send_signal returns Ok(false) for non-existent instances
+    assert!(result.is_ok());
+    assert!(
+        !result.unwrap(),
+        "Should return false for non-existent instance"
+    );
 }
 
 #[tokio::test]
@@ -375,32 +293,19 @@ async fn test_cancel_completed_instance() {
     .await
     .unwrap();
 
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
-
     // Try to send cancel
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(!r.success, "Should reject signal to completed instance");
-            assert!(
-                r.error.contains("terminal") || r.error.contains("completed"),
-                "Error should mention terminal state"
-            );
-        }
-        _ => panic!("Unexpected response"),
-    }
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    // send_signal returns Err for terminal states
+    assert!(
+        result.is_err(),
+        "Should reject signal to completed instance"
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("terminal") || err_msg.contains("completed"),
+        "Error should mention terminal state: {}",
+        err_msg
+    );
 
     ctx.cleanup_instance(&instance_id).await;
 }
@@ -425,28 +330,9 @@ async fn test_cancel_failed_instance() {
         .await
         .unwrap();
 
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
-
     // Try to send cancel
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(!r.success, "Should reject signal to failed instance");
-        }
-        _ => panic!("Unexpected response"),
-    }
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    assert!(result.is_err(), "Should reject signal to failed instance");
 
     ctx.cleanup_instance(&instance_id).await;
 }
@@ -473,32 +359,13 @@ async fn test_cancel_already_cancelled() {
     .await
     .unwrap();
 
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
-
     // Try to send another cancel
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            // Should fail since cancelled is a terminal state
-            assert!(
-                !r.success,
-                "Should reject signal to already cancelled instance"
-            );
-        }
-        _ => panic!("Unexpected response"),
-    }
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    // Should fail since cancelled is a terminal state
+    assert!(
+        result.is_err(),
+        "Should reject signal to already cancelled instance"
+    );
 
     ctx.cleanup_instance(&instance_id).await;
 }
@@ -519,32 +386,16 @@ async fn test_cancel_replaces_pending_signal() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // Send pause first
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalPause as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "pause", &[])
         .await
-        .unwrap();
+        .expect("Send pause should succeed");
 
     // Send cancel (should replace pause)
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "cancel", &[])
         .await
-        .unwrap();
+        .expect("Send cancel should succeed");
 
     // Poll - should only get cancel
     let poll_req = instance_proto::PollSignalsRequest {
@@ -587,21 +438,11 @@ async fn test_pause_and_resume_flow() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // Send pause
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalPause as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "pause", &[])
         .await
-        .unwrap();
+        .expect("Send pause should succeed");
 
     // Poll and verify pause
     let poll_req = instance_proto::PollSignalsRequest {
@@ -637,15 +478,9 @@ async fn test_pause_and_resume_flow() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Send resume
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalResume as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "resume", &[])
         .await
-        .unwrap();
+        .expect("Send resume should succeed");
 
     // Poll and verify resume
     let resp: instance_proto::RpcResponse = ctx
@@ -694,10 +529,6 @@ async fn test_cancel_during_checkpoint_save() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // Save checkpoint first
     let cp_req = instance_proto::CheckpointRequest {
@@ -717,23 +548,9 @@ async fn test_cancel_during_checkpoint_save() {
         _ => panic!("Unexpected response"),
     }
 
-    // Now send cancel signal via management client
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(r.success, "Cancel should succeed");
-        }
-        _ => panic!("Unexpected response"),
-    }
+    // Now send cancel signal via persistence
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    assert!(result.is_ok() && result.unwrap(), "Cancel should succeed");
 
     // Verify checkpoint still exists
     let get_req = instance_proto::GetCheckpointRequest {

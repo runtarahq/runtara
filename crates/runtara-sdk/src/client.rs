@@ -10,8 +10,8 @@ use tracing::{info, instrument};
 
 #[cfg(feature = "quic")]
 use runtara_protocol::instance_proto::{
-    self as proto, PollSignalsRequest, RpcRequest, RpcResponse, SignalAck, SleepRequest,
-    rpc_request, rpc_response,
+    self as proto, PollSignalsRequest, RpcRequest, RpcResponse, SignalAck, rpc_request,
+    rpc_response,
 };
 
 use crate::backend::SdkBackend;
@@ -304,63 +304,18 @@ impl RuntaraSdk {
 
     /// Request to sleep for the specified duration.
     ///
-    /// In QUIC mode, this notifies the server and the server may track the wake time.
-    /// In embedded mode, this is a simple in-process sleep using tokio.
+    /// This is a durable sleep that persists across restarts:
+    /// - Saves a checkpoint with the provided state
+    /// - Records the wake time (`sleep_until`) in the database
+    /// - On resume, calculates remaining time and only sleeps for the remainder
     ///
-    /// For both modes, the sleep saves a checkpoint with the provided state before sleeping,
-    /// which allows the instance to resume correctly after the sleep completes.
+    /// In QUIC mode, the server tracks the wake time. In embedded mode, the
+    /// persistence layer tracks it directly.
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64))]
     pub async fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
-        // First, save a checkpoint so we can resume correctly
-        self.backend.checkpoint(checkpoint_id, state).await?;
-
-        #[cfg(feature = "quic")]
-        {
-            use crate::backend::quic::QuicBackend;
-
-            // If we have a QUIC backend, try to use server-side sleep tracking
-            if let Some(backend) = self.backend.as_any().downcast_ref::<QuicBackend>() {
-                debug!("Requesting QUIC sleep");
-
-                let request = SleepRequest {
-                    instance_id: self.backend.instance_id().to_string(),
-                    duration_ms: duration.as_millis() as u64,
-                    checkpoint_id: checkpoint_id.to_string(),
-                    state: state.to_vec(),
-                };
-
-                let rpc_request = RpcRequest {
-                    request: Some(rpc_request::Request::Sleep(request)),
-                };
-
-                let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
-
-                match rpc_response.response {
-                    Some(rpc_response::Response::Sleep(_)) => {
-                        debug!("QUIC sleep completed");
-                        return Ok(());
-                    }
-                    Some(rpc_response::Response::Error(e)) => {
-                        return Err(SdkError::Server {
-                            code: e.code,
-                            message: e.message,
-                        });
-                    }
-                    _ => {
-                        return Err(SdkError::UnexpectedResponse(
-                            "expected SleepResponse".to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-
-        // For embedded mode (or if QUIC downcast failed), use in-process sleep
-        info!(duration_ms = duration.as_millis(), "In-process sleep");
-        tokio::time::sleep(duration).await;
-        info!("Sleep completed");
-
-        Ok(())
+        self.backend
+            .durable_sleep(duration, checkpoint_id, state)
+            .await
     }
 
     // ========== Events ==========

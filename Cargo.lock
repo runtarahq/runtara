@@ -2114,6 +2114,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "quinn",
+ "runtara-core",
  "runtara-dsl",
  "runtara-protocol",
  "serde",

@@ -73,7 +73,7 @@ pub async fn get_instance(
         r#"
         SELECT instance_id, tenant_id, definition_version,
                status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, output, error
+               created_at, started_at, finished_at, output, error, sleep_until
         FROM instances
         WHERE instance_id = $1
         "#,
@@ -644,6 +644,84 @@ pub async fn count_active_instances(pool: &PgPool) -> Result<i64, CoreError> {
     Ok(row.0)
 }
 
+// ============================================================================
+// Sleep Operations
+// ============================================================================
+
+/// Set the sleep_until timestamp for an instance.
+pub async fn set_instance_sleep(
+    pool: &PgPool,
+    instance_id: &str,
+    sleep_until: DateTime<Utc>,
+) -> Result<(), CoreError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE instances
+        SET sleep_until = $2
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(sleep_until)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(CoreError::InstanceNotFound {
+            instance_id: instance_id.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Clear the sleep_until timestamp for an instance.
+pub async fn clear_instance_sleep(pool: &PgPool, instance_id: &str) -> Result<(), CoreError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE instances
+        SET sleep_until = NULL
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(CoreError::InstanceNotFound {
+            instance_id: instance_id.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Get instances that are due to wake (sleep_until <= now).
+pub async fn get_sleeping_instances_due(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<InstanceRecord>, CoreError> {
+    let records = sqlx::query_as::<_, InstanceRecord>(
+        r#"
+        SELECT instance_id, tenant_id, definition_version,
+               status::text as status, checkpoint_id, attempt, max_attempts,
+               created_at, started_at, finished_at, output, error, sleep_until
+        FROM instances
+        WHERE sleep_until IS NOT NULL
+          AND sleep_until <= NOW()
+          AND status = 'suspended'
+        ORDER BY sleep_until ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records)
+}
+
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
@@ -810,6 +888,25 @@ impl Persistence for PostgresPersistence {
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
         count_active_instances(&self.pool).await
     }
+
+    async fn set_instance_sleep(
+        &self,
+        instance_id: &str,
+        sleep_until: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        set_instance_sleep(&self.pool, instance_id, sleep_until).await
+    }
+
+    async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
+        clear_instance_sleep(&self.pool, instance_id).await
+    }
+
+    async fn get_sleeping_instances_due(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        get_sleeping_instances_due(&self.pool, limit).await
+    }
 }
 
 /// Check database health.
@@ -830,7 +927,7 @@ pub async fn list_instances(
         r#"
         SELECT instance_id, tenant_id, definition_version,
                status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, output, error
+               created_at, started_at, finished_at, output, error, sleep_until
         FROM instances
         WHERE 1=1
         "#,

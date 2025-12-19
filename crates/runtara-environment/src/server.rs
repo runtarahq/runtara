@@ -773,310 +773,264 @@ async fn handle_list_instances(
     })
 }
 
+/// Map environment proto signal type to database signal type string.
+fn map_signal_type(signal_type: environment_proto::SignalType) -> &'static str {
+    match signal_type {
+        environment_proto::SignalType::SignalCancel => "cancel",
+        environment_proto::SignalType::SignalPause => "pause",
+        environment_proto::SignalType::SignalResume => "resume",
+    }
+}
+
 async fn handle_send_signal(
     state: &EnvironmentHandlerState,
     req: environment_proto::SendSignalRequest,
 ) -> Result<environment_proto::SendSignalResponse, crate::error::Error> {
-    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
-
     info!(
         instance_id = %req.instance_id,
         signal_type = ?req.signal_type,
-        "Proxying signal to Core"
+        "Sending signal via shared persistence"
     );
 
-    // Parse core address as SocketAddr
-    let server_addr: std::net::SocketAddr = state
-        .core_addr
-        .parse()
-        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
-
-    // Create client to proxy to Core
-    let client_config = RuntaraClientConfig {
-        server_addr,
-        server_name: "localhost".to_string(),
-        dangerous_skip_cert_verification: true,
-        ..Default::default()
-    };
-    let client = RuntaraClient::new(client_config)
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-    client
-        .connect()
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    // Convert signal type
-    let signal_type = match environment_proto::SignalType::try_from(req.signal_type) {
-        Ok(environment_proto::SignalType::SignalCancel) => {
-            management_proto::SignalType::SignalCancel as i32
-        }
-        Ok(environment_proto::SignalType::SignalPause) => {
-            management_proto::SignalType::SignalPause as i32
-        }
-        Ok(environment_proto::SignalType::SignalResume) => {
-            management_proto::SignalType::SignalResume as i32
-        }
-        Err(_) => {
-            warn!(
-                signal_type = req.signal_type,
-                "Unknown signal type received"
-            );
-            return Err(crate::error::Error::InvalidRequest(format!(
-                "Unknown signal type: {}",
-                req.signal_type
-            )));
-        }
-    };
-
-    // Build management request
-    let mgmt_request = management_proto::RpcRequest {
-        request: Some(management_proto::rpc_request::Request::SendSignal(
-            management_proto::SendSignalRequest {
-                instance_id: req.instance_id.clone(),
-                signal_type,
-                payload: req.payload,
-            },
-        )),
-    };
-
-    // Send request
-    let response: management_proto::RpcResponse = client
-        .request(&mgmt_request)
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    match response.response {
-        Some(management_proto::rpc_response::Response::SendSignal(resp)) => {
-            Ok(environment_proto::SendSignalResponse {
-                success: resp.success,
-                error: resp.error,
-            })
-        }
-        Some(management_proto::rpc_response::Response::Error(e)) => {
-            Ok(environment_proto::SendSignalResponse {
+    // Check if we have Core persistence available
+    let persistence = match &state.core_persistence {
+        Some(p) => p,
+        None => {
+            return Ok(environment_proto::SendSignalResponse {
                 success: false,
-                error: format!("{}: {}", e.code, e.message),
-            })
+                error: "Core persistence not configured".to_string(),
+            });
         }
-        _ => Ok(environment_proto::SendSignalResponse {
+    };
+
+    // Validate instance exists
+    let instance = persistence
+        .get_instance(&req.instance_id)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to get instance: {}", e)))?;
+
+    let instance = match instance {
+        Some(inst) => inst,
+        None => {
+            return Ok(environment_proto::SendSignalResponse {
+                success: false,
+                error: format!("Instance '{}' not found", req.instance_id),
+            });
+        }
+    };
+
+    // Check if instance is in a state that can receive signals
+    if !matches!(
+        instance.status.as_str(),
+        "running" | "suspended" | "pending"
+    ) {
+        return Ok(environment_proto::SendSignalResponse {
             success: false,
-            error: "Unexpected response from Core".to_string(),
-        }),
+            error: format!(
+                "Cannot send signal to instance in '{}' state (terminal state)",
+                instance.status
+            ),
+        });
     }
+
+    // Map proto signal type to DB enum
+    let signal_type = match environment_proto::SignalType::try_from(req.signal_type) {
+        Ok(st) => map_signal_type(st),
+        Err(_) => {
+            return Ok(environment_proto::SendSignalResponse {
+                success: false,
+                error: format!("Unknown signal type: {}", req.signal_type),
+            });
+        }
+    };
+
+    // Insert pending signal via persistence
+    persistence
+        .insert_signal(&req.instance_id, signal_type, &req.payload)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to insert signal: {}", e)))?;
+
+    info!("Signal stored successfully via persistence");
+
+    Ok(environment_proto::SendSignalResponse {
+        success: true,
+        error: String::new(),
+    })
 }
 
 async fn handle_send_custom_signal(
     state: &EnvironmentHandlerState,
     req: environment_proto::SendCustomSignalRequest,
 ) -> Result<environment_proto::SendCustomSignalResponse, crate::error::Error> {
-    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
-
     info!(
         instance_id = %req.instance_id,
         checkpoint_id = %req.checkpoint_id,
-        "Proxying custom signal to Core"
+        "Sending custom signal via shared persistence"
     );
 
-    let server_addr: std::net::SocketAddr = state
-        .core_addr
-        .parse()
-        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
-
-    let client_config = RuntaraClientConfig {
-        server_addr,
-        server_name: "localhost".to_string(),
-        dangerous_skip_cert_verification: true,
-        ..Default::default()
-    };
-    let client = RuntaraClient::new(client_config)
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-    client
-        .connect()
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    let mgmt_request = management_proto::RpcRequest {
-        request: Some(management_proto::rpc_request::Request::SendCustomSignal(
-            management_proto::SendCustomSignalRequest {
-                instance_id: req.instance_id.clone(),
-                checkpoint_id: req.checkpoint_id.clone(),
-                payload: req.payload,
-            },
-        )),
-    };
-
-    let response: management_proto::RpcResponse = client
-        .request(&mgmt_request)
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    match response.response {
-        Some(management_proto::rpc_response::Response::SendCustomSignal(resp)) => {
-            Ok(environment_proto::SendCustomSignalResponse {
-                success: resp.success,
-                error: resp.error,
-            })
-        }
-        Some(management_proto::rpc_response::Response::Error(e)) => {
-            Ok(environment_proto::SendCustomSignalResponse {
+    // Check if we have Core persistence available
+    let persistence = match &state.core_persistence {
+        Some(p) => p,
+        None => {
+            return Ok(environment_proto::SendCustomSignalResponse {
                 success: false,
-                error: format!("{}: {}", e.code, e.message),
-            })
+                error: "Core persistence not configured".to_string(),
+            });
         }
-        _ => Ok(environment_proto::SendCustomSignalResponse {
+    };
+
+    // Validate instance exists
+    let instance = persistence
+        .get_instance(&req.instance_id)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to get instance: {}", e)))?;
+
+    if instance.is_none() {
+        return Ok(environment_proto::SendCustomSignalResponse {
             success: false,
-            error: "Unexpected response from Core".to_string(),
-        }),
+            error: format!("Instance '{}' not found", req.instance_id),
+        });
     }
+
+    // Validate checkpoint_id
+    if req.checkpoint_id.is_empty() {
+        return Ok(environment_proto::SendCustomSignalResponse {
+            success: false,
+            error: "checkpoint_id is required".to_string(),
+        });
+    }
+
+    // Store pending custom signal via persistence
+    persistence
+        .insert_custom_signal(&req.instance_id, &req.checkpoint_id, &req.payload)
+        .await
+        .map_err(|e| {
+            crate::error::Error::Other(format!("Failed to insert custom signal: {}", e))
+        })?;
+
+    info!("Custom signal stored successfully via persistence");
+
+    Ok(environment_proto::SendCustomSignalResponse {
+        success: true,
+        error: String::new(),
+    })
 }
 
 async fn handle_list_checkpoints(
     state: &EnvironmentHandlerState,
     req: environment_proto::ListCheckpointsRequest,
 ) -> Result<environment_proto::ListCheckpointsResponse, crate::error::Error> {
-    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
-
     debug!(
         instance_id = %req.instance_id,
         checkpoint_id_filter = ?req.checkpoint_id,
         limit = ?req.limit,
         offset = ?req.offset,
-        "Proxying list_checkpoints to Core"
+        "Listing checkpoints via shared persistence"
     );
 
-    // Parse core address as SocketAddr
-    let server_addr: std::net::SocketAddr = state
-        .core_addr
-        .parse()
-        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
-
-    // Create client to proxy to Core
-    let client_config = RuntaraClientConfig {
-        server_addr,
-        server_name: "localhost".to_string(),
-        dangerous_skip_cert_verification: true,
-        ..Default::default()
-    };
-    let client = RuntaraClient::new(client_config)
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-    client
-        .connect()
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    // Build management request
-    let mgmt_request = management_proto::RpcRequest {
-        request: Some(management_proto::rpc_request::Request::ListCheckpoints(
-            management_proto::ListCheckpointsRequest {
-                instance_id: req.instance_id.clone(),
-                checkpoint_id: req.checkpoint_id,
-                limit: req.limit,
-                offset: req.offset,
-                created_after_ms: req.created_after_ms,
-                created_before_ms: req.created_before_ms,
-            },
-        )),
-    };
-
-    // Send request
-    let response: management_proto::RpcResponse = client
-        .request(&mgmt_request)
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    match response.response {
-        Some(management_proto::rpc_response::Response::ListCheckpoints(resp)) => {
-            // Convert management proto checkpoints to environment proto
-            let checkpoints = resp
-                .checkpoints
-                .into_iter()
-                .map(|cp| environment_proto::CheckpointSummary {
-                    checkpoint_id: cp.checkpoint_id,
-                    instance_id: cp.instance_id,
-                    created_at_ms: cp.created_at_ms,
-                    data_size_bytes: cp.data_size_bytes,
-                })
-                .collect();
-
-            Ok(environment_proto::ListCheckpointsResponse {
-                checkpoints,
-                total_count: resp.total_count,
-                limit: resp.limit,
-                offset: resp.offset,
-            })
+    // Check if we have Core persistence available
+    let persistence = match &state.core_persistence {
+        Some(p) => p,
+        None => {
+            return Err(crate::error::Error::Other(
+                "Core persistence not configured".to_string(),
+            ));
         }
-        Some(management_proto::rpc_response::Response::Error(e)) => Err(
-            crate::error::Error::CoreProxy(format!("{}: {}", e.code, e.message)),
-        ),
-        _ => Err(crate::error::Error::CoreProxy(
-            "Unexpected response from Core".to_string(),
-        )),
-    }
+    };
+
+    // Parse timestamps from milliseconds
+    let created_after = req
+        .created_after_ms
+        .and_then(chrono::DateTime::from_timestamp_millis);
+    let created_before = req
+        .created_before_ms
+        .and_then(chrono::DateTime::from_timestamp_millis);
+
+    let limit = req.limit.unwrap_or(100) as i64;
+    let offset = req.offset.unwrap_or(0) as i64;
+
+    // Get checkpoints from persistence
+    let checkpoints = persistence
+        .list_checkpoints(
+            &req.instance_id,
+            req.checkpoint_id.as_deref(),
+            limit,
+            offset,
+            created_after,
+            created_before,
+        )
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to list checkpoints: {}", e)))?;
+
+    // Get total count for pagination
+    let total_count = persistence
+        .count_checkpoints(
+            &req.instance_id,
+            req.checkpoint_id.as_deref(),
+            created_after,
+            created_before,
+        )
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to count checkpoints: {}", e)))?;
+
+    // Convert to proto summaries
+    let summaries: Vec<environment_proto::CheckpointSummary> = checkpoints
+        .into_iter()
+        .map(|cp| environment_proto::CheckpointSummary {
+            checkpoint_id: cp.checkpoint_id,
+            instance_id: cp.instance_id,
+            created_at_ms: cp.created_at.timestamp_millis(),
+            data_size_bytes: cp.state.len() as u64,
+        })
+        .collect();
+
+    Ok(environment_proto::ListCheckpointsResponse {
+        checkpoints: summaries,
+        total_count: total_count as u32,
+        limit: limit as u32,
+        offset: offset as u32,
+    })
 }
 
 async fn handle_get_checkpoint(
     state: &EnvironmentHandlerState,
     req: environment_proto::GetCheckpointRequest,
 ) -> Result<environment_proto::GetCheckpointResponse, crate::error::Error> {
-    use runtara_protocol::{RuntaraClient, RuntaraClientConfig, management_proto};
-
     debug!(
         instance_id = %req.instance_id,
         checkpoint_id = %req.checkpoint_id,
-        "Proxying get_checkpoint to Core"
+        "Getting checkpoint via shared persistence"
     );
 
-    // Parse core address as SocketAddr
-    let server_addr: std::net::SocketAddr = state
-        .core_addr
-        .parse()
-        .map_err(|e| crate::error::Error::CoreProxy(format!("Invalid core address: {}", e)))?;
-
-    // Create client to proxy to Core
-    let client_config = RuntaraClientConfig {
-        server_addr,
-        server_name: "localhost".to_string(),
-        dangerous_skip_cert_verification: true,
-        ..Default::default()
-    };
-    let client = RuntaraClient::new(client_config)
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-    client
-        .connect()
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    // Build management request
-    let mgmt_request = management_proto::RpcRequest {
-        request: Some(management_proto::rpc_request::Request::GetCheckpoint(
-            management_proto::GetCheckpointRequest {
-                instance_id: req.instance_id.clone(),
-                checkpoint_id: req.checkpoint_id.clone(),
-            },
-        )),
-    };
-
-    // Send request
-    let response: management_proto::RpcResponse = client
-        .request(&mgmt_request)
-        .await
-        .map_err(|e| crate::error::Error::CoreProxy(e.to_string()))?;
-
-    match response.response {
-        Some(management_proto::rpc_response::Response::GetCheckpoint(resp)) => {
-            Ok(environment_proto::GetCheckpointResponse {
-                found: resp.found,
-                checkpoint_id: resp.checkpoint_id,
-                instance_id: resp.instance_id,
-                created_at_ms: resp.created_at_ms,
-                data: resp.data,
-            })
+    // Check if we have Core persistence available
+    let persistence = match &state.core_persistence {
+        Some(p) => p,
+        None => {
+            return Err(crate::error::Error::Other(
+                "Core persistence not configured".to_string(),
+            ));
         }
-        Some(management_proto::rpc_response::Response::Error(e)) => Err(
-            crate::error::Error::CoreProxy(format!("{}: {}", e.code, e.message)),
-        ),
-        _ => Err(crate::error::Error::CoreProxy(
-            "Unexpected response from Core".to_string(),
-        )),
+    };
+
+    let checkpoint = persistence
+        .load_checkpoint(&req.instance_id, &req.checkpoint_id)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to load checkpoint: {}", e)))?;
+
+    match checkpoint {
+        Some(cp) => Ok(environment_proto::GetCheckpointResponse {
+            found: true,
+            checkpoint_id: cp.checkpoint_id,
+            instance_id: cp.instance_id,
+            created_at_ms: cp.created_at.timestamp_millis(),
+            data: cp.state,
+        }),
+        None => Ok(environment_proto::GetCheckpointResponse {
+            found: false,
+            checkpoint_id: req.checkpoint_id,
+            instance_id: req.instance_id,
+            created_at_ms: 0,
+            data: Vec::new(),
+        }),
     }
 }

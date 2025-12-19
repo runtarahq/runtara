@@ -6,7 +6,6 @@ mod common;
 
 use common::*;
 use runtara_protocol::instance_proto;
-use runtara_protocol::management_proto;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -26,10 +25,6 @@ async fn test_signal_send_poll_ack_flow() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // 1. Initially no signals
     let poll_req = instance_proto::PollSignalsRequest {
@@ -51,23 +46,12 @@ async fn test_signal_send_poll_ack_flow() {
         _ => panic!("Unexpected response"),
     }
 
-    // 2. Send cancel signal via management client
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: b"test payload".to_vec(),
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(r.success, "Send should succeed: {}", r.error);
-        }
-        _ => panic!("Unexpected response"),
-    }
+    // 2. Send cancel signal via persistence
+    let result = ctx
+        .send_signal(&instance_id, "cancel", b"test payload")
+        .await;
+    assert!(result.is_ok(), "Send should succeed");
+    assert!(result.unwrap(), "Should return true for valid instance");
 
     // 3. Poll should return the signal (via instance client)
     let resp: instance_proto::RpcResponse = ctx
@@ -132,37 +116,23 @@ async fn test_all_signal_types() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // Test all signal types can be sent
-    for signal_type in [
-        management_proto::SignalType::SignalCancel,
-        management_proto::SignalType::SignalPause,
-        management_proto::SignalType::SignalResume,
+    for (signal_type_str, expected_proto_type) in [
+        ("cancel", instance_proto::SignalType::SignalCancel),
+        ("pause", instance_proto::SignalType::SignalPause),
+        ("resume", instance_proto::SignalType::SignalResume),
     ] {
         let instance_id = Uuid::new_v4();
         ctx.create_running_instance(&instance_id, "test-tenant")
             .await;
 
-        let send_req = management_proto::SendSignalRequest {
-            instance_id: instance_id.to_string(),
-            signal_type: signal_type as i32,
-            payload: vec![],
-        };
-        let resp: management_proto::RpcResponse = ctx
-            .management_client
-            .request(&wrap_send_signal(send_req))
-            .await
-            .unwrap();
-        match resp.response {
-            Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-                assert!(r.success, "Should be able to send {:?} signal", signal_type);
-            }
-            _ => panic!("Unexpected response"),
-        }
+        let result = ctx.send_signal(&instance_id, signal_type_str, &[]).await;
+        assert!(
+            result.is_ok() && result.unwrap(),
+            "Should be able to send {} signal",
+            signal_type_str
+        );
 
         // Poll and verify type
         let poll_req = instance_proto::PollSignalsRequest {
@@ -177,8 +147,7 @@ async fn test_all_signal_types() {
         match resp.response {
             Some(instance_proto::rpc_response::Response::PollSignals(r)) => {
                 let signal = r.signal.expect("Should have pending signal");
-                // Signal types have same numeric values in both protos
-                assert_eq!(signal.signal_type, signal_type as i32);
+                assert_eq!(signal.signal_type, expected_proto_type as i32);
             }
             _ => panic!("Unexpected response"),
         }
@@ -199,31 +168,13 @@ async fn test_signal_to_pending_instance() {
     let instance_id = Uuid::new_v4();
     ctx.create_test_instance(&instance_id, "test-tenant").await;
     // Instance is in pending state
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
 
     // Should be able to send signal to pending instance
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_send_signal(send_req))
-        .await
-        .unwrap();
-    match resp.response {
-        Some(management_proto::rpc_response::Response::SendSignal(r)) => {
-            assert!(
-                r.success,
-                "Should be able to send signal to pending instance"
-            );
-        }
-        _ => panic!("Unexpected response"),
-    }
+    let result = ctx.send_signal(&instance_id, "cancel", &[]).await;
+    assert!(
+        result.is_ok() && result.unwrap(),
+        "Should be able to send signal to pending instance"
+    );
 
     ctx.cleanup_instance(&instance_id).await;
 }
@@ -244,21 +195,11 @@ async fn test_signal_empty_payload() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
     // Send signal with empty payload
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalPause as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    ctx.send_signal(&instance_id, "pause", &[])
         .await
-        .unwrap();
+        .expect("Send should succeed");
 
     // Poll and verify empty payload
     let poll_req = instance_proto::PollSignalsRequest {
@@ -330,21 +271,11 @@ async fn test_signal_not_acknowledged() {
         .connect()
         .await
         .expect("Failed to connect instance client");
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect management client");
 
-    // Send signal via management client
-    let send_req = management_proto::SendSignalRequest {
-        instance_id: instance_id.to_string(),
-        signal_type: management_proto::SignalType::SignalCancel as i32,
-        payload: vec![],
-    };
-    ctx.management_client
-        .request::<_, management_proto::RpcResponse>(&wrap_send_signal(send_req))
+    // Send signal via persistence
+    ctx.send_signal(&instance_id, "cancel", &[])
         .await
-        .unwrap();
+        .expect("Send should succeed");
 
     // Poll
     let poll_req = instance_proto::PollSignalsRequest {

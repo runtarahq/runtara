@@ -387,3 +387,62 @@ pub async fn health_check(pool: &PgPool) -> Result<bool, sqlx::Error> {
         .await
         .map(|_| true)
 }
+
+// ============================================================================
+// Instance Images (for shared Core persistence mode)
+// ============================================================================
+
+/// Associate an instance with an image.
+///
+/// Used when Core owns the instances table but Environment needs to track
+/// which image was used to launch each instance.
+pub async fn associate_instance_image(
+    pool: &PgPool,
+    instance_id: &str,
+    image_id: &str,
+    tenant_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO instance_images (instance_id, image_id, tenant_id, created_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (instance_id) DO UPDATE SET
+            image_id = $2,
+            tenant_id = $3
+        "#,
+    )
+    .bind(instance_id)
+    .bind(image_id)
+    .bind(tenant_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get the image ID for an instance.
+pub async fn get_instance_image_id(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let result: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT image_id FROM instance_images WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result.map(|(id,)| id))
+}
+
+/// Remove instance-image association.
+pub async fn remove_instance_image(pool: &PgPool, instance_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM instance_images WHERE instance_id = $1")
+        .bind(instance_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}

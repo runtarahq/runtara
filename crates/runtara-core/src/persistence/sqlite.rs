@@ -44,7 +44,7 @@ impl Persistence for SqlitePersistence {
             r#"
             SELECT instance_id, tenant_id, definition_version,
                    status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error
+                   created_at, started_at, finished_at, output, error, sleep_until
             FROM instances
             WHERE instance_id = ?
             "#,
@@ -412,7 +412,7 @@ impl Persistence for SqlitePersistence {
             r#"
             SELECT instance_id, tenant_id, definition_version,
                    status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error
+                   created_at, started_at, finished_at, output, error, sleep_until
             FROM instances
             WHERE (?1 IS NULL OR tenant_id = ?1)
               AND (?2 IS NULL OR status = ?2)
@@ -447,6 +447,77 @@ impl Persistence for SqlitePersistence {
         .await?;
 
         Ok(row.0)
+    }
+
+    async fn set_instance_sleep(
+        &self,
+        instance_id: &str,
+        sleep_until: DateTime<Utc>,
+    ) -> Result<(), CoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE instances
+            SET sleep_until = ?
+            WHERE instance_id = ?
+            "#,
+        )
+        .bind(sleep_until)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(CoreError::InstanceNotFound {
+                instance_id: instance_id.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE instances
+            SET sleep_until = NULL
+            WHERE instance_id = ?
+            "#,
+        )
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(CoreError::InstanceNotFound {
+                instance_id: instance_id.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn get_sleeping_instances_due(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        let records = sqlx::query_as::<_, InstanceRecord>(
+            r#"
+            SELECT instance_id, tenant_id, definition_version,
+                   status as status, checkpoint_id, attempt, max_attempts,
+                   created_at, started_at, finished_at, output, error, sleep_until
+            FROM instances
+            WHERE sleep_until IS NOT NULL
+              AND sleep_until <= datetime('now')
+              AND status = 'suspended'
+            ORDER BY sleep_until ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(records)
     }
 }
 

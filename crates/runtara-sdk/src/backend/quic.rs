@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! QUIC-based SDK backend for remote communication with runtara-core.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use runtara_protocol::instance_proto::{
     self as proto, CheckpointRequest as ProtoCheckpointRequest,
     GetCheckpointRequest as ProtoGetCheckpointRequest, GetInstanceStatusRequest,
-    RegisterInstanceRequest, RpcRequest, RpcResponse, rpc_request, rpc_response,
+    RegisterInstanceRequest, RpcRequest, RpcResponse, SleepRequest, rpc_request, rpc_response,
 };
 use runtara_protocol::{RuntaraClient, RuntaraClientConfig};
 use tracing::{debug, info, instrument, warn};
@@ -298,6 +301,69 @@ impl SdkBackend for QuicBackend {
 
     fn tenant_id(&self) -> &str {
         &self.tenant_id
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn set_sleep_until(&self, _sleep_until: DateTime<Utc>) -> Result<()> {
+        // In QUIC mode, sleep_until is managed server-side via durable_sleep
+        // This is a no-op as the server handles sleep tracking
+        debug!("set_sleep_until is handled by server in QUIC mode");
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn clear_sleep(&self) -> Result<()> {
+        // In QUIC mode, sleep_until is managed server-side
+        // This is a no-op as the server clears sleep after wake
+        debug!("clear_sleep is handled by server in QUIC mode");
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
+        // Get the sleep_until time from the server via status
+        let status = self.get_status().await?;
+        // StatusResponse doesn't currently include sleep_until
+        // For now, return None as the server handles sleep tracking internally
+        debug!("get_sleep_until: status found={}", status.found);
+        Ok(None)
+    }
+
+    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, duration_ms = duration.as_millis() as u64))]
+    async fn durable_sleep(
+        &self,
+        duration: Duration,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<()> {
+        debug!("Requesting durable sleep via QUIC");
+
+        let request = SleepRequest {
+            instance_id: self.instance_id.clone(),
+            duration_ms: duration.as_millis() as u64,
+            checkpoint_id: checkpoint_id.to_string(),
+            state: state.to_vec(),
+        };
+
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::Sleep(request)),
+        };
+
+        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
+
+        match rpc_response.response {
+            Some(rpc_response::Response::Sleep(_)) => {
+                info!("Durable sleep completed (handled by server)");
+                Ok(())
+            }
+            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected SleepResponse".to_string(),
+            )),
+        }
     }
 }
 

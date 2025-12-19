@@ -37,6 +37,8 @@ pub struct InstanceRecord {
     pub output: Option<Vec<u8>>,
     /// Error message from failure.
     pub error: Option<String>,
+    /// When a sleeping instance should be woken.
+    pub sleep_until: Option<DateTime<Utc>>,
 }
 
 /// Checkpoint record from the persistence layer.
@@ -221,4 +223,20 @@ pub trait Persistence: Send + Sync {
     async fn health_check_db(&self) -> Result<bool, CoreError>;
 
     async fn count_active_instances(&self) -> Result<i64, CoreError>;
+
+    /// Set the sleep_until timestamp for an instance.
+    async fn set_instance_sleep(
+        &self,
+        instance_id: &str,
+        sleep_until: DateTime<Utc>,
+    ) -> Result<(), CoreError>;
+
+    /// Clear the sleep_until timestamp for an instance.
+    async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError>;
+
+    /// Get instances that are due to wake (sleep_until <= now).
+    async fn get_sleeping_instances_due(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<InstanceRecord>, CoreError>;
 }

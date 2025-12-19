@@ -14,8 +14,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use runtara_core::instance_handlers::InstanceHandlerState;
-use runtara_core::management_handlers::ManagementHandlerState;
-use runtara_core::persistence::PostgresPersistence;
+use runtara_core::persistence::{Persistence, PostgresPersistence};
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
@@ -23,10 +22,9 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres
 /// Test context that manages database, server, and client for E2E tests.
 pub struct TestContext {
     pub pool: PgPool,
+    pub persistence: Arc<PostgresPersistence>,
     pub instance_client: RuntaraClient,
-    pub management_client: RuntaraClient,
     pub instance_server_addr: SocketAddr,
-    pub management_server_addr: SocketAddr,
 }
 
 impl TestContext {
@@ -35,8 +33,8 @@ impl TestContext {
     /// This sets up:
     /// 1. Database connection from TEST_DATABASE_URL
     /// 2. Instance QUIC server on an available port
-    /// 3. Management QUIC server on an available port
-    /// 4. QUIC clients connected to both servers
+    /// 3. QUIC client connected to the server
+    /// 4. Persistence layer for direct database operations
     pub async fn new() -> Option<Self> {
         // 1. Get database URL from environment
         let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
@@ -47,19 +45,14 @@ impl TestContext {
         // 2b. Run migrations to ensure schema exists
         MIGRATOR.run(&pool).await.ok()?;
 
-        // 3. Find available ports for both servers
+        // 3. Find available port for server
         let listener1 = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
         let instance_server_addr = listener1.local_addr().ok()?;
         drop(listener1);
 
-        let listener2 = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-        let management_server_addr = listener2.local_addr().ok()?;
-        drop(listener2);
-
-        // 4. Create handler states
+        // 4. Create handler state with persistence
         let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
         let instance_state = Arc::new(InstanceHandlerState::new(persistence.clone()));
-        let management_state = Arc::new(ManagementHandlerState::new(persistence.clone()));
 
         // 5. Start instance server in background
         let instance_server_state = instance_state.clone();
@@ -73,24 +66,10 @@ impl TestContext {
             }
         });
 
-        // 6. Start management server in background
-        let management_server_state = management_state.clone();
-        let management_bind_addr = management_server_addr;
-        tokio::spawn(async move {
-            if let Err(e) = runtara_core::server::run_management_server(
-                management_bind_addr,
-                management_server_state,
-            )
-            .await
-            {
-                eprintln!("Test management server error: {}", e);
-            }
-        });
-
-        // 7. Wait for servers to start
+        // 6. Wait for server to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // 8. Create instance client
+        // 7. Create instance client
         let instance_client = RuntaraClient::new(RuntaraClientConfig {
             server_addr: instance_server_addr,
             dangerous_skip_cert_verification: true,
@@ -98,20 +77,11 @@ impl TestContext {
         })
         .ok()?;
 
-        // 9. Create management client
-        let management_client = RuntaraClient::new(RuntaraClientConfig {
-            server_addr: management_server_addr,
-            dangerous_skip_cert_verification: true,
-            ..Default::default()
-        })
-        .ok()?;
-
         Some(Self {
             pool,
+            persistence,
             instance_client,
-            management_client,
             instance_server_addr,
-            management_server_addr,
         })
     }
 
@@ -205,6 +175,46 @@ impl TestContext {
         .await
         .ok()?;
         row.map(|r| r.0)
+    }
+
+    /// Send a signal to an instance via the persistence layer.
+    /// Returns Ok(true) if successful, Ok(false) if instance not found or in terminal state.
+    pub async fn send_signal(
+        &self,
+        instance_id: &Uuid,
+        signal_type: &str,
+        payload: &[u8],
+    ) -> Result<bool, String> {
+        // Check instance exists and is not in terminal state
+        let instance = self
+            .persistence
+            .get_instance(&instance_id.to_string())
+            .await
+            .map_err(|e| format!("Failed to get instance: {}", e))?;
+
+        let instance = match instance {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+
+        // Check terminal states
+        match instance.status.as_str() {
+            "completed" | "failed" | "cancelled" => {
+                return Err(format!(
+                    "Instance is in terminal state: {}",
+                    instance.status
+                ));
+            }
+            _ => {}
+        }
+
+        // Insert signal via persistence
+        self.persistence
+            .insert_signal(&instance_id.to_string(), signal_type, payload)
+            .await
+            .map_err(|e| format!("Failed to insert signal: {}", e))?;
+
+        Ok(true)
     }
 
     /// Clean up all test data for a specific instance.
@@ -346,43 +356,5 @@ pub fn wrap_instance_event(
 ) -> runtara_protocol::instance_proto::RpcRequest {
     runtara_protocol::instance_proto::RpcRequest {
         request: Some(runtara_protocol::instance_proto::rpc_request::Request::InstanceEvent(req)),
-    }
-}
-
-// ============================================================================
-// Management Protocol Helpers
-// ============================================================================
-
-pub fn wrap_health_check(
-    req: runtara_protocol::management_proto::HealthCheckRequest,
-) -> runtara_protocol::management_proto::RpcRequest {
-    runtara_protocol::management_proto::RpcRequest {
-        request: Some(runtara_protocol::management_proto::rpc_request::Request::HealthCheck(req)),
-    }
-}
-
-pub fn wrap_send_signal(
-    req: runtara_protocol::management_proto::SendSignalRequest,
-) -> runtara_protocol::management_proto::RpcRequest {
-    runtara_protocol::management_proto::RpcRequest {
-        request: Some(runtara_protocol::management_proto::rpc_request::Request::SendSignal(req)),
-    }
-}
-
-pub fn wrap_mgmt_get_instance_status(
-    req: runtara_protocol::management_proto::GetInstanceStatusRequest,
-) -> runtara_protocol::management_proto::RpcRequest {
-    runtara_protocol::management_proto::RpcRequest {
-        request: Some(
-            runtara_protocol::management_proto::rpc_request::Request::GetInstanceStatus(req),
-        ),
-    }
-}
-
-pub fn wrap_list_instances(
-    req: runtara_protocol::management_proto::ListInstancesRequest,
-) -> runtara_protocol::management_proto::RpcRequest {
-    runtara_protocol::management_proto::RpcRequest {
-        request: Some(runtara_protocol::management_proto::rpc_request::Request::ListInstances(req)),
     }
 }

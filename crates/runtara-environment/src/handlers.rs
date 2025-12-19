@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
+use runtara_core::persistence::Persistence;
+
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::error::Result;
@@ -22,8 +24,11 @@ use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 ///
 /// Contains database connection, runner, and configuration shared across all handlers.
 pub struct EnvironmentHandlerState {
-    /// PostgreSQL connection pool.
+    /// PostgreSQL connection pool (for Environment-specific tables: images, containers, etc.).
     pub pool: PgPool,
+    /// Core persistence layer (for instance lifecycle, checkpoints, signals).
+    /// When set, instance operations are delegated to Core's shared persistence.
+    pub core_persistence: Option<Arc<dyn Persistence>>,
     /// When the server started (for uptime calculation).
     pub start_time: std::time::Instant,
     /// Server version string.
@@ -46,6 +51,30 @@ impl EnvironmentHandlerState {
     ) -> Self {
         Self {
             pool,
+            core_persistence: None,
+            start_time: std::time::Instant::now(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            runner,
+            core_addr,
+            data_dir,
+        }
+    }
+
+    /// Create a new environment handler state with Core persistence.
+    ///
+    /// When Core persistence is provided, instance lifecycle operations
+    /// (create, update status, etc.) are delegated to Core's shared persistence layer.
+    /// This enables both Environment and Core to share the same instance data.
+    pub fn with_core_persistence(
+        pool: PgPool,
+        core_persistence: Arc<dyn Persistence>,
+        runner: Arc<dyn Runner>,
+        core_addr: String,
+        data_dir: PathBuf,
+    ) -> Self {
+        Self {
+            pool,
+            core_persistence: Some(core_persistence),
             start_time: std::time::Instant::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             runner,

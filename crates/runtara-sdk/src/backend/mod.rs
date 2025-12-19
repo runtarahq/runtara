@@ -12,10 +12,13 @@ pub mod quic;
 #[cfg(feature = "embedded")]
 pub mod embedded;
 
+use std::time::Duration;
+
 #[cfg(feature = "quic")]
 use std::any::Any;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 use crate::error::Result;
 use crate::types::{CheckpointResult, StatusResponse};
@@ -76,4 +79,28 @@ pub trait SdkBackend: Send + Sync {
 
     /// Get the tenant ID.
     fn tenant_id(&self) -> &str;
+
+    /// Set the sleep_until timestamp for durable sleep.
+    async fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()>;
+
+    /// Clear the sleep_until timestamp.
+    async fn clear_sleep(&self) -> Result<()>;
+
+    /// Get the current sleep_until timestamp for this instance.
+    async fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>>;
+
+    /// Perform a durable sleep with checkpoint and remaining time calculation.
+    ///
+    /// This method:
+    /// 1. Saves a checkpoint with the provided state
+    /// 2. Sets sleep_until = now + duration
+    /// 3. On resume, calculates remaining time from stored sleep_until
+    /// 4. Sleeps for the remaining duration
+    /// 5. Clears sleep_until when done
+    async fn durable_sleep(
+        &self,
+        duration: Duration,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<()>;
 }

@@ -6,7 +6,6 @@ mod common;
 
 use common::*;
 use runtara_protocol::instance_proto;
-use runtara_protocol::management_proto;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -197,35 +196,4 @@ async fn test_register_requires_tenant_id() {
     }
 
     ctx.cleanup_instance(&instance_id).await;
-}
-
-#[tokio::test]
-async fn test_health_check() {
-    skip_if_no_db!();
-
-    let Some(ctx) = TestContext::new().await else {
-        eprintln!("Skipping test: failed to create test context");
-        return;
-    };
-
-    ctx.management_client
-        .connect()
-        .await
-        .expect("Failed to connect");
-
-    let health_req = management_proto::HealthCheckRequest {};
-    let resp: management_proto::RpcResponse = ctx
-        .management_client
-        .request(&wrap_health_check(health_req))
-        .await
-        .expect("Failed to send health check request");
-
-    match resp.response {
-        Some(management_proto::rpc_response::Response::HealthCheck(r)) => {
-            assert!(r.healthy, "Server should be healthy");
-            assert!(!r.version.is_empty(), "Version should not be empty");
-            assert!(r.uptime_ms > 0, "Uptime should be positive");
-        }
-        _ => panic!("Unexpected response type"),
-    }
 }

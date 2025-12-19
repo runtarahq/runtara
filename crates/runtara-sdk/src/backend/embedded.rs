@@ -6,9 +6,10 @@
 //! suitable for embedding runtara-core within the same process.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use runtara_core::persistence::{EventRecord, Persistence};
 use tracing::{debug, info, instrument};
 
@@ -302,6 +303,97 @@ impl SdkBackend for EmbeddedBackend {
     fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()> {
+        self.persistence
+            .set_instance_sleep(&self.instance_id, sleep_until)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        debug!(sleep_until = %sleep_until, "Sleep until set");
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn clear_sleep(&self) -> Result<()> {
+        self.persistence
+            .clear_instance_sleep(&self.instance_id)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        debug!("Sleep cleared");
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
+        let instance = self
+            .persistence
+            .get_instance(&self.instance_id)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        Ok(instance.and_then(|i| i.sleep_until))
+    }
+
+    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, duration_ms = duration.as_millis() as u64))]
+    async fn durable_sleep(
+        &self,
+        duration: Duration,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<()> {
+        let now = Utc::now();
+        let wake_at =
+            now + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::zero());
+
+        // Check if we're resuming from a checkpoint
+        let checkpoint_result = self.checkpoint(checkpoint_id, state).await?;
+
+        if checkpoint_result.found {
+            // Resuming - check stored sleep_until time
+            let stored_sleep_until = self.get_sleep_until().await?;
+
+            if let Some(sleep_until) = stored_sleep_until {
+                let now = Utc::now();
+                if sleep_until <= now {
+                    // Sleep already completed
+                    debug!("Sleep already completed, clearing");
+                    self.clear_sleep().await?;
+                    return Ok(());
+                }
+
+                // Calculate remaining duration
+                let remaining = (sleep_until - now).to_std().unwrap_or(Duration::ZERO);
+                info!(
+                    remaining_ms = remaining.as_millis() as u64,
+                    "Resuming sleep with remaining duration"
+                );
+
+                // Sleep for remaining time
+                tokio::time::sleep(remaining).await;
+                self.clear_sleep().await?;
+                return Ok(());
+            }
+
+            // No sleep_until stored but checkpoint exists - sleep was never started
+            // Fall through to set up sleep
+        }
+
+        // New sleep - set sleep_until and sleep
+        self.set_sleep_until(wake_at).await?;
+        info!(
+            duration_ms = duration.as_millis() as u64,
+            "Starting durable sleep"
+        );
+
+        tokio::time::sleep(duration).await;
+        self.clear_sleep().await?;
+        info!("Durable sleep completed");
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +419,7 @@ mod tests {
         checkpoint_id: Option<String>,
         output: Option<Vec<u8>>,
         error: Option<String>,
+        sleep_until: Option<DateTime<Utc>>,
     }
 
     impl MockPersistence {
@@ -355,6 +448,7 @@ mod tests {
                     checkpoint_id: None,
                     output: None,
                     error: None,
+                    sleep_until: None,
                 },
             );
             Ok(())
@@ -380,6 +474,7 @@ mod tests {
                     finished_at: None,
                     output: inst.output.clone(),
                     error: inst.error.clone(),
+                    sleep_until: inst.sleep_until,
                 }))
         }
 
@@ -549,6 +644,33 @@ mod tests {
 
         async fn count_active_instances(&self) -> CoreResult<i64> {
             Ok(0)
+        }
+
+        async fn set_instance_sleep(
+            &self,
+            instance_id: &str,
+            sleep_until: DateTime<Utc>,
+        ) -> CoreResult<()> {
+            let mut instances = self.instances.write().await;
+            if let Some(inst) = instances.get_mut(instance_id) {
+                inst.sleep_until = Some(sleep_until);
+            }
+            Ok(())
+        }
+
+        async fn clear_instance_sleep(&self, instance_id: &str) -> CoreResult<()> {
+            let mut instances = self.instances.write().await;
+            if let Some(inst) = instances.get_mut(instance_id) {
+                inst.sleep_until = None;
+            }
+            Ok(())
+        }
+
+        async fn get_sleeping_instances_due(
+            &self,
+            _limit: i64,
+        ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
+            Ok(vec![])
         }
     }
 

@@ -25,6 +25,9 @@ quinn = { version = "0.11.9", default-features = false, features = ["runtime-tok
 # Protocol
 runtara-protocol = { path = "../runtara-protocol" }
 
+# Core persistence layer (for shared database access)
+runtara-core = { path = "../runtara-core" }
+
 # DSL types for agent metadata (list_agents, get_capability)
 runtara-dsl = { path = "../runtara-dsl" }
 

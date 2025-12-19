@@ -3,7 +3,7 @@
 //! Runtara Core - Durable Execution Engine
 //!
 //! This crate provides the execution engine for durable workflows. It manages checkpoints,
-//! signals, and instance events, persisting all state to PostgreSQL for crash resilience.
+//! signals, and instance events, persisting all state to the database for crash resilience.
 //!
 //! # Architecture
 //!
@@ -17,33 +17,34 @@
 //! ┌─────────────────────────────────────────────────────────────────────────┐
 //! │                      runtara-environment                                 │
 //! │            (Image Registry, Instance Lifecycle, Wake Queue)              │
-//! │                           Port 7000                                      │
+//! │                           Port 8002                                      │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //!           │                                              │
-//!           │ Management Protocol                          │ Spawns
+//!           │ Shared Persistence                           │ Spawns
 //!           ▼                                              ▼
 //! ┌───────────────────────┐                    ┌─────────────────────────────┐
 //! │    runtara-core       │◄───────────────────│     Workflow Instances      │
 //! │  (This Crate)         │  Instance Protocol │   (using runtara-sdk)       │
 //! │  Checkpoints/Signals  │                    │                             │
-//! │  Port 7001 + 7002     │                    └─────────────────────────────┘
+//! │  Port 8001            │                    └─────────────────────────────┘
 //! └───────────────────────┘
 //!           │
 //!           ▼
 //! ┌───────────────────────┐
-//! │      PostgreSQL       │
+//! │  PostgreSQL / SQLite  │
 //! │  (Durable Storage)    │
 //! └───────────────────────┘
 //! ```
 //!
-//! # QUIC Servers
+//! # QUIC Server
 //!
-//! Core exposes two QUIC servers:
+//! Core exposes one QUIC server:
 //!
 //! | Server | Port | Purpose |
 //! |--------|------|---------|
 //! | Instance Server | 8001 | Workflow instances connect here via runtara-sdk |
-//! | Management Server | 8003 | runtara-environment connects here for coordination |
+//!
+//! Environment uses the shared `Persistence` trait directly instead of QUIC.
 //!
 //! # Instance Protocol (Port 8001)
 //!
@@ -57,7 +58,7 @@
 //! | `RegisterInstance` | Self-register on startup, optionally resume from checkpoint |
 //! | `Checkpoint` | Save state (or return existing if checkpoint_id exists) + signal delivery |
 //! | `GetCheckpoint` | Read-only checkpoint lookup |
-//! | `Sleep` | Durable sleep - always handled in-process |
+//! | `Sleep` | Durable sleep - stores wake time in database |
 //! | `InstanceEvent` | Fire-and-forget events (heartbeat, completed, failed, suspended) |
 //! | `GetInstanceStatus` | Query instance status |
 //! | `PollSignals` | Poll for pending cancel/pause/resume signals |
@@ -71,23 +72,11 @@
 //! 2. **Subsequent calls with same checkpoint_id**: Returns existing state (for resume)
 //! 3. **Signal delivery**: Returns pending signals in response for efficient poll-free detection
 //!
-//! ## Sleep Behavior
+//! ## Durable Sleep
 //!
-//! All sleeps are handled in-process by runtara-core. Managed environments
-//! (runtara-environment) may hibernate containers separately based on idleness.
-//!
-//! # Management Protocol (Port 8003)
-//!
-//! The management protocol handles coordination between Core and Environment.
-//!
-//! | Operation | Description |
-//! |-----------|-------------|
-//! | `HealthCheck` | Server health, version, uptime, active instance count |
-//! | `SendSignal` | Deliver cancel/pause/resume signal to instance |
-//! | `GetInstanceStatus` | Query instance status (proxied from Environment) |
-//! | `ListInstances` | List instances with filtering and pagination |
-//!
-//! Note: Start/stop operations are handled by Environment, not Core.
+//! The `Sleep` operation stores a `sleep_until` timestamp in the instances table.
+//! Environment's wake scheduler polls for sleeping instances and relaunches them
+//! when their wake time arrives. On resume, the SDK calculates remaining sleep time.
 //!
 //! # Instance Status State Machine
 //!
@@ -141,19 +130,17 @@
 //!
 //! | Variable | Required | Default | Description |
 //! |----------|----------|---------|-------------|
-//! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
+//! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
 //! | `RUNTARA_QUIC_PORT` | No | `8001` | Instance QUIC server port |
-//! | `RUNTARA_ADMIN_PORT` | No | `8003` | Management QUIC server port |
 //! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances |
 //!
 //! # Modules
 //!
 //! - [`config`]: Server configuration from environment variables
-//! - [`db`]: PostgreSQL persistence layer for instances, checkpoints, events, signals
+//! - [`persistence`]: Database persistence layer for instances, checkpoints, events, signals
 //! - [`error`]: Error types with RPC error code mapping
 //! - [`instance_handlers`]: Instance protocol request handlers
-//! - [`management_handlers`]: Management protocol request handlers
-//! - [`server`]: QUIC server implementations
+//! - [`server`]: QUIC server implementation
 
 #![deny(missing_docs)]
 
@@ -169,8 +156,5 @@ pub mod error;
 /// Instance protocol handlers (registration, checkpoints, events, signals).
 pub mod instance_handlers;
 
-/// Management protocol handlers (health, signals, status queries).
-pub mod management_handlers;
-
-/// QUIC server implementations for instance and management protocols.
+/// QUIC server implementation for the instance protocol.
 pub mod server;
