@@ -27,7 +27,7 @@ macro_rules! skip_if_no_db {
     };
 }
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
 
 /// Get a database pool for testing
 async fn get_test_pool() -> Option<PgPool> {

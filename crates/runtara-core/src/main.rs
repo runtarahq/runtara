@@ -14,12 +14,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::SqlitePoolOptions;
 use tracing::{error, info};
 
 use runtara_core::config::Config;
 use runtara_core::instance_handlers::InstanceHandlerState;
 use runtara_core::management_handlers::ManagementHandlerState;
-use runtara_core::persistence::PostgresPersistence;
+use runtara_core::persistence::{Persistence, PostgresPersistence, SqlitePersistence};
 use runtara_core::server;
 
 #[tokio::main]
@@ -50,27 +51,45 @@ async fn main() -> Result<()> {
         "Configuration loaded"
     );
 
-    // Connect to database
+    // Connect to database (Postgres or SQLite)
     info!("Connecting to database...");
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&config.database_url)
-        .await?;
+    let persistence: Arc<dyn Persistence> = if config.database_url.starts_with("postgres://")
+        || config.database_url.starts_with("postgresql://")
+    {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(&config.database_url)
+            .await?;
 
-    info!("Database connection established");
+        info!("Database connection established (Postgres)");
 
-    // Verify connection
-    let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
-    info!(result = row.0, "Database health check passed");
+        // Verify connection
+        let row: (i32,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await?;
+        info!(result = row.0, "Database health check passed");
 
-    // Create persistence backend and shared handler states
-    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+        info!("Running database migrations...");
+        sqlx::migrate!("./migrations/postgresql").run(&pool).await?;
+        info!("Migrations completed");
+
+        Arc::new(PostgresPersistence::new(pool))
+    } else {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(10)
+            .connect(&config.database_url)
+            .await?;
+
+        info!("Database connection established (SQLite)");
+
+        info!("Running database migrations...");
+        sqlx::migrate!("./migrations/sqlite").run(&pool).await?;
+        info!("Migrations completed");
+
+        Arc::new(SqlitePersistence::new(pool))
+    };
+
+    // Create shared handler states
     let instance_state = Arc::new(InstanceHandlerState::new(persistence.clone()));
     let management_state = Arc::new(ManagementHandlerState::new(persistence.clone()));
-
-    info!("Running database migrations...");
-    sqlx::migrate!("./migrations").run(&pool).await?;
-    info!("Migrations completed");
 
     info!("Runtara Core initialized successfully");
 
@@ -102,7 +121,6 @@ async fn main() -> Result<()> {
     instance_server_handle.abort();
     management_server_handle.abort();
 
-    pool.close().await;
     info!("Shutdown complete");
 
     Ok(())

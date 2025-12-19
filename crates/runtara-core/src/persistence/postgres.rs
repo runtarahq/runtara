@@ -10,7 +10,6 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::Persistence;
 use crate::error::CoreError;
 
 /// PostgreSQL-backed persistence implementation.
@@ -30,109 +29,10 @@ impl PostgresPersistence {
 // Record Types
 // ============================================================================
 
-/// Instance record from the database.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct InstanceRecord {
-    /// Unique identifier for the instance.
-    pub instance_id: String,
-    /// Tenant identifier for multi-tenancy isolation.
-    pub tenant_id: String,
-    /// Version of the workflow definition.
-    pub definition_version: i32,
-    /// Current status (pending, running, suspended, completed, failed, cancelled).
-    pub status: String,
-    /// Last checkpoint ID if instance was checkpointed.
-    pub checkpoint_id: Option<String>,
-    /// Current attempt number (for retries).
-    pub attempt: i32,
-    /// Maximum allowed attempts before permanent failure.
-    pub max_attempts: i32,
-    /// When the instance was created.
-    pub created_at: DateTime<Utc>,
-    /// When the instance started running.
-    pub started_at: Option<DateTime<Utc>>,
-    /// When the instance finished (completed, failed, or cancelled).
-    pub finished_at: Option<DateTime<Utc>>,
-    /// Output data from successful completion.
-    pub output: Option<Vec<u8>>,
-    /// Error message from failure.
-    pub error: Option<String>,
-}
-
-/// Checkpoint record from the database.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CheckpointRecord {
-    /// Database primary key.
-    pub id: i64,
-    /// Instance this checkpoint belongs to.
-    pub instance_id: String,
-    /// Unique checkpoint identifier within the instance.
-    pub checkpoint_id: String,
-    /// Serialized state data.
-    pub state: Vec<u8>,
-    /// When the checkpoint was created.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Event record from the database.
-#[derive(Debug, Clone)]
-pub struct EventRecord {
-    /// Instance this event belongs to.
-    pub instance_id: String,
-    /// Type of event (heartbeat, completed, failed, suspended).
-    pub event_type: String,
-    /// Associated checkpoint ID if applicable.
-    pub checkpoint_id: Option<String>,
-    /// Optional event payload data.
-    pub payload: Option<Vec<u8>>,
-    /// When the event occurred.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Signal record from the database.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct SignalRecord {
-    /// Instance this signal is for.
-    pub instance_id: String,
-    /// Type of signal (cancel, pause, resume).
-    pub signal_type: String,
-    /// Optional signal payload data.
-    pub payload: Option<Vec<u8>>,
-    /// When the signal was created.
-    pub created_at: DateTime<Utc>,
-    /// When the signal was acknowledged by the instance.
-    pub acknowledged_at: Option<DateTime<Utc>>,
-}
-
-/// Pending custom signal scoped to a specific checkpoint.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct CustomSignalRecord {
-    /// Instance this signal is for.
-    pub instance_id: String,
-    /// Target checkpoint/wait key.
-    pub checkpoint_id: String,
-    /// Optional payload.
-    pub payload: Option<Vec<u8>>,
-    /// When the signal was created.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Wake queue entry from the database.
-///
-/// Represents a scheduled wake-up for a suspended instance (durable sleep).
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct WakeEntry {
-    /// Database primary key.
-    pub id: i64,
-    /// Instance to wake.
-    pub instance_id: String,
-    /// Checkpoint to resume from.
-    pub checkpoint_id: String,
-    /// When to wake the instance.
-    pub wake_at: DateTime<Utc>,
-    /// When this wake entry was created.
-    pub created_at: DateTime<Utc>,
-}
+use super::{
+    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, Persistence, SignalRecord,
+    WakeEntry,
+};
 
 // ============================================================================
 // Instance Operations
@@ -974,7 +874,7 @@ pub async fn list_instances(
 mod tests {
     use super::*;
 
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
 
     // Helper to get a test database pool
     async fn test_pool() -> Option<PgPool> {

@@ -18,7 +18,7 @@ use runtara_core::management_handlers::ManagementHandlerState;
 use runtara_core::persistence::PostgresPersistence;
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
 
 /// Test context that manages database, server, and client for E2E tests.
 pub struct TestContext {
