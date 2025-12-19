@@ -87,17 +87,15 @@ impl TestContext {
 
     /// Create a test instance in the database (simulating launcher).
     pub async fn create_test_instance(&self, instance_id: &Uuid, tenant_id: &str) {
-        let definition_id = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO instances (instance_id, tenant_id, definition_id, definition_version, status)
-            VALUES ($1, $2, $3, 1, 'pending')
+            INSERT INTO instances (instance_id, tenant_id, status)
+            VALUES ($1, $2, 'pending')
             ON CONFLICT (instance_id) DO NOTHING
             "#,
         )
         .bind(instance_id.to_string())
         .bind(tenant_id)
-        .bind(definition_id) // definition_id is still UUID type
         .execute(&self.pool)
         .await
         .expect("Failed to create test instance");
