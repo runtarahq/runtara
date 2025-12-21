@@ -3,7 +3,7 @@
 //! Split step emitter.
 //!
 //! The Split step iterates over an array, executing a subgraph for each item.
-//! The Split step checkpoints its final result once all iterations complete.
+//! The Split step uses #[durable] macro to checkpoint its final result.
 //! Individual steps within the subgraph checkpoint themselves via runtara-sdk,
 //! enabling recovery mid-iteration.
 
@@ -21,6 +21,18 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     let step_name = step.name.as_deref().unwrap_or("Unnamed");
     let debug_mode = ctx.debug_mode;
 
+    // Get retry configuration with defaults (0 retries for Split by default)
+    let max_retries = step
+        .config
+        .as_ref()
+        .and_then(|c| c.max_retries)
+        .unwrap_or(0);
+    let retry_delay = step
+        .config
+        .as_ref()
+        .and_then(|c| c.retry_delay)
+        .unwrap_or(1000);
+
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);
     let source_var = ctx.temp_var("source");
@@ -29,6 +41,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
         "{}_subgraph",
         EmitContext::sanitize_ident(step_id)
     ));
+    let durable_fn_name =
+        ctx.temp_var(&format!("{}_durable", EmitContext::sanitize_ident(step_id)));
 
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
@@ -94,6 +108,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     // Cache key for the split step's final result checkpoint
     let cache_key = format!("split::{}", step_id);
 
+    // Generate the durable function with configurable retry settings
+    let max_retries_lit = max_retries;
+    let retry_delay_lit = retry_delay;
+
     quote! {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
@@ -128,114 +146,105 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
         // Define the subgraph function
         #subgraph_code
 
-        // Try to load completed split result from checkpoint via SDK
-        let #step_var: serde_json::Value = {
-            let __sdk = sdk().lock().await;
+        // Define the durable split execution function
+        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        async fn #durable_fn_name(
+            cache_key: &str,
+            split_array: Vec<serde_json::Value>,
+            variables_base: serde_json::Value,
+            extra_variables: serde_json::Value,
+            dont_stop_on_failed: bool,
+            step_id: &str,
+            step_name: &str,
+        ) -> Result<serde_json::Value, String> {
+            let mut results: Vec<serde_json::Value> = Vec::with_capacity(split_array.len());
+            let mut errors: Vec<serde_json::Value> = Vec::new();
 
-            match __sdk.get_checkpoint(#cache_key).await {
-                Ok(Some(cached_bytes)) => {
-                    // Found cached result - deserialize and return
-                    drop(__sdk);
-                    match serde_json::from_slice::<serde_json::Value>(&cached_bytes) {
-                        Ok(cached_value) => cached_value,
-                        Err(e) => {
-                            return Err(format!("Split step {} failed to deserialize cached result: {}", #step_id, e));
+            for (idx, item) in split_array.iter().enumerate() {
+                // Each iteration: data = current item, variables = inherited + extra from mapping + _index
+                let mut merged_vars = match &variables_base {
+                    serde_json::Value::Object(base) => base.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                if let serde_json::Value::Object(extra) = &extra_variables {
+                    for (k, v) in extra {
+                        merged_vars.insert(k.clone(), v.clone());
+                    }
+                }
+                // Inject iteration index as _index (0-based)
+                merged_vars.insert("_index".to_string(), serde_json::json!(idx));
+
+                let subgraph_inputs = ScenarioInputs {
+                    data: Arc::new(item.clone()),
+                    variables: Arc::new(serde_json::Value::Object(merged_vars)),
+                };
+
+                match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {
+                    Ok(result) => results.push(result),
+                    Err(e) => {
+                        if dont_stop_on_failed {
+                            errors.push(serde_json::json!({"error": e, "index": idx}));
+                        } else {
+                            eprintln!("ERROR in split iteration {}: {}", idx, e);
+                            return Err(format!("Split step failed at index {}: {}", idx, e));
                         }
                     }
                 }
-                Ok(None) | Err(_) => {
-                    drop(__sdk);
 
-                    // Execute subgraph for each item
-                    // Inner steps will checkpoint themselves - on recovery they replay from their checkpoints
-                    let mut results: Vec<serde_json::Value> = Vec::with_capacity(split_array.len());
-                    let mut errors: Vec<serde_json::Value> = Vec::new();
-                    let variables_base = (*#inputs_var.variables).clone();
-
-                    for (idx, item) in split_array.iter().enumerate() {
-                        // Each iteration: data = current item, variables = inherited + extra from mapping + _index
-                        let mut merged_vars = match &variables_base {
-                            serde_json::Value::Object(base) => base.clone(),
-                            _ => serde_json::Map::new(),
-                        };
-                        if let serde_json::Value::Object(extra) = &extra_variables {
-                            for (k, v) in extra {
-                                merged_vars.insert(k.clone(), v.clone());
-                            }
-                        }
-                        // Inject iteration index as _index (0-based)
-                        merged_vars.insert("_index".to_string(), serde_json::json!(idx));
-
-                        let subgraph_inputs = ScenarioInputs {
-                            data: Arc::new(item.clone()),
-                            variables: Arc::new(serde_json::Value::Object(merged_vars)),
-                        };
-
-                        match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {
-                            Ok(result) => results.push(result),
-                            Err(e) => {
-                                if dont_stop_on_failed {
-                                    errors.push(serde_json::json!({"error": e, "index": idx}));
-                                } else {
-                                    eprintln!("ERROR in split iteration {}: {}", idx, e);
-                                    return Err(format!("Split step failed at index {}: {}", idx, e));
-                                }
-                            }
-                        }
-
-                        // Check for cancellation after each iteration
-                        {
-                            let mut __sdk = sdk().lock().await;
-                            if let Err(e) = __sdk.check_cancelled().await {
-                                return Err(format!("Split step {} cancelled at iteration {}: {}", #step_id, idx, e));
-                            }
-                        }
+                // Check for cancellation after each iteration
+                {
+                    let mut __sdk = sdk().lock().await;
+                    if let Err(e) = __sdk.check_cancelled().await {
+                        return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, e));
                     }
-
-                    let step_result = if dont_stop_on_failed {
-                        serde_json::json!({
-                            "stepId": #step_id,
-                            "stepName": #step_name,
-                            "stepType": "Split",
-                            "data": {
-                                "success": &results,
-                                "error": &errors,
-                                "aborted": [],
-                                "unknown": [],
-                                "skipped": []
-                            },
-                            "stats": {
-                                "success": results.len(),
-                                "error": errors.len(),
-                                "aborted": 0,
-                                "unknown": 0,
-                                "skipped": 0,
-                                "total": split_array.len()
-                            },
-                            "outputs": &results
-                        })
-                    } else {
-                        serde_json::json!({
-                            "stepId": #step_id,
-                            "stepName": #step_name,
-                            "stepType": "Split",
-                            "outputs": &results
-                        })
-                    };
-
-                    // Save checkpoint for the complete split result
-                    let result_bytes = serde_json::to_vec(&step_result)
-                        .map_err(|e| format!("Split step {} failed to serialize result: {}", #step_id, e))?;
-
-                    let __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.checkpoint(#cache_key, &result_bytes).await {
-                        eprintln!("WARN: Split step {} checkpoint save failed: {}", #step_id, e);
-                    }
-
-                    step_result
                 }
             }
-        };
+
+            let step_result = if dont_stop_on_failed {
+                serde_json::json!({
+                    "stepId": step_id,
+                    "stepName": step_name,
+                    "stepType": "Split",
+                    "data": {
+                        "success": &results,
+                        "error": &errors,
+                        "aborted": [],
+                        "unknown": [],
+                        "skipped": []
+                    },
+                    "stats": {
+                        "success": results.len(),
+                        "error": errors.len(),
+                        "aborted": 0,
+                        "unknown": 0,
+                        "skipped": 0,
+                        "total": split_array.len()
+                    },
+                    "outputs": &results
+                })
+            } else {
+                serde_json::json!({
+                    "stepId": step_id,
+                    "stepName": step_name,
+                    "stepType": "Split",
+                    "outputs": &results
+                })
+            };
+
+            Ok(step_result)
+        }
+
+        // Execute the durable split function
+        let variables_base = (*#inputs_var.variables).clone();
+        let #step_var = #durable_fn_name(
+            #cache_key,
+            split_array,
+            variables_base,
+            extra_variables,
+            dont_stop_on_failed,
+            #step_id,
+            #step_name,
+        ).await?;
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
     }

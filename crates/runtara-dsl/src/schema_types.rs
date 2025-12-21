@@ -232,6 +232,14 @@ pub struct AgentStep {
     /// Maps data to agent capability inputs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
+
+    /// Maximum retry attempts (default: 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Base delay between retries in milliseconds (default: 1000)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<u64>,
 }
 
 /// Evaluates conditions and branches execution
@@ -320,6 +328,14 @@ pub struct StartScenarioStep {
     /// Maps parent data to child scenario inputs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
+
+    /// Maximum retry attempts (default: 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Base delay between retries in milliseconds (default: 1000)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<u64>,
 }
 
 /// Child scenario version specification
@@ -769,4 +785,12 @@ pub struct SplitConfig {
     /// Additional variables to pass to each iteration's subgraph
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variables: Option<InputMapping>,
+
+    /// Maximum retry attempts for the split operation (default: 0 - no retries)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+
+    /// Base delay between retries in milliseconds (default: 1000)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_delay: Option<u64>,
 }

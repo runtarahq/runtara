@@ -5,7 +5,7 @@
 //! The StartScenario step executes a nested child scenario.
 //! When a child scenario's ExecutionGraph is available in the EmitContext,
 //! it will be recursively emitted and embedded into the parent scenario.
-//! The entire child scenario result is checkpointed via runtara-sdk.
+//! The entire child scenario result uses #[durable] macro for checkpoint-based recovery.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -26,10 +26,14 @@ pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> TokenStream {
     let child_scenario_id = &step.child_scenario_id;
     let debug_mode = ctx.debug_mode;
 
+    // Get retry configuration with defaults
+    let max_retries = step.max_retries.unwrap_or(3);
+    let retry_delay = step.retry_delay.unwrap_or(1000);
+
     // Check if we have the child scenario's graph
     if let Some(child_graph) = ctx.get_child_scenario(step_id).cloned() {
         // We have the child graph - emit embedded version
-        emit_with_embedded_child(step, &child_graph, ctx)
+        emit_with_embedded_child(step, &child_graph, ctx, max_retries, retry_delay)
     } else {
         // No child graph available - emit placeholder
         emit_placeholder(step_id, step_name, child_scenario_id, debug_mode, ctx)
@@ -41,6 +45,8 @@ fn emit_with_embedded_child(
     step: &StartScenarioStep,
     child_graph: &ExecutionGraph,
     ctx: &mut EmitContext,
+    max_retries: u32,
+    retry_delay: u64,
 ) -> TokenStream {
     let step_id = &step.id;
     let step_name = step.name.as_deref().unwrap_or("Unnamed");
@@ -55,6 +61,8 @@ fn emit_with_embedded_child(
         "execute_child_{}",
         EmitContext::sanitize_ident(step_id)
     ));
+    let durable_fn_name =
+        ctx.temp_var(&format!("{}_durable", EmitContext::sanitize_ident(step_id)));
 
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
@@ -87,6 +95,8 @@ fn emit_with_embedded_child(
 
     // Cache key for the child scenario checkpoint
     let cache_key = format!("start_scenario::{}", step_id);
+    let max_retries_lit = max_retries;
+    let retry_delay_lit = retry_delay;
 
     quote! {
         // Define the embedded child scenario function
@@ -97,57 +107,46 @@ fn emit_with_embedded_child(
 
         #debug_log
 
-        // Prepare child scenario inputs
-        // All mapped inputs become child's data (myParam1 -> data.myParam1)
-        // Child variables are always isolated - never inherited from parent
-        let child_scenario_inputs = ScenarioInputs {
-            data: Arc::new(#child_inputs_var.clone()),
-            variables: Arc::new(serde_json::Value::Object(serde_json::Map::new())),
-        };
+        // Define the durable child scenario execution function
+        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        async fn #durable_fn_name(
+            cache_key: &str,
+            child_inputs: serde_json::Value,
+            child_scenario_id: &str,
+            step_id: &str,
+            step_name: &str,
+        ) -> Result<serde_json::Value, String> {
+            // Prepare child scenario inputs
+            // All mapped inputs become child's data (myParam1 -> data.myParam1)
+            // Child variables are always isolated - never inherited from parent
+            let child_scenario_inputs = ScenarioInputs {
+                data: Arc::new(child_inputs),
+                variables: Arc::new(serde_json::Value::Object(serde_json::Map::new())),
+            };
 
-        // Use SDK checkpoint to check for cached result
-        let #step_var: serde_json::Value = {
-            let __sdk = sdk().lock().await;
+            // Execute child scenario
+            let child_result = #child_fn_name(Arc::new(child_scenario_inputs)).await
+                .map_err(|e| format!("Child scenario {} failed: {}", child_scenario_id, e))?;
 
-            match __sdk.get_checkpoint(#cache_key).await {
-                Ok(Some(cached_bytes)) => {
-                    // Found cached result - deserialize and return
-                    drop(__sdk);
-                    match serde_json::from_slice::<serde_json::Value>(&cached_bytes) {
-                        Ok(cached_value) => cached_value,
-                        Err(e) => {
-                            return Err(format!("StartScenario step {} failed to deserialize cached result: {}", #step_id, e));
-                        }
-                    }
-                }
-                Ok(None) | Err(_) => {
-                    drop(__sdk);
+            let result = serde_json::json!({
+                "stepId": step_id,
+                "stepName": step_name,
+                "stepType": "StartScenario",
+                "childScenarioId": child_scenario_id,
+                "outputs": child_result
+            });
 
-                    // Execute child scenario
-                    let child_result = #child_fn_name(Arc::new(child_scenario_inputs)).await
-                        .map_err(|e| format!("Child scenario {} failed: {}", #child_scenario_id, e))?;
+            Ok(result)
+        }
 
-                    let result = serde_json::json!({
-                        "stepId": #step_id,
-                        "stepName": #step_name,
-                        "stepType": "StartScenario",
-                        "childScenarioId": #child_scenario_id,
-                        "outputs": child_result
-                    });
-
-                    // Save checkpoint after execution
-                    let result_bytes = serde_json::to_vec(&result)
-                        .map_err(|e| format!("StartScenario step {} failed to serialize result: {}", #step_id, e))?;
-
-                    let __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.checkpoint(#cache_key, &result_bytes).await {
-                        eprintln!("WARN: StartScenario step {} checkpoint save failed: {}", #step_id, e);
-                    }
-
-                    result
-                }
-            }
-        };
+        // Execute the durable child scenario function
+        let #step_var = #durable_fn_name(
+            #cache_key,
+            #child_inputs_var.clone(),
+            #child_scenario_id,
+            #step_id,
+            #step_name,
+        ).await?;
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
 

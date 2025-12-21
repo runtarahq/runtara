@@ -410,6 +410,8 @@ mod tests {
             sequential: Some(false),
             dont_stop_on_failed: Some(true),
             variables: None,
+            max_retries: None,
+            retry_delay: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -466,6 +468,8 @@ mod tests {
                 sequential: None,
                 dont_stop_on_failed: None,
                 variables: None,
+                max_retries: None,
+                retry_delay: None,
             }),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),

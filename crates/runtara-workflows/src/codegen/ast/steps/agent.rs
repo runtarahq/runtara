@@ -3,7 +3,7 @@
 //! Agent step emitter.
 //!
 //! The Agent step executes an agent capability.
-//! All agent capabilities are checkpointed via runtara-sdk for crash recovery.
+//! All agent capabilities use #[durable] macro for checkpoint-based crash recovery.
 //! Rate limiting is handled via connection service responses.
 
 use proc_macro2::TokenStream;
@@ -37,7 +37,11 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
     let agent_id = &step.agent_id;
     let capability_id = &step.capability_id;
 
-    // All capabilities are checkpointed for crash recovery.
+    // Get retry configuration with defaults
+    let max_retries = step.max_retries.unwrap_or(3);
+    let retry_delay = step.retry_delay.unwrap_or(1000);
+
+    // All capabilities use #[durable] for crash recovery.
     // Rate limiting is only applied to external API calls.
     let needs_rate_limit = needs_rate_limiting(agent_id, capability_id);
 
@@ -46,6 +50,8 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
     let source_var = ctx.temp_var("source");
     let step_inputs_var = ctx.temp_var("step_inputs");
     let result_var = ctx.temp_var("result");
+    let durable_fn_name =
+        ctx.temp_var(&format!("{}_durable", EmitContext::sanitize_ident(step_id)));
 
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
@@ -65,38 +71,38 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    // Generate the capability execution code - all capabilities are checkpointed via SDK
-    // Connection fetching and rate limiting is handled within emit_durable_call when connection_id is present
+    // Generate the durable capability execution
     let execute_capability = if needs_rate_limit {
-        // Checkpointing + rate limiting for external API calls
         emit_durable_rate_limited_call(
             step_id,
             agent_id,
             capability_id,
             &step_inputs_var,
             &result_var,
+            &durable_fn_name,
             step.connection_id.as_deref(),
             ctx,
+            max_retries,
+            retry_delay,
         )
     } else {
-        // Checkpointing only (all other capabilities)
         emit_durable_call(
             step_id,
             agent_id,
             capability_id,
             &step_inputs_var,
             &result_var,
+            &durable_fn_name,
             step.connection_id.as_deref(),
             ctx,
+            max_retries,
+            retry_delay,
         )
     };
 
-    // Use base_inputs_code directly - connection injection is handled inside the execution code
-    let inputs_code = base_inputs_code;
-
     quote! {
         let #source_var = #build_source;
-        let #step_inputs_var = #inputs_code;
+        let #step_inputs_var = #base_inputs_code;
 
         #execute_capability
 
@@ -118,22 +124,19 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
     }
 }
 
-/// Emit a durable capability call using runtara-sdk checkpoint API.
-/// Uses the checkpoint pattern:
-/// 1. Check for existing checkpoint (resume case)
-/// 2. Execute capability if no checkpoint
-/// 3. Save result as checkpoint
-///
-/// If connection_id is provided and connection_service_url is configured,
-/// the connection will be fetched from the external service and injected into inputs.
+/// Emit a durable capability call using #[durable] macro.
+#[allow(clippy::too_many_arguments)]
 fn emit_durable_call(
     step_id: &str,
     agent_id: &str,
     capability_id: &str,
     inputs_var: &proc_macro2::Ident,
     result_var: &proc_macro2::Ident,
+    durable_fn_name: &proc_macro2::Ident,
     connection_id: Option<&str>,
     ctx: &EmitContext,
+    max_retries: u32,
+    retry_delay: u64,
 ) -> TokenStream {
     let cache_key = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
 
@@ -146,71 +149,50 @@ fn emit_durable_call(
         false, // no rate limit handling
     );
 
+    let max_retries_lit = max_retries;
+    let retry_delay_lit = retry_delay;
+
     quote! {
-        let #result_var = {
-            let __sdk = sdk().lock().await;
+        // Define the durable agent execution function
+        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        async fn #durable_fn_name(
+            cache_key: &str,
+            inputs: serde_json::Value,
+            agent_id: &str,
+            capability_id: &str,
+            step_id: &str,
+        ) -> Result<serde_json::Value, String> {
+            let result = registry::execute_capability(agent_id, capability_id, inputs)
+                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                    step_id, agent_id, capability_id, e))?;
+            Ok(result)
+        }
 
-            // Check for existing checkpoint (resume case)
-            match __sdk.get_checkpoint(#cache_key).await {
-                Ok(Some(cached_bytes)) => {
-                    // Found cached result - deserialize and return
-                    drop(__sdk);
-                    match serde_json::from_slice::<serde_json::Value>(&cached_bytes) {
-                        Ok(cached_value) => cached_value,
-                        Err(e) => {
-                            return Err(format!("Step {} failed to deserialize cached result: {}", #step_id, e));
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // No cached result - execute capability
-                    drop(__sdk);
+        #connection_fetch
 
-                    #connection_fetch
-
-                    let result = registry::execute_capability(#agent_id, #capability_id, #final_inputs.clone())
-                        .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                            #step_id, #agent_id, #capability_id, e))?;
-
-                    // Save result as checkpoint
-                    let result_bytes = serde_json::to_vec(&result)
-                        .map_err(|e| format!("Step {} failed to serialize result: {}", #step_id, e))?;
-
-                    let __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.checkpoint(#cache_key, &result_bytes).await {
-                        eprintln!("WARN: Step {} checkpoint save failed: {}", #step_id, e);
-                        // Continue even if checkpoint fails - result is still valid
-                    }
-
-                    result
-                }
-                Err(e) => {
-                    // Checkpoint lookup error - log and continue with execution
-                    eprintln!("WARN: Step {} checkpoint lookup failed: {}", #step_id, e);
-                    drop(__sdk);
-
-                    #connection_fetch
-
-                    let result = registry::execute_capability(#agent_id, #capability_id, #final_inputs.clone())
-                        .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                            #step_id, #agent_id, #capability_id, e))?;
-                    result
-                }
-            }
-        };
+        let #result_var = #durable_fn_name(
+            #cache_key,
+            #final_inputs.clone(),
+            #agent_id,
+            #capability_id,
+            #step_id,
+        ).await?;
     }
 }
 
 /// Emit a durable and rate-limited capability call (for HTTP/external APIs).
-/// Same as emit_durable_call but with rate limiting via connection service.
+#[allow(clippy::too_many_arguments)]
 fn emit_durable_rate_limited_call(
     step_id: &str,
     agent_id: &str,
     capability_id: &str,
     inputs_var: &proc_macro2::Ident,
     result_var: &proc_macro2::Ident,
+    durable_fn_name: &proc_macro2::Ident,
     connection_id: Option<&str>,
     ctx: &EmitContext,
+    max_retries: u32,
+    retry_delay: u64,
 ) -> TokenStream {
     let cache_key = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
 
@@ -223,57 +205,34 @@ fn emit_durable_rate_limited_call(
         true, // with rate limit handling
     );
 
+    let max_retries_lit = max_retries;
+    let retry_delay_lit = retry_delay;
+
     quote! {
-        let #result_var = {
-            let __sdk = sdk().lock().await;
+        // Define the durable agent execution function (rate-limited)
+        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        async fn #durable_fn_name(
+            cache_key: &str,
+            inputs: serde_json::Value,
+            agent_id: &str,
+            capability_id: &str,
+            step_id: &str,
+        ) -> Result<serde_json::Value, String> {
+            let result = registry::execute_capability(agent_id, capability_id, inputs)
+                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                    step_id, agent_id, capability_id, e))?;
+            Ok(result)
+        }
 
-            // Check for existing checkpoint (resume case - skip rate limiting)
-            match __sdk.get_checkpoint(#cache_key).await {
-                Ok(Some(cached_bytes)) => {
-                    // Found cached result - deserialize and return (no rate limiting needed)
-                    drop(__sdk);
-                    match serde_json::from_slice::<serde_json::Value>(&cached_bytes) {
-                        Ok(cached_value) => cached_value,
-                        Err(e) => {
-                            return Err(format!("Step {} failed to deserialize cached result: {}", #step_id, e));
-                        }
-                    }
-                }
-                Ok(None) => {
-                    drop(__sdk);
+        #connection_fetch
 
-                    #connection_fetch
-
-                    let result = registry::execute_capability(#agent_id, #capability_id, #final_inputs.clone())
-                        .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                            #step_id, #agent_id, #capability_id, e))?;
-
-                    // Save result as checkpoint
-                    let result_bytes = serde_json::to_vec(&result)
-                        .map_err(|e| format!("Step {} failed to serialize result: {}", #step_id, e))?;
-
-                    let __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.checkpoint(#cache_key, &result_bytes).await {
-                        eprintln!("WARN: Step {} checkpoint save failed: {}", #step_id, e);
-                        // Continue even if checkpoint fails - result is still valid
-                    }
-
-                    result
-                }
-                Err(e) => {
-                    // Checkpoint lookup error - log and continue with execution
-                    eprintln!("WARN: Step {} checkpoint lookup failed: {}", #step_id, e);
-                    drop(__sdk);
-
-                    #connection_fetch
-
-                    let result = registry::execute_capability(#agent_id, #capability_id, #final_inputs.clone())
-                        .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                            #step_id, #agent_id, #capability_id, e))?;
-                    result
-                }
-            }
-        };
+        let #result_var = #durable_fn_name(
+            #cache_key,
+            #final_inputs.clone(),
+            #agent_id,
+            #capability_id,
+            #step_id,
+        ).await?;
     }
 }
 
