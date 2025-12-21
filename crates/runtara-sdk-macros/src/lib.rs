@@ -236,7 +236,7 @@ fn generate_no_retry_wrapper(
             }
 
             // Step 2: Execute original function body
-            let __result: Result<_, _> = async #block.await;
+            let __result: std::result::Result<_, _> = async #block.await;
 
             // Step 3: Cache successful result
             if let Ok(ref value) = __result {
@@ -413,7 +413,7 @@ fn generate_retry_wrapper(
                 }
 
                 // Execute the function body
-                let __result: Result<_, _> = async #block.await;
+                let __result: std::result::Result<_, _> = async #block.await;
 
                 match __result {
                     Ok(ref value) => {
