@@ -9,7 +9,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    FnArg, Ident, ItemFn, LitInt, Pat, ReturnType, Token, Type, parse_macro_input, spanned::Spanned,
+    FnArg, Ident, ItemFn, LitInt, Pat, PatType, ReturnType, Token, Type, parse_macro_input,
+    spanned::Spanned,
 };
 
 /// Parsed configuration from `#[durable(...)]` attributes.
@@ -235,7 +236,7 @@ fn generate_no_retry_wrapper(
             }
 
             // Step 2: Execute original function body
-            let __result: Result<_, _> = (|| async #block)().await;
+            let __result: Result<_, _> = async #block.await;
 
             // Step 3: Cache successful result
             if let Ok(ref value) = __result {
@@ -305,6 +306,19 @@ fn generate_retry_wrapper(
 ) -> syn::Result<TokenStream2> {
     let total_attempts = max_retries + 1;
 
+    // Extract parameters that need cloning for retry loop
+    let clonable_params = extract_clonable_params(&sig.inputs);
+
+    // Generate clone statements for each clonable parameter
+    let clone_statements: Vec<TokenStream2> = clonable_params
+        .iter()
+        .map(|(ident, _ty)| {
+            quote! {
+                let #ident = #ident.clone();
+            }
+        })
+        .collect();
+
     Ok(quote! {
         #(#attrs)*
         #vis #sig {
@@ -358,6 +372,9 @@ fn generate_retry_wrapper(
             let __total_attempts: u32 = #total_attempts;
 
             for __attempt in 1..=__total_attempts {
+                // Clone non-reference parameters for this iteration
+                #(#clone_statements)*
+
                 // Record retry attempt (for attempts > 1)
                 if __attempt > 1 {
                     // Apply backoff delay before retry
@@ -396,7 +413,7 @@ fn generate_retry_wrapper(
                 }
 
                 // Execute the function body
-                let __result: Result<_, _> = (|| async #block)().await;
+                let __result: Result<_, _> = async #block.await;
 
                 match __result {
                     Ok(ref value) => {
@@ -546,4 +563,43 @@ fn extract_first_arg_ident(
         proc_macro2::Span::call_site(),
         "#[durable] requires at least one argument: the idempotency key (String)",
     ))
+}
+
+/// Check if a type is a reference type (starts with &)
+fn is_reference_type(ty: &Type) -> bool {
+    matches!(ty, Type::Reference(_))
+}
+
+/// Extract parameters that need to be cloned for retry loops.
+/// Returns (ident, type) pairs for non-reference, non-first-arg parameters.
+fn extract_clonable_params(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+) -> Vec<(Ident, Type)> {
+    let mut params = Vec::new();
+    let mut is_first = true;
+
+    for arg in inputs.iter() {
+        match arg {
+            FnArg::Receiver(_) => continue,
+            FnArg::Typed(PatType { pat, ty, .. }) => {
+                // Skip the first argument (idempotency key)
+                if is_first {
+                    is_first = false;
+                    continue;
+                }
+
+                // Skip reference types - they don't need cloning
+                if is_reference_type(ty) {
+                    continue;
+                }
+
+                // Extract the identifier
+                if let Pat::Ident(pat_ident) = pat.as_ref() {
+                    params.push((pat_ident.ident.clone(), (**ty).clone()));
+                }
+            }
+        }
+    }
+
+    params
 }
