@@ -1,0 +1,49 @@
+{
+  "name": "Transform Workflow",
+  "description": "A workflow that uses the transform agent to map fields",
+  "steps": {
+    "transform": {
+      "stepType": "Agent",
+      "id": "transform",
+      "name": "Transform Data",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "maxRetries": 3,
+      "retryDelay": 1000,
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "output_name": "$.name",
+            "output_value": "$.value"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "name": "Output Result",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "transform",
+  "executionPlan": [
+    {
+      "fromStep": "transform",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

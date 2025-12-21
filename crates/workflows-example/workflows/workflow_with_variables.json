@@ -1,0 +1,46 @@
+{
+  "name": "Workflow with Variables",
+  "description": "A workflow that demonstrates scenario variables",
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "name": "Output with Variables",
+      "inputMapping": {
+        "input_data": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "config_value": {
+          "valueType": "reference",
+          "value": "variables.config_key"
+        },
+        "max_items": {
+          "valueType": "reference",
+          "value": "variables.max_items"
+        }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {
+    "config_key": {
+      "type": "string",
+      "value": "default_config_value",
+      "description": "Configuration key for the workflow"
+    },
+    "max_items": {
+      "type": "integer",
+      "value": 100,
+      "description": "Maximum number of items to process"
+    },
+    "enabled": {
+      "type": "boolean",
+      "value": true,
+      "description": "Whether processing is enabled"
+    }
+  },
+  "inputSchema": {},
+  "outputSchema": {}
+}
