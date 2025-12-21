@@ -15,7 +15,7 @@ use syn::{
 /// Parsed configuration from `#[durable(...)]` attributes.
 #[derive(Default)]
 struct DurableAttr {
-    /// Maximum number of retry attempts (default: 0 = no retries)
+    /// Maximum number of retry attempts (default: 3)
     max_retries: Option<u32>,
     /// Retry strategy (default: ExponentialBackoff)
     strategy: Option<String>,
@@ -147,7 +147,7 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
     let idempotency_key_ident = extract_first_arg_ident(&sig.inputs)?;
 
     // Get retry configuration with defaults
-    let max_retries = config.max_retries.unwrap_or(0);
+    let max_retries = config.max_retries.unwrap_or(3);
     let base_delay_ms = config.delay.unwrap_or(1000);
 
     // Generate appropriate code based on whether retries are enabled

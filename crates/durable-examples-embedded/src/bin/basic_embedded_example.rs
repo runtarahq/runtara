@@ -4,45 +4,32 @@
 
 use std::sync::Arc;
 
+use rand::Rng;
 use runtara_core::persistence::{Persistence, SqlitePersistence};
 use runtara_sdk::{RuntaraSdk, durable};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
-struct AppError(String);
-impl std::fmt::Display for AppError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+#[durable(max_retries = 5, delay = 100)]
+async fn fetch_data(key: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if rand::thread_rng().gen_bool(0.3) {
+        println!("Error!");
+        return Err("chaos: random failure".into());
     }
-}
-impl std::error::Error for AppError {}
 
-#[durable(max_retries = 3, delay = 100)]
-async fn flaky_api_call(key: &str, id: &str) -> Result<String, AppError> {
-    static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    println!("  API call attempt {} for {id}", n + 1);
-    if n < 2 {
-        return Err(AppError("Service unavailable".into()));
-    }
-    Ok(format!("result-{id}"))
+    let response = "Hello, world".into();
+    Ok(response)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let persistence: Arc<dyn Persistence> =
         Arc::new(SqlitePersistence::from_path(".data/example.db").await?);
+
     RuntaraSdk::embedded(persistence, uuid::Uuid::new_v4().to_string(), "demo")
         .init(None)
         .await?;
 
-    println!("First call (retries until success):");
-    let result = flaky_api_call("call-1", "order-123").await?;
-    println!("  Success: {result}\n");
+    let page = fetch_data("here").await?;
 
-    println!("Cached call (instant):");
-    let result = flaky_api_call("call-1", "order-123").await?;
-    println!("  Cached: {result}");
-
+    println!("Fetch result: {}", page);
     Ok(())
 }

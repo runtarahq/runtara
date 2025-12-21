@@ -517,6 +517,8 @@ dependencies = [
 name = "durable-examples-embedded"
 version = "1.0.24"
 dependencies = [
+ "rand 0.8.5",
+ "reqwest",
  "runtara-core",
  "runtara-sdk",
  "serde",
