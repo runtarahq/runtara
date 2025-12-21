@@ -156,7 +156,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
             dont_stop_on_failed: bool,
             step_id: &str,
             step_name: &str,
-        ) -> Result<serde_json::Value, String> {
+        ) -> std::result::Result<serde_json::Value, String> {
             let mut results: Vec<serde_json::Value> = Vec::with_capacity(split_array.len());
             let mut errors: Vec<serde_json::Value> = Vec::new();
 

@@ -115,7 +115,7 @@ fn emit_with_embedded_child(
             child_scenario_id: &str,
             step_id: &str,
             step_name: &str,
-        ) -> Result<serde_json::Value, String> {
+        ) -> std::result::Result<serde_json::Value, String> {
             // Prepare child scenario inputs
             // All mapped inputs become child's data (myParam1 -> data.myParam1)
             // Child variables are always isolated - never inherited from parent
