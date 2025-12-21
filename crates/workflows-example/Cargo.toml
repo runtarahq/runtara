@@ -14,4 +14,3 @@ path = "src/main.rs"
 runtara-workflows = { path = "../runtara-workflows" }
 runtara-dsl = { path = "../runtara-dsl" }
 serde_json = "1.0"
-tempfile = "3.23"

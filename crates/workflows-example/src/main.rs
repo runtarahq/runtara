@@ -38,6 +38,9 @@ use std::path::Path;
 /// Directory containing workflow JSON files (relative to crate root)
 const WORKFLOWS_DIR: &str = "workflows";
 
+/// Directory for generated code output (relative to crate root)
+const GENERATED_DIR: &str = "generated";
+
 fn main() {
     // Check for --compile flag
     let should_compile = std::env::args().any(|arg| arg == "--compile");
@@ -47,8 +50,13 @@ fn main() {
     // Get the workflows directory path
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workflows_dir = Path::new(manifest_dir).join(WORKFLOWS_DIR);
+    let generated_dir = Path::new(manifest_dir).join(GENERATED_DIR);
 
-    println!("Loading workflows from: {}\n", workflows_dir.display());
+    // Create generated directory
+    std::fs::create_dir_all(&generated_dir).expect("Failed to create generated directory");
+
+    println!("Loading workflows from: {}", workflows_dir.display());
+    println!("Generated code output:  {}\n", generated_dir.display());
 
     // Process each workflow
     let workflows = [
@@ -61,7 +69,7 @@ fn main() {
         println!("{}. Processing: {}", i + 1, filename);
 
         let workflow_path = workflows_dir.join(filename);
-        match load_and_process_workflow(name, &workflow_path, should_compile) {
+        match load_and_process_workflow(name, &workflow_path, &generated_dir, should_compile) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("   Error: {}\n", e);
@@ -72,10 +80,77 @@ fn main() {
     println!("=== Example Complete ===");
 }
 
+/// Simple code formatter that adds newlines for readability.
+/// This is a basic formatter - for production use, consider using rustfmt.
+fn format_generated_code(code: &str) -> String {
+    let mut result = String::with_capacity(code.len() * 2);
+    let mut indent = 0usize;
+    let mut chars = code.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                result.push(c);
+                result.push('\n');
+                indent += 1;
+                result.push_str(&"    ".repeat(indent));
+            }
+            '}' => {
+                if indent > 0 {
+                    indent -= 1;
+                }
+                // Remove trailing whitespace before closing brace
+                while result.ends_with(' ') {
+                    result.pop();
+                }
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                result.push_str(&"    ".repeat(indent));
+                result.push(c);
+                if chars.peek() != Some(&';')
+                    && chars.peek() != Some(&',')
+                    && chars.peek() != Some(&')')
+                {
+                    result.push('\n');
+                    result.push_str(&"    ".repeat(indent));
+                }
+            }
+            ';' => {
+                result.push(c);
+                result.push('\n');
+                result.push_str(&"    ".repeat(indent));
+            }
+            ' ' if result.ends_with('\n') || result.ends_with("    ") => {
+                // Skip extra spaces after newline/indent
+            }
+            _ => {
+                result.push(c);
+            }
+        }
+    }
+
+    // Clean up excessive blank lines
+    let mut final_result = String::new();
+    let mut prev_blank = false;
+    for line in result.lines() {
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank {
+            continue;
+        }
+        final_result.push_str(line);
+        final_result.push('\n');
+        prev_blank = is_blank;
+    }
+
+    final_result
+}
+
 /// Loads a workflow from JSON file and processes it.
 fn load_and_process_workflow(
     name: &str,
     path: &Path,
+    generated_dir: &Path,
     should_compile: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load and parse the JSON file
@@ -91,18 +166,26 @@ fn load_and_process_workflow(
     println!("   Steps: {}", graph.steps.len());
     println!("   Entry point: {}", graph.entry_point);
 
-    // Set up temp directory for generated code
-    let temp_dir = tempfile::TempDir::new()?;
-    std::env::set_var("DATA_DIR", temp_dir.path());
+    // Use the generated directory for output (persistent, not temp)
+    std::env::set_var("DATA_DIR", generated_dir);
 
-    let tenant_id = "example-tenant";
+    let tenant_id = "example";
     let version = 1;
 
     // Generate Rust code
     println!("   Generating Rust code...");
     let build_dir = translate_scenario(tenant_id, name, version, &graph, true)?;
     let main_rs = build_dir.join("main.rs");
-    println!("   Generated code at: {:?}", main_rs);
+
+    // Also copy to a more accessible location with formatted code
+    let output_file = generated_dir.join(format!("{}.rs", name));
+    let code = std::fs::read_to_string(&main_rs)?;
+
+    // Format the code for readability (simple formatting)
+    let formatted = format_generated_code(&code);
+    std::fs::write(&output_file, &formatted)?;
+
+    println!("   Generated code at: {}", output_file.display());
 
     // Print generated code summary
     if let Ok(code) = std::fs::read_to_string(&main_rs) {

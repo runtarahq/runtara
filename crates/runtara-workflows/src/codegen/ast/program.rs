@@ -11,6 +11,7 @@
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
+use std::collections::HashSet;
 
 use super::context::EmitContext;
 use super::steps::{self, StepEmitter, step_id, step_name, step_type_str};
@@ -21,6 +22,44 @@ use runtara_dsl::{ExecutionGraph, Step};
 /// This mirrors `agents_library::get_stdlib_name()` but is used at codegen time.
 fn get_stdlib_crate_name() -> String {
     std::env::var("RUNTARA_STDLIB_NAME").unwrap_or_else(|_| "runtara_workflow_stdlib".to_string())
+}
+
+/// Collect all agent IDs used in an ExecutionGraph, recursively.
+///
+/// This traverses:
+/// - AgentStep: extracts agent_id
+/// - SplitStep: recursively traverses subgraph
+/// - StartScenario: recursively traverses child graphs from EmitContext
+fn collect_used_agents(graph: &ExecutionGraph, ctx: &EmitContext) -> HashSet<String> {
+    let mut agents = HashSet::new();
+    collect_used_agents_recursive(graph, ctx, &mut agents);
+    agents
+}
+
+fn collect_used_agents_recursive(
+    graph: &ExecutionGraph,
+    ctx: &EmitContext,
+    agents: &mut HashSet<String>,
+) {
+    for step in graph.steps.values() {
+        match step {
+            Step::Agent(agent_step) => {
+                agents.insert(agent_step.agent_id.to_lowercase());
+            }
+            Step::Split(split_step) => {
+                // Recursively collect from subgraph
+                collect_used_agents_recursive(&split_step.subgraph, ctx, agents);
+            }
+            Step::StartScenario(start_step) => {
+                // Recursively collect from child scenario if available
+                if let Some(child_graph) = ctx.get_child_scenario(&start_step.id) {
+                    collect_used_agents_recursive(child_graph, ctx, agents);
+                }
+            }
+            // Other step types don't use agents directly
+            Step::Finish(_) | Step::Conditional(_) | Step::Switch(_) => {}
+        }
+    }
 }
 
 /// Emit the complete program.
@@ -90,6 +129,33 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
     let stdlib_name = get_stdlib_crate_name();
     let stdlib_ident = Ident::new(&stdlib_name, Span::call_site());
 
+    // Collect only the agents actually used in this workflow
+    let used_agents = collect_used_agents(graph, ctx);
+
+    // Generate imports only for used agents
+    // Map agent_id to module name and alias
+    let agent_imports: Vec<TokenStream> = used_agents
+        .iter()
+        .filter_map(|agent_id| {
+            // Map agent_id to (module_name, alias)
+            let (module, alias) = match agent_id.as_str() {
+                "utils" => ("utils", "utils"),
+                "transform" => ("transform", "transform"),
+                "http" => ("http", "http"),
+                "csv" => ("csv", "csv_ops"),
+                "xml" => ("xml", "xml_ops"),
+                "text" => ("text", "text_ops"),
+                "sftp" => ("sftp", "sftp"),
+                _ => return None, // Unknown agent, skip
+            };
+            let module_ident = Ident::new(module, Span::call_site());
+            let alias_ident = Ident::new(alias, Span::call_site());
+            Some(quote! {
+                use #stdlib_ident::agents::#module_ident as #alias_ident;
+            })
+        })
+        .collect();
+
     quote! {
         extern crate #stdlib_ident;
 
@@ -103,14 +169,8 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
         use #stdlib_ident::tokio;
         #hashmap_import
 
-        // Re-export agents for compatibility and to ensure inventory registration
-        #[allow(dead_code)] use #stdlib_ident::agents::utils as utils;
-        #[allow(dead_code)] use #stdlib_ident::agents::transform as transform;
-        #[allow(dead_code)] use #stdlib_ident::agents::http as http;
-        #[allow(dead_code)] use #stdlib_ident::agents::csv as csv_ops;
-        #[allow(dead_code)] use #stdlib_ident::agents::xml as xml_ops;
-        #[allow(dead_code)] use #stdlib_ident::agents::text as text_ops;
-        #[allow(dead_code)] use #stdlib_ident::agents::sftp as sftp;
+        // Import only agents used by this workflow
+        #(#agent_imports)*
     }
 }
 
