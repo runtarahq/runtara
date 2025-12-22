@@ -20,6 +20,139 @@ use tracing::info;
 use crate::codegen::ast;
 use crate::paths::get_scenario_json_path;
 
+// ============================================================================
+// Rustc Error Parsing
+// ============================================================================
+
+/// Parse rustc stderr and provide a user-friendly error message.
+///
+/// This function attempts to extract meaningful information from rustc errors
+/// and provide actionable suggestions.
+fn parse_rustc_error(stderr: &str, target: &str) -> String {
+    // Check for common errors and provide helpful suggestions
+
+    // Missing target
+    if stderr.contains("error[E0463]") && stderr.contains("can't find crate") {
+        if stderr.contains("std") {
+            return format!(
+                "Compilation failed: The Rust standard library for target '{}' is not installed.\n\n\
+                 To fix this, run:\n  rustup target add {}",
+                target, target
+            );
+        }
+    }
+
+    // Target not installed
+    if stderr.contains("could not find specification for target") {
+        return format!(
+            "Compilation failed: Target '{}' is not installed.\n\n\
+             To fix this, run:\n  rustup target add {}",
+            target, target
+        );
+    }
+
+    // Linker not found (common on Linux for musl)
+    if stderr.contains("linker") && stderr.contains("not found") {
+        if target.contains("musl") {
+            return format!(
+                "Compilation failed: The musl linker is not installed.\n\n\
+                 To fix this on Ubuntu/Debian, run:\n  sudo apt install musl-tools\n\n\
+                 To fix this on Fedora/RHEL, run:\n  sudo dnf install musl-gcc"
+            );
+        }
+    }
+
+    // Can't find crate (stdlib not compiled)
+    if stderr.contains("can't find crate for") {
+        if let Some(crate_name) = extract_pattern(stderr, "can't find crate for `", "`") {
+            if crate_name == "runtara_workflow_stdlib" {
+                return format!(
+                    "Compilation failed: The workflow stdlib library is not compiled.\n\n\
+                     To fix this, run:\n  cargo build -p runtara-workflow-stdlib --release --target {}\n\n\
+                     Or set RUNTARA_NATIVE_LIBRARY_DIR to point to a pre-compiled stdlib.",
+                    target
+                );
+            }
+            return format!(
+                "Compilation failed: Cannot find crate '{}'.\n\n\
+                 This may indicate the workflow stdlib is not properly compiled.\n\
+                 Try rebuilding: cargo build -p runtara-workflow-stdlib --release --target {}",
+                crate_name, target
+            );
+        }
+    }
+
+    // Unresolved import
+    if stderr.contains("error[E0432]") && stderr.contains("unresolved import") {
+        if let Some(import) = extract_pattern(stderr, "unresolved import `", "`") {
+            return format!(
+                "Compilation failed: Unresolved import '{}'.\n\n\
+                 This is likely a code generation bug. Please report this issue.",
+                import
+            );
+        }
+    }
+
+    // Type errors (usually code generation bugs)
+    if stderr.contains("error[E0308]") && stderr.contains("mismatched types") {
+        return format!(
+            "Compilation failed: Type mismatch in generated code.\n\n\
+             This is likely a code generation bug. Please report this issue."
+        );
+    }
+
+    // Borrow checker errors (usually code generation bugs)
+    if stderr.contains("error[E0382]")
+        || stderr.contains("error[E0502]")
+        || stderr.contains("error[E0499]")
+    {
+        return format!(
+            "Compilation failed: Borrow checker error in generated code.\n\n\
+             This is likely a code generation bug. Please report this issue."
+        );
+    }
+
+    // Extract first error message for unknown errors
+    if let Some(first_error) = extract_first_error(stderr) {
+        return format!(
+            "Compilation failed: {}\n\n\
+             If this error persists, please contact support.",
+            first_error
+        );
+    }
+
+    // Fallback: generic message
+    "Compilation failed. Please contact support if this issue persists.".to_string()
+}
+
+/// Extract a pattern from text: prefix...suffix
+fn extract_pattern<'a>(text: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    let start = text.find(prefix)? + prefix.len();
+    let rest = &text[start..];
+    let end = rest.find(suffix)?;
+    Some(&rest[..end])
+}
+
+/// Extract the first error message from rustc output.
+fn extract_first_error(stderr: &str) -> Option<String> {
+    for line in stderr.lines() {
+        let line = line.trim();
+        if line.starts_with("error[E") {
+            // Extract the error message after the code
+            if let Some(msg_start) = line.find("]: ") {
+                let msg = &line[msg_start + 3..];
+                return Some(msg.to_string());
+            }
+        } else if line.starts_with("error:") {
+            let msg = line.trim_start_matches("error:").trim();
+            if !msg.is_empty() {
+                return Some(msg.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Get the native target triple for the current host platform
 ///
 /// This must match the target used in build.rs when precompiling libraries.
@@ -235,13 +368,45 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         connection_service_url,
     } = input;
 
-    // Validate workflow for security (connection data leakage, etc.)
-    let validation_errors = crate::validation::validate_workflow(&execution_graph);
-    if !validation_errors.is_empty() {
-        let error_messages: Vec<String> = validation_errors.iter().map(|e| e.to_string()).collect();
+    // Validate workflow for security, correctness, and configuration
+    let validation_result = crate::validation::validate_workflow(&execution_graph);
+
+    // Log warnings (but don't fail)
+    for warning in &validation_result.warnings {
+        tracing::warn!(
+            tenant_id = %tenant_id,
+            scenario_id = %scenario_id,
+            version = version,
+            warning = %warning,
+            "Workflow validation warning"
+        );
+    }
+
+    // Fail on errors
+    if validation_result.has_errors() {
+        let error_messages: Vec<String> = validation_result
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+
+        let warning_note = if validation_result.has_warnings() {
+            format!(
+                "\n\nAdditionally, {} warning(s) were found.",
+                validation_result.warnings.len()
+            )
+        } else {
+            String::new()
+        };
+
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Workflow validation failed:\n{}", error_messages.join("\n")),
+            format!(
+                "Workflow validation failed with {} error(s):\n\n{}{}",
+                validation_result.errors.len(),
+                error_messages.join("\n\n"),
+                warning_note
+            ),
         ));
     }
 
@@ -439,15 +604,16 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Log the full error for debugging, but return a clean message to the user
+        // Log the full error for debugging
         tracing::error!(
             stderr = %stderr,
             stdout = %stdout,
             "Rustc compilation failed"
         );
-        return Err(io::Error::other(
-            "Failed to compile the scenario. Please contact support if this issue persists.",
-        ));
+
+        // Parse and provide user-friendly error message
+        let user_message = parse_rustc_error(&stderr, target);
+        return Err(io::Error::other(user_message));
     }
 
     // Verify the binary was created
