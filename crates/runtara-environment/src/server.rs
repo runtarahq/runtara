@@ -325,6 +325,14 @@ async fn handle_stream(
                 message: e.to_string(),
             }),
         },
+
+        Request::ListEvents(req) => match handle_list_events(&state, req).await {
+            Ok(resp) => Response::ListEvents(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_EVENTS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
     };
 
     // Send response
@@ -1033,4 +1041,84 @@ async fn handle_get_checkpoint(
             data: Vec::new(),
         }),
     }
+}
+
+async fn handle_list_events(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::ListEventsRequest,
+) -> Result<environment_proto::ListEventsResponse, crate::error::Error> {
+    use runtara_core::persistence::ListEventsFilter;
+
+    debug!(
+        instance_id = %req.instance_id,
+        event_type = ?req.event_type,
+        subtype = ?req.subtype,
+        limit = ?req.limit,
+        offset = ?req.offset,
+        payload_contains = ?req.payload_contains,
+        "Listing events via shared persistence"
+    );
+
+    // Check if we have Core persistence available
+    let persistence = match &state.core_persistence {
+        Some(p) => p,
+        None => {
+            return Err(crate::error::Error::Other(
+                "Core persistence not configured".to_string(),
+            ));
+        }
+    };
+
+    // Parse timestamps from milliseconds
+    let created_after = req
+        .created_after_ms
+        .and_then(chrono::DateTime::from_timestamp_millis);
+    let created_before = req
+        .created_before_ms
+        .and_then(chrono::DateTime::from_timestamp_millis);
+
+    let limit = req.limit.unwrap_or(100) as i64;
+    let offset = req.offset.unwrap_or(0) as i64;
+
+    // Build filter
+    let filter = ListEventsFilter {
+        event_type: req.event_type,
+        subtype: req.subtype,
+        created_after,
+        created_before,
+        payload_contains: req.payload_contains,
+    };
+
+    // Get events from persistence
+    let events = persistence
+        .list_events(&req.instance_id, &filter, limit, offset)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to list events: {}", e)))?;
+
+    // Get total count for pagination
+    let total_count = persistence
+        .count_events(&req.instance_id, &filter)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to count events: {}", e)))?;
+
+    // Convert to proto summaries
+    let summaries: Vec<environment_proto::EventSummary> = events
+        .into_iter()
+        .map(|ev| environment_proto::EventSummary {
+            id: ev.id.unwrap_or(0),
+            instance_id: ev.instance_id,
+            event_type: ev.event_type,
+            checkpoint_id: ev.checkpoint_id,
+            payload: ev.payload,
+            created_at_ms: ev.created_at.timestamp_millis(),
+            subtype: ev.subtype,
+        })
+        .collect();
+
+    Ok(environment_proto::ListEventsResponse {
+        events: summaries,
+        total_count: total_count as u32,
+        limit: limit as u32,
+        offset: offset as u32,
+    })
 }

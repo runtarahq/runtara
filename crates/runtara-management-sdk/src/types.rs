@@ -813,6 +813,110 @@ pub struct Checkpoint {
     pub data: serde_json::Value,
 }
 
+// ============================================================================
+// Event Types
+// ============================================================================
+
+/// Options for listing events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListEventsOptions {
+    /// Filter by event type (e.g., "custom", "started", "completed").
+    pub event_type: Option<String>,
+    /// Filter by subtype (e.g., "step_debug_start", "step_debug_end", "workflow_log").
+    pub subtype: Option<String>,
+    /// Maximum results to return.
+    pub limit: Option<u32>,
+    /// Pagination offset.
+    pub offset: Option<u32>,
+    /// Filter events created after this time.
+    pub created_after: Option<DateTime<Utc>>,
+    /// Filter events created before this time.
+    pub created_before: Option<DateTime<Utc>>,
+    /// Full-text search in JSON payload content.
+    pub payload_contains: Option<String>,
+}
+
+impl ListEventsOptions {
+    /// Create new options with defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filter by event type.
+    pub fn with_event_type(mut self, event_type: impl Into<String>) -> Self {
+        self.event_type = Some(event_type.into());
+        self
+    }
+
+    /// Filter by subtype.
+    pub fn with_subtype(mut self, subtype: impl Into<String>) -> Self {
+        self.subtype = Some(subtype.into());
+        self
+    }
+
+    /// Set the limit.
+    pub fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Set the offset.
+    pub fn with_offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Filter events created after this time.
+    pub fn with_created_after(mut self, created_after: DateTime<Utc>) -> Self {
+        self.created_after = Some(created_after);
+        self
+    }
+
+    /// Filter events created before this time.
+    pub fn with_created_before(mut self, created_before: DateTime<Utc>) -> Self {
+        self.created_before = Some(created_before);
+        self
+    }
+
+    /// Full-text search in JSON payload.
+    pub fn with_payload_contains(mut self, search: impl Into<String>) -> Self {
+        self.payload_contains = Some(search.into());
+        self
+    }
+}
+
+/// Summary of an event (for list results).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSummary {
+    /// Event ID.
+    pub id: i64,
+    /// Instance ID this event belongs to.
+    pub instance_id: String,
+    /// Event type (e.g., "custom", "started", "completed").
+    pub event_type: String,
+    /// Associated checkpoint ID if applicable.
+    pub checkpoint_id: Option<String>,
+    /// Event payload as JSON (parsed from bytes).
+    pub payload: Option<serde_json::Value>,
+    /// When the event was created.
+    pub created_at: DateTime<Utc>,
+    /// Event subtype (e.g., "step_debug_start", "workflow_log").
+    pub subtype: Option<String>,
+}
+
+/// Result of listing events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListEventsResult {
+    /// List of event summaries.
+    pub events: Vec<EventSummary>,
+    /// Total count (for pagination).
+    pub total_count: u32,
+    /// Limit used in query.
+    pub limit: u32,
+    /// Offset used in query.
+    pub offset: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -333,6 +333,39 @@ message GetCheckpointResponse {
 }
 
 // ============================================================================
+// Events (proxied to Core)
+// ============================================================================
+
+// List events for an instance (debug events, workflow logs, etc.)
+message ListEventsRequest {
+  string instance_id = 1;
+  optional string event_type = 2;         // Filter by event_type (e.g., "custom", "started")
+  optional string subtype = 3;            // Filter by subtype (e.g., "step_debug_start", "workflow_log")
+  optional uint32 limit = 4;              // Max results (default: 100)
+  optional uint32 offset = 5;             // Pagination offset
+  optional int64 created_after_ms = 6;    // Filter events created after this time
+  optional int64 created_before_ms = 7;   // Filter events created before this time
+  optional string payload_contains = 8;   // Full-text search in JSON payload
+}
+
+message ListEventsResponse {
+  repeated EventSummary events = 1;
+  uint32 total_count = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message EventSummary {
+  int64 id = 1;
+  string instance_id = 2;
+  string event_type = 3;
+  optional string checkpoint_id = 4;
+  optional bytes payload = 5;             // JSON payload bytes
+  int64 created_at_ms = 6;
+  optional string subtype = 7;
+}
+
+// ============================================================================
 // RPC Wrapper (for multiplexing on single stream)
 // ============================================================================
 
@@ -362,6 +395,8 @@ message RpcRequest {
     // Checkpoints (proxied to Core)
     ListCheckpointsRequest list_checkpoints = 17;
     GetCheckpointRequest get_checkpoint = 18;
+    // Events (proxied to Core)
+    ListEventsRequest list_events = 20;
   }
 }
 
@@ -392,6 +427,8 @@ message RpcResponse {
     // Checkpoints
     ListCheckpointsResponse list_checkpoints = 17;
     GetCheckpointResponse get_checkpoint = 18;
+    // Events
+    ListEventsResponse list_events = 20;
   }
 }
 

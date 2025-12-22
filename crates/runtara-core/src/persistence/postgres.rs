@@ -30,8 +30,8 @@ impl PostgresPersistence {
 // ============================================================================
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, Persistence, SignalRecord,
-    WakeEntry,
+    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
+    Persistence, SignalRecord, WakeEntry,
 };
 
 // ============================================================================
@@ -501,6 +501,83 @@ pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), Core
     Ok(())
 }
 
+/// List events for an instance with filtering and pagination.
+///
+/// Supports filtering by event_type, subtype, time range, and full-text search
+/// in the JSON payload. Events are returned in reverse chronological order.
+pub async fn list_events(
+    pool: &PgPool,
+    instance_id: &str,
+    filter: &ListEventsFilter,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<EventRecord>, CoreError> {
+    // For PostgreSQL, we use convert_from to search text within BYTEA payload
+    // The payload is expected to be valid UTF-8 JSON when subtype is set
+    let records = sqlx::query_as::<_, EventRecord>(
+        r#"
+        SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, created_at, subtype
+        FROM instance_events
+        WHERE instance_id = $1
+          AND ($2::TEXT IS NULL OR event_type::text = $2)
+          AND ($3::TEXT IS NULL OR subtype = $3)
+          AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4)
+          AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5)
+          AND ($6::TEXT IS NULL OR (
+              payload IS NOT NULL
+              AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%'
+          ))
+        ORDER BY created_at DESC, id DESC
+        LIMIT $7 OFFSET $8
+        "#,
+    )
+    .bind(instance_id)
+    .bind(&filter.event_type)
+    .bind(&filter.subtype)
+    .bind(filter.created_after)
+    .bind(filter.created_before)
+    .bind(&filter.payload_contains)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records)
+}
+
+/// Count events for an instance with filtering.
+pub async fn count_events(
+    pool: &PgPool,
+    instance_id: &str,
+    filter: &ListEventsFilter,
+) -> Result<i64, CoreError> {
+    let count: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM instance_events
+        WHERE instance_id = $1
+          AND ($2::TEXT IS NULL OR event_type::text = $2)
+          AND ($3::TEXT IS NULL OR subtype = $3)
+          AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4)
+          AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5)
+          AND ($6::TEXT IS NULL OR (
+              payload IS NOT NULL
+              AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%'
+          ))
+        "#,
+    )
+    .bind(instance_id)
+    .bind(&filter.event_type)
+    .bind(&filter.subtype)
+    .bind(filter.created_after)
+    .bind(filter.created_before)
+    .bind(&filter.payload_contains)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0)
+}
+
 // ============================================================================
 // Signal Operations
 // ============================================================================
@@ -907,6 +984,24 @@ impl Persistence for PostgresPersistence {
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
         get_sleeping_instances_due(&self.pool, limit).await
+    }
+
+    async fn list_events(
+        &self,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<EventRecord>, CoreError> {
+        list_events(&self.pool, instance_id, filter, limit, offset).await
+    }
+
+    async fn count_events(
+        &self,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+    ) -> Result<i64, CoreError> {
+        count_events(&self.pool, instance_id, filter).await
     }
 }
 
@@ -1349,6 +1444,7 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let event = EventRecord {
+            id: None,
             instance_id: instance_id.to_string(),
             event_type: "started".to_string(),
             checkpoint_id: None,

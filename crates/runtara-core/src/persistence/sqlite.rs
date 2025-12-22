@@ -9,7 +9,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use crate::error::CoreError;
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, Persistence, SignalRecord,
+    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
+    Persistence, SignalRecord,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -581,6 +582,78 @@ impl Persistence for SqlitePersistence {
 
         Ok(records)
     }
+
+    async fn list_events(
+        &self,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<EventRecord>, CoreError> {
+        // For SQLite, we use CAST and LIKE for text search within BLOB payload
+        // The payload is expected to be valid UTF-8 JSON when subtype is set
+        let records = sqlx::query_as::<_, EventRecord>(
+            r#"
+            SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype
+            FROM instance_events
+            WHERE instance_id = ?1
+              AND (?2 IS NULL OR event_type = ?2)
+              AND (?3 IS NULL OR subtype = ?3)
+              AND (?4 IS NULL OR created_at >= ?4)
+              AND (?5 IS NULL OR created_at < ?5)
+              AND (?6 IS NULL OR (
+                  payload IS NOT NULL
+                  AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
+              ))
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?7 OFFSET ?8
+            "#,
+        )
+        .bind(instance_id)
+        .bind(&filter.event_type)
+        .bind(&filter.subtype)
+        .bind(filter.created_after)
+        .bind(filter.created_before)
+        .bind(&filter.payload_contains)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(records)
+    }
+
+    async fn count_events(
+        &self,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+    ) -> Result<i64, CoreError> {
+        let count: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)
+            FROM instance_events
+            WHERE instance_id = ?1
+              AND (?2 IS NULL OR event_type = ?2)
+              AND (?3 IS NULL OR subtype = ?3)
+              AND (?4 IS NULL OR created_at >= ?4)
+              AND (?5 IS NULL OR created_at < ?5)
+              AND (?6 IS NULL OR (
+                  payload IS NOT NULL
+                  AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
+              ))
+            "#,
+        )
+        .bind(instance_id)
+        .bind(&filter.event_type)
+        .bind(&filter.subtype)
+        .bind(filter.created_after)
+        .bind(filter.created_before)
+        .bind(&filter.payload_contains)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count.0)
+    }
 }
 
 #[cfg(test)]
@@ -892,6 +965,7 @@ mod tests {
             .unwrap();
 
         let event = EventRecord {
+            id: None,
             instance_id: instance_id.clone(),
             event_type: "started".to_string(),
             checkpoint_id: None,

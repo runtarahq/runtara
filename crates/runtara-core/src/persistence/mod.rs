@@ -57,8 +57,11 @@ pub struct CheckpointRecord {
 }
 
 /// Event record from the persistence layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EventRecord {
+    /// Database primary key (None when inserting new events).
+    #[sqlx(default)]
+    pub id: Option<i64>,
     /// Instance this event belongs to.
     pub instance_id: String,
     /// Type of event (heartbeat, completed, failed, suspended, custom).
@@ -99,6 +102,21 @@ pub struct CustomSignalRecord {
     pub payload: Option<Vec<u8>>,
     /// When the signal was created.
     pub created_at: DateTime<Utc>,
+}
+
+/// Filter options for listing events.
+#[derive(Debug, Clone, Default)]
+pub struct ListEventsFilter {
+    /// Filter by event type (e.g., "custom", "started", "completed").
+    pub event_type: Option<String>,
+    /// Filter by subtype (e.g., "step_debug_start", "step_debug_end", "workflow_log").
+    pub subtype: Option<String>,
+    /// Filter events created at or after this time.
+    pub created_after: Option<DateTime<Utc>>,
+    /// Filter events created before this time.
+    pub created_before: Option<DateTime<Utc>>,
+    /// Full-text search in JSON payload content.
+    pub payload_contains: Option<String>,
 }
 
 /// Wake queue entry from the persistence layer.
@@ -241,4 +259,22 @@ pub trait Persistence: Send + Sync {
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
+
+    /// List events for an instance with filtering and pagination.
+    ///
+    /// Events are returned in reverse chronological order (newest first).
+    async fn list_events(
+        &self,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<EventRecord>, CoreError>;
+
+    /// Count events for an instance with filtering.
+    async fn count_events(
+        &self,
+        instance_id: &str,
+        filter: &ListEventsFilter,
+    ) -> Result<i64, CoreError>;
 }

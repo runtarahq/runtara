@@ -141,6 +141,7 @@ pub async fn handle_register_instance(
 
     // 6. Insert started event
     let event = EventRecord {
+        id: None,
         instance_id: request.instance_id.clone(),
         event_type: "started".to_string(),
         checkpoint_id: request.checkpoint_id.clone(),
@@ -410,6 +411,7 @@ pub async fn handle_instance_event(
 
     // 4. Insert event record
     let event_record = EventRecord {
+        id: None,
         instance_id: event.instance_id.clone(),
         event_type: event_type.to_string(),
         checkpoint_id: event.checkpoint_id.clone(),

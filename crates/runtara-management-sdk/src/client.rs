@@ -9,9 +9,10 @@ use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 use runtara_protocol::environment_proto::{
     DeleteImageRequest, GetCapabilityRequest, GetCheckpointRequest, GetImageRequest,
     GetInstanceStatusRequest, HealthCheckRequest, ListAgentsRequest, ListCheckpointsRequest,
-    ListImagesRequest, ListInstancesRequest, RegisterImageRequest, RegisterImageStreamStart,
-    ResumeInstanceRequest, RpcRequest, RpcResponse, SendSignalRequest, StartInstanceRequest,
-    StopInstanceRequest, TestCapabilityRequest, rpc_request::Request, rpc_response::Response,
+    ListEventsRequest, ListImagesRequest, ListInstancesRequest, RegisterImageRequest,
+    RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse, SendSignalRequest,
+    StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, rpc_request::Request,
+    rpc_response::Response,
 };
 use runtara_protocol::frame::{Frame, write_frame};
 use tokio::io::AsyncRead;
@@ -19,12 +20,12 @@ use tokio::io::AsyncRead;
 use crate::config::SdkConfig;
 use crate::error::{Result, SdkError};
 use crate::types::{
-    AgentInfo, CapabilityField, Checkpoint, CheckpointSummary, HealthStatus, ImageSummary,
-    InstanceInfo, InstanceStatus, InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult,
-    ListImagesOptions, ListImagesResult, ListInstancesOptions, ListInstancesResult,
-    RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType,
-    StartInstanceOptions, StartInstanceResult, StopInstanceOptions, TestCapabilityOptions,
-    TestCapabilityResult,
+    AgentInfo, CapabilityField, Checkpoint, CheckpointSummary, EventSummary, HealthStatus,
+    ImageSummary, InstanceInfo, InstanceStatus, InstanceSummary, ListCheckpointsOptions,
+    ListCheckpointsResult, ListEventsOptions, ListEventsResult, ListImagesOptions,
+    ListImagesResult, ListInstancesOptions, ListInstancesResult, RegisterImageOptions,
+    RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType, StartInstanceOptions,
+    StartInstanceResult, StopInstanceOptions, TestCapabilityOptions, TestCapabilityResult,
 };
 
 /// High-level SDK for managing runtara-environment instances and images.
@@ -806,6 +807,102 @@ impl ManagementSdk {
             }
             _ => Err(SdkError::UnexpectedResponse(
                 "expected GetCheckpointResponse".to_string(),
+            )),
+        }
+    }
+
+    // =========================================================================
+    // Events
+    // =========================================================================
+
+    /// List events for an instance with optional filtering.
+    ///
+    /// Returns a paginated list of events for the specified instance.
+    /// Events include debug step events, workflow logs, and lifecycle events.
+    /// Supports filtering by event type, subtype, time range, and full-text search in payload.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // List all debug events for an instance
+    /// let result = sdk.list_events(
+    ///     "instance-123",
+    ///     ListEventsOptions::new()
+    ///         .with_subtype("step_debug_start")
+    ///         .with_limit(50)
+    /// ).await?;
+    ///
+    /// for event in result.events {
+    ///     println!("{}: {} - {:?}", event.id, event.subtype.unwrap_or_default(), event.payload);
+    /// }
+    ///
+    /// // Search for events containing specific text in payload
+    /// let result = sdk.list_events(
+    ///     "instance-123",
+    ///     ListEventsOptions::new()
+    ///         .with_payload_contains("error")
+    /// ).await?;
+    /// ```
+    #[instrument(skip(self, options), fields(instance_id = %instance_id))]
+    pub async fn list_events(
+        &self,
+        instance_id: &str,
+        options: ListEventsOptions,
+    ) -> Result<ListEventsResult> {
+        debug!("Listing events");
+
+        let response = self
+            .send_request(Request::ListEvents(ListEventsRequest {
+                instance_id: instance_id.to_string(),
+                event_type: options.event_type,
+                subtype: options.subtype,
+                limit: options.limit,
+                offset: options.offset,
+                created_after_ms: options.created_after.map(|t| t.timestamp_millis()),
+                created_before_ms: options.created_before.map(|t| t.timestamp_millis()),
+                payload_contains: options.payload_contains,
+            }))
+            .await?;
+
+        match response {
+            Response::ListEvents(resp) => {
+                let events = resp
+                    .events
+                    .into_iter()
+                    .map(|ev| {
+                        // Parse payload bytes as JSON if present
+                        let payload = ev.payload.and_then(|bytes| {
+                            if bytes.is_empty() {
+                                None
+                            } else {
+                                serde_json::from_slice(&bytes).ok()
+                            }
+                        });
+
+                        EventSummary {
+                            id: ev.id,
+                            instance_id: ev.instance_id,
+                            event_type: ev.event_type,
+                            checkpoint_id: ev.checkpoint_id,
+                            payload,
+                            created_at: Utc
+                                .timestamp_millis_opt(ev.created_at_ms)
+                                .single()
+                                .unwrap_or_else(Utc::now),
+                            subtype: ev.subtype,
+                        }
+                    })
+                    .collect();
+
+                Ok(ListEventsResult {
+                    events,
+                    total_count: resp.total_count,
+                    limit: resp.limit,
+                    offset: resp.offset,
+                })
+            }
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected ListEventsResponse".to_string(),
             )),
         }
     }
