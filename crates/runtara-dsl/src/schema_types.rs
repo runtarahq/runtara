@@ -67,6 +67,7 @@ pub struct ExecutionGraph {
     pub description: Option<String>,
 
     /// Map of step IDs to step definitions
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub steps: HashMap<String, Step>,
 
     /// ID of the entry point step (step with no incoming edges)
