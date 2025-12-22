@@ -12,9 +12,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use runtara_environment::config::Config;
-use runtara_environment::handlers::EnvironmentHandlerState;
-use runtara_environment::runner::{Runner, oci::OciRunner};
-use runtara_environment::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
+use runtara_environment::runner::Runner;
+use runtara_environment::runner::oci::OciRunner;
+use runtara_environment::runtime::EnvironmentRuntime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,53 +58,25 @@ async fn main() -> anyhow::Result<()> {
     let runner = Arc::new(OciRunner::from_env());
     info!(runner_type = runner.runner_type(), "Runner initialized");
 
-    // Create handler state
-    let _handler_state = Arc::new(EnvironmentHandlerState::new(
-        pool.clone(),
-        runner.clone(),
-        config.core_addr.clone(),
-        config.data_dir.clone(),
-    ));
-
-    // Start wake scheduler
-    let wake_config = WakeSchedulerConfig {
-        core_addr: config.core_addr.clone(),
-        data_dir: config.data_dir.clone(),
-        ..Default::default()
-    };
-    let wake_scheduler = WakeScheduler::new(pool.clone(), runner.clone(), wake_config);
-    let shutdown_handle = wake_scheduler.shutdown_handle();
-
-    let wake_handle = tokio::spawn(async move {
-        wake_scheduler.run().await;
-    });
-
-    info!("Wake scheduler started");
-
-    // Start QUIC server
-    let server_state = _handler_state;
-    let server_addr = config.quic_addr;
-    let server_handle = tokio::spawn(async move {
-        if let Err(e) =
-            runtara_environment::server::run_environment_server(server_addr, server_state).await
-        {
-            tracing::error!("Environment QUIC server error: {}", e);
-        }
-    });
+    // Start the runtime
+    let runtime = EnvironmentRuntime::builder()
+        .pool(pool)
+        .runner(runner)
+        .core_addr(&config.core_addr)
+        .bind_addr(config.quic_addr)
+        .data_dir(&config.data_dir)
+        .build()?
+        .start()
+        .await?;
 
     info!(addr = %config.quic_addr, "Environment server ready");
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
-
     info!("Shutdown signal received");
 
-    // Stop the server
-    server_handle.abort();
-
-    // Signal wake scheduler to stop
-    shutdown_handle.notify_one();
-    wake_handle.await?;
+    // Graceful shutdown
+    runtime.shutdown().await?;
 
     info!("Runtara Environment shut down");
 

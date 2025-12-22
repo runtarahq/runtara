@@ -18,9 +18,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use tracing::{error, info};
 
 use runtara_core::config::Config;
-use runtara_core::instance_handlers::InstanceHandlerState;
 use runtara_core::persistence::{Persistence, PostgresPersistence, SqlitePersistence};
-use runtara_core::server;
+use runtara_core::runtime::CoreRuntime;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -85,19 +84,13 @@ async fn main() -> Result<()> {
         Arc::new(SqlitePersistence::new(pool))
     };
 
-    // Create shared handler state
-    let instance_state = Arc::new(InstanceHandlerState::new(persistence.clone()));
-
-    info!("Runtara Core initialized successfully");
-
-    // Start instance QUIC server (instances connect here for checkpoints/signals)
-    let instance_addr = config.quic_addr;
-    let instance_server_state = instance_state.clone();
-    let instance_server_handle = tokio::spawn(async move {
-        if let Err(e) = server::run_instance_server(instance_addr, instance_server_state).await {
-            error!("Instance QUIC server error: {}", e);
-        }
-    });
+    // Start the runtime
+    let runtime = CoreRuntime::builder()
+        .persistence(persistence)
+        .bind_addr(config.quic_addr)
+        .build()?
+        .start()
+        .await?;
 
     info!(addr = %config.quic_addr, "Runtara Core ready");
 
@@ -105,10 +98,8 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
 
-    // Cancel server task
-    instance_server_handle.abort();
-
-    info!("Shutdown complete");
+    // Graceful shutdown
+    runtime.shutdown().await?;
 
     Ok(())
 }

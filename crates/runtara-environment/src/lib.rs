@@ -174,5 +174,8 @@ pub mod server;
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 
+/// Embeddable runtime for runtara-environment.
+pub mod runtime;
+
 pub use config::Config;
 pub use error::Error;

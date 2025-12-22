@@ -47,7 +47,7 @@ pub async fn run_environment_server(
 }
 
 /// Handle a single connection.
-async fn handle_connection(conn: ConnectionHandler, state: Arc<EnvironmentHandlerState>) {
+pub async fn handle_connection(conn: ConnectionHandler, state: Arc<EnvironmentHandlerState>) {
     info!(remote = %conn.remote_address(), "New environment connection accepted");
 
     conn.run(move |stream: StreamHandler| {

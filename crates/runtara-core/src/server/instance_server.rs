@@ -49,7 +49,7 @@ pub async fn run_instance_server(
 
 /// Handle a single connection
 #[instrument(skip(conn, state), fields(remote = %conn.remote_address()))]
-async fn handle_connection(conn: ConnectionHandler, state: Arc<InstanceServerState>) {
+pub async fn handle_connection(conn: ConnectionHandler, state: Arc<InstanceServerState>) {
     info!("New instance connection accepted");
 
     conn.run(move |stream: StreamHandler| {

@@ -7,4 +7,4 @@
 
 pub mod instance_server;
 
-pub use instance_server::{InstanceServerState, run_instance_server};
+pub use instance_server::{InstanceServerState, handle_connection, run_instance_server};

@@ -162,3 +162,7 @@ pub mod instance_handlers;
 #[cfg(feature = "server")]
 /// QUIC server implementation for the instance protocol.
 pub mod server;
+
+#[cfg(feature = "server")]
+/// Embeddable runtime for runtara-core.
+pub mod runtime;
