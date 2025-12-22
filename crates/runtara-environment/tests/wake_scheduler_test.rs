@@ -520,13 +520,12 @@ async fn test_create_and_get_instance() {
     let instance_id = Uuid::new_v4().to_string();
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
-    let input = serde_json::json!({"key": "value"});
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, Some(&input))
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .expect("Failed to create instance");
 
-    let instance = db::get_instance(&pool, &instance_id)
+    let instance = db::get_instance_full(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance should exist");
@@ -535,7 +534,6 @@ async fn test_create_and_get_instance() {
     assert_eq!(instance.tenant_id, tenant_id);
     assert_eq!(instance.image_id, Some(image_id.clone()));
     assert_eq!(instance.status, "pending");
-    assert_eq!(instance.input, Some(input));
     assert!(instance.output.is_none());
     assert!(instance.error.is_none());
 
@@ -555,7 +553,7 @@ async fn test_update_instance_status() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .unwrap();
 
@@ -600,17 +598,18 @@ async fn test_update_instance_result() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .unwrap();
 
     let output = serde_json::json!({"result": "success"});
+    let output_bytes = serde_json::to_vec(&output).unwrap();
 
     db::update_instance_result(
         &pool,
         &instance_id,
         "completed",
-        Some(&output),
+        Some(&output_bytes),
         None,
         Some("cp-done"),
     )
@@ -622,7 +621,7 @@ async fn test_update_instance_result() {
         .unwrap()
         .unwrap();
     assert_eq!(instance.status, "completed");
-    assert_eq!(instance.output, Some(output));
+    assert_eq!(instance.output, Some(output_bytes));
     assert!(instance.error.is_none());
     assert_eq!(instance.checkpoint_id, Some("cp-done".to_string()));
 
@@ -642,7 +641,7 @@ async fn test_update_instance_result_with_error() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .unwrap();
 
@@ -689,13 +688,13 @@ async fn test_list_instances() {
     let instance2 = Uuid::new_v4().to_string();
     let instance3 = Uuid::new_v4().to_string();
 
-    db::create_instance(&pool, &instance1, "list-test-tenant-a", &image_id, None)
+    db::create_instance(&pool, &instance1, "list-test-tenant-a", &image_id)
         .await
         .unwrap();
-    db::create_instance(&pool, &instance2, "list-test-tenant-a", &image_id, None)
+    db::create_instance(&pool, &instance2, "list-test-tenant-a", &image_id)
         .await
         .unwrap();
-    db::create_instance(&pool, &instance3, "list-test-tenant-b", &image_id, None)
+    db::create_instance(&pool, &instance3, "list-test-tenant-b", &image_id)
         .await
         .unwrap();
 
@@ -830,17 +829,15 @@ fn test_instance_debug() {
     let instance = Instance {
         instance_id: "inst-123".to_string(),
         tenant_id: "tenant-456".to_string(),
-        image_id: Some(Uuid::new_v4().to_string()),
         status: "running".to_string(),
-        input: Some(serde_json::json!({"key": "value"})),
-        output: None,
-        error: None,
         checkpoint_id: Some("cp-1".to_string()),
+        attempt: 1,
+        max_attempts: 3,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
         finished_at: None,
-        retry_count: 0,
-        max_retries: 3,
+        output: None,
+        error: None,
     };
 
     let debug_str = format!("{:?}", instance);
@@ -854,17 +851,15 @@ fn test_instance_clone() {
     let instance = Instance {
         instance_id: "i1".to_string(),
         tenant_id: "t1".to_string(),
-        image_id: Some(Uuid::new_v4().to_string()),
         status: "pending".to_string(),
-        input: None,
-        output: None,
-        error: None,
         checkpoint_id: None,
+        attempt: 0,
+        max_attempts: 3,
         created_at: Utc::now(),
         started_at: None,
         finished_at: None,
-        retry_count: 0,
-        max_retries: 3,
+        output: None,
+        error: None,
     };
 
     let cloned = instance.clone();

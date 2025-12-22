@@ -66,21 +66,13 @@ async fn test_create_and_get_instance() {
         .await
         .expect("Failed to create test image");
 
-    let input = serde_json::json!({"key": "value"});
-
     // Create instance
-    runtara_environment::db::create_instance(
-        &pool,
-        &instance_id,
-        tenant_id,
-        &image_id,
-        Some(&input),
-    )
-    .await
-    .expect("Failed to create instance");
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+        .await
+        .expect("Failed to create instance");
 
-    // Get instance
-    let instance = runtara_environment::db::get_instance(&pool, &instance_id)
+    // Get instance (use get_instance_full to also get image_id)
+    let instance = runtara_environment::db::get_instance_full(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -89,7 +81,6 @@ async fn test_create_and_get_instance() {
     assert_eq!(instance.tenant_id, tenant_id);
     assert_eq!(instance.image_id, Some(image_id.clone()));
     assert_eq!(instance.status, "pending");
-    assert_eq!(instance.input, Some(input));
 
     // Cleanup
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")
@@ -119,7 +110,7 @@ async fn test_update_instance_status() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .expect("Failed to create instance");
 
@@ -183,17 +174,18 @@ async fn test_update_instance_result() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .expect("Failed to create instance");
 
     // Update with success result
     let output = serde_json::json!({"result": "success"});
+    let output_bytes = serde_json::to_vec(&output).unwrap();
     runtara_environment::db::update_instance_result(
         &pool,
         &instance_id,
         "completed",
-        Some(&output),
+        Some(&output_bytes),
         None,
         None,
     )
@@ -206,7 +198,7 @@ async fn test_update_instance_result() {
         .expect("Instance not found");
 
     assert_eq!(instance.status, "completed");
-    assert_eq!(instance.output, Some(output));
+    assert_eq!(instance.output, Some(output_bytes));
     assert!(instance.error.is_none());
 
     // Cleanup
@@ -237,7 +229,7 @@ async fn test_update_instance_result_with_error() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .expect("Failed to create instance");
 
@@ -291,7 +283,7 @@ async fn test_list_instances() {
     // Create multiple instances
     let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
     for id in &ids {
-        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id, None)
+        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id)
             .await
             .expect("Failed to create instance");
     }
@@ -360,7 +352,7 @@ async fn test_schedule_and_get_wake() {
         .await
         .expect("Failed to create test image");
 
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .expect("Failed to create instance");
 
@@ -416,7 +408,7 @@ async fn test_schedule_wake_updates_existing() {
         .await
         .expect("Failed to create test image");
 
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
         .await
         .expect("Failed to create instance");
 
