@@ -1,0 +1,87 @@
+{
+  "name": "Debug Mode Example",
+  "description": "A workflow demonstrating debug mode step telemetry. Compile with --debug flag to emit step events.",
+  "steps": {
+    "fetch": {
+      "stepType": "Agent",
+      "id": "fetch",
+      "name": "Fetch Data",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "maxRetries": 2,
+      "retryDelay": 500,
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "fetched_id": "$.id",
+            "fetched_name": "$.name"
+          }
+        }
+      }
+    },
+    "transform": {
+      "stepType": "Agent",
+      "id": "transform",
+      "name": "Transform Result",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "steps.fetch.outputs"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "result_id": "$.fetched_id",
+            "result_name": "$.fetched_name",
+            "processed": true
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "name": "Complete Workflow",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "fetch",
+  "executionPlan": [
+    {
+      "fromStep": "fetch",
+      "toStep": "transform"
+    },
+    {
+      "fromStep": "transform",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id": { "type": "string" },
+      "name": { "type": "string" }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "result_id": { "type": "string" },
+      "result_name": { "type": "string" },
+      "processed": { "type": "boolean" }
+    }
+  }
+}

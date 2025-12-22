@@ -73,21 +73,161 @@ pub fn step_name(step: &Step) -> Option<&str> {
     }
 }
 
-/// Emit debug logging for step execution start.
+/// Maximum size in bytes for inputs/outputs in debug events before truncation.
+const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
+
+/// Emit debug event for step execution start.
+/// Captures step metadata, inputs, and input mapping.
+///
+/// The generated code builds the payload inline and calls `sdk.custom_event()`.
+///
+/// # Arguments
+/// * `ctx` - Emit context (checks debug_mode)
+/// * `step_id` - Unique step identifier
+/// * `step_name` - Optional human-readable step name
+/// * `step_type` - Step type string (e.g., "Agent", "Conditional")
+/// * `inputs_var` - Optional Ident of variable holding step inputs (as serde_json::Value)
+/// * `input_mapping_json` - Optional static JSON string of input mapping DSL
 pub fn emit_step_debug_start(
     ctx: &EmitContext,
     step_id: &str,
     step_name: Option<&str>,
     step_type: &str,
+    inputs_var: Option<&proc_macro2::Ident>,
+    input_mapping_json: Option<&str>,
 ) -> TokenStream {
-    if ctx.debug_mode {
-        let name_display = step_name.unwrap_or("Unnamed");
-        let runtime_ctx = &ctx.runtime_ctx_var;
-        quote! {
-            #runtime_ctx.step_started(#step_id, #name_display, #step_type);
+    if !ctx.debug_mode {
+        return quote! {};
+    }
+
+    let max_size = STEP_DEBUG_MAX_PAYLOAD_SIZE;
+
+    let name_expr = step_name
+        .map(|n| quote! { Some(#n.to_string()) })
+        .unwrap_or(quote! { None });
+
+    let inputs_expr = inputs_var
+        .map(|v| {
+            quote! {
+                Some(__truncate_json_value(&#v, #max_size))
+            }
+        })
+        .unwrap_or(quote! { None });
+
+    let mapping_expr = input_mapping_json
+        .map(|json| quote! {
+            Some(serde_json::from_str::<serde_json::Value>(#json).unwrap_or(serde_json::Value::Null))
+        })
+        .unwrap_or(quote! { None });
+
+    quote! {
+        let __step_start_time = std::time::Instant::now();
+        {
+            // Truncate helper function
+            fn __truncate_json_value(value: &serde_json::Value, max_size: usize) -> serde_json::Value {
+                let serialized = serde_json::to_string(value).unwrap_or_default();
+                if serialized.len() <= max_size {
+                    value.clone()
+                } else {
+                    let truncated = &serialized[..max_size.saturating_sub(20)];
+                    serde_json::json!({
+                        "_truncated": true,
+                        "_original_size": serialized.len(),
+                        "_preview": truncated
+                    })
+                }
+            }
+
+            let __payload = serde_json::json!({
+                "step_id": #step_id,
+                "step_name": #name_expr,
+                "step_type": #step_type,
+                "timestamp_ms": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                "inputs": #inputs_expr,
+                "input_mapping": #mapping_expr,
+            });
+
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
+            let __sdk_guard = sdk().lock().await;
+            let _ = __sdk_guard.custom_event("step_debug_start", __payload_bytes).await;
         }
-    } else {
-        quote! {}
+    }
+}
+
+/// Emit debug event for step execution end.
+/// Captures step metadata, outputs, and duration.
+///
+/// The generated code builds the payload inline and calls `sdk.custom_event()`.
+///
+/// # Arguments
+/// * `ctx` - Emit context (checks debug_mode)
+/// * `step_id` - Unique step identifier
+/// * `step_name` - Optional human-readable step name
+/// * `step_type` - Step type string (e.g., "Agent", "Conditional")
+/// * `outputs_var` - Optional Ident of variable holding step outputs (as serde_json::Value)
+pub fn emit_step_debug_end(
+    ctx: &EmitContext,
+    step_id: &str,
+    step_name: Option<&str>,
+    step_type: &str,
+    outputs_var: Option<&proc_macro2::Ident>,
+) -> TokenStream {
+    if !ctx.debug_mode {
+        return quote! {};
+    }
+
+    let max_size = STEP_DEBUG_MAX_PAYLOAD_SIZE;
+
+    let name_expr = step_name
+        .map(|n| quote! { Some(#n.to_string()) })
+        .unwrap_or(quote! { None });
+
+    let outputs_expr = outputs_var
+        .map(|v| {
+            quote! {
+                Some(__truncate_json_value(&#v, #max_size))
+            }
+        })
+        .unwrap_or(quote! { None });
+
+    quote! {
+        {
+            let __duration_ms = __step_start_time.elapsed().as_millis() as u64;
+
+            // Truncate helper function
+            fn __truncate_json_value(value: &serde_json::Value, max_size: usize) -> serde_json::Value {
+                let serialized = serde_json::to_string(value).unwrap_or_default();
+                if serialized.len() <= max_size {
+                    value.clone()
+                } else {
+                    let truncated = &serialized[..max_size.saturating_sub(20)];
+                    serde_json::json!({
+                        "_truncated": true,
+                        "_original_size": serialized.len(),
+                        "_preview": truncated
+                    })
+                }
+            }
+
+            let __payload = serde_json::json!({
+                "step_id": #step_id,
+                "step_name": #name_expr,
+                "step_type": #step_type,
+                "timestamp_ms": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                "duration_ms": __duration_ms,
+                "outputs": #outputs_expr,
+            });
+
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
+            let __sdk_guard = sdk().lock().await;
+            let _ = __sdk_guard.custom_event("step_debug_end", __payload_bytes).await;
+        }
     }
 }
 
@@ -159,4 +299,214 @@ pub fn find_next_step_for_label<'a>(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_debug_ctx() -> EmitContext {
+        EmitContext::new(true) // debug_mode = true
+    }
+
+    fn make_non_debug_ctx() -> EmitContext {
+        EmitContext::new(false) // debug_mode = false
+    }
+
+    #[test]
+    fn test_emit_step_debug_start_disabled_when_not_debug_mode() {
+        let ctx = make_non_debug_ctx();
+        let tokens = emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
+        assert!(
+            tokens.is_empty(),
+            "Should emit nothing when debug_mode is false"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_start_emits_code_in_debug_mode() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
+        let code = tokens.to_string();
+
+        // Verify key elements are present in generated code
+        assert!(
+            code.contains("__step_start_time"),
+            "Should declare start time"
+        );
+        assert!(
+            code.contains("step_debug_start"),
+            "Should use correct subtype"
+        );
+        assert!(code.contains("custom_event"), "Should call custom_event");
+        assert!(code.contains("step-1"), "Should include step_id");
+        assert!(code.contains("Test Step"), "Should include step_name");
+        assert!(code.contains("Agent"), "Should include step_type");
+    }
+
+    #[test]
+    fn test_emit_step_debug_start_with_inputs_var() {
+        let ctx = make_debug_ctx();
+        let inputs_var = proc_macro2::Ident::new("my_inputs", proc_macro2::Span::call_site());
+        let tokens =
+            emit_step_debug_start(&ctx, "step-2", None, "Conditional", Some(&inputs_var), None);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("my_inputs"),
+            "Should reference the inputs variable"
+        );
+        assert!(
+            code.contains("__truncate_json_value"),
+            "Should include truncation helper"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_start_with_input_mapping() {
+        let ctx = make_debug_ctx();
+        let mapping_json = r#"{"field": {"type": "reference", "value": "data.x"}}"#;
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step-3",
+            Some("Map Step"),
+            "Agent",
+            None,
+            Some(mapping_json),
+        );
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("input_mapping"),
+            "Should include input_mapping in payload"
+        );
+        assert!(
+            code.contains("serde_json :: from_str"),
+            "Should parse mapping JSON"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_end_disabled_when_not_debug_mode() {
+        let ctx = make_non_debug_ctx();
+        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None);
+        assert!(
+            tokens.is_empty(),
+            "Should emit nothing when debug_mode is false"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_end_emits_code_in_debug_mode() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None);
+        let code = tokens.to_string();
+
+        // Verify key elements are present in generated code
+        assert!(code.contains("__duration_ms"), "Should calculate duration");
+        assert!(
+            code.contains("step_debug_end"),
+            "Should use correct subtype"
+        );
+        assert!(code.contains("custom_event"), "Should call custom_event");
+        assert!(code.contains("step-1"), "Should include step_id");
+        assert!(
+            code.contains("duration_ms"),
+            "Should include duration in payload"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_end_with_outputs_var() {
+        let ctx = make_debug_ctx();
+        let outputs_var = proc_macro2::Ident::new("step_result", proc_macro2::Span::call_site());
+        let tokens = emit_step_debug_end(&ctx, "step-4", None, "Split", Some(&outputs_var));
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("step_result"),
+            "Should reference the outputs variable"
+        );
+        assert!(
+            code.contains("__truncate_json_value"),
+            "Should include truncation helper"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_start_includes_timestamp() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_start(&ctx, "step-5", None, "Finish", None, None);
+        let code = tokens.to_string();
+
+        assert!(code.contains("timestamp_ms"), "Should include timestamp");
+        assert!(
+            code.contains("SystemTime :: now"),
+            "Should use current time"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_end_includes_timestamp_and_duration() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_end(&ctx, "step-6", None, "Agent", None);
+        let code = tokens.to_string();
+
+        assert!(code.contains("timestamp_ms"), "Should include timestamp");
+        assert!(code.contains("duration_ms"), "Should include duration");
+        assert!(
+            code.contains("__step_start_time . elapsed"),
+            "Should calculate elapsed time"
+        );
+    }
+
+    #[test]
+    fn test_truncation_constant() {
+        assert_eq!(
+            STEP_DEBUG_MAX_PAYLOAD_SIZE,
+            10 * 1024,
+            "Max payload size should be 10KB"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_debug_start_without_name() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_start(&ctx, "nameless-step", None, "Agent", None, None);
+        let code = tokens.to_string();
+
+        // Should still work, with None for step_name
+        assert!(code.contains("nameless-step"), "Should include step_id");
+        assert!(code.contains("step_name"), "Should have step_name field");
+    }
+
+    #[test]
+    fn test_emit_step_debug_end_without_outputs() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_end(&ctx, "step-no-output", Some("No Output"), "Finish", None);
+        let code = tokens.to_string();
+
+        // Should still work, with None for outputs
+        assert!(code.contains("step-no-output"), "Should include step_id");
+        assert!(code.contains("outputs"), "Should have outputs field");
+    }
+
+    #[test]
+    fn test_emit_step_debug_generates_truncation_function() {
+        let ctx = make_debug_ctx();
+        let inputs_var = proc_macro2::Ident::new("big_data", proc_macro2::Span::call_site());
+        let tokens = emit_step_debug_start(&ctx, "step", None, "Agent", Some(&inputs_var), None);
+        let code = tokens.to_string();
+
+        // Verify truncation function is generated
+        assert!(
+            code.contains("fn __truncate_json_value"),
+            "Should define truncation function"
+        );
+        assert!(code.contains("_truncated"), "Should mark truncated values");
+        assert!(
+            code.contains("_original_size"),
+            "Should include original size"
+        );
+    }
 }

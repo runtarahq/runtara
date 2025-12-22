@@ -61,7 +61,7 @@ pub struct CheckpointRecord {
 pub struct EventRecord {
     /// Instance this event belongs to.
     pub instance_id: String,
-    /// Type of event (heartbeat, completed, failed, suspended).
+    /// Type of event (heartbeat, completed, failed, suspended, custom).
     pub event_type: String,
     /// Associated checkpoint ID if applicable.
     pub checkpoint_id: Option<String>,
@@ -69,6 +69,8 @@ pub struct EventRecord {
     pub payload: Option<Vec<u8>>,
     /// When the event occurred.
     pub created_at: DateTime<Utc>,
+    /// Arbitrary subtype for custom events.
+    pub subtype: Option<String>,
 }
 
 /// Signal record from the persistence layer.

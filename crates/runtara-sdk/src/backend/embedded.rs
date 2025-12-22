@@ -155,6 +155,7 @@ impl SdkBackend for EmbeddedBackend {
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
+            subtype: None,
         };
 
         self.persistence
@@ -179,6 +180,7 @@ impl SdkBackend for EmbeddedBackend {
             checkpoint_id: None,
             payload: Some(output.to_vec()),
             created_at: Utc::now(),
+            subtype: None,
         };
 
         self.persistence
@@ -203,6 +205,7 @@ impl SdkBackend for EmbeddedBackend {
             checkpoint_id: None,
             payload: Some(error.as_bytes().to_vec()),
             created_at: Utc::now(),
+            subtype: None,
         };
 
         self.persistence
@@ -227,6 +230,7 @@ impl SdkBackend for EmbeddedBackend {
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
+            subtype: None,
         };
 
         self.persistence
@@ -235,6 +239,26 @@ impl SdkBackend for EmbeddedBackend {
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!("Instance suspended");
+        Ok(())
+    }
+
+    #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
+    async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
+        let event = EventRecord {
+            instance_id: self.instance_id.clone(),
+            event_type: "custom".to_string(),
+            checkpoint_id: None,
+            payload: Some(payload),
+            created_at: Utc::now(),
+            subtype: Some(subtype.to_string()),
+        };
+
+        self.persistence
+            .insert_event(&event)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        debug!(subtype = %subtype, "Custom event recorded");
         Ok(())
     }
 

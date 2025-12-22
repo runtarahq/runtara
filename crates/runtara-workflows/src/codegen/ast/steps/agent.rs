@@ -11,6 +11,7 @@ use quote::quote;
 
 use super::super::context::EmitContext;
 use super::super::mapping;
+use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::AgentStep;
 use runtara_dsl::agent_meta::get_all_capabilities;
 
@@ -33,7 +34,8 @@ fn needs_rate_limiting(agent_id: &str, capability_id: &str) -> bool {
 /// Emit code for an Agent step.
 pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
     let step_id = &step.id;
-    let step_name = step.name.as_deref().unwrap_or("Unnamed");
+    let step_name = step.name.as_deref();
+    let step_name_display = step_name.unwrap_or("Unnamed");
     let agent_id = &step.agent_id;
     let capability_id = &step.capability_id;
 
@@ -58,6 +60,15 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
 
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
+
+    // Serialize input mapping to JSON for debug events
+    let input_mapping_json = step.input_mapping.as_ref().and_then(|m| {
+        if m.is_empty() {
+            None
+        } else {
+            serde_json::to_string(m).ok()
+        }
+    });
 
     // Generate input mapping
     let base_inputs_code = if let Some(ref input_mapping) = step.input_mapping {
@@ -100,15 +111,30 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
         )
     };
 
+    // Generate debug event emissions
+    let debug_start = emit_step_debug_start(
+        ctx,
+        step_id,
+        step_name,
+        "Agent",
+        Some(&step_inputs_var),
+        input_mapping_json.as_deref(),
+    );
+    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "Agent", Some(&result_var));
+
     quote! {
         let #source_var = #build_source;
         let #step_inputs_var = #base_inputs_code;
 
+        #debug_start
+
         #execute_capability
+
+        #debug_end
 
         let #step_var = serde_json::json!({
             "stepId": #step_id,
-            "stepName": #step_name,
+            "stepName": #step_name_display,
             "stepType": "Agent",
             "outputs": #result_var
         });

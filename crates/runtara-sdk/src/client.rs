@@ -347,6 +347,27 @@ impl RuntaraSdk {
         self.backend.suspended().await
     }
 
+    /// Send a custom event with arbitrary subtype and payload.
+    ///
+    /// This is a fire-and-forget event stored by runtara-core with the given subtype.
+    /// Core treats the subtype as an opaque string without any semantic interpretation.
+    ///
+    /// # Arguments
+    ///
+    /// * `subtype` - Arbitrary event subtype string
+    /// * `payload` - Event payload as raw bytes (typically JSON serialized)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let payload = serde_json::to_vec(&my_event_data)?;
+    /// sdk.custom_event("my_custom_event", payload).await?;
+    /// ```
+    #[instrument(skip(self, payload), fields(instance_id = %self.backend.instance_id(), subtype = %subtype))]
+    pub async fn custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
+        self.backend.send_custom_event(subtype, payload).await
+    }
+
     // ========== Signals (QUIC only) ==========
 
     /// Poll for pending signals.

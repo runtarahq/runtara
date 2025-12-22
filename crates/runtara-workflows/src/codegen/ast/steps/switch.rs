@@ -9,13 +9,14 @@ use quote::quote;
 
 use super::super::context::EmitContext;
 use super::super::mapping;
+use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::{MappingValue, SwitchStep};
 
 /// Emit code for a Switch step.
 pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
     let step_id = &step.id;
-    let step_name = step.name.as_deref().unwrap_or("Unnamed");
-    let debug_mode = ctx.debug_mode;
+    let step_name = step.name.as_deref();
+    let step_name_display = step_name.unwrap_or("Unnamed");
 
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);
@@ -24,10 +25,15 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
 
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
-    let runtime_ctx = ctx.runtime_ctx_var.clone();
 
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
+
+    // Serialize config to JSON for debug events
+    let config_json = step
+        .config
+        .as_ref()
+        .and_then(|c| serde_json::to_string(c).ok());
 
     // Build inputs from the typed SwitchConfig
     let inputs_code = if let Some(ref config) = step.config {
@@ -63,35 +69,16 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    // Debug timing variables
-    let debug_start_time_var = ctx.temp_var("step_start_time");
-    let debug_duration_var = ctx.temp_var("duration_ms");
-
-    let debug_start = if debug_mode {
-        quote! {
-            #runtime_ctx.step_started(#step_id, "Switch", &#inputs_var);
-            let #debug_start_time_var = std::time::Instant::now();
-        }
-    } else {
-        quote! {}
-    };
-
-    let debug_complete = if debug_mode {
-        quote! {
-            let #debug_duration_var = #debug_start_time_var.elapsed().as_millis() as u64;
-            #runtime_ctx.step_completed(#step_id, &#step_var, #debug_duration_var);
-        }
-    } else {
-        quote! {}
-    };
-
-    let debug_log = if debug_mode {
-        quote! {
-            eprintln!("  -> Switch value: {}", switch_value);
-        }
-    } else {
-        quote! {}
-    };
+    // Generate debug event emissions
+    let debug_start = emit_step_debug_start(
+        ctx,
+        step_id,
+        step_name,
+        "Switch",
+        Some(&inputs_var),
+        config_json.as_deref(),
+    );
+    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "Switch", Some(&step_var));
 
     quote! {
         let #source_var = #build_source;
@@ -101,7 +88,6 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
 
         // Extract switch components
         let switch_value = #inputs_var.get("value").cloned().unwrap_or(serde_json::Value::Null);
-        #debug_log
 
         let cases = #inputs_var.get("cases")
             .and_then(|v| v.as_array())
@@ -248,12 +234,12 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
 
         let #step_var = serde_json::json!({
             "stepId": #step_id,
-            "stepName": #step_name,
+            "stepName": #step_name_display,
             "stepType": "Switch",
             "outputs": output
         });
 
-        #debug_complete
+        #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
     }

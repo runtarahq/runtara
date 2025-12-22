@@ -17,6 +17,26 @@ pub(crate) fn build_event(
         checkpoint_id,
         payload,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        subtype: None,
+    }
+}
+
+/// Build a custom event with an arbitrary subtype.
+///
+/// Custom events are used for extensibility - the subtype can be any string
+/// and the payload is opaque bytes. runtara-core stores them without interpretation.
+pub(crate) fn build_custom_event(
+    instance_id: &str,
+    subtype: &str,
+    payload: Vec<u8>,
+) -> InstanceEvent {
+    InstanceEvent {
+        instance_id: instance_id.to_string(),
+        event_type: InstanceEventType::EventCustom.into(),
+        checkpoint_id: None,
+        payload,
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        subtype: Some(subtype.to_string()),
     }
 }
 
@@ -69,5 +89,14 @@ mod tests {
         let event = build_failed_event("test-instance", "something went wrong");
         assert_eq!(event.event_type, InstanceEventType::EventFailed as i32);
         assert_eq!(event.payload, b"something went wrong".to_vec());
+    }
+
+    #[test]
+    fn test_build_custom_event() {
+        let event = build_custom_event("test-instance", "step_debug_start", b"payload".to_vec());
+        assert_eq!(event.instance_id, "test-instance");
+        assert_eq!(event.event_type, InstanceEventType::EventCustom as i32);
+        assert_eq!(event.subtype, Some("step_debug_start".to_string()));
+        assert_eq!(event.payload, b"payload".to_vec());
     }
 }

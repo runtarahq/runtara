@@ -80,6 +80,7 @@ message InstanceEvent {
   optional string checkpoint_id = 3;  // Current position (for PROGRESS)
   bytes payload = 4;                  // Event-specific data (output, error, etc.)
   int64 timestamp_ms = 5;
+  optional string subtype = 6;        // Arbitrary subtype for EVENT_CUSTOM
 }
 
 enum InstanceEventType {
@@ -87,6 +88,7 @@ enum InstanceEventType {
   EVENT_COMPLETED = 2;    // Instance finished successfully, payload = output
   EVENT_FAILED = 3;       // Instance failed, payload = error details
   EVENT_SUSPENDED = 4;    // Instance suspended (waiting for wake)
+  EVENT_CUSTOM = 5;       // Generic custom event with arbitrary subtype
   // Deprecated: EVENT_STARTED (use heartbeat), EVENT_PROGRESS (use checkpoint or heartbeat)
 }
 

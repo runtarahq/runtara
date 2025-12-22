@@ -485,8 +485,8 @@ pub async fn clear_wake(pool: &PgPool, instance_id: &str) -> Result<(), CoreErro
 pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreError> {
     sqlx::query(
         r#"
-        INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at)
-        VALUES ($1, $2::instance_event_type, $3, $4, $5)
+        INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
+        VALUES ($1, $2::instance_event_type, $3, $4, $5, $6)
         "#,
     )
     .bind(&event.instance_id)
@@ -494,6 +494,7 @@ pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), Core
     .bind(&event.checkpoint_id)
     .bind(&event.payload)
     .bind(event.created_at)
+    .bind(&event.subtype)
     .execute(pool)
     .await?;
 
@@ -1353,6 +1354,7 @@ mod tests {
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
+            subtype: None,
         };
 
         let result = insert_event(&pool, &event).await;

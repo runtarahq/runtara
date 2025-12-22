@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::steps;
-use super::StepEmitter;
+use super::{StepEmitter, emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::{
     ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator, ConditionalStep,
     ExecutionGraph, MappingValue, Step,
@@ -21,24 +21,27 @@ use runtara_dsl::{
 /// Emit code for a Conditional step.
 pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGraph) -> TokenStream {
     let step_id = &step.id;
-    let step_name = step.name.as_deref().unwrap_or("Unnamed");
-    let debug_mode = ctx.debug_mode;
+    let step_name = step.name.as_deref();
+    let step_name_display = step_name.unwrap_or("Unnamed");
     let execution_plan = &graph.execution_plan;
 
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);
     let source_var = ctx.temp_var("source");
     let condition_var = ctx.temp_var("condition_result");
+    let condition_inputs_var = ctx.temp_var("condition_inputs");
 
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
-    let runtime_ctx = ctx.runtime_ctx_var.clone();
 
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
 
     // Generate condition evaluation from the structured condition
     let condition_eval = emit_condition_expression(&step.condition, ctx, &source_var);
+
+    // Serialize condition to JSON for debug events
+    let condition_json = serde_json::to_string(&step.condition).ok();
 
     // Find the true and false branch starting steps
     let true_step_id = steps::find_next_step_for_label(step_id, "true", execution_plan);
@@ -58,62 +61,35 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
         quote! {}
     };
 
-    // Debug timing variables
-    let debug_start_time_var = ctx.temp_var("step_start_time");
-    let debug_duration_var = ctx.temp_var("duration_ms");
-    let condition_inputs_var = ctx.temp_var("condition_inputs");
-
-    let debug_start = if debug_mode {
-        quote! {
-            let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
-            #runtime_ctx.step_started(#step_id, "Conditional", &#condition_inputs_var);
-            let #debug_start_time_var = std::time::Instant::now();
-        }
-    } else {
-        quote! {}
-    };
-
-    let debug_complete = if debug_mode {
-        quote! {
-            let #debug_duration_var = #debug_start_time_var.elapsed().as_millis() as u64;
-            #runtime_ctx.step_completed(#step_id, &#step_var, #debug_duration_var);
-        }
-    } else {
-        quote! {}
-    };
-
-    let debug_log = if debug_mode {
-        quote! {
-            eprintln!("  -> Condition result: {}", #condition_var);
-            if #condition_var {
-                eprintln!("  -> Taking TRUE branch");
-            } else {
-                eprintln!("  -> Taking FALSE branch");
-            }
-        }
-    } else {
-        quote! {}
-    };
+    // Generate debug event emissions
+    let debug_start = emit_step_debug_start(
+        ctx,
+        step_id,
+        step_name,
+        "Conditional",
+        Some(&condition_inputs_var),
+        condition_json.as_deref(),
+    );
+    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "Conditional", Some(&step_var));
 
     quote! {
         let #source_var = #build_source;
+        let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
 
         #debug_start
 
         let #condition_var: bool = #condition_eval;
 
-        #debug_log
-
         let #step_var = serde_json::json!({
             "stepId": #step_id,
-            "stepName": #step_name,
+            "stepName": #step_name_display,
             "stepType": "Conditional",
             "outputs": {
                 "result": #condition_var
             }
         });
 
-        #debug_complete
+        #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
 

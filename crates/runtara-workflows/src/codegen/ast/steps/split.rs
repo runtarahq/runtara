@@ -13,13 +13,14 @@ use quote::quote;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
+use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::{MappingValue, SplitStep};
 
 /// Emit code for a Split step.
 pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     let step_id = &step.id;
-    let step_name = step.name.as_deref().unwrap_or("Unnamed");
-    let debug_mode = ctx.debug_mode;
+    let step_name = step.name.as_deref();
+    let step_name_display = step_name.unwrap_or("Unnamed");
 
     // Get retry configuration with defaults (0 retries for Split by default)
     let max_retries = step
@@ -97,13 +98,22 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     // Generate the subgraph function using shared recursive emitter
     let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx);
 
-    let debug_log = if debug_mode {
-        quote! {
-            eprintln!("  -> Processing {} items", split_array.len());
-        }
-    } else {
-        quote! {}
-    };
+    // Serialize config to JSON for debug events
+    let config_json = step
+        .config
+        .as_ref()
+        .and_then(|c| serde_json::to_string(c).ok());
+
+    // Generate debug event emissions
+    let debug_start = emit_step_debug_start(
+        ctx,
+        step_id,
+        step_name,
+        "Split",
+        Some(&split_inputs_var),
+        config_json.as_deref(),
+    );
+    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "Split", Some(&step_var));
 
     // Cache key for the split step's final result checkpoint
     let cache_key = format!("split::{}", step_id);
@@ -116,6 +126,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
 
+        #debug_start
+
         // Extract split configuration
         let split_array = #split_inputs_var.get("value")
             .and_then(|v| v.as_array())
@@ -125,8 +137,6 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                     #split_inputs_var.get("value").unwrap_or(&serde_json::Value::Null));
                 vec![]
             });
-
-        #debug_log
 
         let _parallelism = #split_inputs_var.get("parallelism")
             .and_then(|v| v.as_i64())
@@ -243,8 +253,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
             extra_variables,
             dont_stop_on_failed,
             #step_id,
-            #step_name,
+            #step_name_display,
         ).await?;
+
+        #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
     }

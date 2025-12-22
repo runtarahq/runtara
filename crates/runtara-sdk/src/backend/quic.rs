@@ -18,7 +18,8 @@ use super::SdkBackend;
 use crate::config::SdkConfig;
 use crate::error::{Result, SdkError};
 use crate::events::{
-    build_completed_event, build_failed_event, build_heartbeat_event, build_suspended_event,
+    build_completed_event, build_custom_event, build_failed_event, build_heartbeat_event,
+    build_suspended_event,
 };
 use crate::types::{CheckpointResult, StatusResponse};
 
@@ -239,6 +240,14 @@ impl SdkBackend for QuicBackend {
         let event = build_suspended_event(&self.instance_id);
         self.send_event(event).await?;
         info!("Suspended event sent");
+        Ok(())
+    }
+
+    #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
+    async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
+        let event = build_custom_event(&self.instance_id, subtype, payload);
+        self.send_event(event).await?;
+        debug!(subtype = %subtype, "Custom event sent");
         Ok(())
     }
 

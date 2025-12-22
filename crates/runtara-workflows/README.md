@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scenario_id: "order-processing".to_string(),
         version: 1,
         execution_graph: scenario.into(),
-        debug_mode: false,
+        debug_mode: false, // Set to true to emit step telemetry events
         child_scenarios: vec![],
         connection_service_url: Some("https://my-product.com/api/connections".to_string()),
     };
@@ -152,18 +152,61 @@ The crate provides `runtara-compile` for command-line compilation:
 
 ```bash
 # Compile a scenario
-runtara-compile --input workflow.json --output ./output
+runtara-compile --workflow workflow.json --tenant tenant-123 --scenario my-workflow
 
-# With debug symbols
-runtara-compile --input workflow.json --output ./output --debug
+# Copy to specific location
+runtara-compile --workflow workflow.json --tenant tenant-123 --scenario my-workflow --output ./my-workflow
 
-# Specify tenant and scenario ID
-runtara-compile \
-    --input workflow.json \
-    --output ./output \
-    --tenant tenant-123 \
-    --scenario-id my-workflow \
-    --version 1
+# With debug mode (emits step telemetry events)
+runtara-compile --workflow workflow.json --tenant tenant-123 --scenario my-workflow --debug
+```
+
+### Debug Mode
+
+When compiling with `debug_mode: true` (or `--debug` CLI flag), the compiled workflow emits telemetry events for each step execution. These events are stored as custom events in runtara-core and can be used for:
+
+- **Step-level tracing**: See exactly which steps executed and in what order
+- **Performance analysis**: Measure step execution duration
+- **Input/output inspection**: Capture step inputs and outputs (truncated to 10KB)
+- **Debugging failures**: Understand workflow state at each step
+
+Debug mode emits two event types per step:
+
+| Event Subtype | Timing | Payload |
+|---------------|--------|---------|
+| `step_debug_start` | Before step execution | step_id, step_name, step_type, inputs, input_mapping, timestamp_ms |
+| `step_debug_end` | After step execution | step_id, step_name, step_type, outputs, duration_ms, timestamp_ms |
+
+Example payload for `step_debug_start`:
+```json
+{
+  "step_id": "fetch-order",
+  "step_name": "Fetch Order",
+  "step_type": "Agent",
+  "timestamp_ms": 1703001234567,
+  "inputs": { "order_id": "ORD-123" },
+  "input_mapping": { "order_id": { "valueType": "reference", "value": "data.orderId" } }
+}
+```
+
+Example payload for `step_debug_end`:
+```json
+{
+  "step_id": "fetch-order",
+  "step_name": "Fetch Order", 
+  "step_type": "Agent",
+  "timestamp_ms": 1703001234717,
+  "duration_ms": 150,
+  "outputs": { "status": 200, "body": "..." }
+}
+```
+
+Query debug events from the database:
+```sql
+SELECT subtype, payload, created_at 
+FROM instance_events 
+WHERE instance_id = $1 AND event_type = 'custom'
+ORDER BY created_at;
 ```
 
 ## Environment Variables

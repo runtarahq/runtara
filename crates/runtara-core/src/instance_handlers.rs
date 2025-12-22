@@ -146,6 +146,7 @@ pub async fn handle_register_instance(
         checkpoint_id: request.checkpoint_id.clone(),
         payload: None,
         created_at: started_at,
+        subtype: None,
     };
     if let Err(e) = state.persistence.insert_event(&event).await {
         warn!("Failed to insert started event: {}", e);
@@ -418,6 +419,7 @@ pub async fn handle_instance_event(
             Some(event.payload.clone())
         },
         created_at,
+        subtype: event.subtype.clone(),
     };
     state.persistence.insert_event(&event_record).await?;
 
@@ -457,6 +459,11 @@ pub async fn handle_instance_event(
                 .persistence
                 .update_instance_status(&event.instance_id, "suspended", None)
                 .await?;
+        }
+        InstanceEventType::EventCustom => {
+            // Custom events are just stored for telemetry - no state changes needed
+            // The event was already logged above with its subtype
+            debug!(subtype = ?event.subtype, "Custom event received");
         }
     }
 
@@ -672,6 +679,7 @@ pub fn map_event_type(event_type: InstanceEventType) -> &'static str {
         InstanceEventType::EventCompleted => "completed",
         InstanceEventType::EventFailed => "failed",
         InstanceEventType::EventSuspended => "suspended",
+        InstanceEventType::EventCustom => "custom",
     }
 }
 
@@ -716,6 +724,7 @@ mod tests {
             map_event_type(InstanceEventType::EventSuspended),
             "suspended"
         );
+        assert_eq!(map_event_type(InstanceEventType::EventCustom), "custom");
     }
 
     #[test]

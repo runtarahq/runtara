@@ -306,14 +306,15 @@ impl Persistence for SqlitePersistence {
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
         sqlx::query(
             r#"
-            INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             "#,
         )
         .bind(&event.instance_id)
         .bind(&event.event_type)
         .bind(&event.checkpoint_id)
         .bind(&event.payload)
+        .bind(&event.subtype)
         .execute(&self.pool)
         .await?;
 
@@ -896,6 +897,7 @@ mod tests {
             checkpoint_id: None,
             payload: None,
             created_at: Utc::now(),
+            subtype: None,
         };
 
         persistence

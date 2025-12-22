@@ -65,6 +65,12 @@ pub trait SdkBackend: Send + Sync {
     /// Send a suspended event.
     async fn suspended(&self) -> Result<()>;
 
+    /// Send a custom event with arbitrary subtype and payload.
+    ///
+    /// This is a fire-and-forget operation - the event is stored by core
+    /// but no response is expected. Core treats the subtype as an opaque string.
+    async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()>;
+
     /// Record a retry attempt.
     async fn record_retry_attempt(
         &self,
