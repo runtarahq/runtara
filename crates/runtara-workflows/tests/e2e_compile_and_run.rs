@@ -209,6 +209,66 @@ fn test_parse_workflow_with_http_agent() {
     assert!(graph.steps.contains_key("http"));
 }
 
+#[test]
+fn test_parse_while_workflow() {
+    let workflow_json = include_str!("fixtures/while_workflow.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "init");
+    assert!(graph.steps.contains_key("init"));
+    assert!(graph.steps.contains_key("loop"));
+    assert!(graph.steps.contains_key("finish"));
+    assert_eq!(graph.execution_plan.len(), 2);
+
+    // Verify the while step has a subgraph and config
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        assert_eq!(while_step.name, Some("Increment Counter".to_string()));
+        assert_eq!(while_step.subgraph.entry_point, "increment");
+        assert!(while_step.subgraph.steps.contains_key("increment"));
+        assert!(while_step.subgraph.steps.contains_key("finish"));
+        // Check config
+        let config = while_step.config.as_ref().expect("Expected config");
+        assert_eq!(config.max_iterations, Some(5));
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_log_workflow() {
+    let workflow_json = include_str!("fixtures/log_workflow.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "log_start");
+    assert!(graph.steps.contains_key("log_start"));
+    assert!(graph.steps.contains_key("transform"));
+    assert!(graph.steps.contains_key("log_end"));
+    assert!(graph.steps.contains_key("finish"));
+    assert_eq!(graph.execution_plan.len(), 3);
+
+    // Verify the log steps
+    use runtara_dsl::{LogLevel, Step};
+    if let Some(Step::Log(log_step)) = graph.steps.get("log_start") {
+        assert_eq!(log_step.name, Some("Log Start".to_string()));
+        assert!(matches!(log_step.level, LogLevel::Info));
+        assert_eq!(log_step.message, "Starting workflow");
+        assert!(log_step.context.is_some());
+    } else {
+        panic!("Expected Log step for log_start");
+    }
+
+    if let Some(Step::Log(log_step)) = graph.steps.get("log_end") {
+        assert_eq!(log_step.name, Some("Log End".to_string()));
+        assert!(matches!(log_step.level, LogLevel::Debug));
+        assert_eq!(log_step.message, "Workflow completed");
+    } else {
+        panic!("Expected Log step for log_end");
+    }
+}
+
 // ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================

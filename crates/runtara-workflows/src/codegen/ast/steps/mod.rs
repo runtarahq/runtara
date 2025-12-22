@@ -8,9 +8,11 @@
 pub mod agent;
 pub mod conditional;
 pub mod finish;
+pub mod log;
 pub mod split;
 pub mod start_scenario;
 pub mod switch;
+pub mod while_loop;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -33,6 +35,8 @@ impl StepEmitter for Step {
             Step::Switch(s) => switch::emit(s, ctx),
             Step::Split(s) => split::emit(s, ctx),
             Step::StartScenario(s) => start_scenario::emit(s, ctx),
+            Step::While(s) => while_loop::emit(s, ctx),
+            Step::Log(s) => log::emit(s, ctx),
         }
     }
 }
@@ -46,6 +50,8 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::Switch(_) => "Switch",
         Step::Split(_) => "Split",
         Step::StartScenario(_) => "StartScenario",
+        Step::While(_) => "While",
+        Step::Log(_) => "Log",
     }
 }
 
@@ -58,6 +64,8 @@ pub fn step_id(step: &Step) -> &str {
         Step::Switch(s) => &s.id,
         Step::Split(s) => &s.id,
         Step::StartScenario(s) => &s.id,
+        Step::While(s) => &s.id,
+        Step::Log(s) => &s.id,
     }
 }
 
@@ -70,6 +78,8 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::Switch(s) => s.name.as_deref(),
         Step::Split(s) => s.name.as_deref(),
         Step::StartScenario(s) => s.name.as_deref(),
+        Step::While(s) => s.name.as_deref(),
+        Step::Log(s) => s.name.as_deref(),
     }
 }
 
@@ -299,6 +309,14 @@ pub fn find_next_step_for_label<'a>(
         }
     }
     None
+}
+
+/// Find the onError handler step for a given step.
+pub fn find_on_error_step<'a>(
+    step_id: &str,
+    execution_plan: &'a [ExecutionPlanEdge],
+) -> Option<&'a str> {
+    find_next_step_for_label(step_id, "onError", execution_plan)
 }
 
 #[cfg(test)]

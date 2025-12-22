@@ -56,8 +56,12 @@ fn collect_used_agents_recursive(
                     collect_used_agents_recursive(child_graph, ctx, agents);
                 }
             }
+            Step::While(while_step) => {
+                // Recursively collect from subgraph
+                collect_used_agents_recursive(&while_step.subgraph, ctx, agents);
+            }
             // Other step types don't use agents directly
-            Step::Finish(_) | Step::Conditional(_) | Step::Switch(_) => {}
+            Step::Finish(_) | Step::Conditional(_) | Step::Switch(_) | Step::Log(_) => {}
         }
     }
 }
@@ -396,14 +400,139 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
     // Debug logging via RuntimeContext (if debug mode enabled)
     let debug_log = emit_step_debug_start(ctx, sid, sname, stype);
 
+    // Check if this step has an onError edge
+    let on_error_step = steps::find_on_error_step(sid, &graph.execution_plan);
+
     // Emit the step-specific code
     let step_code = step.emit(ctx, graph);
 
-    quote! {
-        // Step: #sid (#stype)
-        #debug_log
-        #step_code
+    // Steps that cannot have onError handling (they don't fail or handle errors differently)
+    let can_have_on_error = matches!(
+        step,
+        Step::Agent(_) | Step::Split(_) | Step::StartScenario(_) | Step::While(_)
+    );
+
+    if can_have_on_error && on_error_step.is_some() {
+        let error_step_id = on_error_step.unwrap();
+
+        // Get the error handler step and emit its branch
+        let error_branch_code = if graph.steps.contains_key(error_step_id) {
+            emit_error_branch(error_step_id, graph, ctx)
+        } else {
+            quote! {}
+        };
+
+        // Clone context vars we need in the quote
+        let steps_context = ctx.steps_context_var.clone();
+
+        quote! {
+            // Step: #sid (#stype) with onError handling
+            #debug_log
+            {
+                let __step_result: std::result::Result<(), String> = async {
+                    #step_code
+                    Ok(())
+                }.await;
+
+                if let Err(__error_msg) = __step_result {
+                    // Set error context for the error handler
+                    let __error_context = serde_json::json!({
+                        "message": __error_msg,
+                        "stepId": #sid,
+                        "code": null::<String>
+                    });
+                    #steps_context.insert("error".to_string(), __error_context);
+
+                    // Execute error handler branch
+                    #error_branch_code
+                }
+            }
+        }
+    } else {
+        quote! {
+            // Step: #sid (#stype)
+            #debug_log
+            #step_code
+        }
     }
+}
+
+/// Emit code for an error handling branch.
+fn emit_error_branch(
+    start_step_id: &str,
+    graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> TokenStream {
+    // Collect steps in the error branch
+    let branch_steps = collect_error_branch_steps(start_step_id, graph);
+
+    let step_codes: Vec<TokenStream> = branch_steps
+        .iter()
+        .filter_map(|step_id| {
+            graph.steps.get(step_id).map(|step| {
+                // For error branch steps, emit without onError wrapping to avoid recursion
+                let step_code = step.emit(ctx, graph);
+                quote! { #step_code }
+            })
+        })
+        .collect();
+
+    quote! {
+        #(#step_codes)*
+    }
+}
+
+/// Collect all steps along an error branch until we hit a Finish step or merge back.
+fn collect_error_branch_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut branch_steps = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_step_id = start_step_id.to_string();
+
+    loop {
+        if visited.contains(&current_step_id) {
+            break;
+        }
+        visited.insert(current_step_id.clone());
+
+        let step = match graph.steps.get(&current_step_id) {
+            Some(s) => s,
+            None => break,
+        };
+
+        branch_steps.push(current_step_id.clone());
+
+        // Stop at Finish steps (they return)
+        if matches!(step, Step::Finish(_)) {
+            break;
+        }
+
+        // Stop at Conditional steps (they have their own branches)
+        if matches!(step, Step::Conditional(_)) {
+            break;
+        }
+
+        // Find the next step (follow unlabeled or "next" edges, skip onError)
+        let mut next_step_id = None;
+        for edge in &graph.execution_plan {
+            if edge.from_step == current_step_id {
+                let label = edge.label.as_deref().unwrap_or("");
+                // Follow normal flow, skip onError/true/false branches
+                if label.is_empty() || label == "next" {
+                    next_step_id = Some(edge.to_step.clone());
+                    break;
+                }
+            }
+        }
+
+        match next_step_id {
+            Some(next) => current_step_id = next,
+            None => break,
+        }
+    }
+
+    branch_steps
 }
 
 /// Emit debug start logging using RuntimeContext.

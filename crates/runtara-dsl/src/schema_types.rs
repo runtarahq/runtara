@@ -122,7 +122,10 @@ pub struct ExecutionPlanEdge {
     /// Target step ID
     pub to_step: String,
 
-    /// Edge label ("true"/"false" for Conditional, "next" for sequential)
+    /// Edge label for control flow:
+    /// - `"true"`/`"false"` for Conditional step branches
+    /// - `"onError"` for error handling transition (step failed after retries)
+    /// - `None` or empty for normal sequential flow
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
@@ -175,6 +178,12 @@ pub enum Step {
 
     /// Executes a nested child scenario
     StartScenario(StartScenarioStep),
+
+    /// Conditional loop - repeat until condition is false
+    While(WhileStep),
+
+    /// Emit custom log/debug events
+    Log(LogStep),
 }
 
 /// Common fields shared by all step types
@@ -240,6 +249,10 @@ pub struct AgentStep {
     /// Base delay between retries in milliseconds (default: 1000)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
+
+    /// Step timeout in milliseconds. If exceeded, step fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
 }
 
 /// Evaluates conditions and branches execution
@@ -336,6 +349,10 @@ pub struct StartScenarioStep {
     /// Base delay between retries in milliseconds (default: 1000)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
+
+    /// Step timeout in milliseconds. If exceeded, step fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
 }
 
 /// Child scenario version specification
@@ -347,6 +364,98 @@ pub enum ChildVersion {
     Latest(String),
     /// Use specific version number
     Specific(i32),
+}
+
+/// Conditional loop - repeat subgraph until condition is false
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "WhileStep")]
+#[serde(rename_all = "camelCase")]
+pub struct WhileStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// The condition expression to evaluate before each iteration.
+    /// Loop continues while condition is true.
+    pub condition: ConditionExpression,
+
+    /// Nested execution graph to execute on each iteration
+    pub subgraph: Box<ExecutionGraph>,
+
+    /// While loop configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<WhileConfig>,
+}
+
+/// Configuration for a While step.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "WhileConfig")]
+#[serde(rename_all = "camelCase")]
+pub struct WhileConfig {
+    /// Maximum number of iterations (default: 10).
+    /// Prevents infinite loops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+
+    /// Step timeout in milliseconds. If exceeded, step fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+impl Default for WhileConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: Some(10),
+            timeout: None,
+        }
+    }
+}
+
+/// Emit custom log/debug events during workflow execution
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "LogStep")]
+#[serde(rename_all = "camelCase")]
+pub struct LogStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Log level
+    #[serde(default)]
+    pub level: LogLevel,
+
+    /// Log message
+    pub message: String,
+
+    /// Additional context data to include in the log event.
+    /// Keys are field names, values specify how to obtain the data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<InputMapping>,
+}
+
+/// Log level for Log steps
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Debug level - verbose diagnostic information
+    Debug,
+    /// Info level - general informational messages
+    #[default]
+    Info,
+    /// Warn level - warning conditions
+    Warn,
+    /// Error level - error conditions
+    Error,
 }
 
 // ============================================================================
@@ -793,4 +902,8 @@ pub struct SplitConfig {
     /// Base delay between retries in milliseconds (default: 1000)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
+
+    /// Step timeout in milliseconds. If exceeded, step fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
 }

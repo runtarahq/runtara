@@ -1,0 +1,69 @@
+{
+  "name": "Log Workflow",
+  "description": "A workflow that demonstrates Log step",
+  "steps": {
+    "log_start": {
+      "stepType": "Log",
+      "id": "log_start",
+      "name": "Log Start",
+      "level": "info",
+      "message": "Starting workflow",
+      "context": {
+        "inputData": {
+          "valueType": "reference",
+          "value": "data"
+        }
+      }
+    },
+    "transform": {
+      "stepType": "Agent",
+      "id": "transform",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "processed": "$.value"
+          }
+        }
+      }
+    },
+    "log_end": {
+      "stepType": "Log",
+      "id": "log_end",
+      "name": "Log End",
+      "level": "debug",
+      "message": "Workflow completed",
+      "context": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "log_start",
+  "executionPlan": [
+    { "fromStep": "log_start", "toStep": "transform" },
+    { "fromStep": "transform", "toStep": "log_end" },
+    { "fromStep": "log_end", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

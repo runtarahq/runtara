@@ -178,7 +178,7 @@ fn emit_branch_code(
 // ============================================================================
 
 /// Emit code for a ConditionExpression.
-fn emit_condition_expression(
+pub fn emit_condition_expression(
     expr: &ConditionExpression,
     ctx: &mut EmitContext,
     source_var: &proc_macro2::Ident,
@@ -549,7 +549,7 @@ fn emit_ends_with(
 // ============================================================================
 
 /// Convert a dot-notation path to a JSON pointer.
-fn path_to_json_pointer(path: &str) -> String {
+pub fn path_to_json_pointer(path: &str) -> String {
     let normalized = path
         .replace("['", ".")
         .replace("']", "")

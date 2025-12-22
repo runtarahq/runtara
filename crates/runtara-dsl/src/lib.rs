@@ -412,6 +412,7 @@ mod tests {
             variables: None,
             max_retries: None,
             retry_delay: None,
+            timeout: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -470,6 +471,7 @@ mod tests {
                 variables: None,
                 max_retries: None,
                 retry_delay: None,
+                timeout: None,
             }),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
