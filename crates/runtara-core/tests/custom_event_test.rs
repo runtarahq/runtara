@@ -11,7 +11,7 @@ use common::*;
 use runtara_protocol::instance_proto::{self, InstanceEventType};
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_custom_event_stored_with_subtype() {
     skip_if_no_db!();
 
@@ -85,7 +85,7 @@ async fn test_custom_event_stored_with_subtype() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_multiple_custom_events_with_different_subtypes() {
     skip_if_no_db!();
 
@@ -164,7 +164,7 @@ async fn test_multiple_custom_events_with_different_subtypes() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_custom_event_does_not_change_instance_status() {
     skip_if_no_db!();
 
@@ -222,7 +222,7 @@ async fn test_custom_event_does_not_change_instance_status() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_custom_event_with_json_payload() {
     skip_if_no_db!();
 
@@ -307,7 +307,7 @@ async fn test_custom_event_with_json_payload() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_custom_event_subtype_index() {
     skip_if_no_db!();
 

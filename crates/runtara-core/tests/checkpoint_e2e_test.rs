@@ -13,7 +13,7 @@ use runtara_protocol::instance_proto::*;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_save_fresh() {
     skip_if_no_db!();
 
@@ -56,7 +56,7 @@ async fn test_checkpoint_save_fresh() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_resume_existing() {
     skip_if_no_db!();
 
@@ -119,7 +119,7 @@ async fn test_checkpoint_resume_existing() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_get_checkpoint_readonly() {
     skip_if_no_db!();
 
@@ -169,7 +169,7 @@ async fn test_get_checkpoint_readonly() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_get_checkpoint_not_found() {
     skip_if_no_db!();
 
@@ -210,7 +210,7 @@ async fn test_get_checkpoint_not_found() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_append_only() {
     skip_if_no_db!();
 
@@ -287,7 +287,7 @@ async fn test_checkpoint_append_only() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_large_state() {
     skip_if_no_db!();
 
@@ -346,7 +346,7 @@ async fn test_checkpoint_large_state() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_binary_state() {
     skip_if_no_db!();
 
@@ -396,7 +396,7 @@ async fn test_checkpoint_binary_state() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_survives_reconnect() {
     skip_if_no_db!();
 
@@ -454,7 +454,7 @@ async fn test_checkpoint_survives_reconnect() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_multiple_saves() {
     skip_if_no_db!();
 
@@ -514,7 +514,7 @@ async fn test_checkpoint_multiple_saves() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_updates_instance() {
     skip_if_no_db!();
 
@@ -549,7 +549,7 @@ async fn test_checkpoint_updates_instance() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_wrong_instance() {
     skip_if_no_db!();
 
@@ -604,7 +604,7 @@ async fn test_checkpoint_wrong_instance() {
     ctx.cleanup_instance(&instance_b).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_register_with_checkpoint() {
     skip_if_no_db!();
 
@@ -657,7 +657,7 @@ async fn test_register_with_checkpoint() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_register_with_invalid_checkpoint() {
     skip_if_no_db!();
 

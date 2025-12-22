@@ -12,7 +12,7 @@ use runtara_protocol::instance_proto::*;
 use std::time::Instant;
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_short_sleep_in_process() {
     skip_if_no_db!();
 
@@ -69,7 +69,7 @@ async fn test_short_sleep_in_process() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_long_sleep_in_process() {
     skip_if_no_db!();
 
@@ -126,7 +126,7 @@ async fn test_long_sleep_in_process() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_multiple_sleeps_in_sequence() {
     skip_if_no_db!();
 

@@ -9,7 +9,7 @@ use runtara_protocol::instance_proto;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_running_instance() {
     skip_if_no_db!();
 
@@ -74,7 +74,7 @@ async fn test_cancel_running_instance() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_suspended_instance() {
     skip_if_no_db!();
 
@@ -107,7 +107,7 @@ async fn test_cancel_suspended_instance() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_signal_persists() {
     skip_if_no_db!();
 
@@ -138,7 +138,7 @@ async fn test_cancel_signal_persists() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_with_reason() {
     skip_if_no_db!();
 
@@ -183,7 +183,7 @@ async fn test_cancel_with_reason() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_clears_on_ack() {
     skip_if_no_db!();
 
@@ -250,7 +250,7 @@ async fn test_cancel_clears_on_ack() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_instance_not_found() {
     skip_if_no_db!();
 
@@ -271,7 +271,7 @@ async fn test_cancel_instance_not_found() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_completed_instance() {
     skip_if_no_db!();
 
@@ -310,7 +310,7 @@ async fn test_cancel_completed_instance() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_failed_instance() {
     skip_if_no_db!();
 
@@ -337,7 +337,7 @@ async fn test_cancel_failed_instance() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_already_cancelled() {
     skip_if_no_db!();
 
@@ -370,7 +370,7 @@ async fn test_cancel_already_cancelled() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_replaces_pending_signal() {
     skip_if_no_db!();
 
@@ -422,7 +422,7 @@ async fn test_cancel_replaces_pending_signal() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_pause_and_resume_flow() {
     skip_if_no_db!();
 
@@ -513,7 +513,7 @@ async fn test_pause_and_resume_flow() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_during_checkpoint_save() {
     skip_if_no_db!();
 

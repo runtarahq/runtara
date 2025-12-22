@@ -9,7 +9,7 @@ use runtara_protocol::instance_proto;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_signal_send_poll_ack_flow() {
     skip_if_no_db!();
 
@@ -103,7 +103,7 @@ async fn test_signal_send_poll_ack_flow() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_all_signal_types() {
     skip_if_no_db!();
 
@@ -156,7 +156,7 @@ async fn test_all_signal_types() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_signal_to_pending_instance() {
     skip_if_no_db!();
 
@@ -179,7 +179,7 @@ async fn test_signal_to_pending_instance() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_signal_empty_payload() {
     skip_if_no_db!();
 
@@ -222,7 +222,7 @@ async fn test_signal_empty_payload() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_poll_invalid_instance() {
     skip_if_no_db!();
 
@@ -255,7 +255,7 @@ async fn test_poll_invalid_instance() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_signal_not_acknowledged() {
     skip_if_no_db!();
 

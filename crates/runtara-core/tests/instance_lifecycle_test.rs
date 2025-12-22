@@ -8,7 +8,7 @@ use common::*;
 use runtara_protocol::instance_proto;
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_full_instance_lifecycle() {
     skip_if_no_db!();
 
@@ -120,7 +120,7 @@ async fn test_full_instance_lifecycle() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_register_validates_instance_id_not_empty() {
     skip_if_no_db!();
 
@@ -155,7 +155,7 @@ async fn test_register_validates_instance_id_not_empty() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_register_requires_tenant_id() {
     skip_if_no_db!();
 
