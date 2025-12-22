@@ -1,0 +1,33 @@
+{
+    "name": "Invalid Step Reference",
+    "description": "Workflow referencing a step that doesn't exist - triggers E010",
+    "entryPoint": "process",
+    "steps": {
+        "process": {
+            "stepType": "Agent",
+            "id": "process",
+            "agentId": "transform",
+            "capabilityId": "map",
+            "inputMapping": {
+                "items": {
+                    "valueType": "reference",
+                    "value": "steps.nonexistent_step.outputs.data"
+                }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.process.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "process", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

@@ -1,0 +1,43 @@
+{
+    "name": "Security Leak - Connection to Non-Secure Agent",
+    "description": "Workflow that passes connection data to a non-secure agent - triggers E040",
+    "entryPoint": "get_credentials",
+    "steps": {
+        "get_credentials": {
+            "stepType": "Connection",
+            "id": "get_credentials",
+            "connectionId": "my-api-key",
+            "integrationId": "bearer"
+        },
+        "transform_data": {
+            "stepType": "Agent",
+            "id": "transform_data",
+            "agentId": "transform",
+            "capabilityId": "map",
+            "inputMapping": {
+                "items": { "valueType": "immediate", "value": [1, 2, 3] },
+                "secret": {
+                    "valueType": "reference",
+                    "value": "steps.get_credentials.outputs"
+                }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.transform_data.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [
+        { "fromStep": "get_credentials", "toStep": "transform_data" },
+        { "fromStep": "transform_data", "toStep": "finish" }
+    ],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

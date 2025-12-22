@@ -1,0 +1,36 @@
+{
+    "name": "High Retry Configuration",
+    "description": "Workflow with excessive retry count - triggers W030 warning",
+    "entryPoint": "api_call",
+    "steps": {
+        "api_call": {
+            "stepType": "Agent",
+            "id": "api_call",
+            "agentId": "http",
+            "capabilityId": "request",
+            "maxRetries": 100,
+            "retryDelay": 1000,
+            "inputMapping": {
+                "url": {
+                    "valueType": "immediate",
+                    "value": "https://api.example.com/data"
+                },
+                "method": { "valueType": "immediate", "value": "GET" }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.api_call.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "api_call", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

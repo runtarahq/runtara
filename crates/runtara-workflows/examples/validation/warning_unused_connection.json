@@ -1,0 +1,40 @@
+{
+    "name": "Unused Connection",
+    "description": "Workflow with a connection that is never used - triggers W040 warning",
+    "entryPoint": "get_credentials",
+    "steps": {
+        "get_credentials": {
+            "stepType": "Connection",
+            "id": "get_credentials",
+            "connectionId": "unused-api-key",
+            "integrationId": "bearer"
+        },
+        "transform_data": {
+            "stepType": "Agent",
+            "id": "transform_data",
+            "agentId": "transform",
+            "capabilityId": "map",
+            "inputMapping": {
+                "items": { "valueType": "immediate", "value": [1, 2, 3] },
+                "expression": { "valueType": "immediate", "value": "item * 2" }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.transform_data.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [
+        { "fromStep": "get_credentials", "toStep": "transform_data" },
+        { "fromStep": "transform_data", "toStep": "finish" }
+    ],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

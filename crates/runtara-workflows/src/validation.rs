@@ -1888,4 +1888,486 @@ mod tests {
             Some("my-step".to_string())
         );
     }
+
+    #[test]
+    fn test_extract_step_id_dot_notation() {
+        assert_eq!(
+            extract_step_id_from_reference("steps.my_step.outputs"),
+            Some("my_step".to_string())
+        );
+        assert_eq!(
+            extract_step_id_from_reference("steps.another_step.outputs.data"),
+            Some("another_step".to_string())
+        );
+        // Edge case: just steps.step_id
+        assert_eq!(
+            extract_step_id_from_reference("steps.simple"),
+            Some("simple".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_step_id_non_step_reference() {
+        // References that don't start with "steps." should return None
+        assert_eq!(extract_step_id_from_reference("variables.foo"), None);
+        assert_eq!(extract_step_id_from_reference("inputs.data"), None);
+        assert_eq!(extract_step_id_from_reference("foo.bar"), None);
+    }
+
+    // === ValidationResult Tests ===
+
+    #[test]
+    fn test_validation_result_is_ok() {
+        let result = ValidationResult::default();
+        assert!(result.is_ok());
+        assert!(!result.has_errors());
+        assert!(!result.has_warnings());
+    }
+
+    #[test]
+    fn test_validation_result_with_errors() {
+        let mut result = ValidationResult::default();
+        result.errors.push(ValidationError::EmptyWorkflow);
+        assert!(!result.is_ok());
+        assert!(result.has_errors());
+    }
+
+    #[test]
+    fn test_validation_result_with_warnings() {
+        let mut result = ValidationResult::default();
+        result.warnings.push(ValidationWarning::UnusedConnection {
+            step_id: "test".to_string(),
+        });
+        assert!(result.is_ok()); // Warnings don't prevent compilation
+        assert!(!result.has_errors());
+        assert!(result.has_warnings());
+    }
+
+    #[test]
+    fn test_validation_result_merge() {
+        let mut result1 = ValidationResult::default();
+        result1.errors.push(ValidationError::EmptyWorkflow);
+
+        let mut result2 = ValidationResult::default();
+        result2.warnings.push(ValidationWarning::UnusedConnection {
+            step_id: "conn".to_string(),
+        });
+
+        result1.merge(result2);
+        assert_eq!(result1.errors.len(), 1);
+        assert_eq!(result1.warnings.len(), 1);
+    }
+
+    // === Error Display Tests ===
+
+    #[test]
+    fn test_error_display_entry_point_not_found() {
+        let error = ValidationError::EntryPointNotFound {
+            entry_point: "start".to_string(),
+            available_steps: vec!["step1".to_string(), "step2".to_string()],
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E001]"));
+        assert!(display.contains("start"));
+        assert!(display.contains("step1, step2"));
+    }
+
+    #[test]
+    fn test_error_display_unreachable_step() {
+        let error = ValidationError::UnreachableStep {
+            step_id: "orphan".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E002]"));
+        assert!(display.contains("orphan"));
+        assert!(display.contains("unreachable"));
+    }
+
+    #[test]
+    fn test_error_display_dangling_step() {
+        let error = ValidationError::DanglingStep {
+            step_id: "dead_end".to_string(),
+            step_type: "Agent".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E003]"));
+        assert!(display.contains("dead_end"));
+        assert!(display.contains("Agent"));
+    }
+
+    #[test]
+    fn test_error_display_with_suggestion() {
+        let error = ValidationError::UnknownAgent {
+            step_id: "step1".to_string(),
+            agent_id: "htpp".to_string(),
+            available_agents: vec!["http".to_string(), "transform".to_string()],
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E020]"));
+        assert!(display.contains("htpp"));
+        assert!(display.contains("Did you mean 'http'?"));
+    }
+
+    #[test]
+    fn test_error_display_security_violation() {
+        let error = ValidationError::ConnectionLeakToNonSecureAgent {
+            connection_step_id: "conn".to_string(),
+            agent_step_id: "transform_step".to_string(),
+            agent_id: "transform".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E040]"));
+        assert!(display.contains("Security violation"));
+        assert!(display.contains("conn"));
+        assert!(display.contains("transform"));
+    }
+
+    // === Warning Display Tests ===
+
+    #[test]
+    fn test_warning_display_high_retry() {
+        let warning = ValidationWarning::HighRetryCount {
+            step_id: "step1".to_string(),
+            max_retries: 100,
+            recommended_max: 50,
+        };
+        let display = format!("{}", warning);
+        assert!(display.contains("[W030]"));
+        assert!(display.contains("100"));
+        assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn test_warning_display_long_timeout() {
+        let warning = ValidationWarning::LongTimeout {
+            step_id: "step1".to_string(),
+            timeout_ms: 7_200_000,         // 2 hours
+            recommended_max_ms: 3_600_000, // 1 hour
+        };
+        let display = format!("{}", warning);
+        assert!(display.contains("[W034]"));
+        assert!(display.contains("2.0h"));
+        assert!(display.contains("1.0h"));
+    }
+
+    #[test]
+    fn test_warning_display_unused_connection() {
+        let warning = ValidationWarning::UnusedConnection {
+            step_id: "my_conn".to_string(),
+        };
+        let display = format!("{}", warning);
+        assert!(display.contains("[W040]"));
+        assert!(display.contains("my_conn"));
+        assert!(display.contains("never referenced"));
+    }
+
+    #[test]
+    fn test_warning_display_self_reference() {
+        let warning = ValidationWarning::SelfReference {
+            step_id: "loop_step".to_string(),
+            reference_path: "steps.loop_step.outputs.data".to_string(),
+        };
+        let display = format!("{}", warning);
+        assert!(display.contains("[W050]"));
+        assert!(display.contains("loop_step"));
+        assert!(display.contains("references its own outputs"));
+    }
+
+    // === Graph Structure Edge Cases ===
+
+    #[test]
+    fn test_unreachable_step_detection() {
+        let mut steps = HashMap::new();
+        steps.insert("start".to_string(), create_finish_step("start", None));
+        steps.insert("orphan".to_string(), create_finish_step("orphan", None));
+
+        let graph = create_basic_graph(steps, "start");
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(
+            |e| matches!(e, ValidationError::UnreachableStep { step_id } if step_id == "orphan")
+        ));
+    }
+
+    #[test]
+    fn test_dangling_agent_step() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", None),
+        );
+        // No execution plan edge from agent to anywhere
+
+        let graph = create_basic_graph(steps, "agent");
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(
+            |e| matches!(e, ValidationError::DanglingStep { step_id, .. } if step_id == "agent")
+        ));
+    }
+
+    #[test]
+    fn test_finish_step_allowed_no_outgoing() {
+        // Finish steps don't need outgoing edges - they're terminal
+        let mut steps = HashMap::new();
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let graph = create_basic_graph(steps, "finish");
+        let result = validate_workflow(&graph);
+
+        // Should not have dangling step error for Finish
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DanglingStep { .. }))
+        );
+    }
+
+    // === Self-Reference Warning ===
+
+    #[test]
+    fn test_self_reference_warning() {
+        let mut steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        // Step references itself
+        mapping.insert(
+            "data".to_string(),
+            ref_value("steps.my_step.outputs.previous"),
+        );
+        steps.insert(
+            "my_step".to_string(),
+            create_agent_step("my_step", "transform", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "my_step");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "my_step".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(result.warnings.iter().any(
+            |w| matches!(w, ValidationWarning::SelfReference { step_id, .. } if step_id == "my_step")
+        ));
+    }
+
+    // === Configuration Warning Edge Cases ===
+
+    #[test]
+    fn test_long_retry_delay_warning() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            Step::Agent(AgentStep {
+                id: "agent".to_string(),
+                name: None,
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: Some(5_000_000), // 5000 seconds
+                timeout: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(result.warnings.iter().any(|w| matches!(
+            w,
+            ValidationWarning::LongRetryDelay {
+                retry_delay_ms: 5_000_000,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_normal_config_no_warnings() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            Step::Agent(AgentStep {
+                id: "agent".to_string(),
+                name: None,
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: Some(3),    // Normal
+                retry_delay: Some(1000), // 1 second - normal
+                timeout: Some(30_000),   // 30 seconds - normal
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        // Should have no configuration warnings
+        let config_warnings = result.warnings.iter().any(|w| {
+            matches!(
+                w,
+                ValidationWarning::HighRetryCount { .. }
+                    | ValidationWarning::LongRetryDelay { .. }
+                    | ValidationWarning::LongTimeout { .. }
+            )
+        });
+        assert!(!config_warnings);
+    }
+
+    // === Child Scenario Version Tests ===
+
+    #[test]
+    fn test_child_version_current_valid() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "child".to_string(),
+            Step::StartScenario(StartScenarioStep {
+                id: "child".to_string(),
+                name: None,
+                child_scenario_id: "other-workflow".to_string(),
+                child_version: runtara_dsl::ChildVersion::Latest("current".to_string()),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "child");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "child".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidChildVersion { .. }))
+        );
+    }
+
+    #[test]
+    fn test_child_version_specific_valid() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "child".to_string(),
+            Step::StartScenario(StartScenarioStep {
+                id: "child".to_string(),
+                name: None,
+                child_scenario_id: "other-workflow".to_string(),
+                child_version: runtara_dsl::ChildVersion::Specific(5),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "child");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "child".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidChildVersion { .. }))
+        );
+    }
+
+    #[test]
+    fn test_child_version_zero_invalid() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "child".to_string(),
+            Step::StartScenario(StartScenarioStep {
+                id: "child".to_string(),
+                name: None,
+                child_scenario_id: "other-workflow".to_string(),
+                child_version: runtara_dsl::ChildVersion::Specific(0),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "child");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "child".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidChildVersion { reason, .. } if reason.contains("positive")
+        )));
+    }
+
+    // === Levenshtein Edge Cases ===
+
+    #[test]
+    fn test_levenshtein_single_char_diff() {
+        assert_eq!(levenshtein_distance("cat", "bat"), 1);
+        assert_eq!(levenshtein_distance("cat", "car"), 1);
+        assert_eq!(levenshtein_distance("cat", "cats"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_insertions_deletions() {
+        assert_eq!(levenshtein_distance("abc", "ab"), 1);
+        assert_eq!(levenshtein_distance("ab", "abc"), 1);
+        assert_eq!(levenshtein_distance("", ""), 0);
+    }
+
+    #[test]
+    fn test_find_similar_name_no_close_match() {
+        let candidates = vec!["alpha".to_string(), "beta".to_string()];
+        // "xyz" is too different from any candidate
+        assert_eq!(find_similar_name("xyz", &candidates), None);
+    }
+
+    #[test]
+    fn test_find_similar_name_empty_candidates() {
+        let candidates: Vec<String> = vec![];
+        assert_eq!(find_similar_name("anything", &candidates), None);
+    }
+
+    #[test]
+    fn test_find_similar_name_case_insensitive() {
+        let candidates = vec!["HTTP".to_string(), "Transform".to_string()];
+        assert_eq!(
+            find_similar_name("http", &candidates),
+            Some("HTTP".to_string())
+        );
+    }
 }

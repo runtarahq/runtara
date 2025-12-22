@@ -1,0 +1,35 @@
+{
+    "name": "Long Timeout Configuration",
+    "description": "Workflow with very long timeout - triggers W034 warning",
+    "entryPoint": "slow_process",
+    "steps": {
+        "slow_process": {
+            "stepType": "Agent",
+            "id": "slow_process",
+            "agentId": "http",
+            "capabilityId": "request",
+            "timeout": 7200000,
+            "inputMapping": {
+                "url": {
+                    "valueType": "immediate",
+                    "value": "https://api.example.com/slow"
+                },
+                "method": { "valueType": "immediate", "value": "POST" }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.slow_process.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "slow_process", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

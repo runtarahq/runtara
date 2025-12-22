@@ -1,0 +1,24 @@
+{
+    "name": "Missing Entry Point",
+    "description": "Workflow with entry point that doesn't exist - triggers E001",
+    "entryPoint": "nonexistent_step",
+    "steps": {
+        "transform_data": {
+            "stepType": "Agent",
+            "id": "transform_data",
+            "agentId": "transform",
+            "capabilityId": "map",
+            "inputMapping": {
+                "items": { "valueType": "reference", "value": "data.input" }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish"
+        }
+    },
+    "executionPlan": [{ "fromStep": "transform_data", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

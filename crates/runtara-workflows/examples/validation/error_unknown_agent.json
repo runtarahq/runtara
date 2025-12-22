@@ -1,0 +1,33 @@
+{
+    "name": "Unknown Agent",
+    "description": "Workflow using an agent that doesn't exist - triggers E020 with 'did you mean?' suggestion",
+    "entryPoint": "process",
+    "steps": {
+        "process": {
+            "stepType": "Agent",
+            "id": "process",
+            "agentId": "htpp",
+            "capabilityId": "request",
+            "inputMapping": {
+                "url": {
+                    "valueType": "immediate",
+                    "value": "https://api.example.com"
+                }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.process.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "process", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

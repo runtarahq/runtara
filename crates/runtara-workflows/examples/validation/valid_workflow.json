@@ -1,0 +1,34 @@
+{
+    "name": "Valid Workflow",
+    "description": "A simple valid workflow for testing validation passes",
+    "entryPoint": "transform_data",
+    "steps": {
+        "transform_data": {
+            "stepType": "Agent",
+            "id": "transform_data",
+            "agentId": "transform",
+            "capabilityId": "map",
+            "inputMapping": {
+                "items": { "valueType": "reference", "value": "data.input" },
+                "expression": {
+                    "valueType": "immediate",
+                    "value": "item.value * 2"
+                }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.transform_data.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "transform_data", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

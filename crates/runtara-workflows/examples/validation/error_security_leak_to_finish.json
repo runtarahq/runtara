@@ -1,0 +1,27 @@
+{
+    "name": "Security Leak - Connection to Finish",
+    "description": "Workflow that exposes connection data in outputs - triggers E041",
+    "entryPoint": "get_credentials",
+    "steps": {
+        "get_credentials": {
+            "stepType": "Connection",
+            "id": "get_credentials",
+            "connectionId": "my-api-key",
+            "integrationId": "bearer"
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "credentials": {
+                    "valueType": "reference",
+                    "value": "steps.get_credentials.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "get_credentials", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

@@ -1,0 +1,30 @@
+{
+    "name": "Invalid Child Scenario Version",
+    "description": "Workflow with invalid child scenario version - triggers E050",
+    "entryPoint": "start_child",
+    "steps": {
+        "start_child": {
+            "stepType": "StartScenario",
+            "id": "start_child",
+            "childScenarioId": "child-workflow-123",
+            "childVersion": "invalid_version",
+            "inputMapping": {
+                "data": { "valueType": "reference", "value": "data.payload" }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": {
+                    "valueType": "reference",
+                    "value": "steps.start_child.outputs"
+                }
+            }
+        }
+    },
+    "executionPlan": [{ "fromStep": "start_child", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}

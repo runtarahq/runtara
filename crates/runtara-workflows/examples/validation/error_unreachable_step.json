@@ -1,0 +1,33 @@
+{
+    "name": "Unreachable Step",
+    "description": "Workflow with a step that cannot be reached - triggers E002",
+    "entryPoint": "start",
+    "steps": {
+        "start": {
+            "stepType": "Agent",
+            "id": "start",
+            "agentId": "transform",
+            "capabilityId": "map",
+            "inputMapping": {
+                "items": { "valueType": "reference", "value": "data.input" }
+            }
+        },
+        "orphan_step": {
+            "stepType": "Agent",
+            "id": "orphan_step",
+            "agentId": "transform",
+            "capabilityId": "filter",
+            "inputMapping": {
+                "items": { "valueType": "reference", "value": "data.other" }
+            }
+        },
+        "finish": {
+            "stepType": "Finish",
+            "id": "finish"
+        }
+    },
+    "executionPlan": [{ "fromStep": "start", "toStep": "finish" }],
+    "variables": {},
+    "inputSchema": {},
+    "outputSchema": {}
+}
