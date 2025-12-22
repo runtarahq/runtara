@@ -125,7 +125,7 @@ pub async fn get_instance_full(
                i.created_at, i.started_at, i.finished_at,
                ch.last_heartbeat as heartbeat_at, i.retry_count, i.max_retries
         FROM instances i
-        LEFT JOIN images img ON i.image_id = img.image_id::text
+        LEFT JOIN images img ON i.image_id = img.image_id
         LEFT JOIN container_heartbeats ch ON i.instance_id = ch.instance_id
         WHERE i.instance_id = $1
         "#,
