@@ -383,7 +383,7 @@ pub async fn handle_start_instance(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Parse input
+    // Parse input for runner (not stored in DB, Core doesn't track it)
     let input = request.input.unwrap_or(serde_json::json!({}));
 
     // Create instance record
@@ -392,7 +392,6 @@ pub async fn handle_start_instance(
         &instance_id,
         &request.tenant_id,
         &request.image_id,
-        Some(&input),
     )
     .await
     {
@@ -624,8 +623,8 @@ pub async fn handle_resume_instance(
         }
     };
 
-    // Get image
-    let image_id = match instance.image_id {
+    // Get image ID from instance_images table
+    let image_id = match db::get_instance_image_id(&state.pool, &request.instance_id).await? {
         Some(id) => id,
         None => {
             return Ok(ResumeInstanceResponse {
@@ -788,11 +787,15 @@ pub async fn process_instance_output(
 
     match output.status {
         InstanceOutputStatus::Completed => {
+            let result_bytes = output
+                .result
+                .as_ref()
+                .and_then(|v| serde_json::to_vec(v).ok());
             db::update_instance_result(
                 &state.pool,
                 instance_id,
                 "completed",
-                output.result.as_ref(),
+                result_bytes.as_deref(),
                 None,
                 None,
             )
@@ -980,11 +983,15 @@ async fn process_output(
 
     match output.status {
         InstanceOutputStatus::Completed => {
+            let result_bytes = output
+                .result
+                .as_ref()
+                .and_then(|v| serde_json::to_vec(v).ok());
             db::update_instance_result(
                 &state.pool,
                 instance_id,
                 "completed",
-                output.result.as_ref(),
+                result_bytes.as_deref(),
                 None,
                 None,
             )

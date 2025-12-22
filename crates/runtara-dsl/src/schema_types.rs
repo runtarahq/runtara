@@ -288,6 +288,7 @@ pub struct SplitStep {
     pub name: Option<String>,
 
     /// Nested execution graph for each iteration
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub subgraph: Box<ExecutionGraph>,
 
     /// Split configuration: array to iterate, parallelism settings, error handling
@@ -387,6 +388,7 @@ pub struct WhileStep {
     pub condition: ConditionExpression,
 
     /// Nested execution graph to execute on each iteration
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub subgraph: Box<ExecutionGraph>,
 
     /// While loop configuration
@@ -721,6 +723,7 @@ pub struct SchemaField {
 
     /// For array types, the type of items in the array
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub items: Option<Box<SchemaField>>,
 
     /// Allowed values (enum)
@@ -806,6 +809,7 @@ pub struct ConditionOperation {
 #[serde(untagged)]
 pub enum ConditionArgument {
     /// Nested expression (for AND, OR, NOT, or any operator that takes expressions)
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     Expression(Box<ConditionExpression>),
 
     /// A mapping value - either reference (data path) or immediate (literal)

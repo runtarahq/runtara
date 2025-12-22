@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// Environment configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Database URL for runtara-environment (separate from Core)
+    /// Database URL (shared with Core for checkpoints, events, signals)
     pub database_url: String,
     /// QUIC server address for Environment API
     pub quic_addr: SocketAddr,
@@ -23,14 +23,9 @@ pub struct Config {
 impl Config {
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, ConfigError> {
-        // Environment has its own database, separate from Core
-        let database_url = std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL")
-            .or_else(|_| std::env::var("RUNTARA_DATABASE_URL"))
-            .map_err(|_| {
-                ConfigError::MissingEnvVar(
-                    "RUNTARA_ENVIRONMENT_DATABASE_URL or RUNTARA_DATABASE_URL",
-                )
-            })?;
+        // Shared database with Core for checkpoints, events, signals
+        let database_url = std::env::var("RUNTARA_DATABASE_URL")
+            .map_err(|_| ConfigError::MissingEnvVar("RUNTARA_DATABASE_URL"))?;
 
         let port: u16 = std::env::var("RUNTARA_ENV_QUIC_PORT")
             .unwrap_or_else(|_| "8002".to_string())

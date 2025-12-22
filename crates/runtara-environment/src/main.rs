@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_environment::config::Config;
 use runtara_environment::runner::Runner;
 use runtara_environment::runner::oci::OciRunner;
@@ -49,19 +50,26 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to database");
 
-    // Run migrations
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    // Create environment-specific tables if they don't exist
+    // (Core manages _sqlx_migrations, so we use raw SQL here)
+    sqlx::raw_sql(include_str!("../migrations/schema.sql"))
+        .execute(&pool)
+        .await?;
 
-    info!("Database migrations complete");
+    info!("Database schema verified");
 
     // Create OCI runner
     let runner = Arc::new(OciRunner::from_env());
     info!(runner_type = runner.runner_type(), "Runner initialized");
 
+    // Create shared persistence for checkpoints, events, signals
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
     // Start the runtime
     let runtime = EnvironmentRuntime::builder()
         .pool(pool)
         .runner(runner)
+        .core_persistence(persistence)
         .core_addr(&config.core_addr)
         .bind_addr(config.quic_addr)
         .data_dir(&config.data_dir)

@@ -1,42 +1,72 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Database operations for runtara-environment.
+//!
+//! Environment shares the `instances` table with Core but maintains its own
+//! `instance_images` table to track which image launched each instance.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-/// Instance record from the database.
+/// Instance record from the database (matches Core's schema).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Instance {
     /// Unique identifier for the instance.
     pub instance_id: String,
     /// Tenant identifier for multi-tenancy isolation.
     pub tenant_id: String,
-    /// Image ID that this instance was created from.
-    pub image_id: Option<String>,
     /// Current status (pending, running, suspended, completed, failed, cancelled).
     pub status: String,
-    /// Input data passed when starting the instance.
-    pub input: Option<serde_json::Value>,
-    /// Output data from successful completion.
-    pub output: Option<serde_json::Value>,
-    /// Error message from failure.
-    pub error: Option<String>,
     /// Last checkpoint ID if instance was checkpointed.
     pub checkpoint_id: Option<String>,
+    /// Current attempt number.
+    pub attempt: i32,
+    /// Maximum allowed attempts.
+    pub max_attempts: i32,
     /// When the instance was created.
     pub created_at: DateTime<Utc>,
     /// When the instance started running.
     pub started_at: Option<DateTime<Utc>>,
     /// When the instance finished (completed, failed, or cancelled).
     pub finished_at: Option<DateTime<Utc>>,
-    /// Current retry attempt number.
-    pub retry_count: i32,
-    /// Maximum allowed retries.
-    pub max_retries: i32,
+    /// Output data from successful completion.
+    pub output: Option<Vec<u8>>,
+    /// Error message from failure.
+    pub error: Option<String>,
 }
 
-/// Full instance record with joined image name and heartbeat.
+/// Instance with image info (joined from instance_images).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct InstanceWithImage {
+    /// Unique identifier for the instance.
+    pub instance_id: String,
+    /// Tenant identifier for multi-tenancy isolation.
+    pub tenant_id: String,
+    /// Current status.
+    pub status: String,
+    /// Last checkpoint ID.
+    pub checkpoint_id: Option<String>,
+    /// Current attempt number.
+    pub attempt: i32,
+    /// Maximum allowed attempts.
+    pub max_attempts: i32,
+    /// When the instance was created.
+    pub created_at: DateTime<Utc>,
+    /// When the instance started running.
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the instance finished.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Output data.
+    pub output: Option<Vec<u8>>,
+    /// Error message.
+    pub error: Option<String>,
+    /// Image ID (from instance_images table).
+    pub image_id: Option<String>,
+    /// Image name (from images table).
+    pub image_name: Option<String>,
+}
+
+/// Full instance record with image info and heartbeat.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct InstanceFull {
     /// Unique identifier for the instance.
@@ -47,50 +77,52 @@ pub struct InstanceFull {
     pub image_id: Option<String>,
     /// Human-readable image name (from images table).
     pub image_name: Option<String>,
-    /// Current status (pending, running, suspended, completed, failed, cancelled).
+    /// Current status.
     pub status: String,
-    /// Input data passed when starting the instance.
-    pub input: Option<serde_json::Value>,
-    /// Output data from successful completion.
-    pub output: Option<serde_json::Value>,
-    /// Error message from failure.
+    /// Output data.
+    pub output: Option<Vec<u8>>,
+    /// Error message.
     pub error: Option<String>,
-    /// Last checkpoint ID if instance was checkpointed.
+    /// Last checkpoint ID.
     pub checkpoint_id: Option<String>,
     /// When the instance was created.
     pub created_at: DateTime<Utc>,
     /// When the instance started running.
     pub started_at: Option<DateTime<Utc>>,
-    /// When the instance finished (completed, failed, or cancelled).
+    /// When the instance finished.
     pub finished_at: Option<DateTime<Utc>>,
     /// Last heartbeat timestamp (from container_heartbeats table).
     pub heartbeat_at: Option<DateTime<Utc>>,
-    /// Current retry attempt number.
-    pub retry_count: i32,
-    /// Maximum allowed retries.
-    pub max_retries: i32,
+    /// Current attempt number.
+    pub attempt: i32,
+    /// Maximum allowed attempts.
+    pub max_attempts: i32,
 }
 
-/// Create a new instance record.
+/// Create a new instance record and associate it with an image.
+///
+/// This creates the instance in Core's table and adds the image mapping
+/// in the instance_images table.
 pub async fn create_instance(
     pool: &PgPool,
     instance_id: &str,
     tenant_id: &str,
     image_id: &str,
-    input: Option<&serde_json::Value>,
 ) -> Result<(), sqlx::Error> {
+    // Create instance in Core's table
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, image_id, status, input, created_at)
-        VALUES ($1, $2, $3, 'pending', $4, NOW())
+        INSERT INTO instances (instance_id, tenant_id, status, created_at)
+        VALUES ($1, $2, 'pending', NOW())
         "#,
     )
     .bind(instance_id)
     .bind(tenant_id)
-    .bind(image_id)
-    .bind(input)
     .execute(pool)
     .await?;
+
+    // Associate with image
+    associate_instance_image(pool, instance_id, image_id, tenant_id).await?;
 
     Ok(())
 }
@@ -102,8 +134,9 @@ pub async fn get_instance(
 ) -> Result<Option<Instance>, sqlx::Error> {
     sqlx::query_as::<_, Instance>(
         r#"
-        SELECT instance_id, tenant_id, image_id, status, input, output, error,
-               checkpoint_id, created_at, started_at, finished_at, retry_count, max_retries
+        SELECT instance_id, tenant_id, status::TEXT as status, checkpoint_id,
+               attempt, max_attempts, created_at, started_at, finished_at,
+               output, error
         FROM instances
         WHERE instance_id = $1
         "#,
@@ -120,12 +153,13 @@ pub async fn get_instance_full(
 ) -> Result<Option<InstanceFull>, sqlx::Error> {
     sqlx::query_as::<_, InstanceFull>(
         r#"
-        SELECT i.instance_id, i.tenant_id, i.image_id, img.name as image_name,
-               i.status, i.input, i.output, i.error, i.checkpoint_id,
+        SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
+               i.status::TEXT as status, i.output, i.error, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
-               ch.last_heartbeat as heartbeat_at, i.retry_count, i.max_retries
+               ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts
         FROM instances i
-        LEFT JOIN images img ON i.image_id = img.image_id
+        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
+        LEFT JOIN images img ON ii.image_id = img.image_id
         LEFT JOIN container_heartbeats ch ON i.instance_id = ch.instance_id
         WHERE i.instance_id = $1
         "#,
@@ -145,7 +179,7 @@ pub async fn update_instance_status(
     sqlx::query(
         r#"
         UPDATE instances
-        SET status = $2,
+        SET status = $2::instance_status,
             checkpoint_id = COALESCE($3, checkpoint_id),
             started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN NOW() ELSE started_at END,
             finished_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled') THEN NOW() ELSE finished_at END
@@ -166,14 +200,14 @@ pub async fn update_instance_result(
     pool: &PgPool,
     instance_id: &str,
     status: &str,
-    output: Option<&serde_json::Value>,
+    output: Option<&[u8]>,
     error: Option<&str>,
     checkpoint_id: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         UPDATE instances
-        SET status = $2,
+        SET status = $2::instance_status,
             output = $3,
             error = $4,
             checkpoint_id = COALESCE($5, checkpoint_id),
@@ -223,7 +257,7 @@ pub struct ListInstancesOptions {
 pub async fn list_instances(
     pool: &PgPool,
     options: &ListInstancesOptions,
-) -> Result<Vec<Instance>, sqlx::Error> {
+) -> Result<Vec<InstanceWithImage>, sqlx::Error> {
     // Build ORDER BY clause based on order_by option
     let order_clause = match options.order_by.as_deref() {
         Some("created_at_asc") => "ORDER BY i.created_at ASC",
@@ -240,13 +274,15 @@ pub async fn list_instances(
 
     let query = format!(
         r#"
-        SELECT i.instance_id, i.tenant_id, i.image_id, i.status, i.input, i.output, i.error,
-               i.checkpoint_id, i.created_at, i.started_at, i.finished_at, i.retry_count, i.max_retries
+        SELECT i.instance_id, i.tenant_id, i.status::TEXT as status, i.checkpoint_id,
+               i.attempt, i.max_attempts, i.created_at, i.started_at, i.finished_at,
+               i.output, i.error, ii.image_id, img.name as image_name
         FROM instances i
-        LEFT JOIN images img ON i.image_id = img.image_id
+        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
+        LEFT JOIN images img ON ii.image_id = img.image_id
         WHERE ($1::TEXT IS NULL OR i.tenant_id = $1)
-          AND ($2::TEXT IS NULL OR i.status = $2)
-          AND ($3::TEXT IS NULL OR i.image_id = $3)
+          AND ($2::TEXT IS NULL OR i.status::TEXT = $2)
+          AND ($3::TEXT IS NULL OR ii.image_id = $3)
           AND ($4::TEXT IS NULL OR img.name LIKE $4)
           AND ($5::TIMESTAMPTZ IS NULL OR i.created_at >= $5)
           AND ($6::TIMESTAMPTZ IS NULL OR i.created_at < $6)
@@ -258,7 +294,7 @@ pub async fn list_instances(
         order_clause
     );
 
-    sqlx::query_as::<_, Instance>(&query)
+    sqlx::query_as::<_, InstanceWithImage>(&query)
         .bind(options.tenant_id.as_deref())
         .bind(options.status.as_deref())
         .bind(options.image_id.as_deref())
@@ -288,10 +324,11 @@ pub async fn count_instances(
         r#"
         SELECT COUNT(*)
         FROM instances i
-        LEFT JOIN images img ON i.image_id = img.image_id
+        LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
+        LEFT JOIN images img ON ii.image_id = img.image_id
         WHERE ($1::TEXT IS NULL OR i.tenant_id = $1)
-          AND ($2::TEXT IS NULL OR i.status = $2)
-          AND ($3::TEXT IS NULL OR i.image_id = $3)
+          AND ($2::TEXT IS NULL OR i.status::TEXT = $2)
+          AND ($3::TEXT IS NULL OR ii.image_id = $3)
           AND ($4::TEXT IS NULL OR img.name LIKE $4)
           AND ($5::TIMESTAMPTZ IS NULL OR i.created_at >= $5)
           AND ($6::TIMESTAMPTZ IS NULL OR i.created_at < $6)
@@ -357,9 +394,10 @@ pub async fn schedule_wake(
 pub async fn get_pending_wakes(pool: &PgPool, limit: i64) -> Result<Vec<WakeEntry>, sqlx::Error> {
     sqlx::query_as::<_, WakeEntry>(
         r#"
-        SELECT w.instance_id, i.tenant_id, i.image_id, w.checkpoint_id, w.wake_at
+        SELECT w.instance_id, i.tenant_id, ii.image_id, w.checkpoint_id, w.wake_at
         FROM wake_queue w
         JOIN instances i ON w.instance_id = i.instance_id
+        JOIN instance_images ii ON w.instance_id = ii.instance_id
         WHERE w.wake_at <= NOW()
         ORDER BY w.wake_at ASC
         LIMIT $1
@@ -389,13 +427,10 @@ pub async fn health_check(pool: &PgPool) -> Result<bool, sqlx::Error> {
 }
 
 // ============================================================================
-// Instance Images (for shared Core persistence mode)
+// Instance Images
 // ============================================================================
 
 /// Associate an instance with an image.
-///
-/// Used when Core owns the instances table but Environment needs to track
-/// which image was used to launch each instance.
 pub async fn associate_instance_image(
     pool: &PgPool,
     instance_id: &str,
