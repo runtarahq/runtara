@@ -58,12 +58,14 @@ async fn test_custom_event_stored_with_subtype() {
         subtype: Some("step_debug_start".to_string()),
     };
 
-    // Fire-and-forget: we don't check the response, just verify it was sent
-    let _: instance_proto::RpcResponse = ctx
-        .instance_client
-        .request(&wrap_instance_event(custom_event))
+    // Fire-and-forget: InstanceEvents don't expect a response
+    ctx.instance_client
+        .send_fire_and_forget(&wrap_instance_event(custom_event))
         .await
         .expect("Failed to send custom event");
+
+    // Give the server time to process the event
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Verify event was stored in database with correct subtype
     let row: Option<(String, Option<String>, Vec<u8>)> = sqlx::query_as(
@@ -122,9 +124,8 @@ async fn test_multiple_custom_events_with_different_subtypes() {
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: Some("step_debug_start".to_string()),
     };
-    let _: instance_proto::RpcResponse = ctx
-        .instance_client
-        .request(&wrap_instance_event(start_event))
+    ctx.instance_client
+        .send_fire_and_forget(&wrap_instance_event(start_event))
         .await
         .expect("Failed to send start event");
 
@@ -137,11 +138,13 @@ async fn test_multiple_custom_events_with_different_subtypes() {
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: Some("step_debug_end".to_string()),
     };
-    let _: instance_proto::RpcResponse = ctx
-        .instance_client
-        .request(&wrap_instance_event(end_event))
+    ctx.instance_client
+        .send_fire_and_forget(&wrap_instance_event(end_event))
         .await
         .expect("Failed to send end event");
+
+    // Give the server time to process the events
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Verify both events were stored
     let rows: Vec<(String,)> = sqlx::query_as(
@@ -204,11 +207,13 @@ async fn test_custom_event_does_not_change_instance_status() {
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: Some("arbitrary_subtype".to_string()),
     };
-    let _: instance_proto::RpcResponse = ctx
-        .instance_client
-        .request(&wrap_instance_event(custom_event))
+    ctx.instance_client
+        .send_fire_and_forget(&wrap_instance_event(custom_event))
         .await
         .expect("Failed to send custom event");
+
+    // Give the server time to process the event
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Verify status is still running (custom events don't change status)
     let status_after = ctx.get_instance_status(&instance_id).await;
@@ -271,11 +276,13 @@ async fn test_custom_event_with_json_payload() {
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: Some("step_debug_start".to_string()),
     };
-    let _: instance_proto::RpcResponse = ctx
-        .instance_client
-        .request(&wrap_instance_event(custom_event))
+    ctx.instance_client
+        .send_fire_and_forget(&wrap_instance_event(custom_event))
         .await
         .expect("Failed to send custom event");
+
+    // Give the server time to process the event
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Verify payload was stored correctly
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
@@ -345,12 +352,14 @@ async fn test_custom_event_subtype_index() {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: Some(subtype.to_string()),
         };
-        let _: instance_proto::RpcResponse = ctx
-            .instance_client
-            .request(&wrap_instance_event(custom_event))
+        ctx.instance_client
+            .send_fire_and_forget(&wrap_instance_event(custom_event))
             .await
             .expect("Failed to send custom event");
     }
+
+    // Give the server time to process all events
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Query by subtype (uses the index)
     let start_count: (i64,) = sqlx::query_as(
