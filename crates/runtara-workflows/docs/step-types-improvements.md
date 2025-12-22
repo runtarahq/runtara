@@ -188,6 +188,116 @@ Add `timeout` field to all step types (currently only execution-level timeout ex
 
 ---
 
+### 4. Connection Step
+
+Acquire a connection dynamically within a workflow, enabling agent-like behavior without hardcoded agents.
+
+```json
+{
+  "stepType": "Connection",
+  "id": "api_conn",
+  "name": "Acquire API Connection",
+  "connectionId": "my-api-connection",
+  "integrationId": "bearer"
+}
+```
+
+**Fields:**
+- `connectionId` - Reference to connection in the connection registry
+- `integrationId` - Type of connection (bearer, api_key, basic_auth, sftp, etc.)
+
+**Behavior:**
+- Uses same connection callbacks as agents (fetch from connection service)
+- Waits for rate limit if connection is rate-limited (with heartbeat during wait)
+- Connection data available to subsequent **secure agents only**
+
+**Security Constraints:**
+
+Connection data is sensitive and must be protected:
+
+1. **No logging/storage** - Connection outputs are never:
+   - Logged in debug events
+   - Stored in checkpoints
+   - Included in workflow outputs
+
+2. **Secure agent restriction** - Connection outputs can only be passed to agents marked as `secure: true`:
+   ```json
+   {
+     "stepType": "Agent",
+     "id": "call_api",
+     "agentId": "http",
+     "capabilityId": "request",
+     "inputMapping": {
+       "_connection": { "valueType": "reference", "value": "steps.api_conn.outputs" }
+     }
+   }
+   ```
+
+3. **Compile-time validation** - Code generation fails if:
+   - Connection output is referenced in non-secure agent input
+   - Connection output is used in Finish step outputMapping
+   - Connection output is used in Log step context
+
+**Secure Agents:**
+
+Agents declare security capability via `secure` flag in metadata:
+
+| Agent | secure | Can receive connection data |
+|-------|--------|---------------------------|
+| HTTP | true | Yes |
+| SFTP | true | Yes |
+| Transform | false | No |
+| Utils | false | No |
+| Text | false | No |
+| CSV | false | No |
+| XML | false | No |
+
+**Use Cases:**
+- Dynamic API calls with credentials not known at agent build time
+- Converting scenarios into reusable agents
+- Multi-tenant connection handling
+- Custom integrations without building dedicated agents
+
+**Example: Dynamic API Call**
+
+```json
+{
+  "steps": {
+    "get_connection": {
+      "stepType": "Connection",
+      "id": "get_connection",
+      "connectionId": "external-api",
+      "integrationId": "bearer"
+    },
+    "call_api": {
+      "stepType": "Agent",
+      "id": "call_api",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": { "valueType": "reference", "value": "data.apiUrl" },
+        "method": { "valueType": "immediate", "value": "GET" },
+        "_connection": { "valueType": "reference", "value": "steps.get_connection.outputs" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "steps.call_api.outputs" }
+      }
+    }
+  },
+  "entryPoint": "get_connection",
+  "executionPlan": [
+    { "fromStep": "get_connection", "toStep": "call_api" },
+    { "fromStep": "call_api", "toStep": "finish" }
+  ]
+}
+```
+
+---
+
 ## Implementation Status
 
 | Improvement | Priority | Schema | Code Gen |
@@ -196,9 +306,30 @@ Add `timeout` field to all step types (currently only execution-level timeout ex
 | While step | Medium | Done | Done |
 | Log step | Low | Done | Done |
 | Per-step timeout | Medium | Done | Pending |
+| Connection step | High | Done | Done |
+| Agent `secure` flag | High | Done | Done |
+| Connection security validation | High | Done | Done |
 
 ### Implementation Notes
 
 #### Per-Step Timeout
 The `timeout` field is added to Agent, Split, StartScenario, and While steps.
 Runtime enforcement will wrap step execution with tokio::time::timeout.
+
+#### Connection Step Security
+The connection step implementation includes:
+1. `secure: bool` field added to `AgentModuleConfig` in agent_meta.rs
+   - HTTP and SFTP agents are marked as secure
+   - All other agents are not secure
+2. `ConnectionStep` type added to schema_types.rs with:
+   - `connectionId` - Reference to connection in registry
+   - `integrationId` - Type of connection (bearer, api_key, basic_auth, sftp)
+3. Connection fetch code generation in `steps/connection.rs`
+   - Fetches connection from external service
+   - Handles rate limiting with durable sleep and heartbeat
+   - Does NOT emit debug events (for security)
+4. Compile-time validation in `validation.rs`
+   - Detects connection data leakage to non-secure agents
+   - Prevents connection data in Finish step outputs
+   - Prevents connection data in Log step context
+   - Validation runs before code generation in `compile_scenario()`

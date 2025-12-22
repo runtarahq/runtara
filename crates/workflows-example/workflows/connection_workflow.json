@@ -1,0 +1,128 @@
+{
+  "name": "Connection Workflow",
+  "description": "Demonstrates the Connection step for acquiring credentials dynamically and passing them to secure agents",
+  "steps": {
+    "get_api_connection": {
+      "stepType": "Connection",
+      "id": "get_api_connection",
+      "name": "Acquire API Connection",
+      "connectionId": "external-api",
+      "integrationId": "bearer"
+    },
+    "log_start": {
+      "stepType": "Log",
+      "id": "log_start",
+      "name": "Log API Call Start",
+      "level": "info",
+      "message": "Starting API call with acquired connection",
+      "context": {
+        "targetUrl": {
+          "valueType": "reference",
+          "value": "data.apiUrl"
+        }
+      }
+    },
+    "call_api": {
+      "stepType": "Agent",
+      "id": "call_api",
+      "name": "Call External API",
+      "agentId": "http",
+      "capabilityId": "request",
+      "timeout": 30000,
+      "inputMapping": {
+        "url": {
+          "valueType": "reference",
+          "value": "data.apiUrl"
+        },
+        "method": {
+          "valueType": "immediate",
+          "value": "GET"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_api_connection.outputs"
+        }
+      }
+    },
+    "handle_error": {
+      "stepType": "Log",
+      "id": "handle_error",
+      "name": "Log API Error",
+      "level": "error",
+      "message": "API call failed",
+      "context": {
+        "errorMessage": {
+          "valueType": "reference",
+          "value": "error.message"
+        },
+        "failedStep": {
+          "valueType": "reference",
+          "value": "error.stepId"
+        }
+      }
+    },
+    "error_finish": {
+      "stepType": "Finish",
+      "id": "error_finish",
+      "name": "Error Output",
+      "inputMapping": {
+        "success": {
+          "valueType": "immediate",
+          "value": false
+        },
+        "error": {
+          "valueType": "reference",
+          "value": "error.message"
+        }
+      }
+    },
+    "log_success": {
+      "stepType": "Log",
+      "id": "log_success",
+      "name": "Log Success",
+      "level": "info",
+      "message": "API call completed successfully"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "name": "Success Output",
+      "inputMapping": {
+        "success": {
+          "valueType": "immediate",
+          "value": true
+        },
+        "response": {
+          "valueType": "reference",
+          "value": "steps.call_api.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "get_api_connection",
+  "executionPlan": [
+    { "fromStep": "get_api_connection", "toStep": "log_start" },
+    { "fromStep": "get_api_connection", "toStep": "handle_error", "label": "onError" },
+    { "fromStep": "log_start", "toStep": "call_api" },
+    { "fromStep": "call_api", "toStep": "log_success" },
+    { "fromStep": "call_api", "toStep": "handle_error", "label": "onError" },
+    { "fromStep": "handle_error", "toStep": "error_finish" },
+    { "fromStep": "log_success", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "apiUrl": { "type": "string", "description": "URL of the external API to call" }
+    },
+    "required": ["apiUrl"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "success": { "type": "boolean" },
+      "response": { "type": "object" },
+      "error": { "type": "string" }
+    }
+  }
+}

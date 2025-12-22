@@ -235,6 +235,16 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         connection_service_url,
     } = input;
 
+    // Validate workflow for security (connection data leakage, etc.)
+    let validation_errors = crate::validation::validate_workflow(&execution_graph);
+    if !validation_errors.is_empty() {
+        let error_messages: Vec<String> = validation_errors.iter().map(|e| e.to_string()).collect();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Workflow validation failed:\n{}", error_messages.join("\n")),
+        ));
+    }
+
     // Get native library paths
     let native_libs = get_native_libs()?;
 

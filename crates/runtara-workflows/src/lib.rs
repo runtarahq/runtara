@@ -89,6 +89,9 @@ pub mod dependency_analysis;
 /// File path utilities for scenarios and data.
 pub mod paths;
 
+/// Workflow validation for security and correctness.
+pub mod validation;
+
 // Re-export main types
 pub use agents_library::{NativeLibraryInfo, get_native_library, get_stdlib_name};
 pub use compile::{
@@ -97,6 +100,7 @@ pub use compile::{
 };
 pub use dependency_analysis::{DependencyGraph, ScenarioReference};
 pub use paths::{get_data_dir, get_scenario_dir, get_scenario_json_path};
+pub use validation::{ValidationError, validate_workflow};
 
 // Re-export DSL types for convenience
 pub use runtara_dsl::{ExecutionGraph, Scenario};

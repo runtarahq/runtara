@@ -269,6 +269,61 @@ fn test_parse_log_workflow() {
     }
 }
 
+#[test]
+fn test_parse_connection_workflow() {
+    let workflow_json = r#"{
+        "name": "Connection Test",
+        "steps": {
+            "conn": {
+                "stepType": "Connection",
+                "id": "conn",
+                "name": "Get API Connection",
+                "connectionId": "my-api",
+                "integrationId": "bearer"
+            },
+            "call": {
+                "stepType": "Agent",
+                "id": "call",
+                "agentId": "http",
+                "capabilityId": "request",
+                "inputMapping": {
+                    "_connection": { "valueType": "reference", "value": "steps.conn.outputs" }
+                }
+            },
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish",
+                "inputMapping": {
+                    "result": { "valueType": "reference", "value": "steps.call.outputs" }
+                }
+            }
+        },
+        "entryPoint": "conn",
+        "executionPlan": [
+            { "fromStep": "conn", "toStep": "call" },
+            { "fromStep": "call", "toStep": "finish" }
+        ]
+    }"#;
+
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "conn");
+    assert!(graph.steps.contains_key("conn"));
+    assert!(graph.steps.contains_key("call"));
+    assert!(graph.steps.contains_key("finish"));
+
+    // Verify the connection step
+    use runtara_dsl::Step;
+    if let Some(Step::Connection(conn_step)) = graph.steps.get("conn") {
+        assert_eq!(conn_step.name, Some("Get API Connection".to_string()));
+        assert_eq!(conn_step.connection_id, "my-api");
+        assert_eq!(conn_step.integration_id, "bearer");
+    } else {
+        panic!("Expected Connection step");
+    }
+}
+
 // ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================

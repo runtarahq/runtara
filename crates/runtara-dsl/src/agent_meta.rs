@@ -330,6 +330,10 @@ pub struct AgentModuleConfig {
     pub has_side_effects: bool,
     pub supports_connections: bool,
     pub integration_ids: &'static [&'static str],
+    /// Whether this agent can receive sensitive connection data from Connection steps.
+    /// Only secure agents (http, sftp) should have this set to true.
+    /// This prevents connection credentials from leaking through non-secure agents.
+    pub secure: bool,
 }
 
 /// Default agent module configurations
@@ -341,6 +345,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: false,
         supports_connections: false,
         integration_ids: &[],
+        secure: false,
     },
     AgentModuleConfig {
         id: "transform",
@@ -349,6 +354,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: false,
         supports_connections: false,
         integration_ids: &[],
+        secure: false,
     },
     AgentModuleConfig {
         id: "csv",
@@ -357,6 +363,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: false,
         supports_connections: false,
         integration_ids: &[],
+        secure: false,
     },
     AgentModuleConfig {
         id: "text",
@@ -365,6 +372,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: false,
         supports_connections: false,
         integration_ids: &[],
+        secure: false,
     },
     AgentModuleConfig {
         id: "xml",
@@ -373,6 +381,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: false,
         supports_connections: false,
         integration_ids: &[],
+        secure: false,
     },
     AgentModuleConfig {
         id: "http",
@@ -381,6 +390,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: true,
         supports_connections: true,
         integration_ids: &["bearer", "api_key", "basic_auth"],
+        secure: true,
     },
     AgentModuleConfig {
         id: "sftp",
@@ -389,6 +399,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: true,
         supports_connections: true,
         integration_ids: &["sftp"],
+        secure: true,
     },
     AgentModuleConfig {
         id: "object_model",
@@ -397,6 +408,7 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
         has_side_effects: true,
         supports_connections: false,
         integration_ids: &[],
+        secure: false,
     },
 ];
 

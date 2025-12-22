@@ -61,7 +61,11 @@ fn collect_used_agents_recursive(
                 collect_used_agents_recursive(&while_step.subgraph, ctx, agents);
             }
             // Other step types don't use agents directly
-            Step::Finish(_) | Step::Conditional(_) | Step::Switch(_) | Step::Log(_) => {}
+            Step::Finish(_)
+            | Step::Conditional(_)
+            | Step::Switch(_)
+            | Step::Log(_)
+            | Step::Connection(_) => {}
         }
     }
 }
@@ -409,7 +413,11 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
     // Steps that cannot have onError handling (they don't fail or handle errors differently)
     let can_have_on_error = matches!(
         step,
-        Step::Agent(_) | Step::Split(_) | Step::StartScenario(_) | Step::While(_)
+        Step::Agent(_)
+            | Step::Split(_)
+            | Step::StartScenario(_)
+            | Step::While(_)
+            | Step::Connection(_)
     );
 
     if can_have_on_error && on_error_step.is_some() {

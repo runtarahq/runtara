@@ -184,6 +184,9 @@ pub enum Step {
 
     /// Emit custom log/debug events
     Log(LogStep),
+
+    /// Acquire a connection for use with secure agents
+    Connection(ConnectionStep),
 }
 
 /// Common fields shared by all step types
@@ -456,6 +459,41 @@ pub enum LogLevel {
     Warn,
     /// Error level - error conditions
     Error,
+}
+
+/// Acquire a connection dynamically for use with secure agents.
+///
+/// Connection data is sensitive and protected:
+/// - Never logged or stored in checkpoints
+/// - Can only be passed to agents marked as `secure: true` (http, sftp)
+/// - Compile-time validation prevents leakage to non-secure steps
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "Connection",
+///   "id": "api_conn",
+///   "connectionId": "my-api-connection",
+///   "integrationId": "bearer"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "ConnectionStep")]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Reference to connection in the connection registry
+    pub connection_id: String,
+
+    /// Type of connection (bearer, api_key, basic_auth, sftp, etc.)
+    pub integration_id: String,
 }
 
 // ============================================================================
