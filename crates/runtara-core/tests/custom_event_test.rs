@@ -358,30 +358,40 @@ async fn test_custom_event_subtype_index() {
             .expect("Failed to send custom event");
     }
 
-    // Give the server time to process all events
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for all events to be processed (with retry for CI reliability)
+    let mut start_count = 0i64;
+    let mut end_count = 0i64;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Query by subtype (uses the index)
-    let start_count: (i64,) = sqlx::query_as(
-        r#"SELECT COUNT(*) FROM instance_events
-           WHERE instance_id = $1 AND subtype = 'step_debug_start'"#,
-    )
-    .bind(instance_id.to_string())
-    .fetch_one(&ctx.pool)
-    .await
-    .expect("Failed to count start events");
+        let start_row: (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM instance_events
+               WHERE instance_id = $1 AND subtype = 'step_debug_start'"#,
+        )
+        .bind(instance_id.to_string())
+        .fetch_one(&ctx.pool)
+        .await
+        .expect("Failed to count start events");
 
-    let end_count: (i64,) = sqlx::query_as(
-        r#"SELECT COUNT(*) FROM instance_events
-           WHERE instance_id = $1 AND subtype = 'step_debug_end'"#,
-    )
-    .bind(instance_id.to_string())
-    .fetch_one(&ctx.pool)
-    .await
-    .expect("Failed to count end events");
+        let end_row: (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM instance_events
+               WHERE instance_id = $1 AND subtype = 'step_debug_end'"#,
+        )
+        .bind(instance_id.to_string())
+        .fetch_one(&ctx.pool)
+        .await
+        .expect("Failed to count end events");
 
-    assert_eq!(start_count.0, 3); // Events 0, 2, 4
-    assert_eq!(end_count.0, 2); // Events 1, 3
+        start_count = start_row.0;
+        end_count = end_row.0;
+
+        if start_count == 3 && end_count == 2 {
+            break;
+        }
+    }
+
+    assert_eq!(start_count, 3); // Events 0, 2, 4
+    assert_eq!(end_count, 2); // Events 1, 3
 
     ctx.cleanup_instance(&instance_id).await;
 }
