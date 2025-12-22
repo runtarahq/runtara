@@ -64,8 +64,6 @@ pub enum ValidationError {
     },
     /// A step is not reachable from the entry point.
     UnreachableStep { step_id: String },
-    /// A non-Finish step has no outgoing edges.
-    DanglingStep { step_id: String, step_type: String },
     /// Workflow has no steps defined.
     EmptyWorkflow,
 
@@ -166,13 +164,6 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E002] Step '{}' is unreachable from the entry point",
                     step_id
-                )
-            }
-            ValidationError::DanglingStep { step_id, step_type } => {
-                write!(
-                    f,
-                    "[E003] Step '{}' ({}) has no outgoing edges but is not a Finish step",
-                    step_id, step_type
                 )
             }
             ValidationError::EmptyWorkflow => {
@@ -392,6 +383,8 @@ pub enum ValidationWarning {
         step_id: String,
         reference_path: String,
     },
+    /// A non-Finish step has no outgoing edges (terminal step without explicit Finish).
+    DanglingStep { step_id: String, step_type: String },
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -501,6 +494,13 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, reference_path
                 )
             }
+            ValidationWarning::DanglingStep { step_id, step_type } => {
+                write!(
+                    f,
+                    "[W003] Step '{}' ({}) has no outgoing edges but is not a Finish step. The workflow will terminate here without explicit output.",
+                    step_id, step_type
+                )
+            }
         }
     }
 }
@@ -594,7 +594,7 @@ fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResul
 
         // Check if this step has any outgoing edges
         if !steps_with_outgoing.contains(step_id) {
-            result.errors.push(ValidationError::DanglingStep {
+            result.warnings.push(ValidationWarning::DanglingStep {
                 step_id: step_id.clone(),
                 step_type: get_step_type_name(step).to_string(),
             });
@@ -1984,13 +1984,13 @@ mod tests {
     }
 
     #[test]
-    fn test_error_display_dangling_step() {
-        let error = ValidationError::DanglingStep {
+    fn test_warning_display_dangling_step() {
+        let warning = ValidationWarning::DanglingStep {
             step_id: "dead_end".to_string(),
             step_type: "Agent".to_string(),
         };
-        let display = format!("{}", error);
-        assert!(display.contains("[E003]"));
+        let display = format!("{}", warning);
+        assert!(display.contains("[W003]"));
         assert!(display.contains("dead_end"));
         assert!(display.contains("Agent"));
     }
@@ -2101,8 +2101,9 @@ mod tests {
         let graph = create_basic_graph(steps, "agent");
         let result = validate_workflow(&graph);
 
-        assert!(result.errors.iter().any(
-            |e| matches!(e, ValidationError::DanglingStep { step_id, .. } if step_id == "agent")
+        // Dangling steps are now warnings, not errors
+        assert!(result.warnings.iter().any(
+            |w| matches!(w, ValidationWarning::DanglingStep { step_id, .. } if step_id == "agent")
         ));
     }
 
@@ -2115,12 +2116,12 @@ mod tests {
         let graph = create_basic_graph(steps, "finish");
         let result = validate_workflow(&graph);
 
-        // Should not have dangling step error for Finish
+        // Should not have dangling step warning for Finish
         assert!(
             !result
-                .errors
+                .warnings
                 .iter()
-                .any(|e| matches!(e, ValidationError::DanglingStep { .. }))
+                .any(|w| matches!(w, ValidationWarning::DanglingStep { .. }))
         );
     }
 

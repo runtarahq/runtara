@@ -62,7 +62,6 @@ cargo run -p runtara-workflows --bin runtara-compile -- --verbose --validate exa
 |------|----------|-------------|
 | E001 | Graph | Entry point not found |
 | E002 | Graph | Unreachable step |
-| E003 | Graph | Dangling step (no outgoing edges) |
 | E004 | Graph | Empty workflow |
 | E010 | Reference | Invalid step reference |
 | E011 | Reference | Invalid reference path syntax |
@@ -79,6 +78,7 @@ cargo run -p runtara-workflows --bin runtara-compile -- --verbose --validate exa
 
 | Code | Category | Description |
 |------|----------|-------------|
+| W003 | Graph | Dangling step (no outgoing edges, terminal without Finish) |
 | W020 | Agent | Unknown input field |
 | W030 | Config | High retry count |
 | W031 | Config | Long retry delay |

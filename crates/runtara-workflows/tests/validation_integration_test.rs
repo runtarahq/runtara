@@ -37,7 +37,6 @@ fn test_valid_workflow_passes() {
             ValidationError::EmptyWorkflow
                 | ValidationError::EntryPointNotFound { .. }
                 | ValidationError::UnreachableStep { .. }
-                | ValidationError::DanglingStep { .. }
                 | ValidationError::InvalidStepReference { .. }
                 | ValidationError::InvalidReferencePath { .. }
         )

@@ -25,7 +25,7 @@ Add validation for workflow graph integrity.
 
 ### 1.3 Dangling Steps Detection
 - [ ] Non-Finish steps must have outgoing edges in `execution_plan`
-- [ ] Error: `Step 'process' has no outgoing edges (not a Finish step)`
+- [ ] Warning: `Step 'process' has no outgoing edges (not a Finish step)` (workflows can have terminal steps without Finish)
 
 ### 1.4 Empty Workflow Detection
 - [ ] Warn if `steps` is empty
@@ -39,8 +39,12 @@ pub enum ValidationError {
     // ... existing variants ...
     EntryPointNotFound { entry_point: String, available_steps: Vec<String> },
     UnreachableStep { step_id: String },
-    DanglingStep { step_id: String },
     EmptyWorkflow,
+}
+
+pub enum ValidationWarning {
+    // ... existing variants ...
+    DanglingStep { step_id: String, step_type: String },
 }
 ```
 
