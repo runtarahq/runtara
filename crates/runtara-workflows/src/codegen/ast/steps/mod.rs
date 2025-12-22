@@ -119,7 +119,7 @@ pub fn emit_step_debug_start(
 
     let name_expr = step_name
         .map(|n| quote! { Some(#n.to_string()) })
-        .unwrap_or(quote! { None });
+        .unwrap_or(quote! { None::<String> });
 
     let inputs_expr = inputs_var
         .map(|v| {
@@ -127,13 +127,13 @@ pub fn emit_step_debug_start(
                 Some(__truncate_json_value(&#v, #max_size))
             }
         })
-        .unwrap_or(quote! { None });
+        .unwrap_or(quote! { None::<serde_json::Value> });
 
     let mapping_expr = input_mapping_json
         .map(|json| quote! {
             Some(serde_json::from_str::<serde_json::Value>(#json).unwrap_or(serde_json::Value::Null))
         })
-        .unwrap_or(quote! { None });
+        .unwrap_or(quote! { None::<serde_json::Value> });
 
     quote! {
         let __step_start_time = std::time::Instant::now();
@@ -198,7 +198,7 @@ pub fn emit_step_debug_end(
 
     let name_expr = step_name
         .map(|n| quote! { Some(#n.to_string()) })
-        .unwrap_or(quote! { None });
+        .unwrap_or(quote! { None::<String> });
 
     let outputs_expr = outputs_var
         .map(|v| {
@@ -206,7 +206,7 @@ pub fn emit_step_debug_end(
                 Some(__truncate_json_value(&#v, #max_size))
             }
         })
-        .unwrap_or(quote! { None });
+        .unwrap_or(quote! { None::<serde_json::Value> });
 
     quote! {
         {
