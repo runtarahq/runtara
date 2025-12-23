@@ -71,7 +71,7 @@ message SleepRequest {
 message SleepResponse {}
 
 // ============================================================================
-// Instance Events (instance → core, fire-and-forget)
+// Instance Events (instance → core)
 // ============================================================================
 
 message InstanceEvent {
@@ -90,6 +90,13 @@ enum InstanceEventType {
   EVENT_SUSPENDED = 4;    // Instance suspended (waiting for wake)
   EVENT_CUSTOM = 5;       // Generic custom event with arbitrary subtype
   // Deprecated: EVENT_STARTED (use heartbeat), EVENT_PROGRESS (use checkpoint or heartbeat)
+}
+
+// Response for lifecycle events (completed, failed, suspended).
+// Acknowledges that the event was persisted to the database.
+message InstanceEventResponse {
+  bool success = 1;
+  optional string error = 2;
 }
 
 // Batch of events (for efficiency)
@@ -206,7 +213,8 @@ message RpcResponse {
   oneof response {
     RegisterInstanceResponse register_instance = 1;
     SleepResponse sleep = 4;
-    // InstanceEvent/Batch/SignalAck don't have responses (fire-and-forget)
+    InstanceEventResponse instance_event = 5;  // Response for lifecycle events (completed/failed/suspended)
+    // Heartbeat, custom events, SignalAck, RetryAttempt remain fire-and-forget
     GetInstanceStatusResponse get_instance_status = 7;
     CheckpointResponse checkpoint = 8;
     GetCheckpointResponse get_checkpoint = 9;

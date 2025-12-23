@@ -13,10 +13,10 @@ use tracing::{debug, info, instrument, warn};
 use runtara_protocol::instance_proto as proto;
 use runtara_protocol::instance_proto::{
     CheckpointRequest, CheckpointResponse, GetCheckpointRequest, GetCheckpointResponse,
-    GetInstanceStatusRequest, GetInstanceStatusResponse, InstanceEvent, InstanceEventType,
-    InstanceStatus, PollSignalsRequest, PollSignalsResponse, RegisterInstanceRequest,
-    RegisterInstanceResponse, RetryAttemptEvent, Signal, SignalAck, SignalType, SleepRequest,
-    SleepResponse,
+    GetInstanceStatusRequest, GetInstanceStatusResponse, InstanceEvent, InstanceEventResponse,
+    InstanceEventType, InstanceStatus, PollSignalsRequest, PollSignalsResponse,
+    RegisterInstanceRequest, RegisterInstanceResponse, RetryAttemptEvent, Signal, SignalAck,
+    SignalType, SleepRequest, SleepResponse,
 };
 
 use crate::error::CoreError;
@@ -372,20 +372,22 @@ pub async fn handle_sleep(
 // Instance Events
 // ============================================================================
 
-/// Handle instance event (fire-and-forget).
+/// Handle instance event.
 ///
 /// Processes lifecycle events from instances:
-/// - **Heartbeat**: Update activity timestamp
-/// - **Completed**: Mark instance as completed, store output
-/// - **Failed**: Mark instance as failed, store error
-/// - **Suspended**: Mark instance as suspended
+/// - **Heartbeat**: Update activity timestamp (fire-and-forget)
+/// - **Completed**: Mark instance as completed, store output (returns response)
+/// - **Failed**: Mark instance as failed, store error (returns response)
+/// - **Suspended**: Mark instance as suspended (returns response)
+/// - **Custom**: Store custom event for telemetry (fire-and-forget)
 ///
-/// This is a fire-and-forget operation - no response is sent.
+/// Returns `Some(InstanceEventResponse)` for lifecycle events (completed/failed/suspended)
+/// that require acknowledgment, or `None` for fire-and-forget events (heartbeat/custom).
 #[instrument(skip(state, event), fields(instance_id = %event.instance_id))]
 pub async fn handle_instance_event(
     state: &InstanceHandlerState,
     event: InstanceEvent,
-) -> Result<()> {
+) -> Result<Option<InstanceEventResponse>> {
     debug!(
         event_type = ?event.event_type,
         checkpoint_id = ?event.checkpoint_id,
@@ -426,11 +428,14 @@ pub async fn handle_instance_event(
     state.persistence.insert_event(&event_record).await?;
 
     // 5. Update instance status based on event type
+    // Returns Some(response) for lifecycle events that need acknowledgment,
+    // None for fire-and-forget events (heartbeat, custom)
     match event.event_type() {
         InstanceEventType::EventHeartbeat => {
             // Heartbeat is just an "I'm alive" signal - no state changes needed
             // The event was already logged above
             debug!("Heartbeat received");
+            Ok(None) // Fire-and-forget
         }
         InstanceEventType::EventCompleted => {
             let output = if event.payload.is_empty() {
@@ -443,6 +448,10 @@ pub async fn handle_instance_event(
                 .complete_instance(&event.instance_id, output, None)
                 .await?;
             info!("Instance completed successfully");
+            Ok(Some(InstanceEventResponse {
+                success: true,
+                error: None,
+            }))
         }
         InstanceEventType::EventFailed => {
             let error = if event.payload.is_empty() {
@@ -455,21 +464,29 @@ pub async fn handle_instance_event(
                 .complete_instance(&event.instance_id, None, Some(error))
                 .await?;
             warn!(error = %error, "Instance failed");
+            Ok(Some(InstanceEventResponse {
+                success: true,
+                error: None,
+            }))
         }
         InstanceEventType::EventSuspended => {
             state
                 .persistence
                 .update_instance_status(&event.instance_id, "suspended", None)
                 .await?;
+            info!("Instance suspended");
+            Ok(Some(InstanceEventResponse {
+                success: true,
+                error: None,
+            }))
         }
         InstanceEventType::EventCustom => {
             // Custom events are just stored for telemetry - no state changes needed
             // The event was already logged above with its subtype
             debug!(subtype = ?event.subtype, "Custom event received");
+            Ok(None) // Fire-and-forget
         }
     }
-
-    Ok(())
 }
 
 // ============================================================================

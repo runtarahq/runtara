@@ -150,6 +150,7 @@ impl SdkBackend for EmbeddedBackend {
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     async fn heartbeat(&self) -> Result<()> {
         let event = EventRecord {
+            id: None,
             instance_id: self.instance_id.clone(),
             event_type: "heartbeat".to_string(),
             checkpoint_id: None,
@@ -175,6 +176,7 @@ impl SdkBackend for EmbeddedBackend {
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
+            id: None,
             instance_id: self.instance_id.clone(),
             event_type: "completed".to_string(),
             checkpoint_id: None,
@@ -200,6 +202,7 @@ impl SdkBackend for EmbeddedBackend {
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
+            id: None,
             instance_id: self.instance_id.clone(),
             event_type: "failed".to_string(),
             checkpoint_id: None,
@@ -225,6 +228,7 @@ impl SdkBackend for EmbeddedBackend {
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
+            id: None,
             instance_id: self.instance_id.clone(),
             event_type: "suspended".to_string(),
             checkpoint_id: None,
@@ -245,6 +249,7 @@ impl SdkBackend for EmbeddedBackend {
     #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
     async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let event = EventRecord {
+            id: None,
             instance_id: self.instance_id.clone(),
             event_type: "custom".to_string(),
             checkpoint_id: None,

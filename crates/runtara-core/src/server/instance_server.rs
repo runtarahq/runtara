@@ -129,16 +129,25 @@ async fn handle_stream(mut stream: StreamHandler, state: Arc<InstanceServerState
         },
 
         Request::InstanceEvent(event) => {
-            // Instance events are fire-and-forget, no response expected
-            if let Err(e) = handle_instance_event(&state, event).await {
-                error!("Failed to handle instance event: {}", e);
+            // Some instance events (completed/failed/suspended) return a response
+            // Others (heartbeat/custom) are fire-and-forget
+            match handle_instance_event(&state, event).await {
+                Ok(Some(resp)) => Response::InstanceEvent(resp),
+                Ok(None) => {
+                    // Fire-and-forget event (heartbeat, custom)
+                    stream.finish()?;
+                    return Ok(());
+                }
+                Err(e) => Response::Error(RpcError {
+                    code: "INSTANCE_EVENT_ERROR".to_string(),
+                    message: e.to_string(),
+                }),
             }
-            stream.finish()?;
-            return Ok(());
         }
 
         Request::InstanceEventBatch(batch) => {
-            // Process all events in the batch
+            // Process all events in the batch (fire-and-forget for batches)
+            // Note: Batches are typically used for heartbeats/custom events
             for event in batch.events {
                 if let Err(e) = handle_instance_event(&state, event).await {
                     error!("Failed to handle instance event in batch: {}", e);
