@@ -214,15 +214,15 @@ impl SdkBackend for QuicBackend {
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     async fn heartbeat(&self) -> Result<()> {
         let event = build_heartbeat_event(&self.instance_id);
-        self.send_event(event).await?;
-        debug!("Heartbeat sent");
+        self.send_acknowledged_event(event).await?;
+        debug!("Heartbeat acknowledged");
         Ok(())
     }
 
     #[instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len()))]
     async fn completed(&self, output: &[u8]) -> Result<()> {
         let event = build_completed_event(&self.instance_id, output.to_vec());
-        self.send_lifecycle_event(event).await?;
+        self.send_acknowledged_event(event).await?;
         info!("Completed event acknowledged");
         Ok(())
     }
@@ -230,7 +230,7 @@ impl SdkBackend for QuicBackend {
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     async fn failed(&self, error: &str) -> Result<()> {
         let event = build_failed_event(&self.instance_id, error);
-        self.send_lifecycle_event(event).await?;
+        self.send_acknowledged_event(event).await?;
         warn!(error = %error, "Failed event acknowledged");
         Ok(())
     }
@@ -238,7 +238,7 @@ impl SdkBackend for QuicBackend {
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     async fn suspended(&self) -> Result<()> {
         let event = build_suspended_event(&self.instance_id);
-        self.send_lifecycle_event(event).await?;
+        self.send_acknowledged_event(event).await?;
         info!("Suspended event acknowledged");
         Ok(())
     }
@@ -246,8 +246,8 @@ impl SdkBackend for QuicBackend {
     #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
     async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let event = build_custom_event(&self.instance_id, subtype, payload);
-        self.send_event(event).await?;
-        debug!(subtype = %subtype, "Custom event sent");
+        self.send_acknowledged_event(event).await?;
+        debug!(subtype = %subtype, "Custom event acknowledged");
         Ok(())
     }
 
@@ -377,21 +377,12 @@ impl SdkBackend for QuicBackend {
 }
 
 impl QuicBackend {
-    /// Send an event (fire-and-forget).
-    /// Used for heartbeat and custom events that don't require acknowledgment.
-    async fn send_event(&self, event: proto::InstanceEvent) -> Result<()> {
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::InstanceEvent(event)),
-        };
-
-        self.client.send_fire_and_forget(&rpc_request).await?;
-        Ok(())
-    }
-
-    /// Send a lifecycle event (request-response).
-    /// Used for completed, failed, and suspended events that require acknowledgment
-    /// to ensure they are persisted before the process exits.
-    async fn send_lifecycle_event(&self, event: proto::InstanceEvent) -> Result<()> {
+    /// Send an event and wait for server acknowledgment.
+    ///
+    /// All events use request-response semantics to ensure they are persisted
+    /// before returning. This prevents race conditions where events could be
+    /// lost if the process exits immediately after sending.
+    async fn send_acknowledged_event(&self, event: proto::InstanceEvent) -> Result<()> {
         let rpc_request = RpcRequest {
             request: Some(rpc_request::Request::InstanceEvent(event)),
         };
@@ -402,7 +393,7 @@ impl QuicBackend {
             Some(rpc_response::Response::InstanceEvent(resp)) => {
                 if !resp.success {
                     return Err(SdkError::Server {
-                        code: "LIFECYCLE_EVENT_ERROR".to_string(),
+                        code: "EVENT_ERROR".to_string(),
                         message: resp.error.unwrap_or_else(|| "Unknown error".to_string()),
                     });
                 }

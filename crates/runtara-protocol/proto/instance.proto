@@ -92,8 +92,9 @@ enum InstanceEventType {
   // Deprecated: EVENT_STARTED (use heartbeat), EVENT_PROGRESS (use checkpoint or heartbeat)
 }
 
-// Response for lifecycle events (completed, failed, suspended).
+// Response for all instance events.
 // Acknowledges that the event was persisted to the database.
+// All events use request-response to ensure no events are lost.
 message InstanceEventResponse {
   bool success = 1;
   optional string error = 2;
@@ -213,8 +214,8 @@ message RpcResponse {
   oneof response {
     RegisterInstanceResponse register_instance = 1;
     SleepResponse sleep = 4;
-    InstanceEventResponse instance_event = 5;  // Response for lifecycle events (completed/failed/suspended)
-    // Heartbeat, custom events, SignalAck, RetryAttempt remain fire-and-forget
+    InstanceEventResponse instance_event = 5;  // Response for all instance events (acknowledges persistence)
+    // SignalAck and RetryAttempt remain fire-and-forget (audit-only, no delivery guarantee needed)
     GetInstanceStatusResponse get_instance_status = 7;
     CheckpointResponse checkpoint = 8;
     GetCheckpointResponse get_checkpoint = 9;

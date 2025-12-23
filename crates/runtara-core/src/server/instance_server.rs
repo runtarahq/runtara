@@ -129,15 +129,9 @@ async fn handle_stream(mut stream: StreamHandler, state: Arc<InstanceServerState
         },
 
         Request::InstanceEvent(event) => {
-            // Some instance events (completed/failed/suspended) return a response
-            // Others (heartbeat/custom) are fire-and-forget
+            // All events now return a response to acknowledge persistence
             match handle_instance_event(&state, event).await {
-                Ok(Some(resp)) => Response::InstanceEvent(resp),
-                Ok(None) => {
-                    // Fire-and-forget event (heartbeat, custom)
-                    stream.finish()?;
-                    return Ok(());
-                }
+                Ok(resp) => Response::InstanceEvent(resp),
                 Err(e) => Response::Error(RpcError {
                     code: "INSTANCE_EVENT_ERROR".to_string(),
                     message: e.to_string(),
