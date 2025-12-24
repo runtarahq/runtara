@@ -1,0 +1,77 @@
+{
+  "name": "Log with Rich Context",
+  "description": "Log step with context from multiple sources",
+  "steps": {
+    "transform": {
+      "stepType": "Agent",
+      "id": "transform",
+      "name": "Process Data",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "processedValue": "$.value",
+            "timestamp": "$.timestamp"
+          }
+        }
+      }
+    },
+    "log_with_rich_context": {
+      "stepType": "Log",
+      "id": "log_with_rich_context",
+      "name": "Log with Rich Context",
+      "level": "info",
+      "message": "Processing completed with context",
+      "context": {
+        "inputData": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "transformOutput": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        },
+        "staticValue": {
+          "valueType": "immediate",
+          "value": "constant_string"
+        },
+        "numericValue": {
+          "valueType": "immediate",
+          "value": 42
+        },
+        "booleanValue": {
+          "valueType": "immediate",
+          "value": true
+        },
+        "nestedValue": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs.processedValue"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.transform.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "transform",
+  "executionPlan": [
+    { "fromStep": "transform", "toStep": "log_with_rich_context" },
+    { "fromStep": "log_with_rich_context", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

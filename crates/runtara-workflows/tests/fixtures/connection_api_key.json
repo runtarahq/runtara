@@ -1,0 +1,56 @@
+{
+  "name": "Connection API Key",
+  "description": "Demonstrates acquiring an API key connection and passing it to HTTP agent",
+  "steps": {
+    "get_api_key": {
+      "stepType": "Connection",
+      "id": "get_api_key",
+      "name": "Acquire API Key",
+      "connectionId": "external-service",
+      "integrationId": "api_key"
+    },
+    "call_api": {
+      "stepType": "Agent",
+      "id": "call_api",
+      "name": "Call API with Key",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": {
+          "valueType": "reference",
+          "value": "data.apiUrl"
+        },
+        "method": {
+          "valueType": "immediate",
+          "value": "POST"
+        },
+        "body": {
+          "valueType": "reference",
+          "value": "data.requestBody"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_api_key.outputs"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "response": {
+          "valueType": "reference",
+          "value": "steps.call_api.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "get_api_key",
+  "executionPlan": [
+    { "fromStep": "get_api_key", "toStep": "call_api" },
+    { "fromStep": "call_api", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

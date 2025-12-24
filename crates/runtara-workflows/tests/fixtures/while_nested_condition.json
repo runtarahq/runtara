@@ -1,0 +1,121 @@
+{
+  "name": "While with Nested Condition",
+  "description": "While loop with complex AND/OR nested conditions",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "counter": "$.counter",
+            "minValue": "$.minValue",
+            "maxValue": "$.maxValue",
+            "enabled": "$.enabled"
+          }
+        }
+      }
+    },
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Complex Condition Loop",
+      "condition": {
+        "type": "operation",
+        "op": "AND",
+        "arguments": [
+          {
+            "type": "operation",
+            "op": "GTE",
+            "arguments": [
+              { "valueType": "reference", "value": "steps.init.outputs.counter" },
+              { "valueType": "reference", "value": "steps.init.outputs.minValue" }
+            ]
+          },
+          {
+            "type": "operation",
+            "op": "LT",
+            "arguments": [
+              { "valueType": "reference", "value": "steps.init.outputs.counter" },
+              { "valueType": "reference", "value": "steps.init.outputs.maxValue" }
+            ]
+          },
+          {
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+              { "valueType": "reference", "value": "steps.init.outputs.enabled" },
+              { "valueType": "immediate", "value": true }
+            ]
+          }
+        ]
+      },
+      "subgraph": {
+        "name": "Loop Body",
+        "steps": {
+          "process": {
+            "stepType": "Agent",
+            "id": "process",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "data"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "processed": "$.counter"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "value": {
+                "valueType": "reference",
+                "value": "steps.process.outputs.processed"
+              }
+            }
+          }
+        },
+        "entryPoint": "process",
+        "executionPlan": [
+          { "fromStep": "process", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 50
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "loop" },
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

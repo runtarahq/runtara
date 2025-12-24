@@ -1,0 +1,56 @@
+{
+  "name": "Connection SFTP",
+  "description": "Demonstrates acquiring SFTP connection credentials and passing to SFTP agent",
+  "steps": {
+    "get_sftp_creds": {
+      "stepType": "Connection",
+      "id": "get_sftp_creds",
+      "name": "Acquire SFTP Credentials",
+      "connectionId": "sftp-server",
+      "integrationId": "sftp"
+    },
+    "upload_file": {
+      "stepType": "Agent",
+      "id": "upload_file",
+      "name": "Upload File via SFTP",
+      "agentId": "sftp",
+      "capabilityId": "upload",
+      "inputMapping": {
+        "remotePath": {
+          "valueType": "reference",
+          "value": "data.remotePath"
+        },
+        "content": {
+          "valueType": "reference",
+          "value": "data.fileContent"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_sftp_creds.outputs"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "uploaded": {
+          "valueType": "immediate",
+          "value": true
+        },
+        "result": {
+          "valueType": "reference",
+          "value": "steps.upload_file.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "get_sftp_creds",
+  "executionPlan": [
+    { "fromStep": "get_sftp_creds", "toStep": "upload_file" },
+    { "fromStep": "upload_file", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

@@ -1,0 +1,82 @@
+{
+  "name": "Log All Levels",
+  "description": "Workflow demonstrating all four log levels: debug, info, warn, error",
+  "steps": {
+    "log_debug": {
+      "stepType": "Log",
+      "id": "log_debug",
+      "name": "Debug Log",
+      "level": "debug",
+      "message": "Debug level message",
+      "context": {
+        "debugData": {
+          "valueType": "reference",
+          "value": "data"
+        }
+      }
+    },
+    "log_info": {
+      "stepType": "Log",
+      "id": "log_info",
+      "name": "Info Log",
+      "level": "info",
+      "message": "Info level message",
+      "context": {
+        "infoData": {
+          "valueType": "reference",
+          "value": "data.message"
+        }
+      }
+    },
+    "log_warn": {
+      "stepType": "Log",
+      "id": "log_warn",
+      "name": "Warning Log",
+      "level": "warn",
+      "message": "Warning level message",
+      "context": {
+        "warningReason": {
+          "valueType": "immediate",
+          "value": "potential_issue"
+        }
+      }
+    },
+    "log_error": {
+      "stepType": "Log",
+      "id": "log_error",
+      "name": "Error Log",
+      "level": "error",
+      "message": "Error level message",
+      "context": {
+        "errorCode": {
+          "valueType": "immediate",
+          "value": "E001"
+        },
+        "errorDescription": {
+          "valueType": "immediate",
+          "value": "Sample error for testing"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "logsEmitted": {
+          "valueType": "immediate",
+          "value": 4
+        }
+      }
+    }
+  },
+  "entryPoint": "log_debug",
+  "executionPlan": [
+    { "fromStep": "log_debug", "toStep": "log_info" },
+    { "fromStep": "log_info", "toStep": "log_warn" },
+    { "fromStep": "log_warn", "toStep": "log_error" },
+    { "fromStep": "log_error", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

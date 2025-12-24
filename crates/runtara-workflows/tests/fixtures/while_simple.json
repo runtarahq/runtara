@@ -1,0 +1,97 @@
+{
+  "name": "Simple While Loop",
+  "description": "Basic counter loop that increments until reaching target",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "counter": "$.counter",
+            "target": "$.target"
+          }
+        }
+      }
+    },
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Counter Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "steps.init.outputs.counter" },
+          { "valueType": "reference", "value": "steps.init.outputs.target" }
+        ]
+      },
+      "subgraph": {
+        "name": "Increment Body",
+        "steps": {
+          "increment": {
+            "stepType": "Agent",
+            "id": "increment",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "data"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "value": "$.counter"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "counter": {
+                "valueType": "reference",
+                "value": "steps.increment.outputs.value"
+              }
+            }
+          }
+        },
+        "entryPoint": "increment",
+        "executionPlan": [
+          { "fromStep": "increment", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 10
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "loop" },
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

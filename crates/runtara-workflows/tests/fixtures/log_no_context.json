@@ -1,0 +1,36 @@
+{
+  "name": "Log Without Context",
+  "description": "Minimal log step with just a message, no context",
+  "steps": {
+    "simple_log": {
+      "stepType": "Log",
+      "id": "simple_log",
+      "name": "Simple Log",
+      "level": "info",
+      "message": "Simple log message without context"
+    },
+    "log_default_level": {
+      "stepType": "Log",
+      "id": "log_default_level",
+      "message": "Log with default level (info)"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "done": {
+          "valueType": "immediate",
+          "value": true
+        }
+      }
+    }
+  },
+  "entryPoint": "simple_log",
+  "executionPlan": [
+    { "fromStep": "simple_log", "toStep": "log_default_level" },
+    { "fromStep": "log_default_level", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

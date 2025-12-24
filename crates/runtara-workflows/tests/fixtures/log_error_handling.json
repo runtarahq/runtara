@@ -1,0 +1,97 @@
+{
+  "name": "Log Error Handling",
+  "description": "Error-level logs in error handling paths",
+  "steps": {
+    "process": {
+      "stepType": "Agent",
+      "id": "process",
+      "name": "Process Data",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "processed": "$.value"
+          }
+        }
+      }
+    },
+    "log_success": {
+      "stepType": "Log",
+      "id": "log_success",
+      "name": "Log Success",
+      "level": "info",
+      "message": "Processing completed successfully",
+      "context": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.process.outputs"
+        }
+      }
+    },
+    "log_error": {
+      "stepType": "Log",
+      "id": "log_error",
+      "name": "Log Error",
+      "level": "error",
+      "message": "Processing failed",
+      "context": {
+        "errorMessage": {
+          "valueType": "reference",
+          "value": "error.message"
+        },
+        "errorStep": {
+          "valueType": "reference",
+          "value": "error.stepId"
+        },
+        "inputData": {
+          "valueType": "reference",
+          "value": "data"
+        }
+      }
+    },
+    "success_finish": {
+      "stepType": "Finish",
+      "id": "success_finish",
+      "inputMapping": {
+        "success": {
+          "valueType": "immediate",
+          "value": true
+        },
+        "result": {
+          "valueType": "reference",
+          "value": "steps.process.outputs"
+        }
+      }
+    },
+    "error_finish": {
+      "stepType": "Finish",
+      "id": "error_finish",
+      "inputMapping": {
+        "success": {
+          "valueType": "immediate",
+          "value": false
+        },
+        "error": {
+          "valueType": "reference",
+          "value": "error.message"
+        }
+      }
+    }
+  },
+  "entryPoint": "process",
+  "executionPlan": [
+    { "fromStep": "process", "toStep": "log_success" },
+    { "fromStep": "process", "toStep": "log_error", "label": "onError" },
+    { "fromStep": "log_success", "toStep": "success_finish" },
+    { "fromStep": "log_error", "toStep": "error_finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

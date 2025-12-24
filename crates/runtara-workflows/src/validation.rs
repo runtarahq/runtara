@@ -2371,4 +2371,954 @@ mod tests {
             Some("HTTP".to_string())
         );
     }
+
+    // ============================================================================
+    // While Step Tests
+    // ============================================================================
+
+    fn create_while_step(
+        id: &str,
+        condition: runtara_dsl::ConditionExpression,
+        subgraph: ExecutionGraph,
+        max_iterations: Option<u32>,
+    ) -> Step {
+        use runtara_dsl::{WhileConfig, WhileStep};
+        Step::While(WhileStep {
+            id: id.to_string(),
+            name: None,
+            condition,
+            subgraph: Box::new(subgraph),
+            config: Some(WhileConfig {
+                max_iterations,
+                timeout: None,
+            }),
+        })
+    }
+
+    fn create_lt_condition(left_ref: &str, right_ref: &str) -> runtara_dsl::ConditionExpression {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+        };
+        ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Lt,
+            arguments: vec![
+                ConditionArgument::Value(ref_value(left_ref)),
+                ConditionArgument::Value(ref_value(right_ref)),
+            ],
+        })
+    }
+
+    fn create_simple_subgraph() -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+        ExecutionGraph {
+            name: None,
+            description: None,
+            steps,
+            entry_point: "finish".to_string(),
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    #[test]
+    fn test_while_step_valid_condition() {
+        let mut steps = HashMap::new();
+
+        // Create an init step that sets up counter and target
+        let mut init_mapping = HashMap::new();
+        init_mapping.insert("counter".to_string(), ref_value("data.counter"));
+        init_mapping.insert("target".to_string(), ref_value("data.target"));
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", Some(init_mapping)),
+        );
+
+        // Create while step with LT condition
+        let condition =
+            create_lt_condition("steps.init.outputs.counter", "steps.init.outputs.target");
+        let subgraph = create_simple_subgraph();
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(10)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "init".to_string(),
+                to_step: "loop".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "loop".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Should not have reference errors for valid references
+        let ref_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidStepReference { .. }));
+        assert!(!ref_errors, "Expected no invalid step reference errors");
+    }
+
+    #[test]
+    fn test_while_step_nested_subgraph_validation() {
+        let mut steps = HashMap::new();
+
+        // Init step
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", None),
+        );
+
+        // Create subgraph with its own agent step
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("data".to_string(), ref_value("data.value"));
+        subgraph_steps.insert(
+            "process".to_string(),
+            create_agent_step("process", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "process".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "process".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Create a simple condition that always evaluates
+        use runtara_dsl::{ConditionExpression, ImmediateValue, MappingValue};
+        let condition = ConditionExpression::Value(MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!(true),
+        }));
+
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(5)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "init".to_string(),
+                to_step: "loop".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "loop".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Should validate subgraph steps
+        // Check there's no error about the subgraph entry point
+        let subgraph_errors = result.errors.iter().any(|e| {
+            matches!(e, ValidationError::EntryPointNotFound { entry_point, .. } if entry_point == "process")
+        });
+        assert!(!subgraph_errors, "Expected no subgraph entry point errors");
+    }
+
+    #[test]
+    fn test_while_step_invalid_reference_in_condition() {
+        // NOTE: Condition expression validation is not yet implemented.
+        // This test verifies that while steps with invalid condition references
+        // can still be parsed and don't cause panics during validation.
+        // Future work: add condition reference validation.
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", None),
+        );
+
+        // Create condition referencing non-existent step
+        let condition = create_lt_condition(
+            "steps.nonexistent.outputs.value",
+            "steps.init.outputs.target",
+        );
+        let subgraph = create_simple_subgraph();
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(10)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "init".to_string(),
+                to_step: "loop".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "loop".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Condition references are currently not validated at the DSL level
+        // (they're evaluated at runtime). This test just ensures no panic.
+        assert!(result.is_ok() || !result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_while_step_complex_and_condition() {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+        };
+
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", None),
+        );
+
+        // Create complex AND condition
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::And,
+            arguments: vec![
+                ConditionArgument::Expression(Box::new(ConditionExpression::Operation(
+                    ConditionOperation {
+                        op: ConditionOperator::Gte,
+                        arguments: vec![
+                            ConditionArgument::Value(ref_value("steps.init.outputs.counter")),
+                            ConditionArgument::Value(ref_value("steps.init.outputs.min")),
+                        ],
+                    },
+                ))),
+                ConditionArgument::Expression(Box::new(ConditionExpression::Operation(
+                    ConditionOperation {
+                        op: ConditionOperator::Lt,
+                        arguments: vec![
+                            ConditionArgument::Value(ref_value("steps.init.outputs.counter")),
+                            ConditionArgument::Value(ref_value("steps.init.outputs.max")),
+                        ],
+                    },
+                ))),
+            ],
+        });
+
+        let subgraph = create_simple_subgraph();
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(50)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "init".to_string(),
+                to_step: "loop".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "loop".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Should not have reference errors for nested conditions
+        let ref_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidStepReference { .. }));
+        assert!(
+            !ref_errors,
+            "Expected no invalid step reference errors in complex condition"
+        );
+    }
+
+    #[test]
+    fn test_while_step_with_loop_index_reference() {
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", None),
+        );
+
+        // Condition using loop.index (special loop context variable)
+        let condition = create_lt_condition("loop.index", "steps.init.outputs.maxIterations");
+
+        // Subgraph that references _index variable
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("index".to_string(), ref_value("variables._index"));
+        subgraph_steps.insert(
+            "process".to_string(),
+            create_agent_step("process", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "process".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "process".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(100)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "init".to_string(),
+                to_step: "loop".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "loop".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // loop.index is a valid reference in while conditions
+        // Should not have errors for this special context variable
+        let loop_ref_errors = result.errors.iter().any(|e| {
+            matches!(e, ValidationError::InvalidReferencePath { reference_path, .. } if reference_path.contains("loop.index"))
+        });
+        assert!(
+            !loop_ref_errors,
+            "loop.index should be a valid reference in while conditions"
+        );
+    }
+
+    // ============================================================================
+    // Log Step Tests
+    // ============================================================================
+
+    fn create_log_step_with_level(
+        id: &str,
+        level: LogLevel,
+        message: &str,
+        context: Option<InputMapping>,
+    ) -> Step {
+        Step::Log(LogStep {
+            id: id.to_string(),
+            name: None,
+            level,
+            message: message.to_string(),
+            context,
+        })
+    }
+
+    #[test]
+    fn test_log_step_valid_info() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "log".to_string(),
+            create_log_step_with_level("log", LogLevel::Info, "Test message", None),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "log");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "log".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        // Basic log step should pass
+        assert!(
+            !result.has_errors(),
+            "Basic log step should not cause errors"
+        );
+    }
+
+    #[test]
+    fn test_log_step_valid_all_levels() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "log_debug".to_string(),
+            create_log_step_with_level("log_debug", LogLevel::Debug, "Debug", None),
+        );
+        steps.insert(
+            "log_info".to_string(),
+            create_log_step_with_level("log_info", LogLevel::Info, "Info", None),
+        );
+        steps.insert(
+            "log_warn".to_string(),
+            create_log_step_with_level("log_warn", LogLevel::Warn, "Warn", None),
+        );
+        steps.insert(
+            "log_error".to_string(),
+            create_log_step_with_level("log_error", LogLevel::Error, "Error", None),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "log_debug");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "log_debug".to_string(),
+                to_step: "log_info".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "log_info".to_string(),
+                to_step: "log_warn".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "log_warn".to_string(),
+                to_step: "log_error".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "log_error".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // All log levels should be valid
+        assert!(!result.has_errors(), "All log levels should be valid");
+    }
+
+    #[test]
+    fn test_log_step_valid_context_mapping() {
+        let mut steps = HashMap::new();
+
+        // First, an agent step to produce outputs
+        steps.insert(
+            "process".to_string(),
+            create_agent_step("process", "transform", None),
+        );
+
+        // Log step with context referencing process outputs
+        let mut context = HashMap::new();
+        context.insert(
+            "processResult".to_string(),
+            ref_value("steps.process.outputs"),
+        );
+        context.insert("inputData".to_string(), ref_value("data"));
+        steps.insert(
+            "log".to_string(),
+            create_log_step_with_level("log", LogLevel::Info, "Processing done", Some(context)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "process");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "process".to_string(),
+                to_step: "log".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "log".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Valid context references should pass
+        let ref_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::InvalidStepReference { .. }));
+        assert!(
+            !ref_errors,
+            "Valid context references should not cause errors"
+        );
+    }
+
+    #[test]
+    fn test_log_step_invalid_context_reference() {
+        let mut steps = HashMap::new();
+
+        // Log step with context referencing non-existent step
+        let mut context = HashMap::new();
+        context.insert("result".to_string(), ref_value("steps.nonexistent.outputs"));
+        steps.insert(
+            "log".to_string(),
+            create_log_step_with_level("log", LogLevel::Info, "Test", Some(context)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "log");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "log".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        // Should have invalid reference error
+        assert!(result.errors.iter().any(|e| {
+            matches!(e, ValidationError::InvalidStepReference { referenced_step_id, .. } if referenced_step_id == "nonexistent")
+        }));
+    }
+
+    #[test]
+    fn test_log_step_empty_context() {
+        let mut steps = HashMap::new();
+
+        // Log step with empty context (not None, but empty HashMap)
+        let context = HashMap::new();
+        steps.insert(
+            "log".to_string(),
+            create_log_step_with_level("log", LogLevel::Debug, "Empty context test", Some(context)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "log");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "log".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        // Empty context should be valid
+        assert!(
+            !result.has_errors(),
+            "Empty context should not cause errors"
+        );
+    }
+
+    // ============================================================================
+    // Connection Step Tests
+    // ============================================================================
+
+    fn create_connection_step_with_type(
+        id: &str,
+        connection_id: &str,
+        integration_id: &str,
+    ) -> Step {
+        Step::Connection(ConnectionStep {
+            id: id.to_string(),
+            name: None,
+            connection_id: connection_id.to_string(),
+            integration_id: integration_id.to_string(),
+        })
+    }
+
+    #[test]
+    fn test_connection_step_valid_bearer() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "conn".to_string(),
+            create_connection_step_with_type("conn", "my-api", "bearer"),
+        );
+
+        let mut mapping = HashMap::new();
+        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
+        steps.insert(
+            "http_call".to_string(),
+            create_agent_step("http_call", "http", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "conn");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn".to_string(),
+                to_step: "http_call".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "http_call".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Bearer connection to HTTP agent should pass
+        let security_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
+        assert!(
+            !security_errors,
+            "Bearer connection to HTTP should be secure"
+        );
+    }
+
+    #[test]
+    fn test_connection_step_valid_api_key() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "conn".to_string(),
+            create_connection_step_with_type("conn", "my-api", "api_key"),
+        );
+
+        let mut mapping = HashMap::new();
+        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
+        steps.insert(
+            "http_call".to_string(),
+            create_agent_step("http_call", "http", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "conn");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn".to_string(),
+                to_step: "http_call".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "http_call".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        let security_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
+        assert!(
+            !security_errors,
+            "API key connection to HTTP should be secure"
+        );
+    }
+
+    #[test]
+    fn test_connection_step_valid_basic_auth() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "conn".to_string(),
+            create_connection_step_with_type("conn", "my-service", "basic_auth"),
+        );
+
+        let mut mapping = HashMap::new();
+        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
+        steps.insert(
+            "http_call".to_string(),
+            create_agent_step("http_call", "http", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "conn");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn".to_string(),
+                to_step: "http_call".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "http_call".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        let security_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
+        assert!(
+            !security_errors,
+            "Basic auth connection to HTTP should be secure"
+        );
+    }
+
+    #[test]
+    fn test_connection_step_valid_sftp() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "conn".to_string(),
+            create_connection_step_with_type("conn", "sftp-server", "sftp"),
+        );
+
+        let mut mapping = HashMap::new();
+        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
+        steps.insert(
+            "sftp_call".to_string(),
+            create_agent_step("sftp_call", "sftp", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "conn");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn".to_string(),
+                to_step: "sftp_call".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "sftp_call".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        let security_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
+        assert!(
+            !security_errors,
+            "SFTP connection to SFTP agent should be secure"
+        );
+    }
+
+    #[test]
+    fn test_connection_step_unused_warning() {
+        let mut steps = HashMap::new();
+        // Connection step that's not used by any agent
+        steps.insert(
+            "conn".to_string(),
+            create_connection_step_with_type("conn", "unused-api", "bearer"),
+        );
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", None), // No connection reference
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "conn");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn".to_string(),
+                to_step: "agent".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "agent".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Should have unused connection warning
+        assert!(result.warnings.iter().any(|w| {
+            matches!(w, ValidationWarning::UnusedConnection { step_id } if step_id == "conn")
+        }));
+    }
+
+    #[test]
+    fn test_connection_multiple_connections() {
+        let mut steps = HashMap::new();
+
+        // Two connection steps
+        steps.insert(
+            "conn1".to_string(),
+            create_connection_step_with_type("conn1", "api-1", "bearer"),
+        );
+        steps.insert(
+            "conn2".to_string(),
+            create_connection_step_with_type("conn2", "api-2", "api_key"),
+        );
+
+        // Two HTTP agents using different connections
+        let mut mapping1 = HashMap::new();
+        mapping1.insert("_connection".to_string(), ref_value("steps.conn1.outputs"));
+        steps.insert(
+            "call1".to_string(),
+            create_agent_step("call1", "http", Some(mapping1)),
+        );
+
+        let mut mapping2 = HashMap::new();
+        mapping2.insert("_connection".to_string(), ref_value("steps.conn2.outputs"));
+        steps.insert(
+            "call2".to_string(),
+            create_agent_step("call2", "http", Some(mapping2)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "conn1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn1".to_string(),
+                to_step: "conn2".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "conn2".to_string(),
+                to_step: "call1".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "call1".to_string(),
+                to_step: "call2".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "call2".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Multiple connections should be valid
+        let security_errors = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::ConnectionLeakToNonSecureAgent { .. }
+                    | ValidationError::ConnectionLeakToFinish { .. }
+                    | ValidationError::ConnectionLeakToLog { .. }
+            )
+        });
+        assert!(
+            !security_errors,
+            "Multiple valid connections should not cause security errors"
+        );
+
+        // No unused connection warnings
+        let unused_warnings = result
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ValidationWarning::UnusedConnection { .. }));
+        assert!(
+            !unused_warnings,
+            "Used connections should not trigger unused warning"
+        );
+    }
+
+    #[test]
+    fn test_connection_in_while_subgraph_to_secure_agent() {
+        use runtara_dsl::{ConditionExpression, ImmediateValue, MappingValue};
+
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "init".to_string(),
+            create_agent_step("init", "transform", None),
+        );
+
+        // Subgraph with connection step and HTTP agent
+        let mut subgraph_steps = HashMap::new();
+        subgraph_steps.insert(
+            "conn".to_string(),
+            create_connection_step_with_type("conn", "rate-limited-api", "bearer"),
+        );
+        let mut mapping = HashMap::new();
+        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
+        subgraph_steps.insert(
+            "call".to_string(),
+            create_agent_step("call", "http", Some(mapping)),
+        );
+        subgraph_steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "conn".to_string(),
+            execution_plan: vec![
+                runtara_dsl::ExecutionPlanEdge {
+                    from_step: "conn".to_string(),
+                    to_step: "call".to_string(),
+                    label: None,
+                },
+                runtara_dsl::ExecutionPlanEdge {
+                    from_step: "call".to_string(),
+                    to_step: "finish".to_string(),
+                    label: None,
+                },
+            ],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let condition = ConditionExpression::Value(MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!(true),
+        }));
+
+        steps.insert(
+            "loop".to_string(),
+            create_while_step("loop", condition, subgraph, Some(10)),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "init");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "init".to_string(),
+                to_step: "loop".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "loop".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Connection in subgraph to secure agent should be valid
+        let security_errors = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
+        assert!(
+            !security_errors,
+            "Connection in subgraph to HTTP should be secure"
+        );
+    }
 }

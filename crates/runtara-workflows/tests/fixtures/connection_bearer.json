@@ -1,0 +1,52 @@
+{
+  "name": "Connection Bearer Token",
+  "description": "Demonstrates acquiring a bearer token connection and passing it to HTTP agent",
+  "steps": {
+    "get_token": {
+      "stepType": "Connection",
+      "id": "get_token",
+      "name": "Acquire Bearer Token",
+      "connectionId": "api-service",
+      "integrationId": "bearer"
+    },
+    "call_api": {
+      "stepType": "Agent",
+      "id": "call_api",
+      "name": "Call API with Bearer",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": {
+          "valueType": "reference",
+          "value": "data.apiUrl"
+        },
+        "method": {
+          "valueType": "immediate",
+          "value": "GET"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_token.outputs"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "response": {
+          "valueType": "reference",
+          "value": "steps.call_api.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "get_token",
+  "executionPlan": [
+    { "fromStep": "get_token", "toStep": "call_api" },
+    { "fromStep": "call_api", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

@@ -1,0 +1,96 @@
+{
+  "name": "While Max Iterations",
+  "description": "While loop that hits the maxIterations limit (condition always true)",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "value": "$.value"
+          }
+        }
+      }
+    },
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Infinite Loop (limited)",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "immediate", "value": true },
+          { "valueType": "immediate", "value": true }
+        ]
+      },
+      "subgraph": {
+        "name": "Always Runs",
+        "steps": {
+          "process": {
+            "stepType": "Agent",
+            "id": "process",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "data"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "iteration": "$.value"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "ran": {
+                "valueType": "immediate",
+                "value": true
+              }
+            }
+          }
+        },
+        "entryPoint": "process",
+        "executionPlan": [
+          { "fromStep": "process", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 3
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "totalIterations": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "loop" },
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

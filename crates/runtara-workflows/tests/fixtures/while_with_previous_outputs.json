@@ -1,0 +1,103 @@
+{
+  "name": "While with Previous Outputs",
+  "description": "While loop that uses _previousOutputs to accumulate values across iterations",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "items": "$.items",
+            "count": "$.count"
+          }
+        }
+      }
+    },
+    "accumulator_loop": {
+      "stepType": "While",
+      "id": "accumulator_loop",
+      "name": "Accumulator Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "steps.init.outputs.count" }
+        ]
+      },
+      "subgraph": {
+        "name": "Process Item",
+        "steps": {
+          "accumulate": {
+            "stepType": "Agent",
+            "id": "accumulate",
+            "name": "Accumulate with Previous",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "variables"
+              },
+              "mapping": {
+                "valueType": "immediate",
+                "value": {
+                  "index": "$._index",
+                  "previousData": "$._previousOutputs"
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "currentIndex": {
+                "valueType": "reference",
+                "value": "steps.accumulate.outputs.index"
+              },
+              "accumulated": {
+                "valueType": "reference",
+                "value": "steps.accumulate.outputs.previousData"
+              }
+            }
+          }
+        },
+        "entryPoint": "accumulate",
+        "executionPlan": [
+          { "fromStep": "accumulate", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 20
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "finalResult": {
+          "valueType": "reference",
+          "value": "steps.accumulator_loop.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "accumulator_loop" },
+    { "fromStep": "accumulator_loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

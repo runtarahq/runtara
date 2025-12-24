@@ -1,0 +1,112 @@
+{
+  "name": "Connection in Loop",
+  "description": "Connection refresh inside a while loop for rate-limited APIs",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "itemCount": "$.itemCount",
+            "apiUrl": "$.apiUrl"
+          }
+        }
+      }
+    },
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Process Items with Fresh Connection",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "loop.index" },
+          { "valueType": "reference", "value": "steps.init.outputs.itemCount" }
+        ]
+      },
+      "subgraph": {
+        "name": "Fetch and Process",
+        "steps": {
+          "refresh_conn": {
+            "stepType": "Connection",
+            "id": "refresh_conn",
+            "name": "Refresh Connection",
+            "connectionId": "rate-limited-api",
+            "integrationId": "bearer"
+          },
+          "call_api": {
+            "stepType": "Agent",
+            "id": "call_api",
+            "name": "Call API",
+            "agentId": "http",
+            "capabilityId": "request",
+            "inputMapping": {
+              "url": {
+                "valueType": "reference",
+                "value": "data.apiUrl"
+              },
+              "method": {
+                "valueType": "immediate",
+                "value": "GET"
+              },
+              "_connection": {
+                "valueType": "reference",
+                "value": "steps.refresh_conn.outputs"
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "apiResponse": {
+                "valueType": "reference",
+                "value": "steps.call_api.outputs"
+              }
+            }
+          }
+        },
+        "entryPoint": "refresh_conn",
+        "executionPlan": [
+          { "fromStep": "refresh_conn", "toStep": "call_api" },
+          { "fromStep": "call_api", "toStep": "finish" }
+        ]
+      },
+      "config": {
+        "maxIterations": 10
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "totalProcessed": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.iterations"
+        },
+        "lastResult": {
+          "valueType": "reference",
+          "value": "steps.loop.outputs.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "loop" },
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

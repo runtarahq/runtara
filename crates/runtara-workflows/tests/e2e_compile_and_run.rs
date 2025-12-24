@@ -325,6 +325,368 @@ fn test_parse_connection_workflow() {
 }
 
 // ============================================================================
+// While Step Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_while_simple() {
+    let workflow_json = include_str!("fixtures/while_simple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse while_simple.json");
+
+    assert_eq!(graph.entry_point, "init");
+    assert!(graph.steps.contains_key("init"));
+    assert!(graph.steps.contains_key("loop"));
+    assert!(graph.steps.contains_key("finish"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        assert_eq!(while_step.name, Some("Counter Loop".to_string()));
+        // Check subgraph structure
+        assert_eq!(while_step.subgraph.entry_point, "increment");
+        assert!(while_step.subgraph.steps.contains_key("increment"));
+        // Check config
+        let config = while_step.config.as_ref().expect("Expected config");
+        assert_eq!(config.max_iterations, Some(10));
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_while_nested_condition() {
+    let workflow_json = include_str!("fixtures/while_nested_condition.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse while_nested_condition.json");
+
+    assert_eq!(graph.entry_point, "init");
+    assert!(graph.steps.contains_key("loop"));
+
+    use runtara_dsl::{ConditionExpression, ConditionOperator, Step};
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        // Verify the AND condition structure
+        if let ConditionExpression::Operation(op) = &while_step.condition {
+            assert!(matches!(op.op, ConditionOperator::And));
+            // AND combines 3 conditions: GTE, LT, and EQ
+            assert_eq!(op.arguments.len(), 3);
+        } else {
+            panic!("Expected Operation condition");
+        }
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_while_break_on_first() {
+    let workflow_json = include_str!("fixtures/while_break_on_first.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse while_break_on_first.json");
+
+    assert!(graph.steps.contains_key("loop"));
+
+    // This workflow tests condition that is false on first check
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        assert_eq!(
+            while_step.name,
+            Some("Skip Loop (break on first)".to_string())
+        );
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_while_max_iterations() {
+    let workflow_json = include_str!("fixtures/while_max_iterations.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse while_max_iterations.json");
+
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        // Check the small max_iterations value
+        let config = while_step.config.as_ref().expect("Expected config");
+        assert_eq!(config.max_iterations, Some(3));
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_while_with_previous_outputs() {
+    let workflow_json = include_str!("fixtures/while_with_previous_outputs.json");
+    let graph: ExecutionGraph = serde_json::from_str(workflow_json)
+        .expect("Failed to parse while_with_previous_outputs.json");
+
+    assert!(graph.steps.contains_key("accumulator_loop"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("accumulator_loop") {
+        // Verify subgraph references _previousOutputs
+        assert!(while_step.subgraph.steps.contains_key("accumulate"));
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_while_with_loop_index() {
+    let workflow_json = include_str!("fixtures/while_with_loop_index.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse while_with_loop_index.json");
+
+    assert!(graph.steps.contains_key("indexed_loop"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("indexed_loop") {
+        assert_eq!(while_step.name, Some("Process with Index".to_string()));
+        // Subgraph should reference _index
+        assert!(while_step.subgraph.steps.contains_key("use_index"));
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+// ============================================================================
+// Log Step Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_log_all_levels() {
+    let workflow_json = include_str!("fixtures/log_all_levels.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse log_all_levels.json");
+
+    assert!(graph.steps.contains_key("log_debug"));
+    assert!(graph.steps.contains_key("log_info"));
+    assert!(graph.steps.contains_key("log_warn"));
+    assert!(graph.steps.contains_key("log_error"));
+
+    use runtara_dsl::{LogLevel, Step};
+
+    if let Some(Step::Log(log)) = graph.steps.get("log_debug") {
+        assert!(matches!(log.level, LogLevel::Debug));
+    } else {
+        panic!("Expected Log step for log_debug");
+    }
+
+    if let Some(Step::Log(log)) = graph.steps.get("log_info") {
+        assert!(matches!(log.level, LogLevel::Info));
+    } else {
+        panic!("Expected Log step for log_info");
+    }
+
+    if let Some(Step::Log(log)) = graph.steps.get("log_warn") {
+        assert!(matches!(log.level, LogLevel::Warn));
+    } else {
+        panic!("Expected Log step for log_warn");
+    }
+
+    if let Some(Step::Log(log)) = graph.steps.get("log_error") {
+        assert!(matches!(log.level, LogLevel::Error));
+    } else {
+        panic!("Expected Log step for log_error");
+    }
+}
+
+#[test]
+fn test_parse_log_with_context() {
+    let workflow_json = include_str!("fixtures/log_with_context.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse log_with_context.json");
+
+    assert!(graph.steps.contains_key("log_with_rich_context"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Log(log)) = graph.steps.get("log_with_rich_context") {
+        assert!(log.context.is_some());
+        let context = log.context.as_ref().unwrap();
+        // Should have multiple context fields
+        assert!(context.len() >= 2);
+    } else {
+        panic!("Expected Log step");
+    }
+}
+
+#[test]
+fn test_parse_log_no_context() {
+    let workflow_json = include_str!("fixtures/log_no_context.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse log_no_context.json");
+
+    assert!(graph.steps.contains_key("simple_log"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Log(log)) = graph.steps.get("simple_log") {
+        // Context should be None or empty
+        assert!(log.context.is_none() || log.context.as_ref().map_or(true, |c| c.is_empty()));
+    } else {
+        panic!("Expected Log step");
+    }
+}
+
+#[test]
+fn test_parse_log_in_loop() {
+    let workflow_json = include_str!("fixtures/log_in_loop.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse log_in_loop.json");
+
+    assert!(graph.steps.contains_key("loop"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        // Verify log step exists in subgraph
+        assert!(while_step.subgraph.steps.contains_key("log_iteration"));
+        if let Some(Step::Log(log)) = while_step.subgraph.steps.get("log_iteration") {
+            assert_eq!(log.message, "Processing iteration");
+        } else {
+            panic!("Expected Log step in subgraph");
+        }
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_log_error_handling() {
+    let workflow_json = include_str!("fixtures/log_error_handling.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse log_error_handling.json");
+
+    // Should have error log step
+    assert!(graph.steps.contains_key("log_error"));
+
+    use runtara_dsl::{LogLevel, Step};
+    if let Some(Step::Log(log)) = graph.steps.get("log_error") {
+        assert!(matches!(log.level, LogLevel::Error));
+    } else {
+        panic!("Expected Log step");
+    }
+}
+
+// ============================================================================
+// Connection Step Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_connection_bearer() {
+    let workflow_json = include_str!("fixtures/connection_bearer.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse connection_bearer.json");
+
+    assert!(graph.steps.contains_key("get_token"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Connection(conn)) = graph.steps.get("get_token") {
+        assert_eq!(conn.connection_id, "api-service");
+        assert_eq!(conn.integration_id, "bearer");
+    } else {
+        panic!("Expected Connection step");
+    }
+}
+
+#[test]
+fn test_parse_connection_api_key() {
+    let workflow_json = include_str!("fixtures/connection_api_key.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse connection_api_key.json");
+
+    assert!(graph.steps.contains_key("get_api_key"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Connection(conn)) = graph.steps.get("get_api_key") {
+        assert_eq!(conn.connection_id, "external-service");
+        assert_eq!(conn.integration_id, "api_key");
+    } else {
+        panic!("Expected Connection step");
+    }
+}
+
+#[test]
+fn test_parse_connection_basic_auth() {
+    let workflow_json = include_str!("fixtures/connection_basic_auth.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse connection_basic_auth.json");
+
+    assert!(graph.steps.contains_key("get_credentials"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Connection(conn)) = graph.steps.get("get_credentials") {
+        assert_eq!(conn.connection_id, "service-basic-auth");
+        assert_eq!(conn.integration_id, "basic_auth");
+    } else {
+        panic!("Expected Connection step");
+    }
+}
+
+#[test]
+fn test_parse_connection_sftp() {
+    let workflow_json = include_str!("fixtures/connection_sftp.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse connection_sftp.json");
+
+    assert!(graph.steps.contains_key("get_sftp_creds"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Connection(conn)) = graph.steps.get("get_sftp_creds") {
+        assert_eq!(conn.connection_id, "sftp-server");
+        assert_eq!(conn.integration_id, "sftp");
+    } else {
+        panic!("Expected Connection step");
+    }
+}
+
+#[test]
+fn test_parse_connection_multiple() {
+    let workflow_json = include_str!("fixtures/connection_multiple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse connection_multiple.json");
+
+    // Should have two connection steps
+    assert!(graph.steps.contains_key("get_api_conn"));
+    assert!(graph.steps.contains_key("get_backup_conn"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Connection(conn1)) = graph.steps.get("get_api_conn") {
+        assert_eq!(conn1.connection_id, "primary-api");
+        assert_eq!(conn1.integration_id, "bearer");
+    } else {
+        panic!("Expected Connection step for get_api_conn");
+    }
+
+    if let Some(Step::Connection(conn2)) = graph.steps.get("get_backup_conn") {
+        assert_eq!(conn2.connection_id, "backup-api");
+        assert_eq!(conn2.integration_id, "api_key");
+    } else {
+        panic!("Expected Connection step for get_backup_conn");
+    }
+}
+
+#[test]
+fn test_parse_connection_in_loop() {
+    let workflow_json = include_str!("fixtures/connection_in_loop.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse connection_in_loop.json");
+
+    assert!(graph.steps.contains_key("loop"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        // Verify connection step exists in subgraph
+        assert!(while_step.subgraph.steps.contains_key("refresh_conn"));
+        if let Some(Step::Connection(conn)) = while_step.subgraph.steps.get("refresh_conn") {
+            assert_eq!(conn.connection_id, "rate-limited-api");
+            assert_eq!(conn.integration_id, "bearer");
+        } else {
+            panic!("Expected Connection step in subgraph");
+        }
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+// ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================
 
@@ -630,6 +992,288 @@ fn test_side_effects_detection() {
         result.has_side_effects,
         "HTTP workflow should have side effects"
     );
+
+    drop(temp_dir);
+}
+
+// ============================================================================
+// While Step Compilation Tests
+// ============================================================================
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_while_simple() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/while_simple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "while_simple".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+    assert!(
+        !result.has_side_effects,
+        "While workflow with transform agent should not have side effects"
+    );
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_while_nested_condition() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/while_nested_condition.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "while_nested".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_while_with_loop_index() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/while_with_loop_index.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "while_loop_index".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+// ============================================================================
+// Log Step Compilation Tests
+// ============================================================================
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_log_all_levels() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/log_all_levels.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "log_all_levels".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+    // Log steps don't have external side effects
+    assert!(
+        !result.has_side_effects,
+        "Log workflow should not have side effects"
+    );
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_log_with_context() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/log_with_context.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "log_with_context".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_log_in_subgraph() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/log_in_loop.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "log_in_subgraph".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+// ============================================================================
+// Connection Step Compilation Tests
+// ============================================================================
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_connection_bearer() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/connection_bearer.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "connection_bearer".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: Some("http://localhost:8080/connections".to_string()),
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+    // HTTP agent has side effects
+    assert!(
+        result.has_side_effects,
+        "Connection workflow with HTTP agent should have side effects"
+    );
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_connection_multiple() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/connection_multiple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "connection_multiple".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: Some("http://localhost:8080/connections".to_string()),
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
 
     drop(temp_dir);
 }

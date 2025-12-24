@@ -1,0 +1,52 @@
+{
+  "name": "Connection Basic Auth",
+  "description": "Demonstrates acquiring basic auth credentials and passing to HTTP agent",
+  "steps": {
+    "get_credentials": {
+      "stepType": "Connection",
+      "id": "get_credentials",
+      "name": "Acquire Basic Auth",
+      "connectionId": "service-basic-auth",
+      "integrationId": "basic_auth"
+    },
+    "call_api": {
+      "stepType": "Agent",
+      "id": "call_api",
+      "name": "Call API with Basic Auth",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": {
+          "valueType": "reference",
+          "value": "data.apiUrl"
+        },
+        "method": {
+          "valueType": "immediate",
+          "value": "GET"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_credentials.outputs"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "response": {
+          "valueType": "reference",
+          "value": "steps.call_api.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "get_credentials",
+  "executionPlan": [
+    { "fromStep": "get_credentials", "toStep": "call_api" },
+    { "fromStep": "call_api", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

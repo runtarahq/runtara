@@ -1,0 +1,107 @@
+{
+  "name": "Multiple Connections",
+  "description": "Workflow that acquires multiple connections and uses them with different agents",
+  "steps": {
+    "get_api_conn": {
+      "stepType": "Connection",
+      "id": "get_api_conn",
+      "name": "Acquire API Connection",
+      "connectionId": "primary-api",
+      "integrationId": "bearer"
+    },
+    "get_backup_conn": {
+      "stepType": "Connection",
+      "id": "get_backup_conn",
+      "name": "Acquire Backup Connection",
+      "connectionId": "backup-api",
+      "integrationId": "api_key"
+    },
+    "call_primary": {
+      "stepType": "Agent",
+      "id": "call_primary",
+      "name": "Call Primary API",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": {
+          "valueType": "reference",
+          "value": "data.primaryUrl"
+        },
+        "method": {
+          "valueType": "immediate",
+          "value": "GET"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_api_conn.outputs"
+        }
+      }
+    },
+    "call_backup": {
+      "stepType": "Agent",
+      "id": "call_backup",
+      "name": "Call Backup API",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": {
+          "valueType": "reference",
+          "value": "data.backupUrl"
+        },
+        "method": {
+          "valueType": "immediate",
+          "value": "GET"
+        },
+        "_connection": {
+          "valueType": "reference",
+          "value": "steps.get_backup_conn.outputs"
+        }
+      }
+    },
+    "combine": {
+      "stepType": "Agent",
+      "id": "combine",
+      "name": "Combine Results",
+      "agentId": "transform",
+      "capabilityId": "map-fields",
+      "inputMapping": {
+        "source": {
+          "valueType": "reference",
+          "value": "data"
+        },
+        "mapping": {
+          "valueType": "immediate",
+          "value": {
+            "primary": "$.primaryResult",
+            "backup": "$.backupResult"
+          }
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "primaryResponse": {
+          "valueType": "reference",
+          "value": "steps.call_primary.outputs"
+        },
+        "backupResponse": {
+          "valueType": "reference",
+          "value": "steps.call_backup.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "get_api_conn",
+  "executionPlan": [
+    { "fromStep": "get_api_conn", "toStep": "get_backup_conn" },
+    { "fromStep": "get_backup_conn", "toStep": "call_primary" },
+    { "fromStep": "call_primary", "toStep": "call_backup" },
+    { "fromStep": "call_backup", "toStep": "combine" },
+    { "fromStep": "combine", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
