@@ -784,9 +784,7 @@ impl Runner for OciRunner {
             }
         };
 
-        // Brief wait to detect immediate startup failures
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
+        // Check for immediate startup failures (no delay needed)
         match child.try_wait() {
             Ok(Some(status)) if !status.success() => {
                 let scenario_error = self
@@ -820,7 +818,7 @@ impl Runner for OciRunner {
                 info!(
                     container_id = %container_id,
                     instance_id = %options.instance_id,
-                    "Container completed quickly (within 100ms)"
+                    "Container completed immediately"
                 );
             }
             Ok(None) => {

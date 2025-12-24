@@ -900,12 +900,13 @@ pub fn spawn_container_monitor(
     let instance_id = handle.instance_id.clone();
 
     tokio::spawn(async move {
-        // Poll every 500ms to check if container is still running
-        let poll_interval = Duration::from_millis(500);
+        // Brief delay to let crun register the container before first check
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Poll to check if container is still running
+        let poll_interval = Duration::from_millis(50);
 
         loop {
-            tokio::time::sleep(poll_interval).await;
-
             if !runner.is_running(&handle).await {
                 info!(
                     instance_id = %instance_id,
@@ -942,6 +943,9 @@ pub fn spawn_container_monitor(
 
                 break;
             }
+
+            // Sleep before next check
+            tokio::time::sleep(poll_interval).await;
         }
     });
 }
