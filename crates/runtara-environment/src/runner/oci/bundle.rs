@@ -167,7 +167,7 @@ pub struct BundleConfig {
     pub cpu_quota: i64,
     /// CPU period (microseconds, default: 100000 = 100ms)
     pub cpu_period: u64,
-    /// Run as specific user (default: 65534/65534 = nobody/nogroup)
+    /// Run as specific user (default: 0/0 = root in container, maps to host user in rootless mode)
     pub user: (u32, u32),
     /// Network mode for the container
     pub network_mode: NetworkMode,
@@ -184,9 +184,10 @@ impl Default for BundleConfig {
             cpu_quota: 50000,                // 50%
             cpu_period: 100000,              // 100ms
             user: (0, 0), // Root in container (maps to host user in rootless mode)
-            // Host networking by default for QUIC access to runtara-core.
-            // Use NetworkMode::Pasta for isolation with networking support.
-            network_mode: NetworkMode::Host,
+            // Pasta networking by default for better isolation.
+            // Localhost addresses are auto-transformed to gateway for connectivity.
+            // Use NetworkMode::Host to bypass isolation if needed.
+            network_mode: NetworkMode::Pasta,
             enable_seccomp: true,    // Seccomp filtering enabled by default
             drop_capabilities: true, // Drop dangerous capabilities by default
         }

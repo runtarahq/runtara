@@ -37,10 +37,50 @@ fn parse_network_mode(var: &str) -> NetworkMode {
         .to_ascii_lowercase()
         .as_str()
     {
-        "pasta" => NetworkMode::Pasta,
+        "host" => NetworkMode::Host,
         "none" | "isolated" => NetworkMode::None,
-        _ => NetworkMode::Host, // Default to host networking
+        _ => NetworkMode::Pasta, // Default to pasta networking (isolated with NAT)
     }
+}
+
+/// Get the default gateway IP address from the host.
+/// Used for pasta networking where containers need to connect via the gateway.
+fn get_gateway_ip() -> Option<String> {
+    // Parse `ip route` output to find default gateway
+    let output = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Format: "default via 192.168.1.1 dev eth0 ..."
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
+            return Some(parts[2].to_string());
+        }
+    }
+    None
+}
+
+/// Transform an address for use inside a pasta network namespace.
+/// If the address points to localhost (127.0.0.1), replace it with the gateway
+/// address so the container can reach the host via pasta's NAT.
+fn transform_addr_for_pasta(addr: &str) -> String {
+    // Check if this is a localhost address
+    if addr.starts_with("127.0.0.1:") || addr.starts_with("localhost:") {
+        if let Some(gateway) = get_gateway_ip() {
+            // Extract the port from the original address
+            if let Some(port) = addr.split(':').last() {
+                return format!("{}:{}", gateway, port);
+            }
+        }
+    }
+    addr.to_string()
 }
 
 async fn read_cgroup_value(path: &str) -> Option<u64> {
@@ -161,10 +201,24 @@ impl OciRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
-        env.insert(
-            "RUNTARA_SERVER_ADDR".to_string(),
-            runtara_core_addr.to_string(),
-        );
+
+        // For pasta networking, transform localhost addresses to gateway address
+        // so the container can reach the host via pasta's NAT
+        let server_addr = if matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta) {
+            let transformed = transform_addr_for_pasta(runtara_core_addr);
+            if transformed != runtara_core_addr {
+                debug!(
+                    original = %runtara_core_addr,
+                    transformed = %transformed,
+                    "Transformed server address for pasta networking"
+                );
+            }
+            transformed
+        } else {
+            runtara_core_addr.to_string()
+        };
+
+        env.insert("RUNTARA_SERVER_ADDR".to_string(), server_addr);
         env.insert(
             "DATA_DIR".to_string(),
             self.config.data_dir.to_string_lossy().to_string(),
@@ -338,36 +392,48 @@ impl OciRunner {
         // For pasta mode: create container, attach pasta, then start
         // For other modes: just run directly
         let (mut child, stderr_handle) = if use_pasta {
-            // Step 1: Create container (sets up namespaces but doesn't exec)
-            let create_result = Command::new("crun")
-                .arg("create")
-                .args(if self.config.use_systemd_cgroup {
-                    vec!["--systemd-cgroup"]
-                } else {
-                    vec![]
-                })
+            // Step 1: Create container (spawn and wait for "created" state)
+            // Note: crun create doesn't return until crun start is called,
+            // so we spawn it and poll for the container to be in "created" state
+            let mut create_cmd = Command::new("crun");
+            create_cmd.arg("create");
+            if self.config.use_systemd_cgroup {
+                create_cmd.arg("--systemd-cgroup");
+            }
+            create_cmd
                 .arg("--bundle")
                 .arg(bundle_path)
                 .arg("--config")
                 .arg(config_path)
                 .arg(&container_id)
-                .output()
-                .await;
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
 
-            match create_result {
-                Ok(output) if !output.status.success() => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!(container_id = %container_id, stderr = %stderr, "Failed to create container");
-                    return (
-                        Err(RunnerError::StartFailed(format!(
-                            "crun create failed: {}",
-                            stderr.trim()
-                        ))),
-                        ContainerMetrics::default(),
-                    );
-                }
+            let _create_child = match create_cmd.spawn() {
+                Ok(child) => child,
                 Err(e) => return (Err(RunnerError::Io(e)), ContainerMetrics::default()),
-                Ok(_) => {}
+            };
+
+            // Wait for container to be in "created" state (poll with timeout)
+            let mut created = false;
+            for _ in 0..50 {
+                // 5 seconds max (50 * 100ms)
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some(_pid) = self.get_container_pid(&container_id).await {
+                    created = true;
+                    break;
+                }
+            }
+
+            if !created {
+                error!(container_id = %container_id, "Container failed to reach created state");
+                let _ = self.delete_container(&container_id).await;
+                return (
+                    Err(RunnerError::StartFailed(
+                        "Container creation timed out".to_string(),
+                    )),
+                    ContainerMetrics::default(),
+                );
             }
 
             // Step 2: Get container PID and attach pasta
@@ -932,29 +998,47 @@ impl Runner for OciRunner {
         // For pasta mode: use create/start workflow
         // For other modes: just run directly
         if use_pasta {
-            // Step 1: Create container
-            let create_output = Command::new("crun")
-                .arg("create")
-                .args(if self.config.use_systemd_cgroup {
-                    vec!["--systemd-cgroup"]
-                } else {
-                    vec![]
-                })
+            // Step 1: Create container (spawn and wait for "created" state)
+            // Note: crun create doesn't return until crun start is called,
+            // so we spawn it and poll for the container to be in "created" state
+            let mut create_cmd = Command::new("crun");
+            create_cmd.arg("create");
+            if self.config.use_systemd_cgroup {
+                create_cmd.arg("--systemd-cgroup");
+            }
+            create_cmd
                 .arg("--bundle")
                 .arg(&options.bundle_path)
                 .arg("--config")
                 .arg(&config_path)
                 .arg(&container_id)
-                .output()
-                .await?;
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped());
 
-            if !create_output.status.success() {
-                let stderr = String::from_utf8_lossy(&create_output.stderr);
-                error!(container_id = %container_id, stderr = %stderr, "Failed to create container");
-                return Err(RunnerError::StartFailed(format!(
-                    "crun create failed: {}",
-                    stderr.trim()
-                )));
+            let _create_child = match create_cmd.spawn() {
+                Ok(child) => child,
+                Err(e) => {
+                    return Err(RunnerError::Io(e));
+                }
+            };
+
+            // Wait for container to be in "created" state (poll with timeout)
+            let mut created = false;
+            for _ in 0..50 {
+                // 5 seconds max (50 * 100ms)
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some(_pid) = self.get_container_pid(&container_id).await {
+                    created = true;
+                    break;
+                }
+            }
+
+            if !created {
+                error!(container_id = %container_id, "Container failed to reach created state");
+                let _ = self.delete_container(&container_id).await;
+                return Err(RunnerError::StartFailed(
+                    "Container creation timed out".to_string(),
+                ));
             }
 
             // Step 2: Get container PID and attach pasta
@@ -1103,5 +1187,52 @@ impl Runner for OciRunner {
             .await;
         self.cleanup(&handle.tenant_id, &handle.instance_id).await;
         (output, error, metrics)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_transform_addr_for_pasta_localhost() {
+        // When there's a gateway, localhost should be transformed
+        // Note: This test depends on having a gateway configured on the system
+        let result = transform_addr_for_pasta("127.0.0.1:8001");
+        // Either it's transformed to the gateway, or unchanged if no gateway
+        if let Some(gateway) = get_gateway_ip() {
+            assert_eq!(result, format!("{}:8001", gateway));
+        } else {
+            assert_eq!(result, "127.0.0.1:8001");
+        }
+    }
+
+    #[test]
+    fn test_transform_addr_for_pasta_localhost_text() {
+        let result = transform_addr_for_pasta("localhost:8001");
+        if let Some(gateway) = get_gateway_ip() {
+            assert_eq!(result, format!("{}:8001", gateway));
+        } else {
+            assert_eq!(result, "localhost:8001");
+        }
+    }
+
+    #[test]
+    fn test_transform_addr_for_pasta_non_localhost() {
+        // Non-localhost addresses should not be transformed
+        let result = transform_addr_for_pasta("192.168.1.100:8001");
+        assert_eq!(result, "192.168.1.100:8001");
+
+        let result = transform_addr_for_pasta("10.0.0.1:9000");
+        assert_eq!(result, "10.0.0.1:9000");
+    }
+
+    #[test]
+    fn test_transform_addr_preserves_port() {
+        // Verify that port is preserved in transformation
+        if let Some(gateway) = get_gateway_ip() {
+            let result = transform_addr_for_pasta("127.0.0.1:12345");
+            assert_eq!(result, format!("{}:12345", gateway));
+        }
     }
 }

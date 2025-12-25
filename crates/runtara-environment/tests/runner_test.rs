@@ -332,9 +332,9 @@ fn test_bundle_config_default() {
     assert_eq!(config.memory_limit, 512 * 1024 * 1024); // 512MB
     assert_eq!(config.cpu_quota, 50000);
     assert_eq!(config.cpu_period, 100000);
-    assert_eq!(config.user, (65534, 65534)); // nobody/nogroup
-    // Host networking by default (for QUIC access to runtara-core)
-    assert_eq!(config.network_mode, NetworkMode::Host);
+    assert_eq!(config.user, (0, 0)); // Root in container (maps to host user in rootless mode)
+    // Pasta networking by default (isolated with NAT, localhost transformed to gateway)
+    assert_eq!(config.network_mode, NetworkMode::Pasta);
     assert!(config.enable_seccomp);
     assert!(config.drop_capabilities);
 }
@@ -529,14 +529,14 @@ fn test_oci_config_namespaces() {
         .map(|ns| ns.ns_type.as_str())
         .collect();
 
-    // Should have pid, mount, ipc, uts - but NOT network (host networking)
+    // Should have pid, mount, ipc, uts, and network (pasta networking is default)
     assert!(ns_types.contains(&"pid"));
     assert!(ns_types.contains(&"mount"));
     assert!(ns_types.contains(&"ipc"));
     assert!(ns_types.contains(&"uts"));
     assert!(
-        !ns_types.contains(&"network"),
-        "Should not have network namespace for host networking"
+        ns_types.contains(&"network"),
+        "Should have network namespace for pasta networking (default)"
     );
 }
 
