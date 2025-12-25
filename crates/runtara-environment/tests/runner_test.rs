@@ -529,19 +529,23 @@ fn test_oci_config_namespaces() {
         .map(|ns| ns.ns_type.as_str())
         .collect();
 
-    // Should have pid, mount, ipc, uts, and network (pasta networking is default)
+    // Should have pid, mount, ipc, uts (basic isolation namespaces)
     assert!(ns_types.contains(&"pid"));
     assert!(ns_types.contains(&"mount"));
     assert!(ns_types.contains(&"ipc"));
     assert!(ns_types.contains(&"uts"));
+
+    // Pasta mode (default) does NOT include user or network namespaces in OCI config
+    // because pasta creates its own user/network namespaces when wrapping crun:
+    //   `pasta --config-net -- crun run ...`
+    // Including them in OCI config would cause double-nesting errors.
     assert!(
-        ns_types.contains(&"network"),
-        "Should have network namespace for pasta networking (default)"
+        !ns_types.contains(&"network"),
+        "Pasta mode should not have network namespace (pasta creates it)"
     );
-    // Pasta mode does NOT use user namespace (so pasta can attach to network ns)
     assert!(
         !ns_types.contains(&"user"),
-        "Pasta mode should not have user namespace"
+        "Pasta mode should not have user namespace (pasta creates it)"
     );
 }
 
