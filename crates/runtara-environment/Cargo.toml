@@ -50,6 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2.workspace = true
+nix = { version = "0.29", features = ["user"] }
 
 # Async trait
 async-trait = "0.1"

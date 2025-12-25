@@ -17,7 +17,7 @@ use tokio::fs;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
-use super::bundle::{BundleConfig, BundleManager};
+use super::bundle::{BundleConfig, BundleManager, NetworkMode};
 use crate::runner::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
     RunnerHandle,
@@ -28,6 +28,19 @@ fn parse_env_bool(var: &str, default: bool) -> bool {
     std::env::var(var)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(default)
+}
+
+/// Parse network mode from environment variable
+fn parse_network_mode(var: &str) -> NetworkMode {
+    match std::env::var(var)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pasta" => NetworkMode::Pasta,
+        "none" | "isolated" => NetworkMode::None,
+        _ => NetworkMode::Host, // Default to host networking
+    }
 }
 
 async fn read_cgroup_value(path: &str) -> Option<u64> {
@@ -83,7 +96,11 @@ impl OciRunnerConfig {
                     .unwrap_or(300),
             ),
             use_systemd_cgroup: parse_env_bool("USE_SYSTEMD_CGROUP", false),
-            bundle_config: BundleConfig::default(),
+            bundle_config: {
+                let mut config = BundleConfig::default();
+                config.network_mode = parse_network_mode("RUNTARA_NETWORK_MODE");
+                config
+            },
             skip_cert_verification: parse_env_bool("RUNTARA_SKIP_CERT_VERIFICATION", false),
         }
     }
@@ -181,6 +198,16 @@ impl OciRunner {
             .join(instance_id);
 
         fs::create_dir_all(&run_dir).await?;
+
+        // Set run directory permissions to allow container (running as nobody) to write
+        // This is needed because the container runs as UID 65534 (nobody)
+        let (uid, _gid) = self.config.bundle_config.user;
+        if uid != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            // Make directory world-writable so container can write output.json
+            let permissions = std::fs::Permissions::from_mode(0o777);
+            std::fs::set_permissions(&run_dir, permissions)?;
+        }
 
         let input_path = run_dir.join("input.json");
         let value = serde_json::to_string_pretty(input)?;
@@ -286,6 +313,7 @@ impl OciRunner {
     /// Run crun container and wait for exit
     ///
     /// Uses the shared image bundle but with a per-instance config.json file.
+    /// For Pasta network mode, uses create/start workflow to allow attaching pasta.
     async fn run_container(
         &self,
         bundle_path: &Path,
@@ -295,33 +323,100 @@ impl OciRunner {
         timeout: Duration,
     ) -> (Result<()>, ContainerMetrics) {
         let container_id = self.container_id(instance_id);
-
-        // Build command with stderr capture
-        // Use --config to specify the per-instance config file while sharing the bundle's rootfs
-        let mut cmd = Command::new("crun");
-        cmd.arg("run");
-        if self.config.use_systemd_cgroup {
-            cmd.arg("--systemd-cgroup");
-        }
-        cmd.arg("--bundle").arg(bundle_path);
-        cmd.arg("--config").arg(config_path);
-        cmd.arg(&container_id);
-        cmd.stderr(std::process::Stdio::piped());
+        let use_pasta = matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta);
 
         debug!(
             bundle_path = %bundle_path.display(),
             instance_id = %instance_id,
             container_id = %container_id,
+            network_mode = ?self.config.bundle_config.network_mode,
             "Launching container"
         );
 
-        // Spawn the process
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return (Err(RunnerError::Io(e)), ContainerMetrics::default()),
-        };
+        let mut pasta_pid: Option<u32> = None;
 
-        let stderr_handle = child.stderr.take();
+        // For pasta mode: create container, attach pasta, then start
+        // For other modes: just run directly
+        let (mut child, stderr_handle) = if use_pasta {
+            // Step 1: Create container (sets up namespaces but doesn't exec)
+            let create_result = Command::new("crun")
+                .arg("create")
+                .args(if self.config.use_systemd_cgroup {
+                    vec!["--systemd-cgroup"]
+                } else {
+                    vec![]
+                })
+                .arg("--bundle")
+                .arg(bundle_path)
+                .arg("--config")
+                .arg(config_path)
+                .arg(&container_id)
+                .output()
+                .await;
+
+            match create_result {
+                Ok(output) if !output.status.success() => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(container_id = %container_id, stderr = %stderr, "Failed to create container");
+                    return (
+                        Err(RunnerError::StartFailed(format!(
+                            "crun create failed: {}",
+                            stderr.trim()
+                        ))),
+                        ContainerMetrics::default(),
+                    );
+                }
+                Err(e) => return (Err(RunnerError::Io(e)), ContainerMetrics::default()),
+                Ok(_) => {}
+            }
+
+            // Step 2: Get container PID and attach pasta
+            if let Some(pid) = self.get_container_pid(&container_id).await {
+                match self.start_pasta(pid, instance_id).await {
+                    Ok(p) => pasta_pid = p,
+                    Err(e) => {
+                        let _ = self.delete_container(&container_id).await;
+                        return (Err(e), ContainerMetrics::default());
+                    }
+                }
+            }
+
+            // Step 3: Start the container
+            let mut cmd = Command::new("crun");
+            cmd.arg("start").arg(&container_id);
+            cmd.stderr(std::process::Stdio::piped());
+
+            match cmd.spawn() {
+                Ok(mut c) => {
+                    let stderr = c.stderr.take();
+                    (c, stderr)
+                }
+                Err(e) => {
+                    self.stop_pasta(pasta_pid).await;
+                    let _ = self.delete_container(&container_id).await;
+                    return (Err(RunnerError::Io(e)), ContainerMetrics::default());
+                }
+            }
+        } else {
+            // Direct run for Host and None modes
+            let mut cmd = Command::new("crun");
+            cmd.arg("run");
+            if self.config.use_systemd_cgroup {
+                cmd.arg("--systemd-cgroup");
+            }
+            cmd.arg("--bundle").arg(bundle_path);
+            cmd.arg("--config").arg(config_path);
+            cmd.arg(&container_id);
+            cmd.stderr(std::process::Stdio::piped());
+
+            match cmd.spawn() {
+                Ok(mut c) => {
+                    let stderr = c.stderr.take();
+                    (c, stderr)
+                }
+                Err(e) => return (Err(RunnerError::Io(e)), ContainerMetrics::default()),
+            }
+        };
 
         // Wait for completion with timeout and cancellation check
         let result = self
@@ -336,6 +431,9 @@ impl OciRunner {
 
         // Collect metrics BEFORE deleting the container
         let metrics = self.collect_container_metrics(&container_id).await;
+
+        // Clean up pasta if used
+        self.stop_pasta(pasta_pid).await;
 
         // Always try to clean up container
         let _ = self.delete_container(&container_id).await;
@@ -604,6 +702,72 @@ impl OciRunner {
         let state: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
         state.get("pid")?.as_u64().map(|p| p as u32)
     }
+
+    /// Start pasta for network namespace connectivity
+    ///
+    /// Pasta provides user-mode networking for containers with network namespaces.
+    /// It creates a TAP interface in the namespace and NATs outbound connections.
+    async fn start_pasta(&self, container_pid: u32, instance_id: &str) -> Result<Option<u32>> {
+        if !matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta) {
+            return Ok(None);
+        }
+
+        debug!(
+            instance_id = %instance_id,
+            container_pid = container_pid,
+            "Starting pasta for container network namespace"
+        );
+
+        // pasta attaches to an existing network namespace via /proc/{pid}/ns/net
+        // --foreground keeps it running (we'll track its PID)
+        // --no-map-gw disables default gateway mapping
+        // We use defaults which set up NAT for all outbound TCP/UDP
+        let mut cmd = Command::new("pasta");
+        cmd.arg("--netns")
+            .arg(format!("/proc/{}/ns/net", container_pid))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    warn!(
+                        instance_id = %instance_id,
+                        "pasta not found - falling back to no network connectivity in container"
+                    );
+                    return Ok(None);
+                }
+                return Err(RunnerError::Io(e));
+            }
+        };
+
+        let pasta_pid = child.id();
+
+        // Give pasta a moment to set up the namespace
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        info!(
+            instance_id = %instance_id,
+            container_pid = container_pid,
+            pasta_pid = ?pasta_pid,
+            "Started pasta for network namespace"
+        );
+
+        Ok(pasta_pid)
+    }
+
+    /// Stop pasta process
+    async fn stop_pasta(&self, pasta_pid: Option<u32>) {
+        if let Some(pid) = pasta_pid {
+            debug!(pasta_pid = pid, "Stopping pasta process");
+            // Send SIGTERM to pasta
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output()
+                .await;
+        }
+    }
 }
 
 #[async_trait]
@@ -763,79 +927,145 @@ impl Runner for OciRunner {
         self.bundle_manager
             .write_config_to_path(&config_path, &env, Some(&log_path_str))?;
 
-        // Spawn crun with shared bundle + per-instance config
-        let mut cmd = Command::new("crun");
-        cmd.arg("run");
-        if self.config.use_systemd_cgroup {
-            cmd.arg("--systemd-cgroup");
-        }
-        cmd.arg("--bundle")
-            .arg(&options.bundle_path)
-            .arg("--config")
-            .arg(&config_path)
-            .arg(&container_id)
-            .stderr(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null());
+        let use_pasta = matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta);
 
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                return Err(RunnerError::Io(e));
-            }
-        };
-
-        // Check for immediate startup failures (no delay needed)
-        match child.try_wait() {
-            Ok(Some(status)) if !status.success() => {
-                let scenario_error = self
-                    .load_error(&options.tenant_id, &options.instance_id)
-                    .await;
-
-                let error_msg = if let Some(err) = scenario_error {
-                    err
+        // For pasta mode: use create/start workflow
+        // For other modes: just run directly
+        if use_pasta {
+            // Step 1: Create container
+            let create_output = Command::new("crun")
+                .arg("create")
+                .args(if self.config.use_systemd_cgroup {
+                    vec!["--systemd-cgroup"]
                 } else {
-                    let mut stderr_msg = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        use tokio::io::AsyncReadExt;
-                        let _ = stderr.read_to_string(&mut stderr_msg).await;
-                    }
-                    if stderr_msg.is_empty() {
-                        format!("crun exited with status: {}", status)
-                    } else {
-                        format!("crun failed: {}", stderr_msg.trim())
-                    }
-                };
+                    vec![]
+                })
+                .arg("--bundle")
+                .arg(&options.bundle_path)
+                .arg("--config")
+                .arg(&config_path)
+                .arg(&container_id)
+                .output()
+                .await?;
 
-                error!(
-                    container_id = %container_id,
-                    instance_id = %options.instance_id,
-                    error = %error_msg,
-                    "Container failed to start"
-                );
-                return Err(RunnerError::StartFailed(error_msg));
+            if !create_output.status.success() {
+                let stderr = String::from_utf8_lossy(&create_output.stderr);
+                error!(container_id = %container_id, stderr = %stderr, "Failed to create container");
+                return Err(RunnerError::StartFailed(format!(
+                    "crun create failed: {}",
+                    stderr.trim()
+                )));
             }
-            Ok(Some(_status)) => {
-                info!(
-                    container_id = %container_id,
-                    instance_id = %options.instance_id,
-                    "Container completed immediately"
-                );
+
+            // Step 2: Get container PID and attach pasta
+            if let Some(pid) = self.get_container_pid(&container_id).await {
+                if let Err(e) = self.start_pasta(pid, &options.instance_id).await {
+                    let _ = self.delete_container(&container_id).await;
+                    return Err(e);
+                }
+                // Note: pasta runs as a daemon, it will stay alive while the container runs
+                // and exit when the namespace is destroyed
             }
-            Ok(None) => {
-                info!(
-                    container_id = %container_id,
-                    instance_id = %options.instance_id,
-                    bundle_path = %options.bundle_path.display(),
-                    "Launched container (detached)"
-                );
+
+            // Step 3: Start the container (detached - just fire and check)
+            let start_output = Command::new("crun")
+                .arg("start")
+                .arg(&container_id)
+                .output()
+                .await?;
+
+            if !start_output.status.success() {
+                let stderr = String::from_utf8_lossy(&start_output.stderr);
+                error!(container_id = %container_id, stderr = %stderr, "Failed to start container");
+                let _ = self.delete_container(&container_id).await;
+                return Err(RunnerError::StartFailed(format!(
+                    "crun start failed: {}",
+                    stderr.trim()
+                )));
             }
-            Err(e) => {
-                warn!(
-                    container_id = %container_id,
-                    instance_id = %options.instance_id,
-                    error = %e,
-                    "Could not check crun status"
-                );
+
+            info!(
+                container_id = %container_id,
+                instance_id = %options.instance_id,
+                bundle_path = %options.bundle_path.display(),
+                network_mode = "pasta",
+                "Launched container (detached) with pasta networking"
+            );
+        } else {
+            // Spawn crun with shared bundle + per-instance config
+            let mut cmd = Command::new("crun");
+            cmd.arg("run");
+            if self.config.use_systemd_cgroup {
+                cmd.arg("--systemd-cgroup");
+            }
+            cmd.arg("--bundle")
+                .arg(&options.bundle_path)
+                .arg("--config")
+                .arg(&config_path)
+                .arg(&container_id)
+                .stderr(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null());
+
+            let mut child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(e) => {
+                    return Err(RunnerError::Io(e));
+                }
+            };
+
+            // Check for immediate startup failures (no delay needed)
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    let scenario_error = self
+                        .load_error(&options.tenant_id, &options.instance_id)
+                        .await;
+
+                    let error_msg = if let Some(err) = scenario_error {
+                        err
+                    } else {
+                        let mut stderr_msg = String::new();
+                        if let Some(mut stderr) = child.stderr.take() {
+                            use tokio::io::AsyncReadExt;
+                            let _ = stderr.read_to_string(&mut stderr_msg).await;
+                        }
+                        if stderr_msg.is_empty() {
+                            format!("crun exited with status: {}", status)
+                        } else {
+                            format!("crun failed: {}", stderr_msg.trim())
+                        }
+                    };
+
+                    error!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        error = %error_msg,
+                        "Container failed to start"
+                    );
+                    return Err(RunnerError::StartFailed(error_msg));
+                }
+                Ok(Some(_status)) => {
+                    info!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        "Container completed immediately"
+                    );
+                }
+                Ok(None) => {
+                    info!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        bundle_path = %options.bundle_path.display(),
+                        "Launched container (detached)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        error = %e,
+                        "Could not check crun status"
+                    );
+                }
             }
         }
 

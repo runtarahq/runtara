@@ -327,40 +327,55 @@ fn test_launch_result_serialization() {
 
 #[test]
 fn test_bundle_config_default() {
+    use runtara_environment::runner::oci::NetworkMode;
     let config = BundleConfig::default();
     assert_eq!(config.memory_limit, 512 * 1024 * 1024); // 512MB
     assert_eq!(config.cpu_quota, 50000);
     assert_eq!(config.cpu_period, 100000);
-    assert!(config.user.is_none());
+    assert_eq!(config.user, (65534, 65534)); // nobody/nogroup
+    // Host networking by default (for QUIC access to runtara-core)
+    assert_eq!(config.network_mode, NetworkMode::Host);
+    assert!(config.enable_seccomp);
+    assert!(config.drop_capabilities);
 }
 
 #[test]
 fn test_bundle_config_custom() {
+    use runtara_environment::runner::oci::NetworkMode;
     let config = BundleConfig {
         memory_limit: 256 * 1024 * 1024,
         cpu_quota: 100000,
         cpu_period: 200000,
-        user: Some((1000, 1000)),
+        user: (1000, 1000),
+        network_mode: NetworkMode::Pasta,
+        enable_seccomp: true,
+        drop_capabilities: true,
     };
 
     assert_eq!(config.memory_limit, 268435456);
     assert_eq!(config.cpu_quota, 100000);
-    assert_eq!(config.user, Some((1000, 1000)));
+    assert_eq!(config.user, (1000, 1000));
+    assert_eq!(config.network_mode, NetworkMode::Pasta);
 }
 
 #[test]
 fn test_bundle_config_clone() {
+    use runtara_environment::runner::oci::NetworkMode;
     let config = BundleConfig {
         memory_limit: 100,
         cpu_quota: 200,
         cpu_period: 300,
-        user: Some((1, 2)),
+        user: (1, 2),
+        network_mode: NetworkMode::None,
+        enable_seccomp: false,
+        drop_capabilities: false,
     };
 
     let cloned = config.clone();
     assert_eq!(config.memory_limit, cloned.memory_limit);
     assert_eq!(config.cpu_quota, cloned.cpu_quota);
     assert_eq!(config.user, cloned.user);
+    assert_eq!(config.network_mode, cloned.network_mode);
 }
 
 // ============================================================================

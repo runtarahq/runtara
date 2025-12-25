@@ -9,7 +9,7 @@ mod bundle;
 mod runner;
 
 pub use bundle::{
-    BundleConfig, BundleManager, OciSpec, bundle_exists_at_path, create_bundle_at_path,
-    generate_default_oci_config,
+    BundleConfig, BundleManager, NetworkMode, OciSpec, bundle_exists_at_path,
+    create_bundle_at_path, generate_default_oci_config,
 };
 pub use runner::{OciRunner, OciRunnerConfig};
