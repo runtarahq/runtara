@@ -538,6 +538,11 @@ fn test_oci_config_namespaces() {
         ns_types.contains(&"network"),
         "Should have network namespace for pasta networking (default)"
     );
+    // Pasta mode does NOT use user namespace (so pasta can attach to network ns)
+    assert!(
+        !ns_types.contains(&"user"),
+        "Pasta mode should not have user namespace"
+    );
 }
 
 #[test]

@@ -379,44 +379,75 @@ impl BundleManager {
             },
         ];
 
-        // Add user namespace for rootless container operation
-        // This is required when running crun as a non-root user
-        namespaces.push(OciNamespace {
-            ns_type: "user".to_string(),
-        });
-
-        // Add network namespace based on network mode
-        // - Host: no network namespace (uses host networking)
-        // - Pasta: network namespace (pasta will be set up externally)
-        // - None: network namespace with no connectivity
-        match self.config.network_mode {
-            NetworkMode::Host => {
-                // No network namespace = host networking
+        // Configure namespaces based on network mode
+        //
+        // For Pasta mode:
+        // - NO user namespace - pasta creates its own user namespace when wrapping crun
+        // - NO network namespace - pasta creates and configures the network namespace
+        // - If we included user/network namespace here, we'd get double-nesting errors
+        //
+        // For Host mode:
+        // - User namespace for rootless container operation
+        // - NO network namespace (uses host networking)
+        //
+        // For None mode:
+        // - User namespace for rootless container operation
+        // - Network namespace for full isolation
+        let (uid_mappings, gid_mappings) = match self.config.network_mode {
+            NetworkMode::Pasta => {
+                // Pasta wraps crun in its own user namespace, so don't create another one
+                // No network namespace either - pasta handles that
+                (None, None)
             }
-            NetworkMode::Pasta | NetworkMode::None => {
+            NetworkMode::Host => {
+                // Add user namespace for rootless container operation
+                namespaces.push(OciNamespace {
+                    ns_type: "user".to_string(),
+                });
+                // No network namespace = host networking
+
+                // Set up UID/GID mappings for user namespace
+                let host_uid = nix::unistd::getuid().as_raw();
+                let host_gid = nix::unistd::getgid().as_raw();
+                (
+                    Some(vec![OciIdMapping {
+                        container_id: 0,
+                        host_id: host_uid,
+                        size: 1,
+                    }]),
+                    Some(vec![OciIdMapping {
+                        container_id: 0,
+                        host_id: host_gid,
+                        size: 1,
+                    }]),
+                )
+            }
+            NetworkMode::None => {
+                // Full isolation with user namespace and network namespace
+                namespaces.push(OciNamespace {
+                    ns_type: "user".to_string(),
+                });
                 namespaces.push(OciNamespace {
                     ns_type: "network".to_string(),
                 });
+
+                // Set up UID/GID mappings for user namespace
+                let host_uid = nix::unistd::getuid().as_raw();
+                let host_gid = nix::unistd::getgid().as_raw();
+                (
+                    Some(vec![OciIdMapping {
+                        container_id: 0,
+                        host_id: host_uid,
+                        size: 1,
+                    }]),
+                    Some(vec![OciIdMapping {
+                        container_id: 0,
+                        host_id: host_gid,
+                        size: 1,
+                    }]),
+                )
             }
-        }
-
-        // Set up UID/GID mappings for user namespace
-        // Map container root (0) to current host user, size 1 for simple mapping
-        // Use nix crate for proper UID/GID retrieval
-        let host_uid = nix::unistd::getuid().as_raw();
-        let host_gid = nix::unistd::getgid().as_raw();
-
-        let uid_mappings = Some(vec![OciIdMapping {
-            container_id: 0,
-            host_id: host_uid,
-            size: 1,
-        }]);
-
-        let gid_mappings = Some(vec![OciIdMapping {
-            container_id: 0,
-            host_id: host_gid,
-            size: 1,
-        }]);
+        };
 
         // Build capabilities - minimal set for running workflows
         let capabilities = if self.config.drop_capabilities {

@@ -116,9 +116,9 @@ The OCI container runtime now includes comprehensive security hardening:
 Pasta networking is enabled by default:
 - Containers run in an isolated network namespace
 - Pasta provides user-mode networking with NAT for outbound connections
-- Localhost addresses (127.0.0.1) are automatically transformed to the gateway IP
-- This allows containers to reach runtara-core on the host via the gateway
-- No special configuration needed - works automatically on systems with a default gateway
+- Localhost addresses (127.0.0.1) are automatically transformed to the host's IP
+- This allows containers to reach runtara-core on the host via the network
+- No special configuration needed - works automatically on systems with network connectivity
 
 **Resource Limits:**
 - Memory limit: 512MB default

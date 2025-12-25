@@ -35,7 +35,7 @@ RUNTARA_COMPILE="${PROJECT_ROOT}/target/release/runtara-compile"
 RUNTARA_CTL="${PROJECT_ROOT}/target/release/runtara-ctl"
 
 # Environment defaults for local testing
-export RUNTARA_ENVIRONMENT_ADDR="${RUNTARA_ENVIRONMENT_ADDR:-127.0.0.1:7000}"
+export RUNTARA_ENVIRONMENT_ADDR="${RUNTARA_ENVIRONMENT_ADDR:-127.0.0.1:8002}"
 export RUNTARA_SKIP_CERT_VERIFICATION="${RUNTARA_SKIP_CERT_VERIFICATION:-true}"
 export DATA_DIR="${DATA_DIR:-.data}"
 

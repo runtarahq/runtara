@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
@@ -43,10 +44,13 @@ fn parse_network_mode(var: &str) -> NetworkMode {
     }
 }
 
-/// Get the default gateway IP address from the host.
-/// Used for pasta networking where containers need to connect via the gateway.
-fn get_gateway_ip() -> Option<String> {
-    // Parse `ip route` output to find default gateway
+/// Get the host's IP address on the default route interface.
+/// Note: With the new `pasta --config-net` approach, this is no longer needed
+/// for address transformation, but kept for tests and potential future use.
+#[allow(dead_code)]
+fn get_host_ip() -> Option<String> {
+    // Parse `ip route` output to find the source IP for the default route
+    // Format: "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.95 ..."
     let output = std::process::Command::new("ip")
         .args(["route", "show", "default"])
         .output()
@@ -57,29 +61,31 @@ fn get_gateway_ip() -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Format: "default via 192.168.1.1 dev eth0 ..."
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 && parts[0] == "default" && parts[1] == "via" {
-            return Some(parts[2].to_string());
+        // Look for "src" keyword and get the IP after it
+        for (i, part) in parts.iter().enumerate() {
+            if *part == "src" && i + 1 < parts.len() {
+                return Some(parts[i + 1].to_string());
+            }
         }
     }
     None
 }
 
-/// Transform an address for use inside a pasta network namespace.
-/// If the address points to localhost (127.0.0.1), replace it with the gateway
-/// address so the container can reach the host via pasta's NAT.
+/// Transform address for pasta networking
+///
+/// NOTE: With the current approach of `pasta --config-net -- crun run ...`,
+/// pasta handles localhost translation automatically. When you connect to
+/// 127.0.0.1 inside the container, pasta's network stack routes it to the
+/// host's 127.0.0.1. So we don't need to transform addresses anymore.
+///
+/// This function is kept for backward compatibility but returns the address unchanged.
+#[allow(dead_code)]
 fn transform_addr_for_pasta(addr: &str) -> String {
-    // Check if this is a localhost address
-    if addr.starts_with("127.0.0.1:") || addr.starts_with("localhost:") {
-        if let Some(gateway) = get_gateway_ip() {
-            // Extract the port from the original address
-            if let Some(port) = addr.split(':').last() {
-                return format!("{}:{}", gateway, port);
-            }
-        }
-    }
+    // With pasta --config-net, localhost addresses work correctly without transformation.
+    // Pasta creates a TAP interface that proxies connections from the container's
+    // localhost to the host's localhost automatically.
     addr.to_string()
 }
 
@@ -367,7 +373,7 @@ impl OciRunner {
     /// Run crun container and wait for exit
     ///
     /// Uses the shared image bundle but with a per-instance config.json file.
-    /// For Pasta network mode, uses create/start workflow to allow attaching pasta.
+    /// For Pasta network mode, pasta wraps crun to provide networking.
     async fn run_container(
         &self,
         bundle_path: &Path,
@@ -387,69 +393,23 @@ impl OciRunner {
             "Launching container"
         );
 
-        let mut pasta_pid: Option<u32> = None;
-
-        // For pasta mode: create container, attach pasta, then start
-        // For other modes: just run directly
+        // For pasta mode: pasta runs crun (pasta creates the namespace, crun runs inside it)
+        // For other modes: just run crun directly
         let (mut child, stderr_handle) = if use_pasta {
-            // Step 1: Create container (spawn and wait for "created" state)
-            // Note: crun create doesn't return until crun start is called,
-            // so we spawn it and poll for the container to be in "created" state
-            let mut create_cmd = Command::new("crun");
-            create_cmd.arg("create");
+            // Pasta wraps crun: `pasta -- crun run --bundle ... container_id`
+            // This way pasta creates and configures the network namespace,
+            // and crun runs inside that namespace.
+            let mut cmd = Command::new("pasta");
+            cmd.arg("--config-net"); // Configure the tap interface
+            cmd.arg("--");
+            cmd.arg("crun");
+            cmd.arg("run");
             if self.config.use_systemd_cgroup {
-                create_cmd.arg("--systemd-cgroup");
+                cmd.arg("--systemd-cgroup");
             }
-            create_cmd
-                .arg("--bundle")
-                .arg(bundle_path)
-                .arg("--config")
-                .arg(config_path)
-                .arg(&container_id)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped());
-
-            let _create_child = match create_cmd.spawn() {
-                Ok(child) => child,
-                Err(e) => return (Err(RunnerError::Io(e)), ContainerMetrics::default()),
-            };
-
-            // Wait for container to be in "created" state (poll with timeout)
-            let mut created = false;
-            for _ in 0..50 {
-                // 5 seconds max (50 * 100ms)
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if let Some(_pid) = self.get_container_pid(&container_id).await {
-                    created = true;
-                    break;
-                }
-            }
-
-            if !created {
-                error!(container_id = %container_id, "Container failed to reach created state");
-                let _ = self.delete_container(&container_id).await;
-                return (
-                    Err(RunnerError::StartFailed(
-                        "Container creation timed out".to_string(),
-                    )),
-                    ContainerMetrics::default(),
-                );
-            }
-
-            // Step 2: Get container PID and attach pasta
-            if let Some(pid) = self.get_container_pid(&container_id).await {
-                match self.start_pasta(pid, instance_id).await {
-                    Ok(p) => pasta_pid = p,
-                    Err(e) => {
-                        let _ = self.delete_container(&container_id).await;
-                        return (Err(e), ContainerMetrics::default());
-                    }
-                }
-            }
-
-            // Step 3: Start the container
-            let mut cmd = Command::new("crun");
-            cmd.arg("start").arg(&container_id);
+            cmd.arg("--bundle").arg(bundle_path);
+            cmd.arg("--config").arg(config_path);
+            cmd.arg(&container_id);
             cmd.stderr(std::process::Stdio::piped());
 
             match cmd.spawn() {
@@ -458,9 +418,34 @@ impl OciRunner {
                     (c, stderr)
                 }
                 Err(e) => {
-                    self.stop_pasta(pasta_pid).await;
-                    let _ = self.delete_container(&container_id).await;
-                    return (Err(RunnerError::Io(e)), ContainerMetrics::default());
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        // Pasta not found - fall back to running without network isolation
+                        warn!(
+                            instance_id = %instance_id,
+                            "pasta not found - falling back to host networking"
+                        );
+                        let mut cmd = Command::new("crun");
+                        cmd.arg("run");
+                        if self.config.use_systemd_cgroup {
+                            cmd.arg("--systemd-cgroup");
+                        }
+                        cmd.arg("--bundle").arg(bundle_path);
+                        cmd.arg("--config").arg(config_path);
+                        cmd.arg(&container_id);
+                        cmd.stderr(std::process::Stdio::piped());
+
+                        match cmd.spawn() {
+                            Ok(mut c) => {
+                                let stderr = c.stderr.take();
+                                (c, stderr)
+                            }
+                            Err(e) => {
+                                return (Err(RunnerError::Io(e)), ContainerMetrics::default());
+                            }
+                        }
+                    } else {
+                        return (Err(RunnerError::Io(e)), ContainerMetrics::default());
+                    }
                 }
             }
         } else {
@@ -498,8 +483,8 @@ impl OciRunner {
         // Collect metrics BEFORE deleting the container
         let metrics = self.collect_container_metrics(&container_id).await;
 
-        // Clean up pasta if used
-        self.stop_pasta(pasta_pid).await;
+        // Note: When using pasta, it wraps crun as a child process, so when crun exits,
+        // pasta also exits automatically. No separate cleanup needed.
 
         // Always try to clean up container
         let _ = self.delete_container(&container_id).await;
@@ -768,72 +753,6 @@ impl OciRunner {
         let state: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
         state.get("pid")?.as_u64().map(|p| p as u32)
     }
-
-    /// Start pasta for network namespace connectivity
-    ///
-    /// Pasta provides user-mode networking for containers with network namespaces.
-    /// It creates a TAP interface in the namespace and NATs outbound connections.
-    async fn start_pasta(&self, container_pid: u32, instance_id: &str) -> Result<Option<u32>> {
-        if !matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta) {
-            return Ok(None);
-        }
-
-        debug!(
-            instance_id = %instance_id,
-            container_pid = container_pid,
-            "Starting pasta for container network namespace"
-        );
-
-        // pasta attaches to an existing network namespace via /proc/{pid}/ns/net
-        // --foreground keeps it running (we'll track its PID)
-        // --no-map-gw disables default gateway mapping
-        // We use defaults which set up NAT for all outbound TCP/UDP
-        let mut cmd = Command::new("pasta");
-        cmd.arg("--netns")
-            .arg(format!("/proc/{}/ns/net", container_pid))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
-
-        let child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    warn!(
-                        instance_id = %instance_id,
-                        "pasta not found - falling back to no network connectivity in container"
-                    );
-                    return Ok(None);
-                }
-                return Err(RunnerError::Io(e));
-            }
-        };
-
-        let pasta_pid = child.id();
-
-        // Give pasta a moment to set up the namespace
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        info!(
-            instance_id = %instance_id,
-            container_pid = container_pid,
-            pasta_pid = ?pasta_pid,
-            "Started pasta for network namespace"
-        );
-
-        Ok(pasta_pid)
-    }
-
-    /// Stop pasta process
-    async fn stop_pasta(&self, pasta_pid: Option<u32>) {
-        if let Some(pid) = pasta_pid {
-            debug!(pasta_pid = pid, "Stopping pasta process");
-            // Send SIGTERM to pasta
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .output()
-                .await;
-        }
-    }
 }
 
 #[async_trait]
@@ -995,86 +914,110 @@ impl Runner for OciRunner {
 
         let use_pasta = matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta);
 
-        // For pasta mode: use create/start workflow
-        // For other modes: just run directly
+        // For pasta mode: pasta wraps crun (creates namespace, then crun runs inside)
+        // For other modes: just run crun directly
         if use_pasta {
-            // Step 1: Create container (spawn and wait for "created" state)
-            // Note: crun create doesn't return until crun start is called,
-            // so we spawn it and poll for the container to be in "created" state
-            let mut create_cmd = Command::new("crun");
-            create_cmd.arg("create");
+            // Pasta wraps crun: `pasta -- crun run --bundle ... container_id`
+            let mut cmd = Command::new("pasta");
+            cmd.arg("--config-net"); // Configure the tap interface
+            cmd.arg("--");
+            cmd.arg("crun");
+            cmd.arg("run");
             if self.config.use_systemd_cgroup {
-                create_cmd.arg("--systemd-cgroup");
+                cmd.arg("--systemd-cgroup");
             }
-            create_cmd
-                .arg("--bundle")
+            cmd.arg("--bundle")
                 .arg(&options.bundle_path)
                 .arg("--config")
                 .arg(&config_path)
                 .arg(&container_id)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped());
+                .stderr(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null());
 
-            let _create_child = match create_cmd.spawn() {
+            let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    return Err(RunnerError::Io(e));
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        // Pasta not found - fall back to running without network isolation
+                        warn!(
+                            instance_id = %options.instance_id,
+                            "pasta not found - falling back to host networking"
+                        );
+                        // Fall through to the else branch logic
+                        let mut cmd = Command::new("crun");
+                        cmd.arg("run");
+                        if self.config.use_systemd_cgroup {
+                            cmd.arg("--systemd-cgroup");
+                        }
+                        cmd.arg("--bundle")
+                            .arg(&options.bundle_path)
+                            .arg("--config")
+                            .arg(&config_path)
+                            .arg(&container_id)
+                            .stderr(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::null());
+
+                        cmd.spawn()?
+                    } else {
+                        return Err(RunnerError::Io(e));
+                    }
                 }
             };
 
-            // Wait for container to be in "created" state (poll with timeout)
-            let mut created = false;
-            for _ in 0..50 {
-                // 5 seconds max (50 * 100ms)
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if let Some(_pid) = self.get_container_pid(&container_id).await {
-                    created = true;
-                    break;
+            // Check for immediate startup failures
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    let scenario_error = self
+                        .load_error(&options.tenant_id, &options.instance_id)
+                        .await;
+
+                    let error_msg = if let Some(err) = scenario_error {
+                        err
+                    } else {
+                        let mut stderr_msg = String::new();
+                        if let Some(mut stderr) = child.stderr.take() {
+                            let _ = stderr.read_to_string(&mut stderr_msg).await;
+                        }
+                        if stderr_msg.is_empty() {
+                            format!("pasta/crun exited with status: {}", status)
+                        } else {
+                            format!("pasta/crun failed: {}", stderr_msg.trim())
+                        }
+                    };
+
+                    error!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        error = %error_msg,
+                        "Container failed to start"
+                    );
+                    return Err(RunnerError::StartFailed(error_msg));
+                }
+                Ok(Some(_status)) => {
+                    info!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        "Container completed immediately"
+                    );
+                }
+                Ok(None) => {
+                    info!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        bundle_path = %options.bundle_path.display(),
+                        network_mode = "pasta",
+                        "Launched container (detached) with pasta networking"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        container_id = %container_id,
+                        instance_id = %options.instance_id,
+                        error = %e,
+                        "Could not check pasta/crun status"
+                    );
                 }
             }
-
-            if !created {
-                error!(container_id = %container_id, "Container failed to reach created state");
-                let _ = self.delete_container(&container_id).await;
-                return Err(RunnerError::StartFailed(
-                    "Container creation timed out".to_string(),
-                ));
-            }
-
-            // Step 2: Get container PID and attach pasta
-            if let Some(pid) = self.get_container_pid(&container_id).await {
-                if let Err(e) = self.start_pasta(pid, &options.instance_id).await {
-                    let _ = self.delete_container(&container_id).await;
-                    return Err(e);
-                }
-                // Note: pasta runs as a daemon, it will stay alive while the container runs
-                // and exit when the namespace is destroyed
-            }
-
-            // Step 3: Start the container (detached - just fire and check)
-            let start_output = Command::new("crun")
-                .arg("start")
-                .arg(&container_id)
-                .output()
-                .await?;
-
-            if !start_output.status.success() {
-                let stderr = String::from_utf8_lossy(&start_output.stderr);
-                error!(container_id = %container_id, stderr = %stderr, "Failed to start container");
-                let _ = self.delete_container(&container_id).await;
-                return Err(RunnerError::StartFailed(format!(
-                    "crun start failed: {}",
-                    stderr.trim()
-                )));
-            }
-
-            info!(
-                container_id = %container_id,
-                instance_id = %options.instance_id,
-                bundle_path = %options.bundle_path.display(),
-                network_mode = "pasta",
-                "Launched container (detached) with pasta networking"
-            );
         } else {
             // Spawn crun with shared bundle + per-instance config
             let mut cmd = Command::new("crun");
@@ -1195,44 +1138,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_transform_addr_for_pasta_localhost() {
-        // When there's a gateway, localhost should be transformed
-        // Note: This test depends on having a gateway configured on the system
-        let result = transform_addr_for_pasta("127.0.0.1:8001");
-        // Either it's transformed to the gateway, or unchanged if no gateway
-        if let Some(gateway) = get_gateway_ip() {
-            assert_eq!(result, format!("{}:8001", gateway));
-        } else {
-            assert_eq!(result, "127.0.0.1:8001");
-        }
+    fn test_transform_addr_for_pasta_no_transformation() {
+        // With pasta --config-net, addresses are passed through unchanged
+        // because pasta handles localhost translation automatically
+        assert_eq!(transform_addr_for_pasta("127.0.0.1:8001"), "127.0.0.1:8001");
+        assert_eq!(transform_addr_for_pasta("localhost:8001"), "localhost:8001");
+        assert_eq!(
+            transform_addr_for_pasta("192.168.1.100:8001"),
+            "192.168.1.100:8001"
+        );
+        assert_eq!(transform_addr_for_pasta("10.0.0.1:9000"), "10.0.0.1:9000");
     }
 
     #[test]
-    fn test_transform_addr_for_pasta_localhost_text() {
-        let result = transform_addr_for_pasta("localhost:8001");
-        if let Some(gateway) = get_gateway_ip() {
-            assert_eq!(result, format!("{}:8001", gateway));
-        } else {
-            assert_eq!(result, "localhost:8001");
-        }
-    }
-
-    #[test]
-    fn test_transform_addr_for_pasta_non_localhost() {
-        // Non-localhost addresses should not be transformed
-        let result = transform_addr_for_pasta("192.168.1.100:8001");
-        assert_eq!(result, "192.168.1.100:8001");
-
-        let result = transform_addr_for_pasta("10.0.0.1:9000");
-        assert_eq!(result, "10.0.0.1:9000");
-    }
-
-    #[test]
-    fn test_transform_addr_preserves_port() {
-        // Verify that port is preserved in transformation
-        if let Some(gateway) = get_gateway_ip() {
-            let result = transform_addr_for_pasta("127.0.0.1:12345");
-            assert_eq!(result, format!("{}:12345", gateway));
+    fn test_get_host_ip() {
+        // This function should return a valid IP if network is configured
+        // It's optional and may return None on some systems
+        if let Some(host_ip) = get_host_ip() {
+            // Verify it looks like an IP address (basic check)
+            assert!(host_ip.contains('.'));
+            assert!(!host_ip.contains("127.0.0.1")); // Should not be localhost
         }
     }
 }
