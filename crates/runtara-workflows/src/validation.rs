@@ -138,6 +138,41 @@ pub enum ValidationError {
         version: String,
         reason: String,
     },
+
+    // === Execution Order Errors ===
+    /// A step references another step that hasn't executed yet.
+    StepNotYetExecuted {
+        step_id: String,
+        referenced_step_id: String,
+    },
+
+    // === Variable Errors ===
+    /// A variable reference points to a non-existent variable.
+    UnknownVariable {
+        step_id: String,
+        variable_name: String,
+        available_variables: Vec<String>,
+    },
+
+    // === Type Errors ===
+    /// An immediate value has the wrong type for the expected field.
+    TypeMismatch {
+        step_id: String,
+        field_name: String,
+        expected_type: String,
+        actual_type: String,
+    },
+    /// An enum value is not in the allowed set.
+    InvalidEnumValue {
+        step_id: String,
+        field_name: String,
+        value: String,
+        allowed_values: Vec<String>,
+    },
+
+    // === Naming Errors ===
+    /// Multiple steps have the same name.
+    DuplicateStepName { name: String, step_ids: Vec<String> },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -322,6 +357,82 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E050] Step '{}': child scenario '{}' has invalid version '{}': {}",
                     step_id, child_scenario_id, version, reason
+                )
+            }
+
+            // Execution Order Errors
+            ValidationError::StepNotYetExecuted {
+                step_id,
+                referenced_step_id,
+            } => {
+                write!(
+                    f,
+                    "[E012] Step '{}' references step '{}' which has not executed yet. \
+                     Steps can only reference outputs from steps that execute before them.",
+                    step_id, referenced_step_id
+                )
+            }
+
+            // Variable Errors
+            ValidationError::UnknownVariable {
+                step_id,
+                variable_name,
+                available_variables,
+            } => {
+                let suggestion = find_similar_name(variable_name, available_variables);
+                let suggestion_text = suggestion
+                    .map(|s| format!(". Did you mean '{}'?", s))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "[E013] Step '{}' references unknown variable '{}'{}\n       Available variables: {}",
+                    step_id,
+                    variable_name,
+                    suggestion_text,
+                    if available_variables.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available_variables.join(", ")
+                    }
+                )
+            }
+
+            // Type Errors
+            ValidationError::TypeMismatch {
+                step_id,
+                field_name,
+                expected_type,
+                actual_type,
+            } => {
+                write!(
+                    f,
+                    "[E023] Step '{}': field '{}' expects type '{}' but got '{}'",
+                    step_id, field_name, expected_type, actual_type
+                )
+            }
+            ValidationError::InvalidEnumValue {
+                step_id,
+                field_name,
+                value,
+                allowed_values,
+            } => {
+                write!(
+                    f,
+                    "[E024] Step '{}': field '{}' has invalid value '{}'. Allowed values: {}",
+                    step_id,
+                    field_name,
+                    value,
+                    allowed_values.join(", ")
+                )
+            }
+
+            // Naming Errors
+            ValidationError::DuplicateStepName { name, step_ids } => {
+                write!(
+                    f,
+                    "[E060] Multiple steps have the same name '{}': {}",
+                    name,
+                    step_ids.join(", ")
                 )
             }
         }
@@ -522,6 +633,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 2: Reference validation
     validate_references(graph, &mut result);
 
+    // Phase 2.5: Execution order validation
+    validate_execution_order(graph, &mut result);
+
     // Phase 3: Agent/capability validation
     validate_agents(graph, &mut result);
 
@@ -536,6 +650,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
     // Phase 7: Child scenario validation
     validate_child_scenarios(graph, &mut result);
+
+    // Phase 8: Step name validation
+    validate_step_names(graph, &mut result);
 
     result
 }
@@ -655,6 +772,7 @@ fn compute_reachable_steps(graph: &ExecutionGraph) -> HashSet<String> {
 
 fn validate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
     let step_ids: HashSet<String> = graph.steps.keys().cloned().collect();
+    let variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
 
     for (step_id, step) in &graph.steps {
         let mappings = collect_step_mappings(step);
@@ -662,7 +780,13 @@ fn validate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
         for mapping in mappings {
             for (_, value) in mapping {
                 if let MappingValue::Reference(ref_value) = value {
-                    validate_reference(step_id, &ref_value.value, &step_ids, result);
+                    validate_reference(
+                        step_id,
+                        &ref_value.value,
+                        &step_ids,
+                        &variable_names,
+                        result,
+                    );
                 }
             }
         }
@@ -686,6 +810,7 @@ fn validate_reference(
     step_id: &str,
     ref_path: &str,
     valid_step_ids: &HashSet<String>,
+    valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
     // Check for empty path segments
@@ -715,6 +840,17 @@ fn validate_reference(
                 reference_path: ref_path.to_string(),
                 referenced_step_id: referenced_step_id.clone(),
                 available_steps: valid_step_ids.iter().cloned().collect(),
+            });
+        }
+    }
+
+    // Check for variable references
+    if let Some(variable_name) = extract_variable_name_from_reference(ref_path) {
+        if !valid_variable_names.contains(&variable_name) {
+            result.errors.push(ValidationError::UnknownVariable {
+                step_id: step_id.to_string(),
+                variable_name: variable_name.clone(),
+                available_variables: valid_variable_names.iter().cloned().collect(),
             });
         }
     }
@@ -756,6 +892,115 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
     }
 
     mappings
+}
+
+// ============================================================================
+// Phase 2.5: Execution Order Validation
+// ============================================================================
+
+/// Validate that step references only refer to steps that have already executed.
+fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    // Build execution order from entry_point and execution_plan
+    let order = compute_execution_order(graph);
+
+    // If order is empty (shouldn't happen if graph validation passed), skip
+    if order.is_empty() {
+        return;
+    }
+
+    // Create position map: step_id -> position in execution order
+    let position_map: HashMap<String, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i))
+        .collect();
+
+    // Check each step's references
+    for (step_id, step) in &graph.steps {
+        let current_position = match position_map.get(step_id) {
+            Some(pos) => *pos,
+            None => continue, // Step not in order (unreachable, already caught)
+        };
+
+        let mappings = collect_step_mappings(step);
+
+        for mapping in mappings {
+            for (_, value) in mapping {
+                if let MappingValue::Reference(ref_value) = value {
+                    if let Some(referenced_step_id) =
+                        extract_step_id_from_reference(&ref_value.value)
+                    {
+                        // Skip self-references - they're handled separately as warnings
+                        if referenced_step_id == *step_id {
+                            continue;
+                        }
+
+                        if let Some(ref_position) = position_map.get(&referenced_step_id) {
+                            if *ref_position >= current_position {
+                                result.errors.push(ValidationError::StepNotYetExecuted {
+                                    step_id: step_id.clone(),
+                                    referenced_step_id: referenced_step_id.clone(),
+                                });
+                            }
+                        }
+                        // If referenced step not in position_map, it doesn't exist
+                        // (already caught by reference validation)
+                    }
+                }
+            }
+        }
+    }
+
+    // Recursively validate subgraphs
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_execution_order(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_execution_order(&while_step.subgraph, result);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Compute execution order from entry_point following execution_plan edges.
+/// Returns steps in the order they would execute.
+fn compute_execution_order(graph: &ExecutionGraph) -> Vec<String> {
+    let mut order = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+
+    // Build adjacency list from execution plan
+    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+    for edge in &graph.execution_plan {
+        adjacency
+            .entry(edge.from_step.clone())
+            .or_default()
+            .push(edge.to_step.clone());
+    }
+
+    // BFS from entry point to establish order
+    queue.push_back(graph.entry_point.clone());
+
+    while let Some(step_id) = queue.pop_front() {
+        if visited.contains(&step_id) {
+            continue;
+        }
+        visited.insert(step_id.clone());
+        order.push(step_id.clone());
+
+        if let Some(neighbors) = adjacency.get(&step_id) {
+            for neighbor in neighbors {
+                if !visited.contains(neighbor) {
+                    queue.push_back(neighbor.clone());
+                }
+            }
+        }
+    }
+
+    order
 }
 
 // ============================================================================
@@ -851,6 +1096,43 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                             field_name: key.clone(),
                             available_fields: available_fields.clone(),
                         });
+                    }
+                }
+
+                // Validate immediate value types and enum values
+                if let Some(mapping) = &agent_step.input_mapping {
+                    // Build field lookup map
+                    let field_map: HashMap<&str, &runtara_dsl::agent_meta::CapabilityField> =
+                        inputs.iter().map(|f| (f.name.as_str(), f)).collect();
+
+                    for (field_name, value) in mapping {
+                        if let MappingValue::Immediate(imm) = value {
+                            if let Some(field_meta) = field_map.get(field_name.as_str()) {
+                                // Check type compatibility
+                                if let Some(error) = check_type_compatibility(
+                                    step_id,
+                                    field_name,
+                                    &field_meta.type_name,
+                                    &imm.value,
+                                ) {
+                                    result.errors.push(error);
+                                }
+
+                                // Check enum values
+                                if let Some(enum_values) = &field_meta.enum_values {
+                                    if let Some(value_str) = imm.value.as_str() {
+                                        if !enum_values.contains(&value_str.to_string()) {
+                                            result.errors.push(ValidationError::InvalidEnumValue {
+                                                step_id: step_id.clone(),
+                                                field_name: field_name.clone(),
+                                                value: value_str.to_string(),
+                                                allowed_values: enum_values.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1250,8 +1532,132 @@ fn validate_child_scenarios(graph: &ExecutionGraph, result: &mut ValidationResul
 }
 
 // ============================================================================
+// Phase 8: Step Name Validation
+// ============================================================================
+
+/// Validate that step names are unique across the workflow.
+fn validate_step_names(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let mut name_to_step_ids: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Collect all step names recursively
+    collect_step_names(graph, &mut name_to_step_ids);
+
+    // Report duplicates as errors
+    for (name, step_ids) in name_to_step_ids {
+        if step_ids.len() > 1 {
+            result
+                .errors
+                .push(ValidationError::DuplicateStepName { name, step_ids });
+        }
+    }
+}
+
+/// Recursively collect step names into the map.
+/// Skips StartScenario subgraphs as they have their own namespace.
+fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<String, Vec<String>>) {
+    for (step_id, step) in &graph.steps {
+        // Get the step name (if any)
+        let name = match step {
+            Step::Agent(s) => s.name.as_ref(),
+            Step::Finish(s) => s.name.as_ref(),
+            Step::Conditional(s) => s.name.as_ref(),
+            Step::Split(s) => s.name.as_ref(),
+            Step::Switch(s) => s.name.as_ref(),
+            Step::StartScenario(s) => s.name.as_ref(),
+            Step::While(s) => s.name.as_ref(),
+            Step::Log(s) => s.name.as_ref(),
+            Step::Connection(s) => s.name.as_ref(),
+        };
+
+        if let Some(name) = name {
+            name_to_step_ids
+                .entry(name.clone())
+                .or_default()
+                .push(step_id.clone());
+        }
+
+        // Recursively collect from subgraphs
+        // NOTE: StartScenario steps do NOT have subgraphs in runtara_dsl,
+        // they reference child scenarios by ID. So we only recurse into Split/While.
+        match step {
+            Step::Split(split_step) => {
+                collect_step_names(&split_step.subgraph, name_to_step_ids);
+            }
+            Step::While(while_step) => {
+                collect_step_names(&while_step.subgraph, name_to_step_ids);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Check if an immediate value's type is compatible with the expected field type.
+/// Returns Some(ValidationError::TypeMismatch) if incompatible, None if compatible.
+fn check_type_compatibility(
+    step_id: &str,
+    field_name: &str,
+    expected_type: &str,
+    actual_value: &serde_json::Value,
+) -> Option<ValidationError> {
+    // Normalize the expected type to lowercase for matching
+    let expected_lower = expected_type.to_lowercase();
+
+    let is_compatible = match expected_lower.as_str() {
+        "string" => actual_value.is_string(),
+        "integer" | "int" | "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => {
+            actual_value.is_i64() || actual_value.is_u64()
+        }
+        "number" | "float" | "f32" | "f64" => actual_value.is_number(),
+        "boolean" | "bool" => actual_value.is_boolean(),
+        "array" => actual_value.is_array(),
+        "object" => actual_value.is_object(),
+        // For complex types like Vec<T>, HashMap<K,V>, Option<T>, Value, etc. - allow any value
+        _ if expected_lower.starts_with("vec<")
+            || expected_lower.starts_with("hashmap<")
+            || expected_lower.starts_with("option<")
+            || expected_lower == "value"
+            || expected_lower == "json" =>
+        {
+            true
+        }
+        // Unknown types - skip validation (allow any value)
+        _ => true,
+    };
+
+    if is_compatible {
+        None
+    } else {
+        let actual_type = get_json_type_name(actual_value);
+        Some(ValidationError::TypeMismatch {
+            step_id: step_id.to_string(),
+            field_name: field_name.to_string(),
+            expected_type: expected_type.to_string(),
+            actual_type,
+        })
+    }
+}
+
+/// Get a human-readable name for a JSON value's type.
+fn get_json_type_name(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(_) => "boolean".to_string(),
+        serde_json::Value::Number(n) => {
+            if n.is_i64() || n.is_u64() {
+                "integer".to_string()
+            } else {
+                "number".to_string()
+            }
+        }
+        serde_json::Value::String(_) => "string".to_string(),
+        serde_json::Value::Array(_) => "array".to_string(),
+        serde_json::Value::Object(_) => "object".to_string(),
+    }
+}
 
 /// Extract step ID from a reference path like "steps.my_step.outputs.foo"
 /// or "steps['my-step'].outputs.foo" (bracket notation for IDs with special chars)
@@ -1276,6 +1682,21 @@ fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
             return Some(rest[..dot_pos].to_string());
         } else {
             // Reference is just "steps.step_id" (unlikely but possible)
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+/// Extract variable name from a reference path like "variables.my_var" or "variables.counter.value"
+fn extract_variable_name_from_reference(ref_path: &str) -> Option<String> {
+    if ref_path.starts_with("variables.") {
+        let rest = &ref_path[10..]; // Skip "variables."
+
+        if let Some(dot_pos) = rest.find('.') {
+            return Some(rest[..dot_pos].to_string());
+        } else {
+            // Reference is just "variables.var_name"
             return Some(rest.to_string());
         }
     }
@@ -3319,6 +3740,676 @@ mod tests {
         assert!(
             !security_errors,
             "Connection in subgraph to HTTP should be secure"
+        );
+    }
+
+    // ============================================================================
+    // New Validation Tests - Execution Order, Variables, Types, Enums, Duplicate Names
+    // ============================================================================
+
+    // --- Execution Order Validation Tests ---
+
+    #[test]
+    fn test_forward_reference_error() {
+        // step1 references step2, but step1 executes before step2
+        let mut steps = HashMap::new();
+
+        // step1 references step2's output, but executes first
+        let mut mapping = HashMap::new();
+        mapping.insert("data".to_string(), ref_value("steps.step2.outputs.result"));
+        steps.insert(
+            "step1".to_string(),
+            create_agent_step("step1", "transform", Some(mapping)),
+        );
+
+        steps.insert(
+            "step2".to_string(),
+            create_agent_step("step2", "transform", None),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        // step1 -> step2 -> finish (step1 executes before step2)
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "step2".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step2".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.errors.iter().any(|e| {
+                matches!(e, ValidationError::StepNotYetExecuted { step_id, referenced_step_id }
+                if step_id == "step1" && referenced_step_id == "step2")
+            }),
+            "Expected StepNotYetExecuted error for forward reference"
+        );
+    }
+
+    #[test]
+    fn test_valid_backward_reference() {
+        // step2 references step1, and step1 executes before step2 - should be valid
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "step1".to_string(),
+            create_agent_step("step1", "transform", None),
+        );
+
+        // step2 references step1's output - valid because step1 executes first
+        let mut mapping = HashMap::new();
+        mapping.insert("data".to_string(), ref_value("steps.step1.outputs.result"));
+        steps.insert(
+            "step2".to_string(),
+            create_agent_step("step2", "transform", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        // step1 -> step2 -> finish (step1 executes before step2)
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "step2".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step2".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        // Should not have StepNotYetExecuted error
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::StepNotYetExecuted { .. })),
+            "Expected no StepNotYetExecuted error for valid backward reference"
+        );
+    }
+
+    // --- Variable Existence Validation Tests ---
+
+    #[test]
+    fn test_unknown_variable_error() {
+        let mut steps = HashMap::new();
+
+        // Reference a variable that doesn't exist
+        let mut mapping = HashMap::new();
+        mapping.insert("data".to_string(), ref_value("variables.nonexistent"));
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.errors.iter().any(|e| {
+                matches!(e, ValidationError::UnknownVariable { variable_name, .. }
+                if variable_name == "nonexistent")
+            }),
+            "Expected UnknownVariable error"
+        );
+    }
+
+    #[test]
+    fn test_valid_variable_reference() {
+        use runtara_dsl::{Variable, VariableType};
+
+        let mut steps = HashMap::new();
+
+        // Reference a variable that exists
+        let mut mapping = HashMap::new();
+        mapping.insert("data".to_string(), ref_value("variables.myVar"));
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+        // Add the variable to the graph
+        graph.variables.insert(
+            "myVar".to_string(),
+            Variable {
+                var_type: VariableType::String,
+                value: serde_json::json!("some value"),
+                description: None,
+            },
+        );
+
+        let result = validate_workflow(&graph);
+        // Should not have UnknownVariable error
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnknownVariable { .. })),
+            "Expected no UnknownVariable error for valid variable reference"
+        );
+    }
+
+    #[test]
+    fn test_variable_nested_path_valid() {
+        use runtara_dsl::{Variable, VariableType};
+
+        // Test that variables.myVar.nested.path correctly extracts "myVar"
+        let mut steps = HashMap::new();
+
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "data".to_string(),
+            ref_value("variables.config.database.host"),
+        );
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "agent".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+        // Add the variable to the graph
+        graph.variables.insert(
+            "config".to_string(),
+            Variable {
+                var_type: VariableType::Object,
+                value: serde_json::json!({"database": {"host": "localhost"}}),
+                description: None,
+            },
+        );
+
+        let result = validate_workflow(&graph);
+        // Should not have UnknownVariable error
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::UnknownVariable { .. })),
+            "Expected no UnknownVariable error for nested variable path"
+        );
+    }
+
+    // --- Duplicate Step Name Tests ---
+
+    #[test]
+    fn test_duplicate_step_names_error() {
+        let mut steps = HashMap::new();
+
+        // Two steps with the same name
+        steps.insert(
+            "step1".to_string(),
+            Step::Agent(AgentStep {
+                id: "step1".to_string(),
+                name: Some("Fetch Data".to_string()),
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert(
+            "step2".to_string(),
+            Step::Agent(AgentStep {
+                id: "step2".to_string(),
+                name: Some("Fetch Data".to_string()), // Duplicate name!
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "step2".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step2".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.errors.iter().any(|e| {
+                matches!(e, ValidationError::DuplicateStepName { name, step_ids }
+                if name == "Fetch Data" && step_ids.len() == 2)
+            }),
+            "Expected DuplicateStepName error"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_names_in_subgraph() {
+        use runtara_dsl::SplitStep;
+
+        let mut steps = HashMap::new();
+
+        // Main graph step with a name
+        steps.insert(
+            "main_step".to_string(),
+            Step::Agent(AgentStep {
+                id: "main_step".to_string(),
+                name: Some("Process Item".to_string()),
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+
+        // Create subgraph with a step that has the same name
+        let mut subgraph_steps = HashMap::new();
+        subgraph_steps.insert(
+            "sub_step".to_string(),
+            Step::Agent(AgentStep {
+                id: "sub_step".to_string(),
+                name: Some("Process Item".to_string()), // Duplicate name!
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        subgraph_steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "sub_step".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "sub_step".to_string(),
+                to_step: "sub_finish".to_string(),
+                label: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Create split step containing the subgraph
+        steps.insert(
+            "split".to_string(),
+            Step::Split(SplitStep {
+                id: "split".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: None,
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "main_step");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "main_step".to_string(),
+                to_step: "split".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "split".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.errors.iter().any(|e| {
+                matches!(e, ValidationError::DuplicateStepName { name, step_ids }
+                if name == "Process Item" && step_ids.len() == 2)
+            }),
+            "Expected DuplicateStepName error across main graph and subgraph"
+        );
+    }
+
+    #[test]
+    fn test_unique_step_names_no_error() {
+        let mut steps = HashMap::new();
+
+        steps.insert(
+            "step1".to_string(),
+            Step::Agent(AgentStep {
+                id: "step1".to_string(),
+                name: Some("First Step".to_string()),
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert(
+            "step2".to_string(),
+            Step::Agent(AgentStep {
+                id: "step2".to_string(),
+                name: Some("Second Step".to_string()), // Different name
+                agent_id: "transform".to_string(),
+                capability_id: "map".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "step2".to_string(),
+                label: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step2".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DuplicateStepName { .. })),
+            "Expected no DuplicateStepName error for unique names"
+        );
+    }
+
+    // --- Error Display Tests for New Errors ---
+
+    #[test]
+    fn test_error_display_step_not_yet_executed() {
+        let error = ValidationError::StepNotYetExecuted {
+            step_id: "step1".to_string(),
+            referenced_step_id: "step2".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E012]"));
+        assert!(display.contains("step1"));
+        assert!(display.contains("step2"));
+        assert!(display.contains("has not executed yet"));
+    }
+
+    #[test]
+    fn test_error_display_unknown_variable() {
+        let error = ValidationError::UnknownVariable {
+            step_id: "step1".to_string(),
+            variable_name: "missing".to_string(),
+            available_variables: vec!["foo".to_string(), "bar".to_string()],
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E013]"));
+        assert!(display.contains("step1"));
+        assert!(display.contains("missing"));
+        assert!(display.contains("foo, bar"));
+    }
+
+    #[test]
+    fn test_error_display_type_mismatch() {
+        let error = ValidationError::TypeMismatch {
+            step_id: "step1".to_string(),
+            field_name: "count".to_string(),
+            expected_type: "integer".to_string(),
+            actual_type: "string".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E023]"));
+        assert!(display.contains("step1"));
+        assert!(display.contains("count"));
+        assert!(display.contains("integer"));
+        assert!(display.contains("string"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_enum_value() {
+        let error = ValidationError::InvalidEnumValue {
+            step_id: "step1".to_string(),
+            field_name: "method".to_string(),
+            value: "INVALID".to_string(),
+            allowed_values: vec!["GET".to_string(), "POST".to_string()],
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E024]"));
+        assert!(display.contains("step1"));
+        assert!(display.contains("method"));
+        assert!(display.contains("INVALID"));
+        assert!(display.contains("GET, POST"));
+    }
+
+    #[test]
+    fn test_error_display_duplicate_step_name() {
+        let error = ValidationError::DuplicateStepName {
+            name: "Fetch Data".to_string(),
+            step_ids: vec!["step1".to_string(), "step2".to_string()],
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("[E060]"));
+        assert!(display.contains("Fetch Data"));
+        assert!(display.contains("step1"));
+        assert!(display.contains("step2"));
+    }
+
+    // --- Helper Function Tests for New Functions ---
+
+    #[test]
+    fn test_extract_variable_name_simple() {
+        assert_eq!(
+            extract_variable_name_from_reference("variables.myVar"),
+            Some("myVar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_variable_name_nested() {
+        assert_eq!(
+            extract_variable_name_from_reference("variables.config.database"),
+            Some("config".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_variable_name_bracket_notation() {
+        // Note: Bracket notation is not yet supported for variable extraction.
+        // This test documents the current behavior. Supporting bracket notation
+        // could be added in the future if needed.
+        assert_eq!(
+            extract_variable_name_from_reference("variables['my-var']"),
+            None // Bracket notation not supported
+        );
+        assert_eq!(
+            extract_variable_name_from_reference("variables[\"my-var\"]"),
+            None // Bracket notation not supported
+        );
+    }
+
+    #[test]
+    fn test_extract_variable_name_not_variable() {
+        assert_eq!(
+            extract_variable_name_from_reference("steps.step1.outputs"),
+            None
+        );
+        assert_eq!(extract_variable_name_from_reference("data.value"), None);
+    }
+
+    #[test]
+    fn test_get_json_type_name() {
+        assert_eq!(get_json_type_name(&serde_json::json!("hello")), "string");
+        // Whole numbers are reported as "integer"
+        assert_eq!(get_json_type_name(&serde_json::json!(42)), "integer");
+        // Floating point numbers are reported as "number"
+        assert_eq!(get_json_type_name(&serde_json::json!(42.5)), "number");
+        assert_eq!(get_json_type_name(&serde_json::json!(true)), "boolean");
+        assert_eq!(get_json_type_name(&serde_json::json!([1, 2, 3])), "array");
+        assert_eq!(get_json_type_name(&serde_json::json!({"a": 1})), "object");
+        assert_eq!(get_json_type_name(&serde_json::json!(null)), "null");
+    }
+
+    #[test]
+    fn test_check_type_compatibility_string() {
+        // None means compatible
+        assert!(
+            check_type_compatibility("step", "field", "string", &serde_json::json!("hello"))
+                .is_none()
+        );
+        // Some(error) means incompatible
+        assert!(
+            check_type_compatibility("step", "field", "string", &serde_json::json!(42)).is_some()
+        );
+    }
+
+    #[test]
+    fn test_check_type_compatibility_integer() {
+        assert!(
+            check_type_compatibility("step", "field", "integer", &serde_json::json!(42)).is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "integer", &serde_json::json!(-10)).is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "integer", &serde_json::json!(42.5))
+                .is_some()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "integer", &serde_json::json!("42"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_check_type_compatibility_number() {
+        assert!(
+            check_type_compatibility("step", "field", "number", &serde_json::json!(42)).is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "number", &serde_json::json!(42.5)).is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "number", &serde_json::json!("42")).is_some()
+        );
+    }
+
+    #[test]
+    fn test_check_type_compatibility_boolean() {
+        assert!(
+            check_type_compatibility("step", "field", "boolean", &serde_json::json!(true))
+                .is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "boolean", &serde_json::json!(false))
+                .is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "boolean", &serde_json::json!("true"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_check_type_compatibility_array() {
+        assert!(
+            check_type_compatibility("step", "field", "array", &serde_json::json!([1, 2, 3]))
+                .is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "array", &serde_json::json!([])).is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "array", &serde_json::json!({"a": 1}))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_check_type_compatibility_object() {
+        assert!(
+            check_type_compatibility("step", "field", "object", &serde_json::json!({"a": 1}))
+                .is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "object", &serde_json::json!({})).is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "object", &serde_json::json!([1, 2]))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_check_type_compatibility_unknown_type_passes() {
+        // Unknown types should pass (return None) - e.g., Vec<String>, HashMap, custom types
+        assert!(
+            check_type_compatibility(
+                "step",
+                "field",
+                "Vec<String>",
+                &serde_json::json!("anything")
+            )
+            .is_none()
+        );
+        assert!(
+            check_type_compatibility("step", "field", "CustomType", &serde_json::json!(42))
+                .is_none()
         );
     }
 }
