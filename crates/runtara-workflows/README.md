@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-workflows/badge.svg)](https://docs.rs/runtara-workflows)
 [![License](https://img.shields.io/crates/l/runtara-workflows.svg)](LICENSE)
 
-Workflow compilation library for [Runtara](https://runtara.dev). Compiles JSON DSL scenarios into optimized native Rust binaries.
+Workflow compilation library for [Runtara](https://runtara.com). Compiles JSON DSL scenarios into optimized native Rust binaries.
 
 ## Overview
 

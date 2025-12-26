@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/crates/l/runtara-core.svg)](LICENSE)
 
-Durable execution engine for [Runtara](https://runtara.dev). Manages checkpoints, signals, and instance events with persistence to PostgreSQL or SQLite.
+Durable execution engine for [Runtara](https://runtara.com). Manages checkpoints, signals, and instance events with persistence to PostgreSQL or SQLite.
 
 ## Overview
 

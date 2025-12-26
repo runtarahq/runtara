@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-dsl/badge.svg)](https://docs.rs/runtara-dsl)
 [![License](https://img.shields.io/crates/l/runtara-dsl.svg)](LICENSE)
 
-Domain-specific language types and metadata definitions for [Runtara](https://runtara.dev) workflows and agents.
+Domain-specific language types and metadata definitions for [Runtara](https://runtara.com) workflows and agents.
 
 ## Overview
 

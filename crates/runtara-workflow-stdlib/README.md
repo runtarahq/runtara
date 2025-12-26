@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-workflow-stdlib/badge.svg)](https://docs.rs/runtara-workflow-stdlib)
 [![License](https://img.shields.io/crates/l/runtara-workflow-stdlib.svg)](LICENSE)
 
-Standard library for [Runtara](https://runtara.dev) compiled workflow binaries. Combines the SDK runtime with built-in agents for complete workflow execution.
+Standard library for [Runtara](https://runtara.com) compiled workflow binaries. Combines the SDK runtime with built-in agents for complete workflow execution.
 
 ## Overview
 

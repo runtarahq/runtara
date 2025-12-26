@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-agent-macro/badge.svg)](https://docs.rs/runtara-agent-macro)
 [![License](https://img.shields.io/crates/l/runtara-agent-macro.svg)](LICENSE)
 
-Procedural macros for defining custom agents in [Runtara](https://runtara.dev) workflows. Use `#[agent]` and `#[capability]` to create reusable workflow components.
+Procedural macros for defining custom agents in [Runtara](https://runtara.com) workflows. Use `#[agent]` and `#[capability]` to create reusable workflow components.
 
 ## Overview
 

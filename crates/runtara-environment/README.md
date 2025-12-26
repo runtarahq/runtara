@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/crates/l/runtara-environment.svg)](LICENSE)
 
-Instance lifecycle management for [Runtara](https://runtara.dev). Handles image registration, OCI container execution, and wake scheduling for durable workflows.
+Instance lifecycle management for [Runtara](https://runtara.com). Handles image registration, OCI container execution, and wake scheduling for durable workflows.
 
 ## Overview
 

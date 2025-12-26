@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-protocol/badge.svg)](https://docs.rs/runtara-protocol)
 [![License](https://img.shields.io/crates/l/runtara-protocol.svg)](LICENSE)
 
-Wire protocol layer for the [Runtara](https://runtara.dev) durable execution platform. Provides QUIC transport and Protobuf message definitions for communication between workflow instances and the execution engine.
+Wire protocol layer for the [Runtara](https://runtara.com) durable execution platform. Provides QUIC transport and Protobuf message definitions for communication between workflow instances and the execution engine.
 
 ## Overview
 

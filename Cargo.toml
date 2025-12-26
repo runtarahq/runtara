@@ -28,7 +28,7 @@ edition = "2024"
 version = "1.0.24"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtara/runtara"
-homepage = "https://runtara.dev"
+homepage = "https://runtara.com"
 keywords = ["durable", "workflow", "checkpoint", "execution"]
 categories = ["asynchronous", "development-tools"]
 

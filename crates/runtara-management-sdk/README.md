@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-management-sdk/badge.svg)](https://docs.rs/runtara-management-sdk)
 [![License](https://img.shields.io/crates/l/runtara-management-sdk.svg)](LICENSE)
 
-SDK for managing [Runtara](https://runtara.dev) workflow instances. Start, stop, monitor, and control workflow executions from your application.
+SDK for managing [Runtara](https://runtara.com) workflow instances. Start, stop, monitor, and control workflow executions from your application.
 
 ## Overview
 

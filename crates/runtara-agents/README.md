@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-agents/badge.svg)](https://docs.rs/runtara-agents)
 [![License](https://img.shields.io/crates/l/runtara-agents.svg)](LICENSE)
 
-Built-in agent implementations for [Runtara](https://runtara.dev) workflows. Provides ready-to-use integrations for HTTP, SFTP, CSV, XML, and data transformation.
+Built-in agent implementations for [Runtara](https://runtara.com) workflows. Provides ready-to-use integrations for HTTP, SFTP, CSV, XML, and data transformation.
 
 ## Overview
 

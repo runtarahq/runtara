@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/runtara-sdk/badge.svg)](https://docs.rs/runtara-sdk)
 [![License](https://img.shields.io/crates/l/runtara-sdk.svg)](LICENSE)
 
-High-level SDK for building durable workflows with [Runtara](https://runtara.dev). Provides checkpointing, signal handling, and crash recovery for long-running processes.
+High-level SDK for building durable workflows with [Runtara](https://runtara.com). Provides checkpointing, signal handling, and crash recovery for long-running processes.
 
 ## Overview
 
