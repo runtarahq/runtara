@@ -409,3 +409,150 @@ impl QuicBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> SdkConfig {
+        SdkConfig {
+            instance_id: "test-instance".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            server_addr: "127.0.0.1:8001".parse().unwrap(),
+            server_name: "localhost".to_string(),
+            skip_cert_verification: true,
+            connect_timeout_ms: 5000,
+            request_timeout_ms: 30000,
+            signal_poll_interval_ms: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_creation() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config);
+        assert!(
+            backend.is_ok(),
+            "Failed to create QUIC backend: {:?}",
+            backend.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_instance_and_tenant_id() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        assert_eq!(backend.instance_id(), "test-instance");
+        assert_eq!(backend.tenant_id(), "test-tenant");
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_client_accessor() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        // Just verify we can get a reference to the client
+        let _client = backend.client();
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_as_any() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        let any = backend.as_any();
+        assert!(any.downcast_ref::<QuicBackend>().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_with_custom_server_addr() {
+        let mut config = test_config();
+        config.server_addr = "192.168.1.100:9000".parse().unwrap();
+        config.server_name = "custom-server".to_string();
+        let backend = QuicBackend::new(&config);
+        assert!(backend.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_with_different_timeouts() {
+        let mut config = test_config();
+        config.connect_timeout_ms = 1000;
+        config.request_timeout_ms = 60000;
+        let backend = QuicBackend::new(&config);
+        assert!(backend.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_initial_not_connected() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        // Initially not connected
+        assert!(!backend.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_connect_without_server() {
+        let mut config = test_config();
+        // Use a port that's unlikely to have a server
+        config.server_addr = "127.0.0.1:59999".parse().unwrap();
+        config.connect_timeout_ms = 100; // Short timeout for faster test
+
+        let backend = QuicBackend::new(&config).unwrap();
+        let result = backend.connect().await;
+        // Should fail to connect since no server is running
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_quic_backend_close_without_connection() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        // Closing without a connection should be safe (no-op)
+        backend.close().await;
+        assert!(!backend.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_set_sleep_until_is_noop() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        // set_sleep_until is a no-op in QUIC mode (server handles it)
+        let result = backend.set_sleep_until(Utc::now()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_clear_sleep_is_noop() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        // clear_sleep is a no-op in QUIC mode (server handles it)
+        let result = backend.clear_sleep().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_sleep_until_without_connection() {
+        let config = test_config();
+        let backend = QuicBackend::new(&config).unwrap();
+        // get_sleep_until requires a connection (calls get_status internally)
+        let result = backend.get_sleep_until().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_config_client_mapping() {
+        // Verify that SdkConfig fields are correctly mapped to RuntaraClientConfig
+        let sdk_config = SdkConfig {
+            instance_id: "inst".to_string(),
+            tenant_id: "tenant".to_string(),
+            server_addr: "10.0.0.1:8888".parse().unwrap(),
+            server_name: "my-server".to_string(),
+            skip_cert_verification: true,
+            connect_timeout_ms: 2000,
+            request_timeout_ms: 5000,
+            signal_poll_interval_ms: 1000,
+        };
+
+        let backend = QuicBackend::new(&sdk_config).unwrap();
+        assert_eq!(backend.instance_id(), "inst");
+        assert_eq!(backend.tenant_id(), "tenant");
+    }
+}

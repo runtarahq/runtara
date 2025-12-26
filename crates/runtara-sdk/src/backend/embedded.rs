@@ -701,6 +701,24 @@ mod tests {
         ) -> CoreResult<Vec<runtara_core::persistence::InstanceRecord>> {
             Ok(vec![])
         }
+
+        async fn list_events(
+            &self,
+            _instance_id: &str,
+            _filter: &runtara_core::persistence::ListEventsFilter,
+            _limit: i64,
+            _offset: i64,
+        ) -> CoreResult<Vec<runtara_core::persistence::EventRecord>> {
+            Ok(vec![])
+        }
+
+        async fn count_events(
+            &self,
+            _instance_id: &str,
+            _filter: &runtara_core::persistence::ListEventsFilter,
+        ) -> CoreResult<i64> {
+            Ok(0)
+        }
     }
 
     #[tokio::test]

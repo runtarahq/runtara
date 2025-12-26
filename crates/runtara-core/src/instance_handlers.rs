@@ -717,6 +717,369 @@ pub fn map_signal_type(signal_type: SignalType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::{
+        CheckpointRecord, CustomSignalRecord, InstanceRecord, ListEventsFilter, SignalRecord,
+    };
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Mock persistence for handler unit tests.
+    struct MockPersistence {
+        instances: Mutex<HashMap<String, InstanceRecord>>,
+        checkpoints: Mutex<HashMap<(String, String), CheckpointRecord>>,
+        signals: Mutex<HashMap<String, SignalRecord>>,
+        events: Mutex<Vec<EventRecord>>,
+        custom_signals: Mutex<HashMap<(String, String), CustomSignalRecord>>,
+        fail_register: Mutex<bool>,
+        fail_status_update: Mutex<bool>,
+    }
+
+    impl MockPersistence {
+        fn new() -> Self {
+            Self {
+                instances: Mutex::new(HashMap::new()),
+                checkpoints: Mutex::new(HashMap::new()),
+                signals: Mutex::new(HashMap::new()),
+                events: Mutex::new(Vec::new()),
+                custom_signals: Mutex::new(HashMap::new()),
+                fail_register: Mutex::new(false),
+                fail_status_update: Mutex::new(false),
+            }
+        }
+
+        fn with_instance(self, instance: InstanceRecord) -> Self {
+            self.instances
+                .lock()
+                .unwrap()
+                .insert(instance.instance_id.clone(), instance);
+            self
+        }
+
+        fn with_checkpoint(self, checkpoint: CheckpointRecord) -> Self {
+            self.checkpoints.lock().unwrap().insert(
+                (checkpoint.instance_id.clone(), checkpoint.checkpoint_id.clone()),
+                checkpoint,
+            );
+            self
+        }
+
+        fn with_signal(self, signal: SignalRecord) -> Self {
+            self.signals
+                .lock()
+                .unwrap()
+                .insert(signal.instance_id.clone(), signal);
+            self
+        }
+
+        fn with_custom_signal(self, signal: CustomSignalRecord) -> Self {
+            self.custom_signals
+                .lock()
+                .unwrap()
+                .insert((signal.instance_id.clone(), signal.checkpoint_id.clone()), signal);
+            self
+        }
+
+        fn set_fail_register(&self) {
+            *self.fail_register.lock().unwrap() = true;
+        }
+
+        fn set_fail_status_update(&self) {
+            *self.fail_status_update.lock().unwrap() = true;
+        }
+
+        fn get_events(&self) -> Vec<EventRecord> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    fn make_instance(instance_id: &str, tenant_id: &str, status: &str) -> InstanceRecord {
+        InstanceRecord {
+            instance_id: instance_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            definition_version: 1,
+            status: status.to_string(),
+            checkpoint_id: None,
+            attempt: 1,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            output: None,
+            error: None,
+            sleep_until: None,
+        }
+    }
+
+    fn make_checkpoint(instance_id: &str, checkpoint_id: &str, state: &[u8]) -> CheckpointRecord {
+        CheckpointRecord {
+            id: 1,
+            instance_id: instance_id.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+            state: state.to_vec(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn make_signal(instance_id: &str, signal_type: &str) -> SignalRecord {
+        SignalRecord {
+            instance_id: instance_id.to_string(),
+            signal_type: signal_type.to_string(),
+            payload: None,
+            created_at: Utc::now(),
+            acknowledged_at: None,
+        }
+    }
+
+    #[async_trait]
+    impl Persistence for MockPersistence {
+        async fn register_instance(
+            &self,
+            instance_id: &str,
+            tenant_id: &str,
+        ) -> std::result::Result<(), CoreError> {
+            if *self.fail_register.lock().unwrap() {
+                return Err(CoreError::DatabaseError {
+                    operation: "register_instance".to_string(),
+                    details: "Mock register failure".to_string(),
+                });
+            }
+            let instance = make_instance(instance_id, tenant_id, "pending");
+            self.instances
+                .lock()
+                .unwrap()
+                .insert(instance_id.to_string(), instance);
+            Ok(())
+        }
+
+        async fn get_instance(
+            &self,
+            instance_id: &str,
+        ) -> std::result::Result<Option<InstanceRecord>, CoreError> {
+            Ok(self.instances.lock().unwrap().get(instance_id).cloned())
+        }
+
+        async fn update_instance_status(
+            &self,
+            instance_id: &str,
+            status: &str,
+            started_at: Option<DateTime<Utc>>,
+        ) -> std::result::Result<(), CoreError> {
+            if *self.fail_status_update.lock().unwrap() {
+                return Err(CoreError::DatabaseError {
+                    operation: "update_instance_status".to_string(),
+                    details: "Mock status update failure".to_string(),
+                });
+            }
+            if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+                inst.status = status.to_string();
+                inst.started_at = started_at;
+            }
+            Ok(())
+        }
+
+        async fn update_instance_checkpoint(
+            &self,
+            instance_id: &str,
+            checkpoint_id: &str,
+        ) -> std::result::Result<(), CoreError> {
+            if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+                inst.checkpoint_id = Some(checkpoint_id.to_string());
+            }
+            Ok(())
+        }
+
+        async fn complete_instance(
+            &self,
+            instance_id: &str,
+            output: Option<&[u8]>,
+            error: Option<&str>,
+        ) -> std::result::Result<(), CoreError> {
+            if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+                inst.status = if error.is_some() {
+                    "failed".to_string()
+                } else {
+                    "completed".to_string()
+                };
+                inst.output = output.map(|o| o.to_vec());
+                inst.error = error.map(|e| e.to_string());
+                inst.finished_at = Some(Utc::now());
+            }
+            Ok(())
+        }
+
+        async fn save_checkpoint(
+            &self,
+            instance_id: &str,
+            checkpoint_id: &str,
+            state: &[u8],
+        ) -> std::result::Result<(), CoreError> {
+            let cp = make_checkpoint(instance_id, checkpoint_id, state);
+            self.checkpoints
+                .lock()
+                .unwrap()
+                .insert((instance_id.to_string(), checkpoint_id.to_string()), cp);
+            Ok(())
+        }
+
+        async fn load_checkpoint(
+            &self,
+            instance_id: &str,
+            checkpoint_id: &str,
+        ) -> std::result::Result<Option<CheckpointRecord>, CoreError> {
+            Ok(self
+                .checkpoints
+                .lock()
+                .unwrap()
+                .get(&(instance_id.to_string(), checkpoint_id.to_string()))
+                .cloned())
+        }
+
+        async fn list_checkpoints(
+            &self,
+            _instance_id: &str,
+            _checkpoint_id: Option<&str>,
+            _limit: i64,
+            _offset: i64,
+            _created_after: Option<DateTime<Utc>>,
+            _created_before: Option<DateTime<Utc>>,
+        ) -> std::result::Result<Vec<CheckpointRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn count_checkpoints(
+            &self,
+            _instance_id: &str,
+            _checkpoint_id: Option<&str>,
+            _created_after: Option<DateTime<Utc>>,
+            _created_before: Option<DateTime<Utc>>,
+        ) -> std::result::Result<i64, CoreError> {
+            Ok(0)
+        }
+
+        async fn insert_event(&self, event: &EventRecord) -> std::result::Result<(), CoreError> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+
+        async fn insert_signal(
+            &self,
+            instance_id: &str,
+            signal_type: &str,
+            _payload: &[u8],
+        ) -> std::result::Result<(), CoreError> {
+            let signal = make_signal(instance_id, signal_type);
+            self.signals
+                .lock()
+                .unwrap()
+                .insert(instance_id.to_string(), signal);
+            Ok(())
+        }
+
+        async fn get_pending_signal(
+            &self,
+            instance_id: &str,
+        ) -> std::result::Result<Option<SignalRecord>, CoreError> {
+            Ok(self.signals.lock().unwrap().get(instance_id).cloned())
+        }
+
+        async fn acknowledge_signal(
+            &self,
+            instance_id: &str,
+        ) -> std::result::Result<(), CoreError> {
+            self.signals.lock().unwrap().remove(instance_id);
+            Ok(())
+        }
+
+        async fn insert_custom_signal(
+            &self,
+            _instance_id: &str,
+            _checkpoint_id: &str,
+            _payload: &[u8],
+        ) -> std::result::Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn take_pending_custom_signal(
+            &self,
+            instance_id: &str,
+            checkpoint_id: &str,
+        ) -> std::result::Result<Option<CustomSignalRecord>, CoreError> {
+            Ok(self
+                .custom_signals
+                .lock()
+                .unwrap()
+                .remove(&(instance_id.to_string(), checkpoint_id.to_string())))
+        }
+
+        async fn save_retry_attempt(
+            &self,
+            _instance_id: &str,
+            _checkpoint_id: &str,
+            _attempt: i32,
+            _error_message: Option<&str>,
+        ) -> std::result::Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn list_instances(
+            &self,
+            _tenant_id: Option<&str>,
+            _status: Option<&str>,
+            _limit: i64,
+            _offset: i64,
+        ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn health_check_db(&self) -> std::result::Result<bool, CoreError> {
+            Ok(true)
+        }
+
+        async fn count_active_instances(&self) -> std::result::Result<i64, CoreError> {
+            Ok(0)
+        }
+
+        async fn set_instance_sleep(
+            &self,
+            _instance_id: &str,
+            _sleep_until: DateTime<Utc>,
+        ) -> std::result::Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn clear_instance_sleep(
+            &self,
+            _instance_id: &str,
+        ) -> std::result::Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn get_sleeping_instances_due(
+            &self,
+            _limit: i64,
+        ) -> std::result::Result<Vec<InstanceRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_events(
+            &self,
+            _instance_id: &str,
+            _filter: &ListEventsFilter,
+            _limit: i64,
+            _offset: i64,
+        ) -> std::result::Result<Vec<EventRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn count_events(
+            &self,
+            _instance_id: &str,
+            _filter: &ListEventsFilter,
+        ) -> std::result::Result<i64, CoreError> {
+            Ok(0)
+        }
+    }
 
     #[test]
     fn test_event_type_mapping() {
@@ -753,5 +1116,492 @@ mod tests {
         assert_eq!(map_signal_type(SignalType::SignalCancel), "cancel");
         assert_eq!(map_signal_type(SignalType::SignalPause), "pause");
         assert_eq!(map_signal_type(SignalType::SignalResume), "resume");
+    }
+
+    #[test]
+    fn test_instance_handler_state_new() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+        // Just verify it compiles and persistence is accessible
+        let _ = &state.persistence;
+    }
+
+    // ========================================================================
+    // Register Instance Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_register_empty_instance_id() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.contains("instance_id is required"));
+    }
+
+    #[tokio::test]
+    async fn test_register_empty_tenant_id() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.contains("tenant_id is required"));
+    }
+
+    #[tokio::test]
+    async fn test_register_self_registration() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-new".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(result.success);
+        assert!(result.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_register_existing_instance() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "pending")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_register_with_valid_checkpoint() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "pending"))
+                .with_checkpoint(make_checkpoint("inst-1", "cp-1", b"state")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: Some("cp-1".to_string()),
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn test_register_with_invalid_checkpoint() {
+        let persistence =
+            Arc::new(MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "pending")));
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: Some("nonexistent".to_string()),
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_register_creates_started_event() {
+        let mock = MockPersistence::new();
+        let persistence = Arc::new(mock);
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_register_instance(&state, request).await.unwrap();
+        assert!(result.success);
+
+        // Check that started event was created
+        let events = persistence.get_events();
+        assert!(!events.is_empty());
+        assert_eq!(events[0].event_type, "started");
+        assert_eq!(events[0].instance_id, "inst-1");
+    }
+
+    // ========================================================================
+    // Checkpoint Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_checkpoint_instance_not_found() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = CheckpointRequest {
+            instance_id: "nonexistent".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: b"test state".to_vec(),
+        };
+
+        let result = handle_checkpoint(&state, request).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_instance_not_running() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "completed")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = CheckpointRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: b"test state".to_vec(),
+        };
+
+        let result = handle_checkpoint(&state, request).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_new_saves_state() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = CheckpointRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: b"test state".to_vec(),
+        };
+
+        let result = handle_checkpoint(&state, request).await.unwrap();
+        assert!(!result.found); // New checkpoint, not found
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_existing_returns_state() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_checkpoint(make_checkpoint("inst-1", "cp-1", b"existing state")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = CheckpointRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: b"new state".to_vec(), // This should be ignored
+        };
+
+        let result = handle_checkpoint(&state, request).await.unwrap();
+        assert!(result.found);
+        assert_eq!(result.state, b"existing state");
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_returns_pending_signal() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "cancel")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = CheckpointRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: b"test state".to_vec(),
+        };
+
+        let result = handle_checkpoint(&state, request).await.unwrap();
+        assert!(result.pending_signal.is_some());
+        let signal = result.pending_signal.unwrap();
+        assert_eq!(signal.signal_type, SignalType::SignalCancel as i32);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_returns_custom_signal() {
+        let custom_signal = CustomSignalRecord {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            payload: Some(b"custom payload".to_vec()),
+            created_at: Utc::now(),
+        };
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_custom_signal(custom_signal),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = CheckpointRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: b"test state".to_vec(),
+        };
+
+        let result = handle_checkpoint(&state, request).await.unwrap();
+        assert!(result.custom_signal.is_some());
+        let cs = result.custom_signal.unwrap();
+        assert_eq!(cs.checkpoint_id, "cp-1");
+        assert_eq!(cs.payload, b"custom payload");
+    }
+
+    // ========================================================================
+    // Get Instance Status Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_status_not_found() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = GetInstanceStatusRequest {
+            instance_id: "nonexistent".to_string(),
+        };
+
+        let result = handle_get_instance_status(&state, request).await.unwrap();
+        // Instance not found returns StatusUnknown
+        assert_eq!(result.status, InstanceStatus::StatusUnknown as i32);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_found() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = GetInstanceStatusRequest {
+            instance_id: "inst-1".to_string(),
+        };
+
+        let result = handle_get_instance_status(&state, request).await.unwrap();
+        assert_eq!(result.status, InstanceStatus::StatusRunning as i32);
+    }
+
+    // ========================================================================
+    // Poll Signals Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_poll_signals_no_signal() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = PollSignalsRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_poll_signals(&state, request).await.unwrap();
+        assert!(result.signal.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_poll_signals_with_pending_signal() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "pause")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+
+        let request = PollSignalsRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let result = handle_poll_signals(&state, request).await.unwrap();
+        assert!(result.signal.is_some());
+        let signal = result.signal.unwrap();
+        assert_eq!(signal.signal_type, SignalType::SignalPause as i32);
+    }
+
+    // ========================================================================
+    // Signal Ack Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_signal_ack_success() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "cancel")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let request = SignalAck {
+            instance_id: "inst-1".to_string(),
+            signal_type: SignalType::SignalCancel as i32,
+            acknowledged: true,
+        };
+
+        // handle_signal_ack returns Result<()>
+        handle_signal_ack(&state, request).await.unwrap();
+
+        // Verify signal was acknowledged (removed from pending)
+        assert!(persistence
+            .get_pending_signal("inst-1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    // ========================================================================
+    // Instance Event Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_handle_event_heartbeat() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let event = InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventHeartbeat as i32,
+            checkpoint_id: None,
+            payload: Vec::new(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: None,
+        };
+
+        let result = handle_instance_event(&state, event).await.unwrap();
+        assert!(result.success);
+
+        // Verify event was inserted
+        let events = persistence.get_events();
+        assert!(!events.is_empty());
+        assert_eq!(events[0].event_type, "heartbeat");
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_completed() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let event = InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventCompleted as i32,
+            checkpoint_id: None,
+            payload: b"result".to_vec(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: None,
+        };
+
+        let result = handle_instance_event(&state, event).await.unwrap();
+        assert!(result.success);
+
+        // Verify instance was completed
+        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        assert_eq!(inst.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_failed() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let event = InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventFailed as i32,
+            checkpoint_id: None,
+            payload: b"error message".to_vec(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: None,
+        };
+
+        let result = handle_instance_event(&state, event).await.unwrap();
+        assert!(result.success);
+
+        // Verify instance was failed
+        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        assert_eq!(inst.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_suspended() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let event = InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventSuspended as i32,
+            checkpoint_id: None,
+            payload: Vec::new(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: None,
+        };
+
+        let result = handle_instance_event(&state, event).await.unwrap();
+        assert!(result.success);
+
+        // Verify instance was suspended
+        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        assert_eq!(inst.status, "suspended");
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_custom() {
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let event = InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventCustom as i32,
+            checkpoint_id: None,
+            payload: b"custom data".to_vec(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: Some("my_custom_type".to_string()),
+        };
+
+        let result = handle_instance_event(&state, event).await.unwrap();
+        assert!(result.success);
+
+        // Verify event was inserted with subtype
+        let events = persistence.get_events();
+        assert!(!events.is_empty());
+        assert_eq!(events[0].event_type, "custom");
+        assert_eq!(events[0].subtype.as_deref(), Some("my_custom_type"));
     }
 }

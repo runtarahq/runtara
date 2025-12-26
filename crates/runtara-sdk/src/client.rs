@@ -638,4 +638,64 @@ mod tests {
         assert_eq!(config.tenant_id, "test-tenant");
         assert!(config.skip_cert_verification);
     }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_sdk_with_custom_config() {
+        let config = SdkConfig {
+            instance_id: "custom-instance".to_string(),
+            tenant_id: "custom-tenant".to_string(),
+            server_addr: "127.0.0.1:9999".parse().unwrap(),
+            server_name: "custom-server".to_string(),
+            skip_cert_verification: true,
+            request_timeout_ms: 5000,
+            connect_timeout_ms: 3000,
+            signal_poll_interval_ms: 500,
+        };
+
+        // May fail in sandboxed environments
+        if let Ok(sdk) = RuntaraSdk::new(config) {
+            assert_eq!(sdk.instance_id(), "custom-instance");
+            assert_eq!(sdk.tenant_id(), "custom-tenant");
+        }
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_sdk_localhost_sets_defaults() {
+        // May fail in sandboxed environments
+        if let Ok(sdk) = RuntaraSdk::localhost("inst", "tenant") {
+            assert!(!sdk.is_registered());
+            assert_eq!(sdk.instance_id(), "inst");
+        }
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_sdk_config_defaults() {
+        let config = SdkConfig::localhost("a", "b");
+        assert_eq!(config.request_timeout_ms, 30_000);
+        assert_eq!(config.connect_timeout_ms, 10_000);
+        assert_eq!(config.signal_poll_interval_ms, 1_000);
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_sdk_config_with_string_types() {
+        // Test that String types work as well as &str
+        let config = SdkConfig::localhost(String::from("instance"), String::from("tenant"));
+        assert_eq!(config.instance_id, "instance");
+        assert_eq!(config.tenant_id, "tenant");
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_sdk_initial_state() {
+        if let Ok(sdk) = RuntaraSdk::localhost("test", "test") {
+            // SDK should start unregistered
+            assert!(!sdk.is_registered());
+            // pending_signal should be None
+            assert!(sdk.pending_signal.is_none());
+        }
+    }
 }

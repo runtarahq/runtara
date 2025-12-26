@@ -14,7 +14,7 @@ use syn::{
 };
 
 /// Parsed configuration from `#[durable(...)]` attributes.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct DurableAttr {
     /// Maximum number of retry attempts (default: 3)
     max_retries: Option<u32>,
@@ -602,4 +602,241 @@ fn extract_clonable_params(
     }
 
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn test_durable_attr_parsing_empty() {
+        let attr: DurableAttr = syn::parse2(quote! {}).unwrap();
+        assert!(attr.max_retries.is_none());
+        assert!(attr.strategy.is_none());
+        assert!(attr.delay.is_none());
+    }
+
+    #[test]
+    fn test_durable_attr_parsing_max_retries() {
+        let attr: DurableAttr = syn::parse2(quote! { max_retries = 5 }).unwrap();
+        assert_eq!(attr.max_retries, Some(5));
+        assert!(attr.strategy.is_none());
+        assert!(attr.delay.is_none());
+    }
+
+    #[test]
+    fn test_durable_attr_parsing_delay() {
+        let attr: DurableAttr = syn::parse2(quote! { delay = 2000 }).unwrap();
+        assert!(attr.max_retries.is_none());
+        assert!(attr.strategy.is_none());
+        assert_eq!(attr.delay, Some(2000));
+    }
+
+    #[test]
+    fn test_durable_attr_parsing_strategy() {
+        let attr: DurableAttr = syn::parse2(quote! { strategy = ExponentialBackoff }).unwrap();
+        assert!(attr.max_retries.is_none());
+        assert_eq!(attr.strategy, Some("ExponentialBackoff".to_string()));
+        assert!(attr.delay.is_none());
+    }
+
+    #[test]
+    fn test_durable_attr_parsing_all_options() {
+        let attr: DurableAttr =
+            syn::parse2(quote! { max_retries = 3, strategy = ExponentialBackoff, delay = 1000 })
+                .unwrap();
+        assert_eq!(attr.max_retries, Some(3));
+        assert_eq!(attr.strategy, Some("ExponentialBackoff".to_string()));
+        assert_eq!(attr.delay, Some(1000));
+    }
+
+    #[test]
+    fn test_durable_attr_parsing_unknown_attribute_fails() {
+        let result: Result<DurableAttr, _> = syn::parse2(quote! { unknown = 5 });
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown attribute"));
+    }
+
+    #[test]
+    fn test_durable_attr_parsing_invalid_strategy_fails() {
+        let result: Result<DurableAttr, _> = syn::parse2(quote! { strategy = LinearBackoff });
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Only ExponentialBackoff"));
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_valid() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str) -> Result<String, Error> {
+                Ok("hello".to_string())
+            }
+        };
+        let result = extract_result_ok_type(&fn_item.sig.output);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_no_return() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str) {
+            }
+        };
+        let result = extract_result_ok_type(&fn_item.sig.output);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_not_result() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str) -> Option<String> {
+                Some("hello".to_string())
+            }
+        };
+        let result = extract_result_ok_type(&fn_item.sig.output);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_first_arg_ident_valid() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str, value: i32) -> Result<(), ()> {
+                Ok(())
+            }
+        };
+        let result = extract_first_arg_ident(&fn_item.sig.inputs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().to_string(), "key");
+    }
+
+    #[test]
+    fn test_extract_first_arg_ident_no_args() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo() -> Result<(), ()> {
+                Ok(())
+            }
+        };
+        let result = extract_first_arg_ident(&fn_item.sig.inputs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_first_arg_ident_with_self() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(&self, key: &str) -> Result<(), ()> {
+                Ok(())
+            }
+        };
+        let result = extract_first_arg_ident(&fn_item.sig.inputs);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().to_string(), "key");
+    }
+
+    #[test]
+    fn test_is_reference_type_reference() {
+        let ty: Type = parse_quote! { &str };
+        assert!(is_reference_type(&ty));
+    }
+
+    #[test]
+    fn test_is_reference_type_not_reference() {
+        let ty: Type = parse_quote! { String };
+        assert!(!is_reference_type(&ty));
+    }
+
+    #[test]
+    fn test_extract_clonable_params_reference_skipped() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str, value: &[u8]) -> Result<(), ()> {
+                Ok(())
+            }
+        };
+        let params = extract_clonable_params(&fn_item.sig.inputs);
+        // Both args are references, so nothing should be cloned
+        // (first arg is also skipped as idempotency key)
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_extract_clonable_params_owned_included() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str, value: String, count: i32) -> Result<(), ()> {
+                Ok(())
+            }
+        };
+        let params = extract_clonable_params(&fn_item.sig.inputs);
+        // First arg (key) is skipped, value and count should be included
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].0.to_string(), "value");
+        assert_eq!(params[1].0.to_string(), "count");
+    }
+
+    #[test]
+    fn test_generate_durable_wrapper_not_async_fails() {
+        let fn_item: ItemFn = parse_quote! {
+            fn foo(key: &str) -> Result<(), ()> {
+                Ok(())
+            }
+        };
+        let config = DurableAttr::default();
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("async"));
+    }
+
+    #[test]
+    fn test_generate_durable_wrapper_valid() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str) -> Result<String, String> {
+                Ok("hello".to_string())
+            }
+        };
+        let config = DurableAttr::default();
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_durable_wrapper_zero_retries() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str) -> Result<String, String> {
+                Ok("hello".to_string())
+            }
+        };
+        let config = DurableAttr {
+            max_retries: Some(0),
+            strategy: None,
+            delay: None,
+        };
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        // Should generate the no-retry path
+        let tokens = result.unwrap().to_string();
+        // Check that retry-specific code is NOT present
+        assert!(!tokens.contains("__max_retries"));
+    }
+
+    #[test]
+    fn test_generate_durable_wrapper_with_retries() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn foo(key: &str) -> Result<String, String> {
+                Ok("hello".to_string())
+            }
+        };
+        let config = DurableAttr {
+            max_retries: Some(3),
+            strategy: None,
+            delay: Some(1000),
+        };
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        // Should generate the retry path
+        let tokens = result.unwrap().to_string();
+        // Check that retry-specific code IS present
+        assert!(tokens.contains("__max_retries"));
+        assert!(tokens.contains("__base_delay_ms"));
+    }
 }

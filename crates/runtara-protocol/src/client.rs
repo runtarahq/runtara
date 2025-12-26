@@ -337,6 +337,51 @@ mod tests {
         assert_eq!(config.server_name, "localhost");
     }
 
+    #[test]
+    fn test_default_config_all_fields() {
+        let config = RuntaraClientConfig::default();
+        assert_eq!(config.server_addr, "127.0.0.1:8001".parse().unwrap());
+        assert_eq!(config.server_name, "localhost");
+        assert!(config.enable_0rtt);
+        assert!(!config.dangerous_skip_cert_verification);
+        assert_eq!(config.keep_alive_interval_ms, 10_000);
+        assert_eq!(config.idle_timeout_ms, 30_000);
+        assert_eq!(config.connect_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = RuntaraClientConfig {
+            server_addr: "192.168.1.1:9000".parse().unwrap(),
+            server_name: "custom".to_string(),
+            enable_0rtt: false,
+            dangerous_skip_cert_verification: true,
+            keep_alive_interval_ms: 5000,
+            idle_timeout_ms: 60000,
+            connect_timeout_ms: 3000,
+        };
+        let cloned = config.clone();
+        assert_eq!(config.server_addr, cloned.server_addr);
+        assert_eq!(config.server_name, cloned.server_name);
+        assert_eq!(config.enable_0rtt, cloned.enable_0rtt);
+        assert_eq!(
+            config.dangerous_skip_cert_verification,
+            cloned.dangerous_skip_cert_verification
+        );
+        assert_eq!(config.keep_alive_interval_ms, cloned.keep_alive_interval_ms);
+        assert_eq!(config.idle_timeout_ms, cloned.idle_timeout_ms);
+        assert_eq!(config.connect_timeout_ms, cloned.connect_timeout_ms);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = RuntaraClientConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("RuntaraClientConfig"));
+        assert!(debug_str.contains("server_addr"));
+        assert!(debug_str.contains("server_name"));
+    }
+
     #[tokio::test]
     async fn test_client_creation() {
         let mut config = RuntaraClientConfig::default();
@@ -347,5 +392,168 @@ mod tests {
             "Failed to create client: {:?}",
             client.err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_client_localhost() {
+        let client = RuntaraClient::localhost();
+        assert!(
+            client.is_ok(),
+            "Failed to create localhost client: {:?}",
+            client.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_client_with_custom_config() {
+        let config = RuntaraClientConfig {
+            server_addr: "10.0.0.1:8888".parse().unwrap(),
+            server_name: "my-server".to_string(),
+            enable_0rtt: false,
+            dangerous_skip_cert_verification: true,
+            keep_alive_interval_ms: 0, // Disable keep-alive
+            idle_timeout_ms: 120000,
+            connect_timeout_ms: 5000,
+        };
+        let client = RuntaraClient::new(config);
+        assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_client_initial_not_connected() {
+        let config = RuntaraClientConfig {
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
+        let client = RuntaraClient::new(config).unwrap();
+        assert!(!client.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_client_connect_timeout() {
+        let config = RuntaraClientConfig {
+            server_addr: "127.0.0.1:59998".parse().unwrap(), // Unlikely to have a server
+            dangerous_skip_cert_verification: true,
+            connect_timeout_ms: 100, // Very short timeout
+            ..Default::default()
+        };
+        let client = RuntaraClient::new(config).unwrap();
+        let result = client.connect().await;
+        // Should timeout since no server is running
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_client_close_without_connection() {
+        let config = RuntaraClientConfig {
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
+        let client = RuntaraClient::new(config).unwrap();
+        // Closing without a connection should be safe
+        client.close().await;
+        assert!(!client.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_open_stream_without_connection() {
+        let config = RuntaraClientConfig {
+            server_addr: "127.0.0.1:59997".parse().unwrap(),
+            dangerous_skip_cert_verification: true,
+            connect_timeout_ms: 100,
+            ..Default::default()
+        };
+        let client = RuntaraClient::new(config).unwrap();
+        // open_stream will try to connect first, then fail
+        let result = client.open_stream().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_open_uni_send_without_connection() {
+        let config = RuntaraClientConfig {
+            server_addr: "127.0.0.1:59996".parse().unwrap(),
+            dangerous_skip_cert_verification: true,
+            connect_timeout_ms: 100,
+            ..Default::default()
+        };
+        let client = RuntaraClient::new(config).unwrap();
+        let result = client.open_uni_send().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_open_raw_stream_without_connection() {
+        let config = RuntaraClientConfig {
+            server_addr: "127.0.0.1:59995".parse().unwrap(),
+            dangerous_skip_cert_verification: true,
+            connect_timeout_ms: 100,
+            ..Default::default()
+        };
+        let client = RuntaraClient::new(config).unwrap();
+        let result = client.open_raw_stream().await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_error_display() {
+        let err = ClientError::NotConnected;
+        assert_eq!(format!("{}", err), "no connection established");
+
+        let err = ClientError::Timeout(5000);
+        assert_eq!(format!("{}", err), "connection timed out after 5000ms");
+
+        let err = ClientError::InvalidServerName("bad-name".to_string());
+        assert_eq!(format!("{}", err), "invalid server name: bad-name");
+    }
+
+    #[test]
+    fn test_skip_server_verification_schemes() {
+        use rustls::client::danger::ServerCertVerifier;
+        let verifier = SkipServerVerification;
+        let schemes = verifier.supported_verify_schemes();
+        assert!(!schemes.is_empty());
+        assert!(schemes.contains(&rustls::SignatureScheme::RSA_PKCS1_SHA256));
+        assert!(schemes.contains(&rustls::SignatureScheme::ECDSA_NISTP256_SHA256));
+        assert!(schemes.contains(&rustls::SignatureScheme::ED25519));
+    }
+
+    #[test]
+    fn test_skip_server_verification_debug() {
+        let verifier = SkipServerVerification;
+        let debug_str = format!("{:?}", verifier);
+        assert!(debug_str.contains("SkipServerVerification"));
+    }
+
+    #[test]
+    fn test_build_client_config_with_verification() {
+        let config = RuntaraClientConfig {
+            dangerous_skip_cert_verification: false,
+            ..Default::default()
+        };
+        // This should work (uses webpki_roots)
+        let result = RuntaraClient::build_client_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_client_config_skip_verification() {
+        let config = RuntaraClientConfig {
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
+        let result = RuntaraClient::build_client_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_client_config_no_keepalive() {
+        let config = RuntaraClientConfig {
+            keep_alive_interval_ms: 0,
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
+        let result = RuntaraClient::build_client_config(&config);
+        assert!(result.is_ok());
     }
 }
