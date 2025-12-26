@@ -202,10 +202,7 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::Invalid("RUNTARA_QUIC_PORT", _)
-        ));
+        assert!(matches!(err, ConfigError::Invalid("RUNTARA_QUIC_PORT", _)));
     }
 
     #[test]
@@ -220,10 +217,7 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::Invalid("RUNTARA_QUIC_PORT", _)
-        ));
+        assert!(matches!(err, ConfigError::Invalid("RUNTARA_QUIC_PORT", _)));
     }
 
     #[test]

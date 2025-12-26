@@ -758,7 +758,10 @@ mod tests {
 
         fn with_checkpoint(self, checkpoint: CheckpointRecord) -> Self {
             self.checkpoints.lock().unwrap().insert(
-                (checkpoint.instance_id.clone(), checkpoint.checkpoint_id.clone()),
+                (
+                    checkpoint.instance_id.clone(),
+                    checkpoint.checkpoint_id.clone(),
+                ),
                 checkpoint,
             );
             self
@@ -773,10 +776,10 @@ mod tests {
         }
 
         fn with_custom_signal(self, signal: CustomSignalRecord) -> Self {
-            self.custom_signals
-                .lock()
-                .unwrap()
-                .insert((signal.instance_id.clone(), signal.checkpoint_id.clone()), signal);
+            self.custom_signals.lock().unwrap().insert(
+                (signal.instance_id.clone(), signal.checkpoint_id.clone()),
+                signal,
+            );
             self
         }
 
@@ -1216,8 +1219,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_with_invalid_checkpoint() {
-        let persistence =
-            Arc::new(MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "pending")));
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "pending")),
+        );
         let state = InstanceHandlerState::new(persistence);
 
         let request = RegisterInstanceRequest {
@@ -1274,9 +1278,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_instance_not_running() {
-        let persistence = Arc::new(
-            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "completed")),
-        );
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            "completed",
+        )));
         let state = InstanceHandlerState::new(persistence);
 
         let request = CheckpointRequest {
@@ -1471,11 +1477,13 @@ mod tests {
         handle_signal_ack(&state, request).await.unwrap();
 
         // Verify signal was acknowledged (removed from pending)
-        assert!(persistence
-            .get_pending_signal("inst-1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            persistence
+                .get_pending_signal("inst-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ========================================================================

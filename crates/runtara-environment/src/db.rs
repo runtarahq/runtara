@@ -481,3 +481,442 @@ pub async fn remove_instance_image(pool: &PgPool, instance_id: &str) -> Result<(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==========================================================================
+    // ListInstancesOptions tests
+    // ==========================================================================
+
+    #[test]
+    fn test_list_instances_options_default() {
+        let options = ListInstancesOptions::default();
+
+        assert!(options.tenant_id.is_none());
+        assert!(options.status.is_none());
+        assert!(options.image_id.is_none());
+        assert!(options.image_name_prefix.is_none());
+        assert!(options.created_after.is_none());
+        assert!(options.created_before.is_none());
+        assert!(options.finished_after.is_none());
+        assert!(options.finished_before.is_none());
+        assert!(options.order_by.is_none());
+        assert_eq!(options.limit, 0);
+        assert_eq!(options.offset, 0);
+    }
+
+    #[test]
+    fn test_list_instances_options_with_tenant() {
+        let options = ListInstancesOptions {
+            tenant_id: Some("tenant-1".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(options.tenant_id, Some("tenant-1".to_string()));
+    }
+
+    #[test]
+    fn test_list_instances_options_with_status() {
+        let options = ListInstancesOptions {
+            status: Some("running".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(options.status, Some("running".to_string()));
+    }
+
+    #[test]
+    fn test_list_instances_options_with_image_filters() {
+        let options = ListInstancesOptions {
+            image_id: Some("img-123".to_string()),
+            image_name_prefix: Some("scenario:".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(options.image_id, Some("img-123".to_string()));
+        assert_eq!(options.image_name_prefix, Some("scenario:".to_string()));
+    }
+
+    #[test]
+    fn test_list_instances_options_with_date_filters() {
+        let now = Utc::now();
+        let yesterday = now - chrono::Duration::days(1);
+
+        let options = ListInstancesOptions {
+            created_after: Some(yesterday),
+            created_before: Some(now),
+            finished_after: Some(yesterday),
+            finished_before: Some(now),
+            ..Default::default()
+        };
+
+        assert!(options.created_after.is_some());
+        assert!(options.created_before.is_some());
+        assert!(options.finished_after.is_some());
+        assert!(options.finished_before.is_some());
+    }
+
+    #[test]
+    fn test_list_instances_options_with_ordering() {
+        let options = ListInstancesOptions {
+            order_by: Some("created_at_asc".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(options.order_by, Some("created_at_asc".to_string()));
+    }
+
+    #[test]
+    fn test_list_instances_options_with_pagination() {
+        let options = ListInstancesOptions {
+            limit: 50,
+            offset: 100,
+            ..Default::default()
+        };
+
+        assert_eq!(options.limit, 50);
+        assert_eq!(options.offset, 100);
+    }
+
+    #[test]
+    fn test_list_instances_options_full() {
+        let now = Utc::now();
+
+        let options = ListInstancesOptions {
+            tenant_id: Some("tenant-1".to_string()),
+            status: Some("completed".to_string()),
+            image_id: Some("img-456".to_string()),
+            image_name_prefix: Some("workflow:".to_string()),
+            created_after: Some(now - chrono::Duration::days(7)),
+            created_before: Some(now),
+            finished_after: Some(now - chrono::Duration::days(1)),
+            finished_before: Some(now),
+            order_by: Some("finished_at_desc".to_string()),
+            limit: 25,
+            offset: 50,
+        };
+
+        assert_eq!(options.tenant_id, Some("tenant-1".to_string()));
+        assert_eq!(options.status, Some("completed".to_string()));
+        assert_eq!(options.image_id, Some("img-456".to_string()));
+        assert_eq!(options.image_name_prefix, Some("workflow:".to_string()));
+        assert!(options.created_after.is_some());
+        assert!(options.created_before.is_some());
+        assert!(options.finished_after.is_some());
+        assert!(options.finished_before.is_some());
+        assert_eq!(options.order_by, Some("finished_at_desc".to_string()));
+        assert_eq!(options.limit, 25);
+        assert_eq!(options.offset, 50);
+    }
+
+    #[test]
+    fn test_list_instances_options_debug() {
+        let options = ListInstancesOptions {
+            tenant_id: Some("test".to_string()),
+            ..Default::default()
+        };
+
+        let debug_str = format!("{:?}", options);
+        assert!(debug_str.contains("ListInstancesOptions"));
+        assert!(debug_str.contains("tenant_id"));
+        assert!(debug_str.contains("test"));
+    }
+
+    #[test]
+    fn test_list_instances_options_clone() {
+        let options = ListInstancesOptions {
+            tenant_id: Some("tenant-1".to_string()),
+            status: Some("running".to_string()),
+            limit: 10,
+            ..Default::default()
+        };
+
+        let cloned = options.clone();
+
+        assert_eq!(options.tenant_id, cloned.tenant_id);
+        assert_eq!(options.status, cloned.status);
+        assert_eq!(options.limit, cloned.limit);
+    }
+
+    // ==========================================================================
+    // Instance struct tests
+    // ==========================================================================
+
+    #[test]
+    fn test_instance_debug() {
+        let instance = Instance {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: "running".to_string(),
+            checkpoint_id: Some("cp-1".to_string()),
+            attempt: 1,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            output: None,
+            error: None,
+        };
+
+        let debug_str = format!("{:?}", instance);
+        assert!(debug_str.contains("Instance"));
+        assert!(debug_str.contains("inst-1"));
+        assert!(debug_str.contains("running"));
+    }
+
+    #[test]
+    fn test_instance_clone() {
+        let instance = Instance {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: "completed".to_string(),
+            checkpoint_id: Some("cp-1".to_string()),
+            attempt: 2,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            output: Some(b"result".to_vec()),
+            error: None,
+        };
+
+        let cloned = instance.clone();
+
+        assert_eq!(instance.instance_id, cloned.instance_id);
+        assert_eq!(instance.tenant_id, cloned.tenant_id);
+        assert_eq!(instance.status, cloned.status);
+        assert_eq!(instance.checkpoint_id, cloned.checkpoint_id);
+        assert_eq!(instance.attempt, cloned.attempt);
+        assert_eq!(instance.max_attempts, cloned.max_attempts);
+        assert_eq!(instance.output, cloned.output);
+    }
+
+    #[test]
+    fn test_instance_with_error() {
+        let instance = Instance {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: "failed".to_string(),
+            checkpoint_id: None,
+            attempt: 3,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            output: None,
+            error: Some("Something went wrong".to_string()),
+        };
+
+        assert_eq!(instance.status, "failed");
+        assert_eq!(instance.error, Some("Something went wrong".to_string()));
+        assert!(instance.output.is_none());
+    }
+
+    // ==========================================================================
+    // InstanceWithImage struct tests
+    // ==========================================================================
+
+    #[test]
+    fn test_instance_with_image_debug() {
+        let instance = InstanceWithImage {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: "running".to_string(),
+            checkpoint_id: None,
+            attempt: 1,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            output: None,
+            error: None,
+            image_id: Some("img-123".to_string()),
+            image_name: Some("my-workflow:v1".to_string()),
+        };
+
+        let debug_str = format!("{:?}", instance);
+        assert!(debug_str.contains("InstanceWithImage"));
+        assert!(debug_str.contains("img-123"));
+        assert!(debug_str.contains("my-workflow:v1"));
+    }
+
+    #[test]
+    fn test_instance_with_image_clone() {
+        let instance = InstanceWithImage {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: "running".to_string(),
+            checkpoint_id: None,
+            attempt: 1,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            output: None,
+            error: None,
+            image_id: Some("img-123".to_string()),
+            image_name: Some("my-workflow".to_string()),
+        };
+
+        let cloned = instance.clone();
+
+        assert_eq!(instance.image_id, cloned.image_id);
+        assert_eq!(instance.image_name, cloned.image_name);
+    }
+
+    #[test]
+    fn test_instance_with_image_no_image() {
+        let instance = InstanceWithImage {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: "pending".to_string(),
+            checkpoint_id: None,
+            attempt: 0,
+            max_attempts: 3,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            output: None,
+            error: None,
+            image_id: None,
+            image_name: None,
+        };
+
+        assert!(instance.image_id.is_none());
+        assert!(instance.image_name.is_none());
+    }
+
+    // ==========================================================================
+    // InstanceFull struct tests
+    // ==========================================================================
+
+    #[test]
+    fn test_instance_full_debug() {
+        let instance = InstanceFull {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: Some("img-123".to_string()),
+            image_name: Some("my-workflow:v1".to_string()),
+            status: "running".to_string(),
+            output: None,
+            error: None,
+            checkpoint_id: Some("cp-5".to_string()),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            heartbeat_at: Some(Utc::now()),
+            attempt: 1,
+            max_attempts: 3,
+        };
+
+        let debug_str = format!("{:?}", instance);
+        assert!(debug_str.contains("InstanceFull"));
+        assert!(debug_str.contains("heartbeat_at"));
+    }
+
+    #[test]
+    fn test_instance_full_clone() {
+        let now = Utc::now();
+        let instance = InstanceFull {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: Some("img-123".to_string()),
+            image_name: Some("workflow".to_string()),
+            status: "completed".to_string(),
+            output: Some(b"result".to_vec()),
+            error: None,
+            checkpoint_id: Some("cp-10".to_string()),
+            created_at: now,
+            started_at: Some(now),
+            finished_at: Some(now),
+            heartbeat_at: Some(now),
+            attempt: 1,
+            max_attempts: 3,
+        };
+
+        let cloned = instance.clone();
+
+        assert_eq!(instance.instance_id, cloned.instance_id);
+        assert_eq!(instance.heartbeat_at, cloned.heartbeat_at);
+        assert_eq!(instance.output, cloned.output);
+    }
+
+    #[test]
+    fn test_instance_full_no_heartbeat() {
+        let instance = InstanceFull {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: None,
+            image_name: None,
+            status: "pending".to_string(),
+            output: None,
+            error: None,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            heartbeat_at: None,
+            attempt: 0,
+            max_attempts: 3,
+        };
+
+        assert!(instance.heartbeat_at.is_none());
+        assert!(instance.started_at.is_none());
+    }
+
+    // ==========================================================================
+    // WakeEntry struct tests
+    // ==========================================================================
+
+    #[test]
+    fn test_wake_entry_debug() {
+        let entry = WakeEntry {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: "img-123".to_string(),
+            checkpoint_id: "cp-5".to_string(),
+            wake_at: Utc::now(),
+        };
+
+        let debug_str = format!("{:?}", entry);
+        assert!(debug_str.contains("WakeEntry"));
+        assert!(debug_str.contains("inst-1"));
+        assert!(debug_str.contains("cp-5"));
+    }
+
+    #[test]
+    fn test_wake_entry_clone() {
+        let wake_at = Utc::now();
+        let entry = WakeEntry {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: "img-123".to_string(),
+            checkpoint_id: "cp-5".to_string(),
+            wake_at,
+        };
+
+        let cloned = entry.clone();
+
+        assert_eq!(entry.instance_id, cloned.instance_id);
+        assert_eq!(entry.tenant_id, cloned.tenant_id);
+        assert_eq!(entry.image_id, cloned.image_id);
+        assert_eq!(entry.checkpoint_id, cloned.checkpoint_id);
+        assert_eq!(entry.wake_at, cloned.wake_at);
+    }
+
+    #[test]
+    fn test_wake_entry_future_wake() {
+        let future_time = Utc::now() + chrono::Duration::hours(1);
+        let entry = WakeEntry {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: "img-123".to_string(),
+            checkpoint_id: "cp-5".to_string(),
+            wake_at: future_time,
+        };
+
+        assert!(entry.wake_at > Utc::now());
+    }
+}

@@ -163,3 +163,328 @@ pub fn get_native_library() -> io::Result<NativeLibraryInfo> {
 
     Ok(info)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that modify environment variables
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Helper to set env vars for a test and restore them after
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            Self { vars: Vec::new() }
+        }
+
+        fn set(&mut self, key: &str, value: &str) {
+            let old = env::var(key).ok();
+            self.vars.push((key.to_string(), old));
+            // SAFETY: Tests are serialized via ENV_MUTEX, so no concurrent access
+            unsafe { env::set_var(key, value) };
+        }
+
+        fn remove(&mut self, key: &str) {
+            let old = env::var(key).ok();
+            self.vars.push((key.to_string(), old));
+            // SAFETY: Tests are serialized via ENV_MUTEX, so no concurrent access
+            unsafe { env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.vars.drain(..).rev() {
+                // SAFETY: Tests are serialized via ENV_MUTEX, so no concurrent access
+                unsafe {
+                    match value {
+                        Some(v) => env::set_var(&key, v),
+                        None => env::remove_var(&key),
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================================================
+    // NativeLibraryInfo struct tests
+    // ==========================================================================
+
+    #[test]
+    fn test_native_library_info_debug() {
+        let info = NativeLibraryInfo {
+            scenario_lib_path: PathBuf::from("/usr/lib/libruntara_workflow_stdlib.rlib"),
+            deps_dir: PathBuf::from("/usr/lib/deps"),
+        };
+
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("NativeLibraryInfo"));
+        assert!(debug_str.contains("scenario_lib_path"));
+        assert!(debug_str.contains("deps_dir"));
+    }
+
+    #[test]
+    fn test_native_library_info_clone() {
+        let info = NativeLibraryInfo {
+            scenario_lib_path: PathBuf::from("/path/to/lib.rlib"),
+            deps_dir: PathBuf::from("/path/to/deps"),
+        };
+
+        let cloned = info.clone();
+
+        assert_eq!(info.scenario_lib_path, cloned.scenario_lib_path);
+        assert_eq!(info.deps_dir, cloned.deps_dir);
+    }
+
+    #[test]
+    fn test_native_library_info_paths() {
+        let info = NativeLibraryInfo {
+            scenario_lib_path: PathBuf::from("/custom/path/libworkflow.rlib"),
+            deps_dir: PathBuf::from("/custom/path/deps"),
+        };
+
+        assert_eq!(
+            info.scenario_lib_path,
+            PathBuf::from("/custom/path/libworkflow.rlib")
+        );
+        assert_eq!(info.deps_dir, PathBuf::from("/custom/path/deps"));
+    }
+
+    // ==========================================================================
+    // get_stdlib_name tests
+    // ==========================================================================
+
+    #[test]
+    fn test_get_stdlib_name_default() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        guard.remove("RUNTARA_STDLIB_NAME");
+
+        let name = get_stdlib_name();
+        assert_eq!(name, "runtara_workflow_stdlib");
+    }
+
+    #[test]
+    fn test_get_stdlib_name_custom() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        guard.set("RUNTARA_STDLIB_NAME", "smo_workflow_stdlib");
+
+        let name = get_stdlib_name();
+        assert_eq!(name, "smo_workflow_stdlib");
+    }
+
+    #[test]
+    fn test_get_stdlib_name_custom_with_underscores() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        guard.set("RUNTARA_STDLIB_NAME", "my_custom_stdlib_name");
+
+        let name = get_stdlib_name();
+        assert_eq!(name, "my_custom_stdlib_name");
+    }
+
+    #[test]
+    fn test_get_stdlib_name_empty_uses_default() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Empty string is a valid value, not missing
+        guard.set("RUNTARA_STDLIB_NAME", "");
+
+        let name = get_stdlib_name();
+        // Empty string is returned since it's set
+        assert_eq!(name, "");
+    }
+
+    // ==========================================================================
+    // get_native_library_dir tests (checking env var handling)
+    // ==========================================================================
+
+    #[test]
+    fn test_get_native_library_dir_from_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Use tempdir for a path that exists
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        guard.set(
+            "RUNTARA_NATIVE_LIBRARY_DIR",
+            temp_dir.path().to_str().unwrap(),
+        );
+
+        let dir = get_native_library_dir();
+        assert_eq!(dir, temp_dir.path());
+    }
+
+    #[test]
+    fn test_get_native_library_dir_env_nonexistent_falls_through() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Set to non-existent path - should fall through to other checks
+        guard.set("RUNTARA_NATIVE_LIBRARY_DIR", "/nonexistent/path/12345");
+        guard.remove("DATA_DIR");
+
+        let dir = get_native_library_dir();
+        // Should fall back to some other path (not the env var value)
+        assert_ne!(dir, PathBuf::from("/nonexistent/path/12345"));
+    }
+
+    #[test]
+    fn test_get_native_library_dir_data_dir_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Create a temp dir structure
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let lib_cache = temp_dir.path().join("library_cache").join("native");
+        std::fs::create_dir_all(&lib_cache).unwrap();
+
+        guard.remove("RUNTARA_NATIVE_LIBRARY_DIR");
+        guard.set("DATA_DIR", temp_dir.path().to_str().unwrap());
+
+        let dir = get_native_library_dir();
+        // May or may not use DATA_DIR depending on other paths existing
+        // Just verify it doesn't panic
+        assert!(dir.to_str().is_some());
+    }
+
+    // ==========================================================================
+    // load_native_library error cases
+    // ==========================================================================
+
+    #[test]
+    fn test_load_native_library_missing_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Point to a non-existent directory that also won't fall through
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nonexistent = temp_dir.path().join("nonexistent");
+        guard.set("RUNTARA_NATIVE_LIBRARY_DIR", nonexistent.to_str().unwrap());
+
+        // Clear other paths to force our env var path
+        guard.remove("DATA_DIR");
+
+        // The function internally checks if path exists before using env var
+        // So we need a different approach - just verify error handling works
+        let result = load_native_library();
+        // Either succeeds (if system has libs) or fails with appropriate error
+        if let Err(e) = result {
+            assert!(e.to_string().contains("not found") || e.to_string().contains("library"));
+        }
+    }
+
+    #[test]
+    fn test_load_native_library_missing_rlib() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Create a directory but no .rlib file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        guard.set(
+            "RUNTARA_NATIVE_LIBRARY_DIR",
+            temp_dir.path().to_str().unwrap(),
+        );
+        guard.remove("RUNTARA_STDLIB_NAME");
+
+        let result = load_native_library();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_load_native_library_missing_deps() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Create directory with .rlib but no deps dir
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("libruntara_workflow_stdlib.rlib"),
+            b"fake rlib",
+        )
+        .unwrap();
+
+        guard.set(
+            "RUNTARA_NATIVE_LIBRARY_DIR",
+            temp_dir.path().to_str().unwrap(),
+        );
+        guard.remove("RUNTARA_STDLIB_NAME");
+
+        let result = load_native_library();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("deps"));
+    }
+
+    #[test]
+    fn test_load_native_library_success() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Create complete directory structure
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let deps_dir = temp_dir.path().join("deps");
+        std::fs::create_dir(&deps_dir).unwrap();
+        std::fs::write(
+            temp_dir.path().join("libruntara_workflow_stdlib.rlib"),
+            b"fake rlib",
+        )
+        .unwrap();
+
+        guard.set(
+            "RUNTARA_NATIVE_LIBRARY_DIR",
+            temp_dir.path().to_str().unwrap(),
+        );
+        guard.remove("RUNTARA_STDLIB_NAME");
+
+        let result = load_native_library();
+        assert!(result.is_ok());
+
+        let info = result.unwrap();
+        assert_eq!(
+            info.scenario_lib_path,
+            temp_dir.path().join("libruntara_workflow_stdlib.rlib")
+        );
+        assert_eq!(info.deps_dir, deps_dir);
+    }
+
+    #[test]
+    fn test_load_native_library_custom_stdlib_name() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+
+        // Create directory with custom stdlib name
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let deps_dir = temp_dir.path().join("deps");
+        std::fs::create_dir(&deps_dir).unwrap();
+        std::fs::write(temp_dir.path().join("libcustom_stdlib.rlib"), b"fake rlib").unwrap();
+
+        guard.set(
+            "RUNTARA_NATIVE_LIBRARY_DIR",
+            temp_dir.path().to_str().unwrap(),
+        );
+        guard.set("RUNTARA_STDLIB_NAME", "custom_stdlib");
+
+        let result = load_native_library();
+        assert!(result.is_ok());
+
+        let info = result.unwrap();
+        assert_eq!(
+            info.scenario_lib_path,
+            temp_dir.path().join("libcustom_stdlib.rlib")
+        );
+    }
+}

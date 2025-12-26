@@ -146,7 +146,10 @@ enum Command {
 
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = std::env::args().collect();
+    parse_args_from_vec(&args)
+}
 
+fn parse_args_from_vec(args: &[String]) -> Result<Command, String> {
     if args.len() < 2 {
         return Err("No command specified".to_string());
     }
@@ -588,4 +591,599 @@ async fn execute_command(sdk: &ManagementSdk, cmd: Command) -> Result<(), String
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to create args vector from string slice
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ==========================================================================
+    // Command enum tests
+    // ==========================================================================
+
+    #[test]
+    fn test_command_debug() {
+        let cmd = Command::Health;
+        let debug_str = format!("{:?}", cmd);
+        assert!(debug_str.contains("Health"));
+
+        let cmd = Command::Register {
+            binary_path: "/path/to/bin".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            name: "my-workflow".to_string(),
+            description: Some("A test workflow".to_string()),
+        };
+        let debug_str = format!("{:?}", cmd);
+        assert!(debug_str.contains("Register"));
+        assert!(debug_str.contains("tenant-1"));
+        assert!(debug_str.contains("my-workflow"));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Basic commands
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_no_command() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl"]));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "No command specified");
+    }
+
+    #[test]
+    fn test_parse_unknown_command() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "unknown"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown command"));
+    }
+
+    #[test]
+    fn test_parse_health() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "health"]));
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), Command::Health));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Register command
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_register_missing_all() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "register"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--binary is required"));
+    }
+
+    #[test]
+    fn test_parse_register_missing_tenant() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "register",
+            "--binary",
+            "/path/to/bin",
+            "--name",
+            "test",
+        ]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--tenant is required"));
+    }
+
+    #[test]
+    fn test_parse_register_missing_name() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "register",
+            "--binary",
+            "/path/to/bin",
+            "--tenant",
+            "acme",
+        ]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--name is required"));
+    }
+
+    #[test]
+    fn test_parse_register_minimal() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "register",
+            "--binary",
+            "/path/to/bin",
+            "--tenant",
+            "acme",
+            "--name",
+            "my-workflow",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Register {
+                binary_path,
+                tenant_id,
+                name,
+                description,
+            } => {
+                assert_eq!(binary_path, "/path/to/bin");
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(name, "my-workflow");
+                assert!(description.is_none());
+            }
+            _ => panic!("Expected Register command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_with_description() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "register",
+            "--binary",
+            "/path/to/bin",
+            "--tenant",
+            "acme",
+            "--name",
+            "my-workflow",
+            "--description",
+            "A test workflow",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Register { description, .. } => {
+                assert_eq!(description, Some("A test workflow".to_string()));
+            }
+            _ => panic!("Expected Register command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_register_unknown_arg() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "register",
+            "--binary",
+            "/path",
+            "--unknown",
+        ]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown argument"));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - List images
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_list_images_default() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "list-images"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::ListImages { tenant_id, limit } => {
+                assert!(tenant_id.is_none());
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("Expected ListImages command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_list_images_with_tenant() {
+        let result =
+            parse_args_from_vec(&args(&["runtara-ctl", "list-images", "--tenant", "acme"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::ListImages { tenant_id, .. } => {
+                assert_eq!(tenant_id, Some("acme".to_string()));
+            }
+            _ => panic!("Expected ListImages command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_list_images_with_limit() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "list-images", "--limit", "50"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::ListImages { limit, .. } => {
+                assert_eq!(limit, 50);
+            }
+            _ => panic!("Expected ListImages command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_list_images_invalid_limit() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "list-images", "--limit", "abc"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid limit"));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Get/Delete image
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_get_image() {
+        let result =
+            parse_args_from_vec(&args(&["runtara-ctl", "get-image", "img_123", "tenant-1"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::GetImage {
+                image_id,
+                tenant_id,
+            } => {
+                assert_eq!(image_id, "img_123");
+                assert_eq!(tenant_id, "tenant-1");
+            }
+            _ => panic!("Expected GetImage command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_get_image_missing_tenant() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "get-image", "img_123"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Tenant ID required"));
+    }
+
+    #[test]
+    fn test_parse_get_image_missing_image() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "get-image"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Image ID required"));
+    }
+
+    #[test]
+    fn test_parse_delete_image() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "delete-image",
+            "img_123",
+            "tenant-1",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::DeleteImage {
+                image_id,
+                tenant_id,
+            } => {
+                assert_eq!(image_id, "img_123");
+                assert_eq!(tenant_id, "tenant-1");
+            }
+            _ => panic!("Expected DeleteImage command"),
+        }
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Start command
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_start_missing_required() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "start"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--image is required"));
+    }
+
+    #[test]
+    fn test_parse_start_missing_tenant() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "start", "--image", "img_123"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--tenant is required"));
+    }
+
+    #[test]
+    fn test_parse_start_minimal() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "start",
+            "--image",
+            "img_123",
+            "--tenant",
+            "acme",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Start {
+                image_id,
+                tenant_id,
+                input,
+                instance_id,
+                timeout,
+            } => {
+                assert_eq!(image_id, "img_123");
+                assert_eq!(tenant_id, "acme");
+                assert!(input.is_none());
+                assert!(instance_id.is_none());
+                assert!(timeout.is_none());
+            }
+            _ => panic!("Expected Start command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_start_full() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "start",
+            "--image",
+            "img_123",
+            "--tenant",
+            "acme",
+            "--input",
+            "{\"key\": \"value\"}",
+            "--instance-id",
+            "inst_456",
+            "--timeout",
+            "300",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Start {
+                image_id,
+                tenant_id,
+                input,
+                instance_id,
+                timeout,
+            } => {
+                assert_eq!(image_id, "img_123");
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(input, Some("{\"key\": \"value\"}".to_string()));
+                assert_eq!(instance_id, Some("inst_456".to_string()));
+                assert_eq!(timeout, Some(300));
+            }
+            _ => panic!("Expected Start command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_start_invalid_timeout() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "start",
+            "--image",
+            "img_123",
+            "--tenant",
+            "acme",
+            "--timeout",
+            "not_a_number",
+        ]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid timeout"));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Status command
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_status() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "status", "inst_123"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Status { instance_id } => {
+                assert_eq!(instance_id, "inst_123");
+            }
+            _ => panic!("Expected Status command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_status_missing_id() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "status"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Instance ID required"));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Wait command
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_wait_default() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "wait", "inst_123"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Wait {
+                instance_id,
+                poll_ms,
+            } => {
+                assert_eq!(instance_id, "inst_123");
+                assert_eq!(poll_ms, 500);
+            }
+            _ => panic!("Expected Wait command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_wait_custom_poll() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "wait",
+            "inst_123",
+            "--poll",
+            "1000",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Wait { poll_ms, .. } => {
+                assert_eq!(poll_ms, 1000);
+            }
+            _ => panic!("Expected Wait command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_wait_invalid_poll() {
+        let result =
+            parse_args_from_vec(&args(&["runtara-ctl", "wait", "inst_123", "--poll", "abc"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid poll interval"));
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - List instances
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_list_instances_default() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "list-instances"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::ListInstances { tenant_id, limit } => {
+                assert!(tenant_id.is_none());
+                assert_eq!(limit, 100);
+            }
+            _ => panic!("Expected ListInstances command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_list_instances_with_options() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "list-instances",
+            "--tenant",
+            "acme",
+            "--limit",
+            "25",
+        ]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::ListInstances { tenant_id, limit } => {
+                assert_eq!(tenant_id, Some("acme".to_string()));
+                assert_eq!(limit, 25);
+            }
+            _ => panic!("Expected ListInstances command"),
+        }
+    }
+
+    // ==========================================================================
+    // parse_args_from_vec tests - Stop/Cancel/Pause/Resume
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_stop() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "stop", "inst_123"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Stop { instance_id } => {
+                assert_eq!(instance_id, "inst_123");
+            }
+            _ => panic!("Expected Stop command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_cancel() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "cancel", "inst_123"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Cancel { instance_id } => {
+                assert_eq!(instance_id, "inst_123");
+            }
+            _ => panic!("Expected Cancel command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pause() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "pause", "inst_123"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Pause { instance_id } => {
+                assert_eq!(instance_id, "inst_123");
+            }
+            _ => panic!("Expected Pause command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_resume() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "resume", "inst_123"]));
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Command::Resume { instance_id } => {
+                assert_eq!(instance_id, "inst_123");
+            }
+            _ => panic!("Expected Resume command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stop_missing_id() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "stop"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Instance ID required"));
+    }
+
+    #[test]
+    fn test_parse_cancel_missing_id() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "cancel"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Instance ID required"));
+    }
+
+    #[test]
+    fn test_parse_pause_missing_id() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "pause"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Instance ID required"));
+    }
+
+    #[test]
+    fn test_parse_resume_missing_id() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "resume"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Instance ID required"));
+    }
+
+    // ==========================================================================
+    // Edge cases
+    // ==========================================================================
+
+    #[test]
+    fn test_parse_register_missing_binary_value() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "register", "--binary"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--binary requires a path"));
+    }
+
+    #[test]
+    fn test_parse_register_missing_tenant_value() {
+        let result = parse_args_from_vec(&args(&[
+            "runtara-ctl",
+            "register",
+            "--binary",
+            "/path",
+            "--tenant",
+        ]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--tenant requires an ID"));
+    }
+
+    #[test]
+    fn test_parse_start_missing_image_value() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "start", "--image"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--image requires an ID"));
+    }
+
+    #[test]
+    fn test_parse_list_images_missing_tenant_value() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "list-images", "--tenant"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--tenant requires an ID"));
+    }
+
+    #[test]
+    fn test_parse_list_images_missing_limit_value() {
+        let result = parse_args_from_vec(&args(&["runtara-ctl", "list-images", "--limit"]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--limit requires a number"));
+    }
 }

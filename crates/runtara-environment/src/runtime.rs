@@ -383,3 +383,200 @@ async fn run_environment_server_with_shutdown(
     info!("Environment QUIC server stopped");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builder_default_values() {
+        let builder = EnvironmentRuntimeBuilder::default();
+
+        assert!(builder.pool.is_none());
+        assert!(builder.core_persistence.is_none());
+        assert!(builder.runner.is_none());
+        assert_eq!(
+            builder.bind_addr,
+            "0.0.0.0:8002".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(builder.core_addr, "127.0.0.1:8001");
+        assert_eq!(builder.data_dir, PathBuf::from(".data"));
+        assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
+        assert_eq!(builder.wake_batch_size, 10);
+    }
+
+    #[test]
+    fn test_builder_new_equals_default() {
+        let builder_new = EnvironmentRuntimeBuilder::new();
+        let builder_default = EnvironmentRuntimeBuilder::default();
+
+        assert_eq!(builder_new.bind_addr, builder_default.bind_addr);
+        assert_eq!(builder_new.core_addr, builder_default.core_addr);
+        assert_eq!(builder_new.data_dir, builder_default.data_dir);
+        assert_eq!(
+            builder_new.wake_poll_interval,
+            builder_default.wake_poll_interval
+        );
+        assert_eq!(builder_new.wake_batch_size, builder_default.wake_batch_size);
+    }
+
+    #[test]
+    fn test_builder_bind_addr() {
+        let builder =
+            EnvironmentRuntimeBuilder::new().bind_addr("192.168.1.1:9000".parse().unwrap());
+
+        assert_eq!(
+            builder.bind_addr,
+            "192.168.1.1:9000".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_builder_core_addr() {
+        let builder = EnvironmentRuntimeBuilder::new().core_addr("10.0.0.1:8001");
+
+        assert_eq!(builder.core_addr, "10.0.0.1:8001");
+    }
+
+    #[test]
+    fn test_builder_core_addr_from_string() {
+        let addr = String::from("custom-host:8001");
+        let builder = EnvironmentRuntimeBuilder::new().core_addr(addr);
+
+        assert_eq!(builder.core_addr, "custom-host:8001");
+    }
+
+    #[test]
+    fn test_builder_data_dir() {
+        let builder = EnvironmentRuntimeBuilder::new().data_dir("/var/lib/runtara");
+
+        assert_eq!(builder.data_dir, PathBuf::from("/var/lib/runtara"));
+    }
+
+    #[test]
+    fn test_builder_data_dir_from_pathbuf() {
+        let path = PathBuf::from("/custom/path");
+        let builder = EnvironmentRuntimeBuilder::new().data_dir(path);
+
+        assert_eq!(builder.data_dir, PathBuf::from("/custom/path"));
+    }
+
+    #[test]
+    fn test_builder_wake_poll_interval() {
+        let builder = EnvironmentRuntimeBuilder::new().wake_poll_interval(Duration::from_secs(30));
+
+        assert_eq!(builder.wake_poll_interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_builder_wake_batch_size() {
+        let builder = EnvironmentRuntimeBuilder::new().wake_batch_size(50);
+
+        assert_eq!(builder.wake_batch_size, 50);
+    }
+
+    #[test]
+    fn test_builder_chaining() {
+        let builder = EnvironmentRuntimeBuilder::new()
+            .bind_addr("0.0.0.0:9000".parse().unwrap())
+            .core_addr("core.local:8001")
+            .data_dir("/data")
+            .wake_poll_interval(Duration::from_secs(10))
+            .wake_batch_size(25);
+
+        assert_eq!(
+            builder.bind_addr,
+            "0.0.0.0:9000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(builder.core_addr, "core.local:8001");
+        assert_eq!(builder.data_dir, PathBuf::from("/data"));
+        assert_eq!(builder.wake_poll_interval, Duration::from_secs(10));
+        assert_eq!(builder.wake_batch_size, 25);
+    }
+
+    #[test]
+    fn test_builder_build_fails_without_pool() {
+        let builder = EnvironmentRuntimeBuilder::new();
+        let result = builder.build();
+
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert!(err.to_string().contains("pool is required"));
+        }
+    }
+
+    #[test]
+    fn test_environment_runtime_builder_static_method() {
+        // Test that EnvironmentRuntime::builder() returns a builder
+        let builder = EnvironmentRuntime::builder();
+
+        // Should have default values
+        assert_eq!(
+            builder.bind_addr,
+            "0.0.0.0:8002".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(builder.core_addr, "127.0.0.1:8001");
+    }
+
+    #[test]
+    fn test_builder_wake_poll_interval_subsecond() {
+        let builder =
+            EnvironmentRuntimeBuilder::new().wake_poll_interval(Duration::from_millis(500));
+
+        assert_eq!(builder.wake_poll_interval, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_builder_wake_poll_interval_long() {
+        let builder =
+            EnvironmentRuntimeBuilder::new().wake_poll_interval(Duration::from_secs(3600));
+
+        assert_eq!(builder.wake_poll_interval, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn test_builder_wake_batch_size_one() {
+        let builder = EnvironmentRuntimeBuilder::new().wake_batch_size(1);
+
+        assert_eq!(builder.wake_batch_size, 1);
+    }
+
+    #[test]
+    fn test_builder_wake_batch_size_large() {
+        let builder = EnvironmentRuntimeBuilder::new().wake_batch_size(1000);
+
+        assert_eq!(builder.wake_batch_size, 1000);
+    }
+
+    #[test]
+    fn test_builder_ipv6_bind_addr() {
+        let builder = EnvironmentRuntimeBuilder::new().bind_addr("[::]:8002".parse().unwrap());
+
+        assert_eq!(
+            builder.bind_addr,
+            "[::]:8002".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_builder_overwrite_values() {
+        let builder = EnvironmentRuntimeBuilder::new()
+            .bind_addr("0.0.0.0:9000".parse().unwrap())
+            .bind_addr("0.0.0.0:9001".parse().unwrap());
+
+        // Last value should win
+        assert_eq!(
+            builder.bind_addr,
+            "0.0.0.0:9001".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_builder_core_addr_overwrite() {
+        let builder = EnvironmentRuntimeBuilder::new()
+            .core_addr("host1:8001")
+            .core_addr("host2:8001");
+
+        assert_eq!(builder.core_addr, "host2:8001");
+    }
+}

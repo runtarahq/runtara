@@ -775,3 +775,455 @@ pub fn create_bundle_at_path(bundle_path: &Path, binary_path: &Path) -> std::io:
 pub fn bundle_exists_at_path(bundle_path: &Path) -> bool {
     bundle_path.join("config.json").exists() && bundle_path.join("rootfs/binary").exists()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_bundle_config_default() {
+        let config = BundleConfig::default();
+
+        assert_eq!(config.memory_limit, 512 * 1024 * 1024); // 512MB
+        assert_eq!(config.cpu_quota, 50000); // 50%
+        assert_eq!(config.cpu_period, 100000); // 100ms
+        assert_eq!(config.user, (0, 0));
+        assert_eq!(config.network_mode, NetworkMode::Pasta);
+        assert!(config.enable_seccomp);
+        assert!(config.drop_capabilities);
+    }
+
+    #[test]
+    fn test_network_mode_default() {
+        let mode = NetworkMode::default();
+        assert_eq!(mode, NetworkMode::Host);
+    }
+
+    #[test]
+    fn test_network_mode_equality() {
+        assert_eq!(NetworkMode::Host, NetworkMode::Host);
+        assert_eq!(NetworkMode::Pasta, NetworkMode::Pasta);
+        assert_eq!(NetworkMode::None, NetworkMode::None);
+        assert_ne!(NetworkMode::Host, NetworkMode::Pasta);
+    }
+
+    #[test]
+    fn test_bundle_manager_new() {
+        let bundles_dir = PathBuf::from("/tmp/bundles");
+        let config = BundleConfig::default();
+        let manager = BundleManager::new(bundles_dir.clone(), config);
+
+        assert_eq!(manager.bundles_dir, bundles_dir);
+    }
+
+    #[test]
+    fn test_bundle_path() {
+        let bundles_dir = PathBuf::from("/tmp/bundles");
+        let manager = BundleManager::new(bundles_dir.clone(), BundleConfig::default());
+
+        let path = manager.bundle_path("test-instance");
+        assert_eq!(path, bundles_dir.join("test-instance"));
+    }
+
+    #[test]
+    fn test_bundle_exists_false_when_missing() {
+        let bundles_dir = PathBuf::from("/nonexistent/bundles");
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        assert!(!manager.bundle_exists("test-instance"));
+    }
+
+    #[test]
+    fn test_prepare_bundle() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundles_dir = temp_dir.path().to_path_buf();
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        let binary = b"#!/bin/sh\necho hello";
+        let result = manager.prepare_bundle("test-instance", binary);
+
+        assert!(result.is_ok());
+        let bundle_dir = result.unwrap();
+
+        // Check bundle structure
+        assert!(bundle_dir.join("config.json").exists());
+        assert!(bundle_dir.join("rootfs").exists());
+        assert!(bundle_dir.join("rootfs/binary").exists());
+
+        // Check binary content
+        let binary_content = std::fs::read(bundle_dir.join("rootfs/binary")).unwrap();
+        assert_eq!(binary_content, binary);
+    }
+
+    #[test]
+    fn test_bundle_exists_after_prepare() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundles_dir = temp_dir.path().to_path_buf();
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        let binary = b"test binary";
+        manager.prepare_bundle("test-instance", binary).unwrap();
+
+        assert!(manager.bundle_exists("test-instance"));
+    }
+
+    #[test]
+    fn test_delete_bundle() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundles_dir = temp_dir.path().to_path_buf();
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        // Create a bundle
+        manager.prepare_bundle("test-instance", b"binary").unwrap();
+        assert!(manager.bundle_exists("test-instance"));
+
+        // Delete it
+        manager.delete_bundle("test-instance").unwrap();
+        assert!(!manager.bundle_exists("test-instance"));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_bundle() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundles_dir = temp_dir.path().to_path_buf();
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        // Deleting nonexistent bundle should succeed (no-op)
+        let result = manager.delete_bundle("nonexistent");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_update_bundle_env() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundles_dir = temp_dir.path().to_path_buf();
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        // Create a bundle first
+        manager.prepare_bundle("test-instance", b"binary").unwrap();
+
+        // Update with environment variables
+        let mut env = HashMap::new();
+        env.insert("RUNTARA_INSTANCE_ID".to_string(), "inst-123".to_string());
+        env.insert("RUNTARA_TENANT_ID".to_string(), "tenant-456".to_string());
+
+        let result = manager.update_bundle_env("test-instance", &env, None);
+        assert!(result.is_ok());
+
+        // Read config.json and verify env
+        let config_path = manager.bundle_path("test-instance").join("config.json");
+        let config_json = std::fs::read_to_string(config_path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+
+        let env_array = config["process"]["env"].as_array().unwrap();
+        let env_strings: Vec<&str> = env_array.iter().map(|v| v.as_str().unwrap()).collect();
+
+        assert!(
+            env_strings
+                .iter()
+                .any(|e| e.starts_with("RUNTARA_INSTANCE_ID="))
+        );
+        assert!(
+            env_strings
+                .iter()
+                .any(|e| e.starts_with("RUNTARA_TENANT_ID="))
+        );
+    }
+
+    #[test]
+    fn test_update_bundle_env_with_log_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundles_dir = temp_dir.path().to_path_buf();
+        let manager = BundleManager::new(bundles_dir, BundleConfig::default());
+
+        manager.prepare_bundle("test-instance", b"binary").unwrap();
+
+        let env = HashMap::new();
+        let result = manager.update_bundle_env("test-instance", &env, Some("/var/log/test.log"));
+        assert!(result.is_ok());
+
+        // Read config and verify STDERR_LOG_PATH
+        let config_path = manager.bundle_path("test-instance").join("config.json");
+        let config_json = std::fs::read_to_string(config_path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+
+        let env_array = config["process"]["env"].as_array().unwrap();
+        let env_strings: Vec<&str> = env_array.iter().map(|v| v.as_str().unwrap()).collect();
+
+        assert!(
+            env_strings
+                .iter()
+                .any(|e| e.contains("STDERR_LOG_PATH=/var/log/test.log"))
+        );
+    }
+
+    #[test]
+    fn test_generate_default_oci_config() {
+        let config = generate_default_oci_config();
+
+        assert_eq!(config.oci_version, "1.0.0");
+        assert_eq!(config.root.path, "rootfs");
+        assert!(config.root.readonly);
+        assert!(!config.process.terminal);
+        assert_eq!(config.process.args, vec!["/binary"]);
+        assert_eq!(config.process.cwd, "/");
+    }
+
+    #[test]
+    fn test_oci_spec_serialization() {
+        let config = generate_default_oci_config();
+        let json = serde_json::to_string_pretty(&config);
+        assert!(json.is_ok());
+
+        // Verify it can be deserialized back
+        let json_str = json.unwrap();
+        let parsed: std::result::Result<OciSpec, _> = serde_json::from_str(&json_str);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_oci_config_has_proc_mount() {
+        let config = generate_default_oci_config();
+
+        let proc_mount = config.mounts.iter().find(|m| m.destination == "/proc");
+        assert!(proc_mount.is_some());
+        assert_eq!(proc_mount.unwrap().mount_type, "proc");
+    }
+
+    #[test]
+    fn test_oci_config_has_dev_mount() {
+        let config = generate_default_oci_config();
+
+        let dev_mount = config.mounts.iter().find(|m| m.destination == "/dev");
+        assert!(dev_mount.is_some());
+        assert_eq!(dev_mount.unwrap().mount_type, "tmpfs");
+    }
+
+    #[test]
+    fn test_oci_config_has_resolv_conf() {
+        let config = generate_default_oci_config();
+
+        let resolv = config
+            .mounts
+            .iter()
+            .find(|m| m.destination == "/etc/resolv.conf");
+        assert!(resolv.is_some());
+    }
+
+    #[test]
+    fn test_oci_config_has_namespaces() {
+        let config = generate_default_oci_config();
+
+        let ns_types: Vec<&str> = config
+            .linux
+            .namespaces
+            .iter()
+            .map(|n| n.ns_type.as_str())
+            .collect();
+        assert!(ns_types.contains(&"pid"));
+        assert!(ns_types.contains(&"mount"));
+        assert!(ns_types.contains(&"ipc"));
+        assert!(ns_types.contains(&"uts"));
+    }
+
+    #[test]
+    fn test_oci_config_has_resource_limits() {
+        let config = generate_default_oci_config();
+
+        let resources = config.linux.resources.as_ref().unwrap();
+        let memory = resources.memory.as_ref().unwrap();
+        let cpu = resources.cpu.as_ref().unwrap();
+
+        assert!(memory.limit > 0);
+        assert!(cpu.quota > 0);
+        assert!(cpu.period > 0);
+    }
+
+    #[test]
+    fn test_oci_config_has_seccomp() {
+        let config = generate_default_oci_config();
+
+        let seccomp = config.linux.seccomp.as_ref();
+        assert!(seccomp.is_some());
+
+        let seccomp = seccomp.unwrap();
+        assert_eq!(seccomp.default_action, "SCMP_ACT_ERRNO");
+        assert!(!seccomp.architectures.is_empty());
+        assert!(!seccomp.syscalls.is_empty());
+    }
+
+    #[test]
+    fn test_oci_config_has_masked_paths() {
+        let config = generate_default_oci_config();
+
+        let masked = config.linux.masked_paths.as_ref().unwrap();
+        assert!(masked.contains(&"/proc/kcore".to_string()));
+        assert!(masked.contains(&"/sys/firmware".to_string()));
+    }
+
+    #[test]
+    fn test_oci_config_has_readonly_paths() {
+        let config = generate_default_oci_config();
+
+        let readonly = config.linux.readonly_paths.as_ref().unwrap();
+        assert!(readonly.contains(&"/proc/sys".to_string()));
+    }
+
+    #[test]
+    fn test_create_bundle_at_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_path = temp_dir.path().join("my-bundle");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        // Create a test binary file
+        std::fs::write(&binary_path, b"test binary content").unwrap();
+
+        let result = create_bundle_at_path(&bundle_path, &binary_path);
+        assert!(result.is_ok());
+
+        // Verify structure
+        assert!(bundle_path.join("config.json").exists());
+        assert!(bundle_path.join("rootfs/binary").exists());
+
+        // Verify binary was copied
+        let copied_binary = std::fs::read(bundle_path.join("rootfs/binary")).unwrap();
+        assert_eq!(copied_binary, b"test binary content");
+    }
+
+    #[test]
+    fn test_bundle_exists_at_path_true() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_path = temp_dir.path().join("test-bundle");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        std::fs::write(&binary_path, b"test").unwrap();
+        create_bundle_at_path(&bundle_path, &binary_path).unwrap();
+
+        assert!(bundle_exists_at_path(&bundle_path));
+    }
+
+    #[test]
+    fn test_bundle_exists_at_path_false() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_path = temp_dir.path().join("nonexistent-bundle");
+
+        assert!(!bundle_exists_at_path(&bundle_path));
+    }
+
+    #[test]
+    fn test_bundle_exists_at_path_partial() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundle_path = temp_dir.path().join("partial-bundle");
+
+        // Create only config.json, not rootfs/binary
+        std::fs::create_dir_all(&bundle_path).unwrap();
+        std::fs::write(bundle_path.join("config.json"), "{}").unwrap();
+
+        assert!(!bundle_exists_at_path(&bundle_path));
+    }
+
+    #[test]
+    fn test_bundle_config_custom() {
+        let config = BundleConfig {
+            memory_limit: 1024 * 1024 * 1024, // 1GB
+            cpu_quota: 100000,                // 100%
+            cpu_period: 100000,
+            user: (1000, 1000),
+            network_mode: NetworkMode::Host,
+            enable_seccomp: false,
+            drop_capabilities: false,
+        };
+
+        assert_eq!(config.memory_limit, 1024 * 1024 * 1024);
+        assert_eq!(config.cpu_quota, 100000);
+        assert_eq!(config.user, (1000, 1000));
+        assert_eq!(config.network_mode, NetworkMode::Host);
+        assert!(!config.enable_seccomp);
+        assert!(!config.drop_capabilities);
+    }
+
+    #[test]
+    fn test_oci_config_with_seccomp_disabled() {
+        let config = BundleConfig {
+            enable_seccomp: false,
+            ..Default::default()
+        };
+        let manager = BundleManager::new(PathBuf::new(), config);
+        let oci_config = manager.generate_oci_config(vec![], None, None);
+
+        assert!(oci_config.linux.seccomp.is_none());
+    }
+
+    #[test]
+    fn test_oci_config_with_capabilities_disabled() {
+        let config = BundleConfig {
+            drop_capabilities: false,
+            ..Default::default()
+        };
+        let manager = BundleManager::new(PathBuf::new(), config);
+        let oci_config = manager.generate_oci_config(vec![], None, None);
+
+        assert!(oci_config.process.capabilities.is_none());
+    }
+
+    #[test]
+    fn test_oci_mount_clone() {
+        let mount = OciMount {
+            destination: "/proc".to_string(),
+            mount_type: "proc".to_string(),
+            source: "proc".to_string(),
+            options: vec!["hidepid=2".to_string()],
+        };
+        let cloned = mount.clone();
+        assert_eq!(mount.destination, cloned.destination);
+    }
+
+    #[test]
+    fn test_oci_process_clone() {
+        let process = OciProcess {
+            terminal: false,
+            args: vec!["/binary".to_string()],
+            env: vec!["PATH=/usr/bin".to_string()],
+            cwd: "/".to_string(),
+            user: Some(OciUser { uid: 0, gid: 0 }),
+            capabilities: None,
+        };
+        let cloned = process.clone();
+        assert_eq!(process.terminal, cloned.terminal);
+        assert_eq!(process.args, cloned.args);
+    }
+
+    #[test]
+    fn test_oci_namespace_clone() {
+        let ns = OciNamespace {
+            ns_type: "pid".to_string(),
+        };
+        let cloned = ns.clone();
+        assert_eq!(ns.ns_type, cloned.ns_type);
+    }
+
+    #[test]
+    fn test_oci_resources_clone() {
+        let resources = OciResources {
+            memory: Some(OciMemory { limit: 512000000 }),
+            cpu: Some(OciCpu {
+                quota: 50000,
+                period: 100000,
+            }),
+        };
+        let cloned = resources.clone();
+        assert_eq!(
+            resources.memory.as_ref().unwrap().limit,
+            cloned.memory.as_ref().unwrap().limit
+        );
+    }
+
+    #[test]
+    fn test_network_mode_debug() {
+        let mode = NetworkMode::Pasta;
+        let debug_str = format!("{:?}", mode);
+        assert!(debug_str.contains("Pasta"));
+    }
+}
