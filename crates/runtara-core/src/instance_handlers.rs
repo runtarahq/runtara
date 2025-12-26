@@ -783,10 +783,12 @@ mod tests {
             self
         }
 
+        #[allow(dead_code)]
         fn set_fail_register(&self) {
             *self.fail_register.lock().unwrap() = true;
         }
 
+        #[allow(dead_code)]
         fn set_fail_status_update(&self) {
             *self.fail_status_update.lock().unwrap() = true;
         }
