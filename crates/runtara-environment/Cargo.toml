@@ -2,7 +2,11 @@
 name = "runtara-environment"
 edition.workspace = true
 version.workspace = true
-publish = false
+license.workspace = true
+repository.workspace = true
+description = "Environment server for runtara - image registry, OCI runner, and instance management"
+keywords = ["durable", "workflow", "oci", "container"]
+categories = ["asynchronous", "development-tools"]
 
 [lib]
 name = "runtara_environment"
@@ -23,13 +27,13 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki",
 quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 
 # Protocol
-runtara-protocol = { path = "../runtara-protocol" }
+runtara-protocol = { path = "../runtara-protocol", version = "1.0" }
 
 # Core persistence layer (for shared database access)
-runtara-core = { path = "../runtara-core" }
+runtara-core = { path = "../runtara-core", version = "1.0" }
 
 # DSL types for agent metadata (list_agents, get_capability)
-runtara-dsl = { path = "../runtara-dsl" }
+runtara-dsl = { path = "../runtara-dsl", version = "1.0" }
 
 # Configuration
 dotenvy = "0.15"

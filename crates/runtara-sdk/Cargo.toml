@@ -15,6 +15,7 @@ default = ["quic"]
 quic = ["dep:runtara-protocol"]
 
 # Embedded mode - direct persistence layer access without QUIC
+# Note: This feature is only available when building from source (runtara-core is not published)
 embedded = ["dep:runtara-core"]
 
 [dependencies]
