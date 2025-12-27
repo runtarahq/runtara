@@ -151,23 +151,23 @@ impl RuntaraServer {
         };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
 
-        if config.udp_receive_buffer_size > 0 {
-            if let Err(e) = socket.set_recv_buffer_size(config.udp_receive_buffer_size) {
-                warn!(
-                    size = config.udp_receive_buffer_size,
-                    error = %e,
-                    "Failed to set UDP receive buffer size"
-                );
-            }
+        if config.udp_receive_buffer_size > 0
+            && let Err(e) = socket.set_recv_buffer_size(config.udp_receive_buffer_size)
+        {
+            warn!(
+                size = config.udp_receive_buffer_size,
+                error = %e,
+                "Failed to set UDP receive buffer size"
+            );
         }
-        if config.udp_send_buffer_size > 0 {
-            if let Err(e) = socket.set_send_buffer_size(config.udp_send_buffer_size) {
-                warn!(
-                    size = config.udp_send_buffer_size,
-                    error = %e,
-                    "Failed to set UDP send buffer size"
-                );
-            }
+        if config.udp_send_buffer_size > 0
+            && let Err(e) = socket.set_send_buffer_size(config.udp_send_buffer_size)
+        {
+            warn!(
+                size = config.udp_send_buffer_size,
+                error = %e,
+                "Failed to set UDP send buffer size"
+            );
         }
 
         // Bind and convert to std socket
@@ -179,7 +179,7 @@ impl RuntaraServer {
         let endpoint = Endpoint::new_with_abstract_socket(
             quinn::EndpointConfig::default(),
             Some(server_config),
-            runtime.wrap_udp_socket(std_socket.into())?,
+            runtime.wrap_udp_socket(std_socket)?,
             runtime,
         )?;
 
