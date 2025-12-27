@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to database
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(config.db_pool_size)
         .connect(&config.database_url)
         .await?;
 
@@ -73,6 +73,9 @@ async fn main() -> anyhow::Result<()> {
         .core_addr(&config.core_addr)
         .bind_addr(config.quic_addr)
         .data_dir(&config.data_dir)
+        .request_timeout(std::time::Duration::from_millis(
+            config.db_request_timeout_ms,
+        ))
         .build()?
         .start()
         .await?;

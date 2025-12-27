@@ -39,7 +39,12 @@ pub struct EnvironmentHandlerState {
     pub core_addr: String,
     /// Data directory for images and instance I/O.
     pub data_dir: PathBuf,
+    /// Request timeout for database operations.
+    pub request_timeout: Duration,
 }
+
+/// Default request timeout for database operations (30 seconds).
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl EnvironmentHandlerState {
     /// Create a new environment handler state.
@@ -57,6 +62,7 @@ impl EnvironmentHandlerState {
             runner,
             core_addr,
             data_dir,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 
@@ -80,7 +86,14 @@ impl EnvironmentHandlerState {
             runner,
             core_addr,
             data_dir,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
+    }
+
+    /// Set the request timeout for database operations.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Get the server uptime in milliseconds.

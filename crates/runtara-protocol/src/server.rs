@@ -39,14 +39,22 @@ pub struct RuntaraServerConfig {
     pub cert_pem: Vec<u8>,
     /// TLS private key (PEM format)
     pub key_pem: Vec<u8>,
-    /// Maximum concurrent connections
-    pub max_connections: u32,
+    /// Maximum pending incoming connections (handshakes in progress)
+    pub max_incoming: u32,
     /// Maximum concurrent bidirectional streams per connection
     pub max_bi_streams: u32,
     /// Maximum concurrent unidirectional streams per connection
     pub max_uni_streams: u32,
     /// Idle timeout in milliseconds
     pub idle_timeout_ms: u64,
+    /// Server-side keep-alive interval in milliseconds (0 to disable)
+    pub keep_alive_interval_ms: u64,
+    /// UDP receive buffer size in bytes (0 for OS default)
+    pub udp_receive_buffer_size: usize,
+    /// UDP send buffer size in bytes (0 for OS default)
+    pub udp_send_buffer_size: usize,
+    /// Maximum concurrent connection handlers (0 for unlimited)
+    pub max_concurrent_handlers: u32,
 }
 
 impl Default for RuntaraServerConfig {
@@ -55,10 +63,69 @@ impl Default for RuntaraServerConfig {
             bind_addr: "0.0.0.0:7001".parse().unwrap(),
             cert_pem: Vec::new(),
             key_pem: Vec::new(),
-            max_connections: 10_000,
-            max_bi_streams: 100,
+            max_incoming: 10_000,
+            max_bi_streams: 1_000,
             max_uni_streams: 100,
-            idle_timeout_ms: 30_000,
+            idle_timeout_ms: 120_000,
+            keep_alive_interval_ms: 15_000,
+            udp_receive_buffer_size: 2 * 1024 * 1024, // 2MB
+            udp_send_buffer_size: 2 * 1024 * 1024,    // 2MB
+            max_concurrent_handlers: 0,               // unlimited by default
+        }
+    }
+}
+
+impl RuntaraServerConfig {
+    /// Create a configuration from environment variables with defaults.
+    ///
+    /// Environment variables:
+    /// - `RUNTARA_QUIC_MAX_INCOMING`: Max pending handshakes (default: 10000)
+    /// - `RUNTARA_QUIC_MAX_BI_STREAMS`: Max bidirectional streams per connection (default: 1000)
+    /// - `RUNTARA_QUIC_MAX_UNI_STREAMS`: Max unidirectional streams per connection (default: 100)
+    /// - `RUNTARA_QUIC_IDLE_TIMEOUT_MS`: Idle timeout in ms (default: 120000)
+    /// - `RUNTARA_QUIC_KEEP_ALIVE_MS`: Keep-alive interval in ms, 0 to disable (default: 15000)
+    /// - `RUNTARA_QUIC_UDP_RECV_BUFFER`: UDP receive buffer size in bytes (default: 2097152)
+    /// - `RUNTARA_QUIC_UDP_SEND_BUFFER`: UDP send buffer size in bytes (default: 2097152)
+    /// - `RUNTARA_QUIC_MAX_HANDLERS`: Max concurrent connection handlers, 0 for unlimited (default: 0)
+    pub fn from_env() -> Self {
+        let default = Self::default();
+
+        Self {
+            bind_addr: default.bind_addr,
+            cert_pem: default.cert_pem,
+            key_pem: default.key_pem,
+            max_incoming: std::env::var("RUNTARA_QUIC_MAX_INCOMING")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.max_incoming),
+            max_bi_streams: std::env::var("RUNTARA_QUIC_MAX_BI_STREAMS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.max_bi_streams),
+            max_uni_streams: std::env::var("RUNTARA_QUIC_MAX_UNI_STREAMS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.max_uni_streams),
+            idle_timeout_ms: std::env::var("RUNTARA_QUIC_IDLE_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.idle_timeout_ms),
+            keep_alive_interval_ms: std::env::var("RUNTARA_QUIC_KEEP_ALIVE_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.keep_alive_interval_ms),
+            udp_receive_buffer_size: std::env::var("RUNTARA_QUIC_UDP_RECV_BUFFER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.udp_receive_buffer_size),
+            udp_send_buffer_size: std::env::var("RUNTARA_QUIC_UDP_SEND_BUFFER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.udp_send_buffer_size),
+            max_concurrent_handlers: std::env::var("RUNTARA_QUIC_MAX_HANDLERS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.max_concurrent_handlers),
         }
     }
 }
@@ -66,35 +133,94 @@ impl Default for RuntaraServerConfig {
 /// QUIC server for runtara-core
 pub struct RuntaraServer {
     endpoint: Endpoint,
+    config: RuntaraServerConfig,
 }
 
 impl RuntaraServer {
     /// Create a new server with the given configuration
     pub fn new(config: RuntaraServerConfig) -> Result<Self, ServerError> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
         let server_config = Self::build_server_config(&config)?;
-        let endpoint = Endpoint::server(server_config, config.bind_addr)?;
 
-        info!(addr = %config.bind_addr, "QUIC server bound");
+        // Create UDP socket with custom buffer sizes using socket2
+        let domain = if config.bind_addr.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
 
-        Ok(Self { endpoint })
+        if config.udp_receive_buffer_size > 0 {
+            if let Err(e) = socket.set_recv_buffer_size(config.udp_receive_buffer_size) {
+                warn!(
+                    size = config.udp_receive_buffer_size,
+                    error = %e,
+                    "Failed to set UDP receive buffer size"
+                );
+            }
+        }
+        if config.udp_send_buffer_size > 0 {
+            if let Err(e) = socket.set_send_buffer_size(config.udp_send_buffer_size) {
+                warn!(
+                    size = config.udp_send_buffer_size,
+                    error = %e,
+                    "Failed to set UDP send buffer size"
+                );
+            }
+        }
+
+        // Bind and convert to std socket
+        socket.bind(&config.bind_addr.into())?;
+        let std_socket: std::net::UdpSocket = socket.into();
+
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| ServerError::Bind(std::io::Error::other("no async runtime found")))?;
+        let endpoint = Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            runtime.wrap_udp_socket(std_socket.into())?,
+            runtime,
+        )?;
+
+        info!(
+            addr = %config.bind_addr,
+            max_incoming = config.max_incoming,
+            max_bi_streams = config.max_bi_streams,
+            idle_timeout_ms = config.idle_timeout_ms,
+            keep_alive_ms = config.keep_alive_interval_ms,
+            udp_recv_buffer = config.udp_receive_buffer_size,
+            udp_send_buffer = config.udp_send_buffer_size,
+            max_handlers = config.max_concurrent_handlers,
+            "QUIC server bound"
+        );
+
+        Ok(Self { endpoint, config })
     }
 
     /// Create a server with self-signed certificate for local development
     pub fn localhost(bind_addr: SocketAddr) -> Result<Self, ServerError> {
+        Self::localhost_with_config(bind_addr, RuntaraServerConfig::from_env())
+    }
+
+    /// Create a server with self-signed certificate and custom config
+    pub fn localhost_with_config(
+        bind_addr: SocketAddr,
+        mut config: RuntaraServerConfig,
+    ) -> Result<Self, ServerError> {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .map_err(|e| ServerError::Tls(e.to_string()))?;
 
-        let cert_pem = cert.cert.pem().into_bytes();
-        let key_pem = cert.key_pair.serialize_pem().into_bytes();
-
-        let config = RuntaraServerConfig {
-            bind_addr,
-            cert_pem,
-            key_pem,
-            ..Default::default()
-        };
+        config.bind_addr = bind_addr;
+        config.cert_pem = cert.cert.pem().into_bytes();
+        config.key_pem = cert.key_pair.serialize_pem().into_bytes();
 
         Self::new(config)
+    }
+
+    /// Get the server configuration
+    pub fn config(&self) -> &RuntaraServerConfig {
+        &self.config
     }
 
     fn build_server_config(config: &RuntaraServerConfig) -> Result<ServerConfig, ServerError> {
@@ -120,11 +246,21 @@ impl RuntaraServer {
         transport.max_concurrent_bidi_streams(config.max_bi_streams.into());
         transport.max_concurrent_uni_streams(config.max_uni_streams.into());
 
+        // Server-side keep-alive
+        if config.keep_alive_interval_ms > 0 {
+            transport.keep_alive_interval(Some(std::time::Duration::from_millis(
+                config.keep_alive_interval_ms,
+            )));
+        }
+
         let mut server_config = ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(crypto)
                 .map_err(|e| ServerError::Tls(e.to_string()))?,
         ));
         server_config.transport_config(Arc::new(transport));
+
+        // Limit pending handshakes
+        server_config.max_incoming(config.max_incoming as usize);
 
         Ok(server_config)
     }
@@ -151,12 +287,37 @@ impl RuntaraServer {
         H: Fn(ConnectionHandler) -> Fut + Send + Sync + Clone + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        use tokio::sync::Semaphore;
+
         info!("QUIC server running");
+
+        // Create semaphore for backpressure if configured
+        let semaphore = if self.config.max_concurrent_handlers > 0 {
+            Some(Arc::new(Semaphore::new(
+                self.config.max_concurrent_handlers as usize,
+            )))
+        } else {
+            None
+        };
 
         while let Some(incoming) = self.accept().await {
             let handler = handler.clone();
+            let semaphore = semaphore.clone();
 
             tokio::spawn(async move {
+                // Acquire permit if semaphore is configured
+                let _permit = if let Some(ref sem) = semaphore {
+                    match sem.clone().acquire_owned().await {
+                        Ok(permit) => Some(permit),
+                        Err(_) => {
+                            warn!("semaphore closed, dropping connection");
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 match incoming.await {
                     Ok(connection) => {
                         let remote_addr = connection.remote_address();
@@ -402,7 +563,7 @@ mod tests {
     fn test_default_config() {
         let config = RuntaraServerConfig::default();
         assert_eq!(config.bind_addr, "0.0.0.0:7001".parse().unwrap());
-        assert_eq!(config.max_connections, 10_000);
+        assert_eq!(config.max_incoming, 10_000);
     }
 
     #[test]
@@ -411,10 +572,14 @@ mod tests {
         assert_eq!(config.bind_addr, "0.0.0.0:7001".parse().unwrap());
         assert!(config.cert_pem.is_empty());
         assert!(config.key_pem.is_empty());
-        assert_eq!(config.max_connections, 10_000);
-        assert_eq!(config.max_bi_streams, 100);
+        assert_eq!(config.max_incoming, 10_000);
+        assert_eq!(config.max_bi_streams, 1_000);
         assert_eq!(config.max_uni_streams, 100);
-        assert_eq!(config.idle_timeout_ms, 30_000);
+        assert_eq!(config.idle_timeout_ms, 120_000);
+        assert_eq!(config.keep_alive_interval_ms, 15_000);
+        assert_eq!(config.udp_receive_buffer_size, 2 * 1024 * 1024);
+        assert_eq!(config.udp_send_buffer_size, 2 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_handlers, 0);
     }
 
     #[test]
@@ -423,19 +588,33 @@ mod tests {
             bind_addr: "127.0.0.1:9000".parse().unwrap(),
             cert_pem: b"test-cert".to_vec(),
             key_pem: b"test-key".to_vec(),
-            max_connections: 5000,
+            max_incoming: 5000,
             max_bi_streams: 50,
             max_uni_streams: 25,
             idle_timeout_ms: 60000,
+            keep_alive_interval_ms: 10000,
+            udp_receive_buffer_size: 1024 * 1024,
+            udp_send_buffer_size: 1024 * 1024,
+            max_concurrent_handlers: 500,
         };
         let cloned = config.clone();
         assert_eq!(config.bind_addr, cloned.bind_addr);
         assert_eq!(config.cert_pem, cloned.cert_pem);
         assert_eq!(config.key_pem, cloned.key_pem);
-        assert_eq!(config.max_connections, cloned.max_connections);
+        assert_eq!(config.max_incoming, cloned.max_incoming);
         assert_eq!(config.max_bi_streams, cloned.max_bi_streams);
         assert_eq!(config.max_uni_streams, cloned.max_uni_streams);
         assert_eq!(config.idle_timeout_ms, cloned.idle_timeout_ms);
+        assert_eq!(config.keep_alive_interval_ms, cloned.keep_alive_interval_ms);
+        assert_eq!(
+            config.udp_receive_buffer_size,
+            cloned.udp_receive_buffer_size
+        );
+        assert_eq!(config.udp_send_buffer_size, cloned.udp_send_buffer_size);
+        assert_eq!(
+            config.max_concurrent_handlers,
+            cloned.max_concurrent_handlers
+        );
     }
 
     #[test]
@@ -444,7 +623,7 @@ mod tests {
         let debug_str = format!("{:?}", config);
         assert!(debug_str.contains("RuntaraServerConfig"));
         assert!(debug_str.contains("bind_addr"));
-        assert!(debug_str.contains("max_connections"));
+        assert!(debug_str.contains("max_incoming"));
     }
 
     #[tokio::test]
@@ -564,10 +743,14 @@ mod tests {
             bind_addr: "0.0.0.0:0".parse().unwrap(),
             cert_pem: cert.cert.pem().into_bytes(),
             key_pem: cert.key_pair.serialize_pem().into_bytes(),
-            max_connections: 1000,
+            max_incoming: 1000,
             max_bi_streams: 200,
             max_uni_streams: 50,
             idle_timeout_ms: 120000,
+            keep_alive_interval_ms: 20000,
+            udp_receive_buffer_size: 4 * 1024 * 1024,
+            udp_send_buffer_size: 4 * 1024 * 1024,
+            max_concurrent_handlers: 200,
         };
         let result = RuntaraServer::build_server_config(&config);
         assert!(result.is_ok());

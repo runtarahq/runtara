@@ -18,6 +18,10 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Skip TLS certificate verification (passed to instances)
     pub skip_cert_verification: bool,
+    /// Database connection pool size
+    pub db_pool_size: u32,
+    /// Request timeout for database operations in milliseconds
+    pub db_request_timeout_ms: u64,
 }
 
 impl Config {
@@ -44,12 +48,24 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let db_pool_size = std::env::var("RUNTARA_DB_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+
+        let db_request_timeout_ms = std::env::var("RUNTARA_DB_REQUEST_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000); // 30 seconds default
+
         Ok(Self {
             database_url,
             quic_addr,
             core_addr,
             data_dir,
             skip_cert_verification,
+            db_pool_size,
+            db_request_timeout_ms,
         })
     }
 }

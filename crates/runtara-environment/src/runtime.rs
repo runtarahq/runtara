@@ -60,6 +60,7 @@ pub struct EnvironmentRuntimeBuilder {
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
+    request_timeout: Duration,
 }
 
 impl Default for EnvironmentRuntimeBuilder {
@@ -73,6 +74,7 @@ impl Default for EnvironmentRuntimeBuilder {
             data_dir: PathBuf::from(".data"),
             wake_poll_interval: Duration::from_secs(5),
             wake_batch_size: 10,
+            request_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -144,6 +146,14 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
+    /// Set the request timeout for database operations.
+    ///
+    /// Default: 30 seconds
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -164,6 +174,7 @@ impl EnvironmentRuntimeBuilder {
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
+            request_timeout: self.request_timeout,
         })
     }
 }
@@ -178,6 +189,7 @@ pub struct EnvironmentRuntimeConfig {
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
+    request_timeout: Duration,
 }
 
 impl EnvironmentRuntimeConfig {
@@ -185,20 +197,26 @@ impl EnvironmentRuntimeConfig {
     pub async fn start(self) -> Result<EnvironmentRuntime> {
         // Create handler state
         let state = if let Some(ref persistence) = self.core_persistence {
-            Arc::new(EnvironmentHandlerState::with_core_persistence(
-                self.pool.clone(),
-                persistence.clone(),
-                self.runner.clone(),
-                self.core_addr.clone(),
-                self.data_dir.clone(),
-            ))
+            Arc::new(
+                EnvironmentHandlerState::with_core_persistence(
+                    self.pool.clone(),
+                    persistence.clone(),
+                    self.runner.clone(),
+                    self.core_addr.clone(),
+                    self.data_dir.clone(),
+                )
+                .with_request_timeout(self.request_timeout),
+            )
         } else {
-            Arc::new(EnvironmentHandlerState::new(
-                self.pool.clone(),
-                self.runner.clone(),
-                self.core_addr.clone(),
-                self.data_dir.clone(),
-            ))
+            Arc::new(
+                EnvironmentHandlerState::new(
+                    self.pool.clone(),
+                    self.runner.clone(),
+                    self.core_addr.clone(),
+                    self.data_dir.clone(),
+                )
+                .with_request_timeout(self.request_timeout),
+            )
         };
 
         // Create wake scheduler
