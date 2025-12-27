@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use runtara_core::persistence::Persistence;
 
@@ -746,137 +746,6 @@ pub async fn handle_resume_instance(
 }
 
 // ============================================================================
-// Instance Output Processing
-// ============================================================================
-
-/// Process instance output after container exits.
-/// Called by the container watcher when a container finishes.
-pub async fn process_instance_output(
-    state: &EnvironmentHandlerState,
-    instance_id: &str,
-    tenant_id: &str,
-) -> Result<()> {
-    let output_path = output_file_path(&state.data_dir, tenant_id, instance_id);
-
-    let output = match InstanceOutput::read_from_file(&output_path).await {
-        Ok(o) => o,
-        Err(e) => {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "Failed to read instance output, marking as failed"
-            );
-            db::update_instance_result(
-                &state.pool,
-                instance_id,
-                "failed",
-                None,
-                Some("No output.json found"),
-                None,
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-
-    info!(
-        instance_id = %instance_id,
-        status = ?output.status,
-        "Processing instance output"
-    );
-
-    match output.status {
-        InstanceOutputStatus::Completed => {
-            let result_bytes = output
-                .result
-                .as_ref()
-                .and_then(|v| serde_json::to_vec(v).ok());
-            db::update_instance_result(
-                &state.pool,
-                instance_id,
-                "completed",
-                result_bytes.as_deref(),
-                None,
-                None,
-            )
-            .await?;
-        }
-        InstanceOutputStatus::Failed => {
-            db::update_instance_result(
-                &state.pool,
-                instance_id,
-                "failed",
-                None,
-                output.error.as_deref(),
-                None,
-            )
-            .await?;
-        }
-        InstanceOutputStatus::Suspended => {
-            db::update_instance_result(
-                &state.pool,
-                instance_id,
-                "suspended",
-                None,
-                None,
-                output.checkpoint_id.as_deref(),
-            )
-            .await?;
-        }
-        InstanceOutputStatus::Sleeping => {
-            // Schedule wake
-            if let (Some(wake_after_ms), Some(checkpoint_id)) =
-                (output.wake_after_ms, &output.checkpoint_id)
-            {
-                let wake_at =
-                    chrono::Utc::now() + chrono::Duration::milliseconds(wake_after_ms as i64);
-                db::schedule_wake(&state.pool, instance_id, checkpoint_id, wake_at).await?;
-                db::update_instance_result(
-                    &state.pool,
-                    instance_id,
-                    "sleeping",
-                    None,
-                    None,
-                    Some(checkpoint_id),
-                )
-                .await?;
-
-                info!(
-                    instance_id = %instance_id,
-                    wake_at = %wake_at,
-                    checkpoint_id = %checkpoint_id,
-                    "Scheduled wake for sleeping instance"
-                );
-            } else {
-                warn!(
-                    instance_id = %instance_id,
-                    "Sleeping output missing wake_after_ms or checkpoint_id"
-                );
-                db::update_instance_result(
-                    &state.pool,
-                    instance_id,
-                    "failed",
-                    None,
-                    Some("Invalid sleep output"),
-                    None,
-                )
-                .await?;
-            }
-        }
-        InstanceOutputStatus::Cancelled => {
-            db::update_instance_result(&state.pool, instance_id, "cancelled", None, None, None)
-                .await?;
-        }
-    }
-
-    // Clean up container registry
-    let container_registry = ContainerRegistry::new(state.pool.clone());
-    let _ = container_registry.cleanup(instance_id).await;
-
-    Ok(())
-}
-
-// ============================================================================
 // Container Monitor
 // ============================================================================
 
@@ -920,21 +789,14 @@ pub fn spawn_container_monitor(
                 };
 
                 if let Err(e) = process_output(&output_state, &instance_id, &tenant_id).await {
+                    // Log error but don't mark as failed - defer to Core for authoritative status.
+                    // This prevents race conditions where monitor sets "failed" before Core
+                    // has processed the SDK completion event.
                     error!(
                         instance_id = %instance_id,
                         error = %e,
-                        "Failed to process instance output"
+                        "Failed to process instance output, deferring to Core for status"
                     );
-                    // Mark as failed if we couldn't process output
-                    let _ = db::update_instance_result(
-                        &pool,
-                        &instance_id,
-                        "failed",
-                        None,
-                        Some(&format!("Failed to process output: {}", e)),
-                        None,
-                    )
-                    .await;
                 }
 
                 // Clean up container registry
@@ -951,6 +813,14 @@ pub fn spawn_container_monitor(
 }
 
 /// Process instance output (simpler version that doesn't need full state).
+///
+/// Uses conditional updates (only if status = 'running') to avoid overwriting
+/// status updates that were already set by runtara-core via SDK events.
+///
+/// IMPORTANT: When output.json cannot be read, this function does NOT mark the instance
+/// as failed. Instead, it relies on Core (via SDK events) to be the authoritative source
+/// for status updates. This prevents race conditions where the container monitor detects
+/// process exit before Core has processed the SDK completion event.
 async fn process_output(
     state: &OutputProcessorState,
     instance_id: &str,
@@ -958,40 +828,82 @@ async fn process_output(
 ) -> Result<()> {
     let output_path = output_file_path(&state.data_dir, tenant_id, instance_id);
 
-    let output = match InstanceOutput::read_from_file(&output_path).await {
-        Ok(o) => o,
-        Err(e) => {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "Failed to read instance output, marking as failed"
-            );
-            db::update_instance_result(
-                &state.pool,
-                instance_id,
-                "failed",
-                None,
-                Some("No output.json found"),
-                None,
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    // Retry reading output.json with delays to handle race conditions.
+    // The SDK sends completion events via QUIC which Core processes, but the container
+    // monitor may detect the container exit before Core has updated the database.
+    // By retrying, we give Core time to process the event first.
+    const MAX_RETRIES: u32 = 10;
+    const RETRY_DELAY_MS: u64 = 100;
 
+    for attempt in 0..MAX_RETRIES {
+        // First check if Core has already set a terminal status
+        if let Ok(Some(inst)) = db::get_instance(&state.pool, instance_id).await {
+            if matches!(
+                inst.status.as_str(),
+                "completed" | "failed" | "cancelled" | "suspended"
+            ) {
+                debug!(
+                    instance_id = %instance_id,
+                    status = %inst.status,
+                    "Instance already has terminal status from Core, skipping output processing"
+                );
+                return Ok(());
+            }
+        }
+
+        match InstanceOutput::read_from_file(&output_path).await {
+            Ok(o) => {
+                // Successfully read output, process it
+                return process_output_inner(state, instance_id, o).await;
+            }
+            Err(e) => {
+                if attempt < MAX_RETRIES - 1 {
+                    debug!(
+                        instance_id = %instance_id,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Failed to read output.json, retrying..."
+                    );
+                    tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                } else {
+                    // All retries exhausted - but do NOT mark as failed.
+                    // Core is the authoritative source for status updates via SDK events.
+                    // If output.json doesn't exist, Core should have already received
+                    // the completion/failure event from the SDK.
+                    warn!(
+                        instance_id = %instance_id,
+                        error = %e,
+                        "Failed to read instance output after {} retries, deferring to Core for status",
+                        MAX_RETRIES
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Inner function to process the output once we have it.
+async fn process_output_inner(
+    state: &OutputProcessorState,
+    instance_id: &str,
+    output: InstanceOutput,
+) -> Result<()> {
     info!(
         instance_id = %instance_id,
         status = ?output.status,
         "Processing instance output"
     );
 
+    // Use conditional updates to avoid overwriting status set by Core via SDK events
     match output.status {
         InstanceOutputStatus::Completed => {
             let result_bytes = output
                 .result
                 .as_ref()
                 .and_then(|v| serde_json::to_vec(v).ok());
-            db::update_instance_result(
+            let updated = db::update_instance_result_if_running(
                 &state.pool,
                 instance_id,
                 "completed",
@@ -1000,9 +912,15 @@ async fn process_output(
                 None,
             )
             .await?;
+            if !updated {
+                debug!(
+                    instance_id = %instance_id,
+                    "Skipped status update - already set by Core"
+                );
+            }
         }
         InstanceOutputStatus::Failed => {
-            db::update_instance_result(
+            let updated = db::update_instance_result_if_running(
                 &state.pool,
                 instance_id,
                 "failed",
@@ -1011,9 +929,15 @@ async fn process_output(
                 None,
             )
             .await?;
+            if !updated {
+                debug!(
+                    instance_id = %instance_id,
+                    "Skipped status update - already set by Core"
+                );
+            }
         }
         InstanceOutputStatus::Suspended => {
-            db::update_instance_result(
+            let updated = db::update_instance_result_if_running(
                 &state.pool,
                 instance_id,
                 "suspended",
@@ -1022,6 +946,12 @@ async fn process_output(
                 output.checkpoint_id.as_deref(),
             )
             .await?;
+            if !updated {
+                debug!(
+                    instance_id = %instance_id,
+                    "Skipped status update - already set by Core"
+                );
+            }
         }
         InstanceOutputStatus::Sleeping => {
             // For sleeping, we need to schedule a wake
@@ -1031,7 +961,7 @@ async fn process_output(
                 let wake_at =
                     chrono::Utc::now() + chrono::Duration::milliseconds(wake_after_ms as i64);
 
-                db::update_instance_result(
+                let updated = db::update_instance_result_if_running(
                     &state.pool,
                     instance_id,
                     "suspended",
@@ -1041,20 +971,28 @@ async fn process_output(
                 )
                 .await?;
 
-                db::schedule_wake(&state.pool, instance_id, &checkpoint_id, wake_at).await?;
+                // Only schedule wake if we actually updated the status
+                if updated {
+                    db::schedule_wake(&state.pool, instance_id, &checkpoint_id, wake_at).await?;
 
-                info!(
-                    instance_id = %instance_id,
-                    wake_at = %wake_at,
-                    checkpoint_id = %checkpoint_id,
-                    "Scheduled wake for sleeping instance"
-                );
+                    info!(
+                        instance_id = %instance_id,
+                        wake_at = %wake_at,
+                        checkpoint_id = %checkpoint_id,
+                        "Scheduled wake for sleeping instance"
+                    );
+                } else {
+                    debug!(
+                        instance_id = %instance_id,
+                        "Skipped sleep scheduling - status already set by Core"
+                    );
+                }
             } else {
                 warn!(
                     instance_id = %instance_id,
                     "Sleeping output missing wake_after_ms or checkpoint_id"
                 );
-                db::update_instance_result(
+                let _ = db::update_instance_result_if_running(
                     &state.pool,
                     instance_id,
                     "failed",
@@ -1066,8 +1004,15 @@ async fn process_output(
             }
         }
         InstanceOutputStatus::Cancelled => {
-            db::update_instance_result(&state.pool, instance_id, "cancelled", None, None, None)
-                .await?;
+            let _ = db::update_instance_result_if_running(
+                &state.pool,
+                instance_id,
+                "cancelled",
+                None,
+                None,
+                None,
+            )
+            .await?;
         }
     }
 

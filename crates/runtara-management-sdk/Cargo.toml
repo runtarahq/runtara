@@ -23,5 +23,9 @@ chrono = { workspace = true }
 name = "runtara-ctl"
 path = "src/bin/runtara-ctl.rs"
 
+[[bin]]
+name = "e2e-parallel-status-test"
+path = "src/bin/e2e-parallel-status-test.rs"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

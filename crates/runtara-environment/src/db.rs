@@ -226,6 +226,44 @@ pub async fn update_instance_result(
     Ok(())
 }
 
+/// Update instance result only if current status is 'running'.
+///
+/// This prevents the container monitor from overwriting status updates
+/// that were already set by runtara-core via SDK events. The SDK event
+/// path is authoritative for successful completions; the monitor only
+/// handles cases where the container crashed without reporting.
+///
+/// Returns true if the update was applied, false if skipped (status was not 'running').
+pub async fn update_instance_result_if_running(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    checkpoint_id: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE instances
+        SET status = $2::instance_status,
+            output = $3,
+            error = $4,
+            checkpoint_id = COALESCE($5, checkpoint_id),
+            finished_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW() ELSE finished_at END
+        WHERE instance_id = $1 AND status = 'running'
+        "#,
+    )
+    .bind(instance_id)
+    .bind(status)
+    .bind(output)
+    .bind(error)
+    .bind(checkpoint_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 /// Options for listing instances.
 #[derive(Debug, Clone, Default)]
 pub struct ListInstancesOptions {
