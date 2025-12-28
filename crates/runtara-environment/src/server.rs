@@ -675,6 +675,9 @@ async fn handle_get_instance_status(
             heartbeat_at_ms: inst.heartbeat_at.map(|t| t.timestamp_millis()),
             retry_count: inst.attempt as u32,
             max_retries: inst.max_attempts as u32,
+            // Execution metrics (available for terminal states)
+            memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
+            cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
         }),
         None => Ok(environment_proto::GetInstanceStatusResponse {
             instance_id: req.instance_id,
@@ -693,6 +696,9 @@ async fn handle_get_instance_status(
             heartbeat_at_ms: None,
             retry_count: 0,
             max_retries: 0,
+            // Execution metrics - not available for not found
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
         }),
     }
 }

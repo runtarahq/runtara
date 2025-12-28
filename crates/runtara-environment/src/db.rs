@@ -97,6 +97,10 @@ pub struct InstanceFull {
     pub attempt: i32,
     /// Maximum allowed attempts.
     pub max_attempts: i32,
+    /// Peak memory usage during execution (in bytes).
+    pub memory_peak_bytes: Option<i64>,
+    /// Total CPU time consumed during execution (in microseconds).
+    pub cpu_usage_usec: Option<i64>,
 }
 
 /// Create a new instance record and associate it with an image.
@@ -156,7 +160,8 @@ pub async fn get_instance_full(
         SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
                i.status::TEXT as status, i.output, i.error, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
-               ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts
+               ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts,
+               i.memory_peak_bytes, i.cpu_usage_usec
         FROM instances i
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
@@ -262,6 +267,33 @@ pub async fn update_instance_result_if_running(
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Update execution metrics for an instance.
+///
+/// Stores cgroup-collected resource usage metrics (memory, CPU) after container execution.
+/// Only updates if metrics are not already set (first writer wins).
+pub async fn update_instance_metrics(
+    pool: &PgPool,
+    instance_id: &str,
+    memory_peak_bytes: Option<u64>,
+    cpu_usage_usec: Option<u64>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE instances
+        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
+            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(memory_peak_bytes.map(|v| v as i64))
+    .bind(cpu_usage_usec.map(|v| v as i64))
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Options for listing instances.
@@ -847,11 +879,15 @@ mod tests {
             heartbeat_at: Some(Utc::now()),
             attempt: 1,
             max_attempts: 3,
+            memory_peak_bytes: Some(536_870_912), // 512 MB
+            cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
         };
 
         let debug_str = format!("{:?}", instance);
         assert!(debug_str.contains("InstanceFull"));
         assert!(debug_str.contains("heartbeat_at"));
+        assert!(debug_str.contains("memory_peak_bytes"));
+        assert!(debug_str.contains("cpu_usage_usec"));
     }
 
     #[test]
@@ -872,6 +908,8 @@ mod tests {
             heartbeat_at: Some(now),
             attempt: 1,
             max_attempts: 3,
+            memory_peak_bytes: Some(1_073_741_824), // 1 GB
+            cpu_usage_usec: Some(5_000_000),        // 5 seconds
         };
 
         let cloned = instance.clone();
@@ -879,6 +917,8 @@ mod tests {
         assert_eq!(instance.instance_id, cloned.instance_id);
         assert_eq!(instance.heartbeat_at, cloned.heartbeat_at);
         assert_eq!(instance.output, cloned.output);
+        assert_eq!(instance.memory_peak_bytes, cloned.memory_peak_bytes);
+        assert_eq!(instance.cpu_usage_usec, cloned.cpu_usage_usec);
     }
 
     #[test]
@@ -898,10 +938,66 @@ mod tests {
             heartbeat_at: None,
             attempt: 0,
             max_attempts: 3,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
         };
 
         assert!(instance.heartbeat_at.is_none());
         assert!(instance.started_at.is_none());
+        assert!(instance.memory_peak_bytes.is_none());
+        assert!(instance.cpu_usage_usec.is_none());
+    }
+
+    #[test]
+    fn test_instance_full_with_metrics() {
+        let instance = InstanceFull {
+            instance_id: "inst-metrics".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: Some("img-123".to_string()),
+            image_name: Some("cpu-intensive-workflow".to_string()),
+            status: "completed".to_string(),
+            output: Some(b"done".to_vec()),
+            error: None,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            heartbeat_at: None,
+            attempt: 1,
+            max_attempts: 1,
+            memory_peak_bytes: Some(2_147_483_648), // 2 GB
+            cpu_usage_usec: Some(120_000_000),      // 2 minutes
+        };
+
+        assert_eq!(instance.memory_peak_bytes, Some(2_147_483_648));
+        assert_eq!(instance.cpu_usage_usec, Some(120_000_000));
+    }
+
+    #[test]
+    fn test_instance_full_without_metrics() {
+        // Simulates an instance where metrics couldn't be collected
+        // (e.g., container exited too quickly or cgroup read failed)
+        let instance = InstanceFull {
+            instance_id: "inst-no-metrics".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            image_id: Some("img-123".to_string()),
+            image_name: Some("quick-workflow".to_string()),
+            status: "completed".to_string(),
+            output: Some(b"done".to_vec()),
+            error: None,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            heartbeat_at: None,
+            attempt: 1,
+            max_attempts: 1,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
+        };
+
+        assert!(instance.memory_peak_bytes.is_none());
+        assert!(instance.cpu_usage_usec.is_none());
     }
 
     // ==========================================================================

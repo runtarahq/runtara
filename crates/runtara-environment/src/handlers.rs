@@ -795,6 +795,34 @@ pub fn spawn_container_monitor(
                     "Container finished, processing output"
                 );
 
+                // Collect metrics from cgroup before container cleanup
+                let (_output, _error, metrics) = runner.collect_result(&handle).await;
+
+                // Store metrics in database
+                if metrics.memory_peak_bytes.is_some() || metrics.cpu_usage_usec.is_some() {
+                    if let Err(e) = db::update_instance_metrics(
+                        &pool,
+                        &instance_id,
+                        metrics.memory_peak_bytes,
+                        metrics.cpu_usage_usec,
+                    )
+                    .await
+                    {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to store container metrics"
+                        );
+                    } else {
+                        debug!(
+                            instance_id = %instance_id,
+                            memory_peak_bytes = ?metrics.memory_peak_bytes,
+                            cpu_usage_usec = ?metrics.cpu_usage_usec,
+                            "Stored container metrics"
+                        );
+                    }
+                }
+
                 // Create minimal state for processing output
                 let output_state = OutputProcessorState {
                     pool: pool.clone(),

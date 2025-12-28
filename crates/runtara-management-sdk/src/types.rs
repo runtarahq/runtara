@@ -140,6 +140,12 @@ pub struct InstanceInfo {
     pub retry_count: u32,
     /// Maximum allowed retries configured for this instance.
     pub max_retries: u32,
+
+    // Execution metrics (available for terminal states)
+    /// Peak memory usage during execution (in bytes).
+    pub memory_peak_bytes: Option<u64>,
+    /// Total CPU time consumed during execution (in microseconds).
+    pub cpu_usage_usec: Option<u64>,
 }
 
 /// Summary of an instance (used in list results).
@@ -1426,5 +1432,91 @@ mod tests {
 
         assert!(!field.required);
         assert_eq!(field.default_value, Some(json!("GET")));
+    }
+
+    // ========================================================================
+    // InstanceInfo tests (with metrics)
+    // ========================================================================
+
+    #[test]
+    fn test_instance_info_with_metrics() {
+        let info = InstanceInfo {
+            instance_id: "inst-123".to_string(),
+            image_id: "img-456".to_string(),
+            image_name: "my-workflow:v1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: InstanceStatus::Completed,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            heartbeat_at: None,
+            input: None,
+            output: Some(json!({"result": "success"})),
+            error: None,
+            retry_count: 0,
+            max_retries: 3,
+            memory_peak_bytes: Some(536_870_912), // 512 MB
+            cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
+        };
+
+        assert_eq!(info.memory_peak_bytes, Some(536_870_912));
+        assert_eq!(info.cpu_usage_usec, Some(1_500_000));
+    }
+
+    #[test]
+    fn test_instance_info_without_metrics() {
+        let info = InstanceInfo {
+            instance_id: "inst-123".to_string(),
+            image_id: "img-456".to_string(),
+            image_name: "my-workflow:v1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: InstanceStatus::Running,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            heartbeat_at: Some(Utc::now()),
+            input: Some(json!({"key": "value"})),
+            output: None,
+            error: None,
+            retry_count: 0,
+            max_retries: 3,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
+        };
+
+        assert!(info.memory_peak_bytes.is_none());
+        assert!(info.cpu_usage_usec.is_none());
+    }
+
+    #[test]
+    fn test_instance_info_serde_with_metrics() {
+        let info = InstanceInfo {
+            instance_id: "inst-123".to_string(),
+            image_id: "img-456".to_string(),
+            image_name: "workflow".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: InstanceStatus::Completed,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            heartbeat_at: None,
+            input: None,
+            output: Some(json!("done")),
+            error: None,
+            retry_count: 1,
+            max_retries: 3,
+            memory_peak_bytes: Some(1_073_741_824), // 1 GB
+            cpu_usage_usec: Some(5_000_000),        // 5 seconds
+        };
+
+        let json_str = serde_json::to_string(&info).unwrap();
+        let deserialized: InstanceInfo = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(deserialized.instance_id, "inst-123");
+        assert_eq!(deserialized.memory_peak_bytes, Some(1_073_741_824));
+        assert_eq!(deserialized.cpu_usage_usec, Some(5_000_000));
     }
 }

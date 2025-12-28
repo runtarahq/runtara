@@ -195,6 +195,8 @@ impl ManagementSdk {
                     error: resp.error,
                     retry_count: resp.retry_count,
                     max_retries: resp.max_retries,
+                    memory_peak_bytes: resp.memory_peak_bytes,
+                    cpu_usage_usec: resp.cpu_usage_usec,
                 })
             }
             _ => Err(SdkError::UnexpectedResponse(
