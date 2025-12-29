@@ -626,6 +626,7 @@ pub async fn get_tenant_metrics(
     // Build query with date_trunc for bucket alignment
     // Duration = finished_at - started_at (only for terminal states with both timestamps)
     // Uses generate_series + LEFT JOIN to include empty buckets for charting
+    // Note: Uses CASE WHEN instead of FILTER for broader PostgreSQL compatibility
     let query = format!(
         r#"
         WITH time_series AS (
@@ -639,19 +640,20 @@ pub async fn get_tenant_metrics(
             SELECT
                 date_trunc('{trunc_unit}', i.finished_at) AS bucket_time,
                 COUNT(*) AS invocation_count,
-                COUNT(*) FILTER (WHERE i.status = 'completed') AS success_count,
-                COUNT(*) FILTER (WHERE i.status = 'failed') AS failure_count,
-                COUNT(*) FILTER (WHERE i.status = 'cancelled') AS cancelled_count,
-                AVG(EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000)
-                    FILTER (WHERE i.started_at IS NOT NULL AND i.finished_at IS NOT NULL) AS avg_duration_ms,
-                MIN(EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000)
-                    FILTER (WHERE i.started_at IS NOT NULL AND i.finished_at IS NOT NULL) AS min_duration_ms,
-                MAX(EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000)
-                    FILTER (WHERE i.started_at IS NOT NULL AND i.finished_at IS NOT NULL) AS max_duration_ms,
-                AVG(i.memory_peak_bytes)::FLOAT8
-                    FILTER (WHERE i.memory_peak_bytes IS NOT NULL) AS avg_memory_bytes,
-                MAX(i.memory_peak_bytes)
-                    FILTER (WHERE i.memory_peak_bytes IS NOT NULL) AS max_memory_bytes
+                SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) AS success_count,
+                SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failure_count,
+                SUM(CASE WHEN i.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+                AVG(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
+                    ELSE NULL END) AS avg_duration_ms,
+                MIN(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
+                    ELSE NULL END) AS min_duration_ms,
+                MAX(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
+                    ELSE NULL END) AS max_duration_ms,
+                AVG(i.memory_peak_bytes)::FLOAT8 AS avg_memory_bytes,
+                MAX(i.memory_peak_bytes) AS max_memory_bytes
             FROM instances i
             WHERE i.tenant_id = $1
               AND i.finished_at >= $2
