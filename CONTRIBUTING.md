@@ -2,6 +2,23 @@
 
 Thank you for your interest in contributing to Runtara! This document provides guidelines and instructions for contributing.
 
+## Contributor License Agreement (CLA)
+
+**All contributions require signing our [Contributor License Agreement (CLA)](CLA.md).** We cannot accept pull requests from contributors who have not signed the CLA.
+
+Before your first contribution, please read the CLA and include the following statement in your pull request:
+
+```
+I have read the Runtara Contributor License Agreement and I agree to its terms.
+
+Name: [Your Full Name]
+Email: [Your Email]
+Date: [Date]
+GitHub Username: [Your GitHub Username]
+```
+
+If you have questions about the CLA, contact us at legal@syncmyorders.com.
+
 ## Code of Conduct
 
 This project adheres to a [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
@@ -29,12 +46,13 @@ Feature requests are welcome! Please:
 
 ### Pull Requests
 
-1. **Fork the repository** and create your branch from `main`
-2. **Follow the coding standards** (see below)
-3. **Add tests** for new functionality
-4. **Ensure all tests pass** locally
-5. **Update documentation** if needed
-6. **Submit your PR** with a clear description
+1. **Sign the CLA** if this is your first contribution (see above)
+2. **Fork the repository** and create your branch from `main`
+3. **Follow the coding standards** (see below)
+4. **Add tests** for new functionality
+5. **Ensure all tests pass** locally
+6. **Update documentation** if needed
+7. **Submit your PR** with a clear description
 
 ## Development Setup
 
