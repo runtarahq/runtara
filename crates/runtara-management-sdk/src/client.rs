@@ -8,11 +8,11 @@ use tracing::{debug, info, instrument};
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 use runtara_protocol::environment_proto::{
     DeleteImageRequest, GetCapabilityRequest, GetCheckpointRequest, GetImageRequest,
-    GetInstanceStatusRequest, HealthCheckRequest, ListAgentsRequest, ListCheckpointsRequest,
-    ListEventsRequest, ListImagesRequest, ListInstancesRequest, RegisterImageRequest,
-    RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse, SendSignalRequest,
-    StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, rpc_request::Request,
-    rpc_response::Response,
+    GetInstanceStatusRequest, GetTenantMetricsRequest, HealthCheckRequest, ListAgentsRequest,
+    ListCheckpointsRequest, ListEventsRequest, ListImagesRequest, ListInstancesRequest,
+    RegisterImageRequest, RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse,
+    SendSignalRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
+    rpc_request::Request, rpc_response::Response,
 };
 use runtara_protocol::frame::{Frame, write_frame};
 use tokio::io::AsyncRead;
@@ -20,12 +20,14 @@ use tokio::io::AsyncRead;
 use crate::config::SdkConfig;
 use crate::error::{Result, SdkError};
 use crate::types::{
-    AgentInfo, CapabilityField, Checkpoint, CheckpointSummary, EventSummary, HealthStatus,
-    ImageSummary, InstanceInfo, InstanceStatus, InstanceSummary, ListCheckpointsOptions,
-    ListCheckpointsResult, ListEventsOptions, ListEventsResult, ListImagesOptions,
-    ListImagesResult, ListInstancesOptions, ListInstancesResult, RegisterImageOptions,
+    AgentInfo, CapabilityField, Checkpoint, CheckpointSummary, EventSummary,
+    GetTenantMetricsOptions, HealthStatus, ImageSummary, InstanceInfo, InstanceStatus,
+    InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult, ListEventsOptions,
+    ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
+    ListInstancesResult, MetricsBucket, MetricsGranularity, RegisterImageOptions,
     RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType, StartInstanceOptions,
-    StartInstanceResult, StopInstanceOptions, TestCapabilityOptions, TestCapabilityResult,
+    StartInstanceResult, StopInstanceOptions, TenantMetricsResult, TestCapabilityOptions,
+    TestCapabilityResult,
 };
 
 /// High-level SDK for managing runtara-environment instances and images.
@@ -1033,6 +1035,105 @@ impl ManagementSdk {
             }
             _ => Err(SdkError::UnexpectedResponse(
                 "expected GetCapabilityResponse".to_string(),
+            )),
+        }
+    }
+
+    // =========================================================================
+    // Tenant Metrics
+    // =========================================================================
+
+    /// Get aggregated execution metrics for a tenant.
+    ///
+    /// Returns time-bucketed metrics including invocation counts, success rates,
+    /// duration statistics, and memory usage across all instances for the tenant.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Options including tenant_id, time range, and granularity
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use chrono::{Duration, Utc};
+    ///
+    /// // Get last 7 days of daily metrics
+    /// let result = sdk.get_tenant_metrics(
+    ///     GetTenantMetricsOptions::new("tenant-1")
+    ///         .with_start_time(Utc::now() - Duration::days(7))
+    ///         .with_granularity(MetricsGranularity::Daily)
+    /// ).await?;
+    ///
+    /// for bucket in result.buckets {
+    ///     println!("{}: {} invocations, {:.1}% success rate",
+    ///         bucket.bucket_time.format("%Y-%m-%d"),
+    ///         bucket.invocation_count,
+    ///         bucket.success_rate_percent.unwrap_or(0.0)
+    ///     );
+    /// }
+    /// ```
+    #[instrument(skip(self), fields(tenant_id = %options.tenant_id))]
+    pub async fn get_tenant_metrics(
+        &self,
+        options: GetTenantMetricsOptions,
+    ) -> Result<TenantMetricsResult> {
+        debug!("Getting tenant metrics");
+
+        if options.tenant_id.is_empty() {
+            return Err(SdkError::InvalidInput("tenant_id is required".to_string()));
+        }
+
+        let request = GetTenantMetricsRequest {
+            tenant_id: options.tenant_id.clone(),
+            start_time_ms: options.start_time.map(|t| t.timestamp_millis()),
+            end_time_ms: options.end_time.map(|t| t.timestamp_millis()),
+            granularity: options.granularity.map(i32::from),
+        };
+
+        let response = self
+            .send_request(Request::GetTenantMetrics(request))
+            .await?;
+
+        match response {
+            Response::GetTenantMetrics(resp) => {
+                let buckets = resp
+                    .buckets
+                    .into_iter()
+                    .map(|b| MetricsBucket {
+                        bucket_time: Utc
+                            .timestamp_millis_opt(b.bucket_time_ms)
+                            .single()
+                            .unwrap_or_else(Utc::now),
+                        invocation_count: b.invocation_count,
+                        success_count: b.success_count,
+                        failure_count: b.failure_count,
+                        cancelled_count: b.cancelled_count,
+                        // Convert milliseconds to seconds for SDK API
+                        avg_duration_seconds: b.avg_duration_ms.map(|ms| ms / 1000.0),
+                        min_duration_seconds: b.min_duration_ms.map(|ms| ms / 1000.0),
+                        max_duration_seconds: b.max_duration_ms.map(|ms| ms / 1000.0),
+                        avg_memory_bytes: b.avg_memory_bytes,
+                        max_memory_bytes: b.max_memory_bytes,
+                        success_rate_percent: b.success_rate_percent,
+                    })
+                    .collect();
+
+                Ok(TenantMetricsResult {
+                    tenant_id: resp.tenant_id,
+                    start_time: Utc
+                        .timestamp_millis_opt(resp.start_time_ms)
+                        .single()
+                        .unwrap_or_else(Utc::now),
+                    end_time: Utc
+                        .timestamp_millis_opt(resp.end_time_ms)
+                        .single()
+                        .unwrap_or_else(Utc::now),
+                    granularity: MetricsGranularity::from(resp.granularity),
+                    buckets,
+                })
+            }
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected GetTenantMetricsResponse".to_string(),
             )),
         }
     }

@@ -333,6 +333,14 @@ async fn handle_stream(
                 message: e.to_string(),
             }),
         },
+
+        Request::GetTenantMetrics(req) => match handle_get_tenant_metrics(&state, req).await {
+            Ok(resp) => Response::GetTenantMetrics(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "GET_TENANT_METRICS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
     };
 
     // Send response
@@ -1122,5 +1130,100 @@ async fn handle_list_events(
         total_count: total_count as u32,
         limit: limit as u32,
         offset: offset as u32,
+    })
+}
+
+/// Handle get tenant metrics request.
+async fn handle_get_tenant_metrics(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::GetTenantMetricsRequest,
+) -> Result<environment_proto::GetTenantMetricsResponse, crate::error::Error> {
+    debug!(
+        tenant_id = %req.tenant_id,
+        "Getting tenant metrics"
+    );
+
+    // Validate tenant_id
+    if req.tenant_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "tenant_id is required".to_string(),
+        ));
+    }
+
+    // Parse timestamps with defaults
+    let now = chrono::Utc::now();
+    let end_time = req
+        .end_time_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .unwrap_or(now);
+    let start_time = req
+        .start_time_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .unwrap_or(end_time - chrono::Duration::hours(24));
+
+    // Parse granularity
+    let granularity = match req.granularity {
+        Some(g) => match environment_proto::MetricsGranularity::try_from(g) {
+            Ok(environment_proto::MetricsGranularity::GranularityDaily) => {
+                db::MetricsGranularity::Daily
+            }
+            _ => db::MetricsGranularity::Hourly,
+        },
+        None => db::MetricsGranularity::Hourly,
+    };
+
+    let options = db::TenantMetricsOptions {
+        tenant_id: req.tenant_id.clone(),
+        start_time,
+        end_time,
+        granularity,
+    };
+
+    let bucket_rows = db::get_tenant_metrics(&state.pool, &options)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to get tenant metrics: {}", e)))?;
+
+    // Convert to proto
+    let buckets: Vec<environment_proto::MetricsBucket> = bucket_rows
+        .into_iter()
+        .map(|row| {
+            let terminal_count = row.success_count + row.failure_count + row.cancelled_count;
+            let success_rate = if terminal_count > 0 {
+                Some((row.success_count as f64 / terminal_count as f64) * 100.0)
+            } else {
+                None
+            };
+
+            environment_proto::MetricsBucket {
+                bucket_time_ms: row.bucket_time.timestamp_millis(),
+                invocation_count: row.invocation_count,
+                success_count: row.success_count,
+                failure_count: row.failure_count,
+                cancelled_count: row.cancelled_count,
+                avg_duration_ms: row.avg_duration_ms,
+                min_duration_ms: row.min_duration_ms,
+                max_duration_ms: row.max_duration_ms,
+                avg_memory_bytes: row.avg_memory_bytes.map(|v| v as i64),
+                max_memory_bytes: row.max_memory_bytes,
+                success_rate_percent: success_rate,
+            }
+        })
+        .collect();
+
+    let proto_granularity = match granularity {
+        db::MetricsGranularity::Hourly => {
+            environment_proto::MetricsGranularity::GranularityHourly as i32
+        }
+        db::MetricsGranularity::Daily => {
+            environment_proto::MetricsGranularity::GranularityDaily as i32
+        }
+    };
+
+    Ok(environment_proto::GetTenantMetricsResponse {
+        tenant_id: req.tenant_id,
+        start_time_ms: start_time.timestamp_millis(),
+        end_time_ms: end_time.timestamp_millis(),
+        granularity: proto_granularity,
+        buckets,
     })
 }

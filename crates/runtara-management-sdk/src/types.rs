@@ -923,6 +923,130 @@ pub struct ListEventsResult {
     pub offset: u32,
 }
 
+// ============================================================================
+// Tenant Metrics
+// ============================================================================
+
+/// Granularity for metrics aggregation buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsGranularity {
+    /// Hourly buckets (default).
+    #[default]
+    Hourly,
+    /// Daily buckets.
+    Daily,
+}
+
+impl From<MetricsGranularity> for i32 {
+    fn from(granularity: MetricsGranularity) -> Self {
+        match granularity {
+            MetricsGranularity::Hourly => 0,
+            MetricsGranularity::Daily => 1,
+        }
+    }
+}
+
+impl From<i32> for MetricsGranularity {
+    fn from(value: i32) -> Self {
+        match value {
+            1 => MetricsGranularity::Daily,
+            _ => MetricsGranularity::Hourly,
+        }
+    }
+}
+
+/// Options for getting tenant metrics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetTenantMetricsOptions {
+    /// Tenant ID (required).
+    pub tenant_id: String,
+    /// Start of time range (default: 24 hours ago).
+    pub start_time: Option<DateTime<Utc>>,
+    /// End of time range (default: now).
+    pub end_time: Option<DateTime<Utc>>,
+    /// Bucket granularity (default: hourly).
+    pub granularity: Option<MetricsGranularity>,
+}
+
+impl GetTenantMetricsOptions {
+    /// Create new options with required tenant ID.
+    pub fn new(tenant_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Set the start time.
+    pub fn with_start_time(mut self, start_time: DateTime<Utc>) -> Self {
+        self.start_time = Some(start_time);
+        self
+    }
+
+    /// Set the end time.
+    pub fn with_end_time(mut self, end_time: DateTime<Utc>) -> Self {
+        self.end_time = Some(end_time);
+        self
+    }
+
+    /// Set the granularity.
+    pub fn with_granularity(mut self, granularity: MetricsGranularity) -> Self {
+        self.granularity = Some(granularity);
+        self
+    }
+}
+
+/// Result of tenant metrics aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantMetricsResult {
+    /// Tenant ID.
+    pub tenant_id: String,
+    /// Start of time range.
+    pub start_time: DateTime<Utc>,
+    /// End of time range.
+    pub end_time: DateTime<Utc>,
+    /// Bucket granularity used.
+    pub granularity: MetricsGranularity,
+    /// Time-bucketed metrics.
+    pub buckets: Vec<MetricsBucket>,
+}
+
+/// A single time bucket of aggregated metrics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsBucket {
+    /// Start time of this bucket (UTC).
+    pub bucket_time: DateTime<Utc>,
+
+    // Counts
+    /// Total number of invocations in this bucket.
+    pub invocation_count: i64,
+    /// Number of successful completions.
+    pub success_count: i64,
+    /// Number of failures.
+    pub failure_count: i64,
+    /// Number of cancellations.
+    pub cancelled_count: i64,
+
+    // Duration stats (seconds)
+    /// Average execution duration in seconds.
+    pub avg_duration_seconds: Option<f64>,
+    /// Minimum execution duration in seconds.
+    pub min_duration_seconds: Option<f64>,
+    /// Maximum execution duration in seconds.
+    pub max_duration_seconds: Option<f64>,
+
+    // Memory stats (bytes)
+    /// Average peak memory usage in bytes.
+    pub avg_memory_bytes: Option<i64>,
+    /// Maximum peak memory usage in bytes.
+    pub max_memory_bytes: Option<i64>,
+
+    // Calculated
+    /// Success rate as percentage (0-100).
+    pub success_rate_percent: Option<f64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

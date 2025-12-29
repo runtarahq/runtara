@@ -552,6 +552,138 @@ pub async fn remove_instance_image(pool: &PgPool, instance_id: &str) -> Result<(
     Ok(())
 }
 
+// ============================================================================
+// Tenant Metrics
+// ============================================================================
+
+/// Granularity for metrics aggregation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsGranularity {
+    /// Hourly buckets.
+    Hourly,
+    /// Daily buckets.
+    Daily,
+}
+
+/// Options for tenant metrics aggregation.
+#[derive(Debug, Clone)]
+pub struct TenantMetricsOptions {
+    /// Tenant ID.
+    pub tenant_id: String,
+    /// Start of time range.
+    pub start_time: DateTime<Utc>,
+    /// End of time range.
+    pub end_time: DateTime<Utc>,
+    /// Bucket granularity.
+    pub granularity: MetricsGranularity,
+}
+
+/// Aggregated metrics bucket from database.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MetricsBucketRow {
+    /// Start of bucket (UTC).
+    pub bucket_time: DateTime<Utc>,
+    /// Total invocations in bucket.
+    pub invocation_count: i64,
+    /// Successful completions.
+    pub success_count: i64,
+    /// Failed completions.
+    pub failure_count: i64,
+    /// Cancelled executions.
+    pub cancelled_count: i64,
+    /// Average duration in milliseconds.
+    pub avg_duration_ms: Option<f64>,
+    /// Minimum duration in milliseconds.
+    pub min_duration_ms: Option<f64>,
+    /// Maximum duration in milliseconds.
+    pub max_duration_ms: Option<f64>,
+    /// Average peak memory in bytes.
+    pub avg_memory_bytes: Option<f64>,
+    /// Maximum peak memory in bytes.
+    pub max_memory_bytes: Option<i64>,
+}
+
+/// Get aggregated tenant metrics.
+///
+/// Aggregates instance execution metrics into time buckets using PostgreSQL
+/// date_trunc for bucket alignment and aggregate functions for statistics.
+///
+/// Returns all buckets in the time range, including empty ones (with zero counts).
+pub async fn get_tenant_metrics(
+    pool: &PgPool,
+    options: &TenantMetricsOptions,
+) -> Result<Vec<MetricsBucketRow>, sqlx::Error> {
+    let trunc_unit = match options.granularity {
+        MetricsGranularity::Hourly => "hour",
+        MetricsGranularity::Daily => "day",
+    };
+
+    let interval = match options.granularity {
+        MetricsGranularity::Hourly => "1 hour",
+        MetricsGranularity::Daily => "1 day",
+    };
+
+    // Build query with date_trunc for bucket alignment
+    // Duration = finished_at - started_at (only for terminal states with both timestamps)
+    // Uses generate_series + LEFT JOIN to include empty buckets for charting
+    let query = format!(
+        r#"
+        WITH time_series AS (
+            SELECT generate_series(
+                date_trunc('{trunc_unit}', $2::timestamptz),
+                date_trunc('{trunc_unit}', $3::timestamptz),
+                interval '{interval}'
+            ) AS bucket_time
+        ),
+        metrics AS (
+            SELECT
+                date_trunc('{trunc_unit}', i.finished_at) AS bucket_time,
+                COUNT(*) AS invocation_count,
+                COUNT(*) FILTER (WHERE i.status = 'completed') AS success_count,
+                COUNT(*) FILTER (WHERE i.status = 'failed') AS failure_count,
+                COUNT(*) FILTER (WHERE i.status = 'cancelled') AS cancelled_count,
+                AVG(EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000)
+                    FILTER (WHERE i.started_at IS NOT NULL AND i.finished_at IS NOT NULL) AS avg_duration_ms,
+                MIN(EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000)
+                    FILTER (WHERE i.started_at IS NOT NULL AND i.finished_at IS NOT NULL) AS min_duration_ms,
+                MAX(EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000)
+                    FILTER (WHERE i.started_at IS NOT NULL AND i.finished_at IS NOT NULL) AS max_duration_ms,
+                AVG(i.memory_peak_bytes)::FLOAT8
+                    FILTER (WHERE i.memory_peak_bytes IS NOT NULL) AS avg_memory_bytes,
+                MAX(i.memory_peak_bytes)
+                    FILTER (WHERE i.memory_peak_bytes IS NOT NULL) AS max_memory_bytes
+            FROM instances i
+            WHERE i.tenant_id = $1
+              AND i.finished_at >= $2
+              AND i.finished_at < $3
+              AND i.status IN ('completed', 'failed', 'cancelled')
+            GROUP BY date_trunc('{trunc_unit}', i.finished_at)
+        )
+        SELECT
+            ts.bucket_time,
+            COALESCE(m.invocation_count, 0) AS invocation_count,
+            COALESCE(m.success_count, 0) AS success_count,
+            COALESCE(m.failure_count, 0) AS failure_count,
+            COALESCE(m.cancelled_count, 0) AS cancelled_count,
+            m.avg_duration_ms,
+            m.min_duration_ms,
+            m.max_duration_ms,
+            m.avg_memory_bytes,
+            m.max_memory_bytes
+        FROM time_series ts
+        LEFT JOIN metrics m ON ts.bucket_time = m.bucket_time
+        ORDER BY ts.bucket_time ASC
+        "#
+    );
+
+    sqlx::query_as::<_, MetricsBucketRow>(&query)
+        .bind(&options.tenant_id)
+        .bind(options.start_time)
+        .bind(options.end_time)
+        .fetch_all(pool)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
