@@ -174,6 +174,12 @@ pub mod server;
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 
+/// Background worker for cleaning up old run directories.
+pub mod cleanup_worker;
+
+/// Background worker for detecting and failing stale instances.
+pub mod heartbeat_monitor;
+
 /// Embeddable runtime for runtara-environment.
 pub mod runtime;
 

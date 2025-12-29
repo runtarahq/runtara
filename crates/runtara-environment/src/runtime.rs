@@ -46,7 +46,9 @@ use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
+use crate::cleanup_worker::{CleanupWorker, CleanupWorkerConfig};
 use crate::handlers::EnvironmentHandlerState;
+use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::runner::Runner;
 use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
 
@@ -61,6 +63,10 @@ pub struct EnvironmentRuntimeBuilder {
     wake_poll_interval: Duration,
     wake_batch_size: i64,
     request_timeout: Duration,
+    cleanup_poll_interval: Duration,
+    cleanup_max_age: Duration,
+    heartbeat_poll_interval: Duration,
+    heartbeat_timeout: Duration,
 }
 
 impl Default for EnvironmentRuntimeBuilder {
@@ -75,6 +81,10 @@ impl Default for EnvironmentRuntimeBuilder {
             wake_poll_interval: Duration::from_secs(5),
             wake_batch_size: 10,
             request_timeout: Duration::from_secs(30),
+            cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
+            cleanup_max_age: Duration::from_secs(24 * 3600),  // 24 hours
+            heartbeat_poll_interval: Duration::from_secs(30), // 30 seconds
+            heartbeat_timeout: Duration::from_secs(120),      // 2 minutes
         }
     }
 }
@@ -154,6 +164,38 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
+    /// Set the cleanup worker poll interval.
+    ///
+    /// Default: 1 hour
+    pub fn cleanup_poll_interval(mut self, interval: Duration) -> Self {
+        self.cleanup_poll_interval = interval;
+        self
+    }
+
+    /// Set the maximum age for run directories before cleanup.
+    ///
+    /// Default: 24 hours
+    pub fn cleanup_max_age(mut self, max_age: Duration) -> Self {
+        self.cleanup_max_age = max_age;
+        self
+    }
+
+    /// Set the heartbeat monitor poll interval.
+    ///
+    /// Default: 30 seconds
+    pub fn heartbeat_poll_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_poll_interval = interval;
+        self
+    }
+
+    /// Set the heartbeat timeout (time without heartbeat before marking as failed).
+    ///
+    /// Default: 2 minutes
+    pub fn heartbeat_timeout(mut self, timeout: Duration) -> Self {
+        self.heartbeat_timeout = timeout;
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -175,6 +217,10 @@ impl EnvironmentRuntimeBuilder {
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
             request_timeout: self.request_timeout,
+            cleanup_poll_interval: self.cleanup_poll_interval,
+            cleanup_max_age: self.cleanup_max_age,
+            heartbeat_poll_interval: self.heartbeat_poll_interval,
+            heartbeat_timeout: self.heartbeat_timeout,
         })
     }
 }
@@ -190,6 +236,10 @@ pub struct EnvironmentRuntimeConfig {
     wake_poll_interval: Duration,
     wake_batch_size: i64,
     request_timeout: Duration,
+    cleanup_poll_interval: Duration,
+    cleanup_max_age: Duration,
+    heartbeat_poll_interval: Duration,
+    heartbeat_timeout: Duration,
 }
 
 impl EnvironmentRuntimeConfig {
@@ -245,6 +295,41 @@ impl EnvironmentRuntimeConfig {
             wake_scheduler.run().await;
         });
 
+        // Create cleanup worker
+        let cleanup_config = CleanupWorkerConfig {
+            data_dir: self.data_dir.clone(),
+            poll_interval: self.cleanup_poll_interval,
+            max_age: self.cleanup_max_age,
+        };
+        let cleanup_worker = CleanupWorker::new(cleanup_config);
+        let cleanup_shutdown = cleanup_worker.shutdown_handle();
+
+        // Start cleanup worker task
+        let cleanup_handle = tokio::spawn(async move {
+            cleanup_worker.run().await;
+        });
+
+        // Create heartbeat monitor (only if core_persistence is available)
+        let (heartbeat_handle, heartbeat_shutdown) =
+            if let Some(ref persistence) = self.core_persistence {
+                let heartbeat_config = HeartbeatMonitorConfig {
+                    poll_interval: self.heartbeat_poll_interval,
+                    heartbeat_timeout: self.heartbeat_timeout,
+                };
+                let heartbeat_monitor =
+                    HeartbeatMonitor::new(self.pool.clone(), persistence.clone(), heartbeat_config);
+                let shutdown = heartbeat_monitor.shutdown_handle();
+
+                let handle = tokio::spawn(async move {
+                    heartbeat_monitor.run().await;
+                });
+
+                (Some(handle), Some(shutdown))
+            } else {
+                info!("Heartbeat monitor disabled: core_persistence not configured");
+                (None, None)
+            };
+
         // Start QUIC server task
         let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
         let bind_addr = self.bind_addr;
@@ -265,8 +350,12 @@ impl EnvironmentRuntimeConfig {
         Ok(EnvironmentRuntime {
             server_handle,
             wake_handle,
+            cleanup_handle,
+            heartbeat_handle,
             server_shutdown_tx,
             wake_shutdown,
+            cleanup_shutdown,
+            heartbeat_shutdown,
             state,
             bind_addr,
         })
@@ -278,13 +367,19 @@ impl EnvironmentRuntimeConfig {
 /// The runtime manages:
 /// - QUIC server for management SDK connections (images, instances, signals)
 /// - Wake scheduler for durable sleep wake-ups
+/// - Cleanup worker for removing old run directories
+/// - Heartbeat monitor for detecting and failing stale instances
 ///
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
     server_handle: JoinHandle<Result<()>>,
     wake_handle: JoinHandle<()>,
+    cleanup_handle: JoinHandle<()>,
+    heartbeat_handle: Option<JoinHandle<()>>,
     server_shutdown_tx: watch::Sender<bool>,
     wake_shutdown: Arc<Notify>,
+    cleanup_shutdown: Arc<Notify>,
+    heartbeat_shutdown: Option<Arc<Notify>>,
     state: Arc<EnvironmentHandlerState>,
     bind_addr: SocketAddr,
 }
@@ -307,8 +402,8 @@ impl EnvironmentRuntime {
 
     /// Gracefully shut down the runtime.
     ///
-    /// This signals both the QUIC server and wake scheduler to stop,
-    /// then waits for them to complete.
+    /// This signals the QUIC server, wake scheduler, cleanup worker, and heartbeat
+    /// monitor to stop, then waits for them to complete.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
@@ -318,9 +413,29 @@ impl EnvironmentRuntime {
         // Signal wake scheduler shutdown
         self.wake_shutdown.notify_one();
 
+        // Signal cleanup worker shutdown
+        self.cleanup_shutdown.notify_one();
+
+        // Signal heartbeat monitor shutdown (if running)
+        if let Some(ref shutdown) = self.heartbeat_shutdown {
+            shutdown.notify_one();
+        }
+
         // Wait for wake scheduler
         if let Err(e) = self.wake_handle.await {
             error!("Wake scheduler task panicked: {}", e);
+        }
+
+        // Wait for cleanup worker
+        if let Err(e) = self.cleanup_handle.await {
+            error!("Cleanup worker task panicked: {}", e);
+        }
+
+        // Wait for heartbeat monitor (if running)
+        if let Some(handle) = self.heartbeat_handle {
+            if let Err(e) = handle.await {
+                error!("Heartbeat monitor task panicked: {}", e);
+            }
         }
 
         // Wait for server
@@ -342,7 +457,15 @@ impl EnvironmentRuntime {
 
     /// Check if the runtime is still running.
     pub fn is_running(&self) -> bool {
-        !self.server_handle.is_finished() && !self.wake_handle.is_finished()
+        let heartbeat_running = self
+            .heartbeat_handle
+            .as_ref()
+            .map_or(true, |h| !h.is_finished());
+
+        !self.server_handle.is_finished()
+            && !self.wake_handle.is_finished()
+            && !self.cleanup_handle.is_finished()
+            && heartbeat_running
     }
 }
 

@@ -349,26 +349,9 @@ impl OciRunner {
         None
     }
 
-    /// Clean up run directory after execution
-    async fn cleanup(&self, tenant_id: &str, instance_id: &str) {
-        let run_dir = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id);
-
-        if let Err(e) = fs::remove_dir_all(&run_dir).await {
-            debug!(
-                instance_id = %instance_id,
-                path = %run_dir.display(),
-                error = %e,
-                "Failed to clean up run directory"
-            );
-        }
-        // Note: We no longer delete bundles here since they are shared per-image.
-        // Bundles are only deleted when the image itself is deleted.
-    }
+    // NOTE: Run directory cleanup is now handled by the CleanupWorker in cleanup_worker.rs
+    // which runs periodically and removes directories older than 24 hours.
+    // This prevents race conditions where cleanup happens before output.json can be read.
 
     /// Run crun container and wait for exit
     ///
@@ -816,34 +799,30 @@ impl Runner for OciRunner {
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        // NOTE: Run directory cleanup is handled by a separate background worker
+        // after 24 hours, not immediately.
         match result {
             Ok(()) => {
                 match self
                     .load_output(&options.tenant_id, &options.instance_id)
                     .await
                 {
-                    Ok(output) => {
-                        self.cleanup(&options.tenant_id, &options.instance_id).await;
-                        Ok(LaunchResult {
-                            instance_id: options.instance_id.clone(),
-                            success: true,
-                            output: Some(output),
-                            error: None,
-                            duration_ms,
-                            metrics,
-                        })
-                    }
-                    Err(e) => {
-                        self.cleanup(&options.tenant_id, &options.instance_id).await;
-                        Ok(LaunchResult {
-                            instance_id: options.instance_id.clone(),
-                            success: false,
-                            output: None,
-                            error: Some(format!("Failed to load output: {}", e)),
-                            duration_ms,
-                            metrics,
-                        })
-                    }
+                    Ok(output) => Ok(LaunchResult {
+                        instance_id: options.instance_id.clone(),
+                        success: true,
+                        output: Some(output),
+                        error: None,
+                        duration_ms,
+                        metrics,
+                    }),
+                    Err(e) => Ok(LaunchResult {
+                        instance_id: options.instance_id.clone(),
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to load output: {}", e)),
+                        duration_ms,
+                        metrics,
+                    }),
                 }
             }
             Err(e) => {
@@ -854,7 +833,6 @@ impl Runner for OciRunner {
                     Some(msg) => msg,
                     None => e.to_string(),
                 };
-                self.cleanup(&options.tenant_id, &options.instance_id).await;
                 Ok(LaunchResult {
                     instance_id: options.instance_id.clone(),
                     success: false,
@@ -1128,7 +1106,9 @@ impl Runner for OciRunner {
         let error = self
             .load_error(&handle.tenant_id, &handle.instance_id)
             .await;
-        self.cleanup(&handle.tenant_id, &handle.instance_id).await;
+        // NOTE: Run directory cleanup is handled by a separate background worker
+        // after 24 hours, not immediately. This allows output.json to be read
+        // by the container monitor's process_output function.
         (output, error, metrics)
     }
 }

@@ -530,7 +530,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_sleep_until_without_connection() {
-        let config = test_config();
+        let mut config = test_config();
+        // Use a port that's unlikely to have a server
+        config.server_addr = "127.0.0.1:59998".parse().unwrap();
+        config.connect_timeout_ms = 100; // Short timeout for faster test
+
         let backend = QuicBackend::new(&config).unwrap();
         // get_sleep_until requires a connection (calls get_status internally)
         let result = backend.get_sleep_until().await;
