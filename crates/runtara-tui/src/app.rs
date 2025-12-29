@@ -4,9 +4,9 @@
 
 use chrono::{DateTime, Utc};
 use runtara_management_sdk::{
-    Checkpoint, CheckpointSummary, HealthStatus, ImageSummary, InstanceInfo, InstanceStatus,
-    InstanceSummary, ListCheckpointsOptions, ListImagesOptions, ListInstancesOptions,
-    ManagementSdk, SdkConfig,
+    Checkpoint, CheckpointSummary, GetTenantMetricsOptions, HealthStatus, ImageSummary,
+    InstanceInfo, InstanceStatus, InstanceSummary, ListCheckpointsOptions, ListImagesOptions,
+    ListInstancesOptions, ManagementSdk, MetricsGranularity, SdkConfig, TenantMetricsResult,
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -64,6 +64,7 @@ pub enum Tab {
     #[default]
     Instances,
     Images,
+    Metrics,
     Health,
 }
 
@@ -72,12 +73,13 @@ impl Tab {
         match self {
             Tab::Instances => "Instances",
             Tab::Images => "Images",
+            Tab::Metrics => "Metrics",
             Tab::Health => "Health",
         }
     }
 
     pub fn all() -> &'static [Tab] {
-        &[Tab::Instances, Tab::Images, Tab::Health]
+        &[Tab::Instances, Tab::Images, Tab::Metrics, Tab::Health]
     }
 }
 
@@ -137,6 +139,11 @@ pub struct App {
     /// Checkpoint detail view
     pub checkpoint_detail: Option<Checkpoint>,
 
+    /// Metrics data
+    pub metrics: Option<TenantMetricsResult>,
+    pub metrics_granularity: MetricsGranularity,
+    pub metrics_selected: usize,
+
     /// Scroll offset for detail views
     pub detail_scroll: u16,
 
@@ -181,6 +188,9 @@ impl App {
             checkpoints_total: 0,
             checkpoints_selected: 0,
             checkpoint_detail: None,
+            metrics: None,
+            metrics_granularity: MetricsGranularity::Hourly,
+            metrics_selected: 0,
             detail_scroll: 0,
             last_refresh: None,
             refresh_interval,
@@ -271,6 +281,25 @@ impl App {
             }
         }
 
+        // Fetch metrics (requires tenant_id)
+        if let Some(ref tenant_id) = self.tenant_id {
+            let options =
+                GetTenantMetricsOptions::new(tenant_id).with_granularity(self.metrics_granularity);
+
+            match sdk.get_tenant_metrics(options).await {
+                Ok(result) => {
+                    let bucket_count = result.buckets.len();
+                    self.metrics = Some(result);
+                    if self.metrics_selected >= bucket_count && bucket_count > 0 {
+                        self.metrics_selected = bucket_count - 1;
+                    }
+                }
+                Err(e) => {
+                    self.error = Some(format!("Failed to get metrics: {}", e));
+                }
+            }
+        }
+
         self.last_refresh = Some(Instant::now());
     }
 
@@ -286,7 +315,8 @@ impl App {
     pub fn next_tab(&mut self) {
         self.tab = match self.tab {
             Tab::Instances => Tab::Images,
-            Tab::Images => Tab::Health,
+            Tab::Images => Tab::Metrics,
+            Tab::Metrics => Tab::Health,
             Tab::Health => Tab::Instances,
         };
     }
@@ -296,7 +326,8 @@ impl App {
         self.tab = match self.tab {
             Tab::Instances => Tab::Health,
             Tab::Images => Tab::Instances,
-            Tab::Health => Tab::Images,
+            Tab::Metrics => Tab::Images,
+            Tab::Health => Tab::Metrics,
         };
     }
 
@@ -305,7 +336,8 @@ impl App {
         self.tab = match index {
             0 => Tab::Instances,
             1 => Tab::Images,
-            2 => Tab::Health,
+            2 => Tab::Metrics,
+            3 => Tab::Health,
             _ => Tab::Instances,
         };
     }
@@ -321,6 +353,13 @@ impl App {
             Tab::Images => {
                 if !self.images.is_empty() {
                     self.images_selected = (self.images_selected + 1) % self.images.len();
+                }
+            }
+            Tab::Metrics => {
+                if let Some(ref metrics) = self.metrics {
+                    if !metrics.buckets.is_empty() {
+                        self.metrics_selected = (self.metrics_selected + 1) % metrics.buckets.len();
+                    }
                 }
             }
             Tab::Health => {}
@@ -346,6 +385,16 @@ impl App {
                         .unwrap_or(self.images.len() - 1);
                 }
             }
+            Tab::Metrics => {
+                if let Some(ref metrics) = self.metrics {
+                    if !metrics.buckets.is_empty() {
+                        self.metrics_selected = self
+                            .metrics_selected
+                            .checked_sub(1)
+                            .unwrap_or(metrics.buckets.len() - 1);
+                    }
+                }
+            }
             Tab::Health => {}
         }
     }
@@ -353,6 +402,15 @@ impl App {
     /// Cycle through status filters
     pub fn cycle_status_filter(&mut self) {
         self.status_filter = self.status_filter.next();
+    }
+
+    /// Toggle metrics granularity between hourly and daily
+    pub fn toggle_metrics_granularity(&mut self) {
+        self.metrics_granularity = match self.metrics_granularity {
+            MetricsGranularity::Hourly => MetricsGranularity::Daily,
+            MetricsGranularity::Daily => MetricsGranularity::Hourly,
+        };
+        self.metrics_selected = 0;
     }
 
     /// Open instance detail view for the selected instance

@@ -108,7 +108,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                             KeyCode::Char('1') => app.set_tab(0),
                             KeyCode::Char('2') => app.set_tab(1),
                             KeyCode::Char('3') => app.set_tab(2),
+                            KeyCode::Char('4') => app.set_tab(3),
                             KeyCode::Char('f') => app.cycle_status_filter(),
+                            KeyCode::Char('g') => {
+                                if app.tab == app::Tab::Metrics {
+                                    app.toggle_metrics_granularity();
+                                    app.refresh().await;
+                                }
+                            }
                             KeyCode::Enter => {
                                 if app.tab == app::Tab::Instances {
                                     app.open_instance_detail().await;

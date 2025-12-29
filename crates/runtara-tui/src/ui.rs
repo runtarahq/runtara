@@ -11,6 +11,7 @@ use ratatui::{
 };
 
 use crate::app::{format_datetime, format_duration, status_style, App, Tab, ViewMode};
+use runtara_management_sdk::MetricsGranularity;
 
 /// Main draw function
 pub fn draw(f: &mut Frame, app: &App) {
@@ -78,7 +79,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .select(match app.tab {
             Tab::Instances => 0,
             Tab::Images => 1,
-            Tab::Health => 2,
+            Tab::Metrics => 2,
+            Tab::Health => 3,
         });
 
     f.render_widget(tabs, chunks[0]);
@@ -100,6 +102,7 @@ fn draw_content(f: &mut Frame, app: &App, area: Rect) {
     match app.tab {
         Tab::Instances => draw_instances(f, app, area),
         Tab::Images => draw_images(f, app, area),
+        Tab::Metrics => draw_metrics(f, app, area),
         Tab::Health => draw_health(f, app, area),
     }
 }
@@ -247,6 +250,166 @@ fn draw_images(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(table, area);
 }
 
+fn draw_metrics(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    // Granularity info
+    let granularity_text = match app.metrics_granularity {
+        MetricsGranularity::Hourly => "Hourly",
+        MetricsGranularity::Daily => "Daily",
+    };
+
+    let tenant_text = app
+        .tenant_id
+        .as_ref()
+        .map(|t| format!("Tenant: {}", t))
+        .unwrap_or_else(|| "No tenant selected (use -t flag)".to_string());
+
+    let filter_info = Paragraph::new(Line::from(vec![
+        Span::raw(" Granularity: "),
+        Span::styled(
+            granularity_text,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled(tenant_text, Style::default().fg(Color::White)),
+        Span::raw(" | Press 'g' to toggle granularity"),
+    ]));
+    f.render_widget(filter_info, chunks[0]);
+
+    // Check if we have metrics data
+    let metrics = match &app.metrics {
+        Some(m) => m,
+        None => {
+            let no_data = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    if app.tenant_id.is_none() {
+                        "  Please specify a tenant ID to view metrics"
+                    } else {
+                        "  No metrics data available"
+                    },
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(""),
+                Line::from(if app.tenant_id.is_none() {
+                    "  Run with: runtara-tui -t <tenant_id>"
+                } else {
+                    "  Press 'r' to refresh"
+                }),
+            ])
+            .block(Block::default().borders(Borders::ALL).title(" Metrics "));
+            f.render_widget(no_data, chunks[1]);
+            return;
+        }
+    };
+
+    // Metrics table
+    let header = Row::new(vec![
+        Cell::from("Time").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Invocations").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Success").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Failed").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Success %").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Avg Duration").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Avg Memory").style(Style::default().add_modifier(Modifier::BOLD)),
+    ])
+    .height(1)
+    .style(Style::default().fg(Color::Yellow));
+
+    let rows: Vec<Row> = metrics
+        .buckets
+        .iter()
+        .enumerate()
+        .map(|(i, bucket)| {
+            let is_selected = i == app.metrics_selected;
+
+            let style = if is_selected {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+
+            let time_format = match app.metrics_granularity {
+                MetricsGranularity::Hourly => bucket.bucket_time.format("%m-%d %H:00").to_string(),
+                MetricsGranularity::Daily => bucket.bucket_time.format("%Y-%m-%d").to_string(),
+            };
+
+            let success_rate = bucket
+                .success_rate_percent
+                .map(|r| format!("{:.1}%", r))
+                .unwrap_or_else(|| "-".to_string());
+
+            let success_rate_color = bucket.success_rate_percent.map_or(Color::DarkGray, |r| {
+                if r >= 95.0 {
+                    Color::Green
+                } else if r >= 80.0 {
+                    Color::Yellow
+                } else {
+                    Color::Red
+                }
+            });
+
+            let avg_duration = bucket
+                .avg_duration_seconds
+                .map(|d| format!("{:.2}s", d))
+                .unwrap_or_else(|| "-".to_string());
+
+            let avg_memory = bucket
+                .avg_memory_bytes
+                .map(|m| format_bytes(m as u64))
+                .unwrap_or_else(|| "-".to_string());
+
+            Row::new(vec![
+                Cell::from(time_format),
+                Cell::from(bucket.invocation_count.to_string()),
+                Cell::from(bucket.success_count.to_string())
+                    .style(Style::default().fg(Color::Green)),
+                Cell::from(bucket.failure_count.to_string()).style(Style::default().fg(
+                    if bucket.failure_count > 0 {
+                        Color::Red
+                    } else {
+                        Color::DarkGray
+                    },
+                )),
+                Cell::from(success_rate).style(Style::default().fg(success_rate_color)),
+                Cell::from(avg_duration),
+                Cell::from(avg_memory),
+            ])
+            .style(style)
+        })
+        .collect();
+
+    let title = format!(
+        " Metrics ({} - {}) ({} buckets) ",
+        metrics.start_time.format("%m-%d %H:%M"),
+        metrics.end_time.format("%m-%d %H:%M"),
+        metrics.buckets.len()
+    );
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Min(10),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(title));
+
+    f.render_widget(table, chunks[1]);
+}
+
 fn draw_health(f: &mut Frame, app: &App, area: Rect) {
     let content = match &app.health {
         Some(health) => {
@@ -340,10 +503,11 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.view_mode {
         ViewMode::List => match app.tab {
             Tab::Instances => {
-                "q:Quit | Tab:Switch Tab | 1-3:Tab | j/k:Navigate | Enter:Details | f:Filter | r:Refresh"
+                "q:Quit | Tab:Switch Tab | 1-4:Tab | j/k:Navigate | Enter:Details | f:Filter | r:Refresh"
             }
-            Tab::Images => "q:Quit | Tab:Switch Tab | 1-3:Tab | j/k:Navigate | r:Refresh",
-            Tab::Health => "q:Quit | Tab:Switch Tab | 1-3:Tab | r:Refresh",
+            Tab::Images => "q:Quit | Tab:Switch Tab | 1-4:Tab | j/k:Navigate | r:Refresh",
+            Tab::Metrics => "q:Quit | Tab:Switch Tab | 1-4:Tab | j/k:Navigate | g:Granularity | r:Refresh",
+            Tab::Health => "q:Quit | Tab:Switch Tab | 1-4:Tab | r:Refresh",
         },
         ViewMode::InstanceDetail => {
             "Esc:Back | c:Checkpoints | j/k:Scroll"

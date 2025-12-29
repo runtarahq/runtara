@@ -53,10 +53,11 @@ pub use config::SdkConfig;
 pub use error::{Result, SdkError};
 pub use types::{
     AgentInfo, CapabilityField, CapabilityInfo, Checkpoint, CheckpointSummary, EventSummary,
-    HealthStatus, ImageSummary, InstanceInfo, InstanceStatus, InstanceSummary,
-    ListCheckpointsOptions, ListCheckpointsResult, ListEventsOptions, ListEventsResult,
-    ListImagesOptions, ListImagesResult, ListInstancesOptions, ListInstancesOrder,
-    ListInstancesResult, RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions,
-    RunnerType, SignalType, StartInstanceOptions, StartInstanceResult, StopInstanceOptions,
+    GetTenantMetricsOptions, HealthStatus, ImageSummary, InstanceInfo, InstanceStatus,
+    InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult, ListEventsOptions,
+    ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
+    ListInstancesOrder, ListInstancesResult, MetricsBucket, MetricsGranularity,
+    RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType,
+    StartInstanceOptions, StartInstanceResult, StopInstanceOptions, TenantMetricsResult,
     TestCapabilityOptions, TestCapabilityResult,
 };
