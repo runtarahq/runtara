@@ -58,6 +58,18 @@ struct StaleContainer {
     last_heartbeat: Option<DateTime<Utc>>,
 }
 
+/// Information about an orphaned instance.
+///
+/// An orphaned instance is one that is marked as "running" in Core's persistence
+/// but is not being tracked in this Environment's container_registry.
+#[derive(Debug)]
+struct OrphanedInstance {
+    instance_id: String,
+    tenant_id: String,
+    started_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
 impl HeartbeatMonitor {
     /// Create a new heartbeat monitor.
     pub fn new(
@@ -117,24 +129,42 @@ impl HeartbeatMonitor {
             - chrono::Duration::from_std(self.config.heartbeat_timeout)
                 .map_err(|e| crate::error::Error::Other(format!("Invalid duration: {}", e)))?;
 
+        // Check 1: Containers in container_registry with stale heartbeats
         let stale_containers = self.get_stale_containers(cutoff).await?;
 
-        if stale_containers.is_empty() {
+        // Check 2: Running instances in Core that are not being tracked locally
+        let orphaned_instances = self.get_orphaned_running_instances(cutoff).await?;
+
+        let total_stale = stale_containers.len() + orphaned_instances.len();
+        if total_stale == 0 {
             debug!("No stale instances found");
             return Ok(());
         }
 
         info!(
-            count = stale_containers.len(),
+            stale_containers = stale_containers.len(),
+            orphaned_instances = orphaned_instances.len(),
             "Found stale instances to fail"
         );
 
+        // Process stale containers (those in container_registry)
         for container in stale_containers {
             if let Err(e) = self.fail_stale_instance(&container).await {
                 error!(
                     instance_id = %container.instance_id,
                     error = %e,
                     "Failed to mark stale instance as failed"
+                );
+            }
+        }
+
+        // Process orphaned instances (running in Core but not tracked locally)
+        for instance in orphaned_instances {
+            if let Err(e) = self.fail_orphaned_instance(&instance).await {
+                error!(
+                    instance_id = %instance.instance_id,
+                    error = %e,
+                    "Failed to mark orphaned instance as failed"
                 );
             }
         }
@@ -221,6 +251,105 @@ impl HeartbeatMonitor {
         info!(
             instance_id = %container.instance_id,
             "Stale instance marked as failed and cleaned up"
+        );
+
+        Ok(())
+    }
+
+    /// Get instances that are running in Core but not tracked in container_registry.
+    ///
+    /// These are "orphaned" instances - Core thinks they're running, but we have
+    /// no local record of them. This can happen when:
+    /// - Environment was restarted while instances were running
+    /// - Container registry entry was lost or never created
+    /// - Multiple Environment instances share the same Core database
+    async fn get_orphaned_running_instances(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> crate::error::Result<Vec<OrphanedInstance>> {
+        // Get all running instances from Core
+        let running_instances = self
+            .core_persistence
+            .list_instances(None, Some("running"), 1000, 0)
+            .await
+            .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
+
+        if running_instances.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Get all instance IDs we're tracking locally
+        let tracked_ids: std::collections::HashSet<String> =
+            sqlx::query_scalar::<_, String>("SELECT instance_id FROM container_registry")
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .collect();
+
+        // Filter to find orphaned instances:
+        // - Running in Core
+        // - Not tracked locally
+        // - Started before the cutoff time (to avoid racing with new launches)
+        let orphaned: Vec<OrphanedInstance> = running_instances
+            .into_iter()
+            .filter(|inst| {
+                // Not tracked locally
+                if tracked_ids.contains(&inst.instance_id) {
+                    return false;
+                }
+
+                // Check if it's old enough to be considered orphaned
+                // Use started_at if available, otherwise created_at
+                let started = inst.started_at.unwrap_or(inst.created_at);
+                started < cutoff
+            })
+            .map(|inst| OrphanedInstance {
+                instance_id: inst.instance_id,
+                tenant_id: inst.tenant_id,
+                started_at: inst.started_at,
+                created_at: inst.created_at,
+            })
+            .collect();
+
+        Ok(orphaned)
+    }
+
+    /// Mark an orphaned instance as failed.
+    async fn fail_orphaned_instance(
+        &self,
+        instance: &OrphanedInstance,
+    ) -> crate::error::Result<()> {
+        let started_desc = match instance.started_at {
+            Some(started) => format!("started at {}", started.format("%Y-%m-%d %H:%M:%S UTC")),
+            None => format!(
+                "created at {}",
+                instance.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            ),
+        };
+
+        let error_message = format!(
+            "Instance orphaned: {} but not tracked by Environment (timeout: {}s)",
+            started_desc,
+            self.config.heartbeat_timeout.as_secs()
+        );
+
+        warn!(
+            instance_id = %instance.instance_id,
+            tenant_id = %instance.tenant_id,
+            started_at = ?instance.started_at,
+            created_at = %instance.created_at,
+            "Marking orphaned instance as failed"
+        );
+
+        // Mark instance as failed in Core persistence
+        self.core_persistence
+            .complete_instance(&instance.instance_id, None, Some(&error_message))
+            .await
+            .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
+
+        info!(
+            instance_id = %instance.instance_id,
+            "Orphaned instance marked as failed"
         );
 
         Ok(())
