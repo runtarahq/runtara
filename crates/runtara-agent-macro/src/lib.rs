@@ -43,6 +43,27 @@ struct CapabilityArgs {
     /// Whether this capability requires rate limiting (external API calls)
     #[darling(default)]
     rate_limited: bool,
+
+    // === Module registration attributes ===
+    // When module_display_name is provided, automatically registers an AgentModuleConfig
+    /// Display name for auto-registered module (e.g., "SMO Test")
+    #[darling(default)]
+    module_display_name: Option<String>,
+    /// Description for auto-registered module
+    #[darling(default)]
+    module_description: Option<String>,
+    /// Whether the auto-registered module has side effects (default: false)
+    #[darling(default)]
+    module_has_side_effects: Option<bool>,
+    /// Whether the auto-registered module supports connections (default: false)
+    #[darling(default)]
+    module_supports_connections: Option<bool>,
+    /// Integration IDs for the auto-registered module (comma-separated)
+    #[darling(default)]
+    module_integration_ids: Option<String>,
+    /// Whether the auto-registered module is secure (default: false)
+    #[darling(default)]
+    module_secure: Option<bool>,
 }
 
 /// Field attributes for CapabilityInput derive
@@ -181,6 +202,57 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input type as an identifier for the executor function
     let input_type_ident = format_ident!("{}", input_type);
 
+    // Generate module registration if module_display_name is provided
+    let module_registration =
+        if let (Some(module_id), Some(mod_display_name)) = (&module, &args.module_display_name) {
+            let module_meta_ident = format_ident!(
+                "__AGENT_MODULE_META_{}_{}",
+                module_id.to_uppercase().replace('-', "_"),
+                fn_name.to_string().to_uppercase()
+            );
+
+            let mod_description = args
+                .module_description
+                .clone()
+                .unwrap_or_else(|| format!("{} agent module", mod_display_name));
+            let mod_has_side_effects = args.module_has_side_effects.unwrap_or(false);
+            let mod_supports_connections = args.module_supports_connections.unwrap_or(false);
+            let mod_secure = args.module_secure.unwrap_or(false);
+
+            // Parse integration_ids from comma-separated string
+            let integration_ids_tokens = if let Some(ref ids_str) = args.module_integration_ids {
+                let ids: Vec<&str> = ids_str
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                quote! { &[#(#ids),*] }
+            } else {
+                quote! { &[] }
+            };
+
+            Some(quote! {
+                #[allow(non_upper_case_globals)]
+                #[doc(hidden)]
+                pub static #module_meta_ident: runtara_dsl::agent_meta::AgentModuleConfig =
+                    runtara_dsl::agent_meta::AgentModuleConfig {
+                        id: #module_id,
+                        name: #mod_display_name,
+                        description: #mod_description,
+                        has_side_effects: #mod_has_side_effects,
+                        supports_connections: #mod_supports_connections,
+                        integration_ids: #integration_ids_tokens,
+                        secure: #mod_secure,
+                    };
+
+                inventory::submit! {
+                    &#module_meta_ident
+                }
+            })
+        } else {
+            None
+        };
+
     let expanded = quote! {
         #input_fn
 
@@ -231,6 +303,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         inventory::submit! {
             &#executor_ident
         }
+
+        #module_registration
     };
 
     TokenStream::from(expanded)

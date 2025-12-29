@@ -336,8 +336,11 @@ pub struct AgentModuleConfig {
     pub secure: bool,
 }
 
-/// Default agent module configurations
-pub const AGENT_MODULES: &[AgentModuleConfig] = &[
+// Register AgentModuleConfig with inventory
+inventory::collect!(&'static AgentModuleConfig);
+
+/// Built-in agent module configurations
+pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
     AgentModuleConfig {
         id: "utils",
         name: "Utils",
@@ -412,9 +415,35 @@ pub const AGENT_MODULES: &[AgentModuleConfig] = &[
     },
 ];
 
+/// Get all agent modules (built-in + inventory-registered).
+/// Built-in modules take precedence over inventory-registered ones with the same id.
+/// Modules are deduplicated by id.
+pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
+    use std::collections::HashSet;
+
+    let mut seen_ids = HashSet::new();
+    let mut modules = Vec::new();
+
+    // Add built-in modules first (they take precedence)
+    for module in BUILTIN_AGENT_MODULES {
+        if seen_ids.insert(module.id) {
+            modules.push(module);
+        }
+    }
+
+    // Add inventory-registered modules (skip if id already exists)
+    for module in inventory::iter::<&'static AgentModuleConfig> {
+        if seen_ids.insert(module.id) {
+            modules.push(*module);
+        }
+    }
+
+    modules
+}
+
 /// Find agent module config by id
 pub fn find_agent_module(id: &str) -> Option<&'static AgentModuleConfig> {
-    AGENT_MODULES.iter().find(|m| m.id == id)
+    get_all_agent_modules().into_iter().find(|m| m.id == id)
 }
 
 // ============================================================================
@@ -676,7 +705,7 @@ pub fn get_agents() -> Vec<AgentInfo> {
     // Build agent info for each module
     let mut agents = Vec::new();
 
-    for config in AGENT_MODULES {
+    for config in get_all_agent_modules() {
         let caps = caps_by_module.get(config.id).cloned().unwrap_or_default();
 
         if caps.is_empty() {
@@ -953,4 +982,188 @@ pub fn clear_current_input() {
 /// Returns None if no input is currently stored.
 pub fn get_current_input() -> Option<serde_json::Value> {
     CURRENT_INPUT.with(|c| c.borrow().clone())
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builtin_agent_modules_count() {
+        // Verify we have the expected number of built-in modules
+        assert_eq!(
+            BUILTIN_AGENT_MODULES.len(),
+            8,
+            "Expected 8 built-in agent modules"
+        );
+    }
+
+    #[test]
+    fn test_builtin_agent_modules_ids() {
+        let ids: Vec<&str> = BUILTIN_AGENT_MODULES.iter().map(|m| m.id).collect();
+
+        assert!(ids.contains(&"utils"), "Missing utils module");
+        assert!(ids.contains(&"transform"), "Missing transform module");
+        assert!(ids.contains(&"csv"), "Missing csv module");
+        assert!(ids.contains(&"text"), "Missing text module");
+        assert!(ids.contains(&"xml"), "Missing xml module");
+        assert!(ids.contains(&"http"), "Missing http module");
+        assert!(ids.contains(&"sftp"), "Missing sftp module");
+        assert!(ids.contains(&"object_model"), "Missing object_model module");
+    }
+
+    #[test]
+    fn test_get_all_agent_modules_includes_builtins() {
+        let modules = get_all_agent_modules();
+
+        // Should include all built-in modules
+        assert!(
+            modules.len() >= BUILTIN_AGENT_MODULES.len(),
+            "get_all_agent_modules should include at least all built-in modules"
+        );
+
+        // Verify built-in module IDs are present
+        let module_ids: Vec<&str> = modules.iter().map(|m| m.id).collect();
+        for builtin in BUILTIN_AGENT_MODULES {
+            assert!(
+                module_ids.contains(&builtin.id),
+                "Built-in module {} should be in get_all_agent_modules()",
+                builtin.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_all_agent_modules_deduplication() {
+        let modules = get_all_agent_modules();
+
+        // Check for duplicates
+        let mut seen_ids = std::collections::HashSet::new();
+        for module in &modules {
+            assert!(
+                seen_ids.insert(module.id),
+                "Duplicate module id found: {}",
+                module.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_agent_module_existing() {
+        let http_module = find_agent_module("http");
+        assert!(http_module.is_some(), "Should find http module");
+
+        let module = http_module.unwrap();
+        assert_eq!(module.id, "http");
+        assert_eq!(module.name, "HTTP");
+        assert!(module.has_side_effects);
+        assert!(module.supports_connections);
+        assert!(module.secure);
+    }
+
+    #[test]
+    fn test_find_agent_module_non_existing() {
+        let result = find_agent_module("non_existent_module");
+        assert!(result.is_none(), "Should not find non-existent module");
+    }
+
+    #[test]
+    fn test_secure_modules() {
+        // Only http and sftp should be secure
+        for module in BUILTIN_AGENT_MODULES {
+            match module.id {
+                "http" | "sftp" => {
+                    assert!(module.secure, "{} module should be secure", module.id);
+                }
+                _ => {
+                    assert!(!module.secure, "{} module should not be secure", module.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_side_effects_modules() {
+        // http, sftp, and object_model have side effects
+        for module in BUILTIN_AGENT_MODULES {
+            match module.id {
+                "http" | "sftp" | "object_model" => {
+                    assert!(
+                        module.has_side_effects,
+                        "{} module should have side effects",
+                        module.id
+                    );
+                }
+                _ => {
+                    assert!(
+                        !module.has_side_effects,
+                        "{} module should not have side effects",
+                        module.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_connection_supporting_modules() {
+        // Only http and sftp support connections
+        for module in BUILTIN_AGENT_MODULES {
+            match module.id {
+                "http" | "sftp" => {
+                    assert!(
+                        module.supports_connections,
+                        "{} module should support connections",
+                        module.id
+                    );
+                    assert!(
+                        !module.integration_ids.is_empty(),
+                        "{} module should have integration IDs",
+                        module.id
+                    );
+                }
+                _ => {
+                    assert!(
+                        !module.supports_connections,
+                        "{} module should not support connections",
+                        module.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_http_integration_ids() {
+        let http_module = find_agent_module("http").unwrap();
+        let integration_ids = http_module.integration_ids;
+
+        assert!(
+            integration_ids.contains(&"bearer"),
+            "http should support bearer"
+        );
+        assert!(
+            integration_ids.contains(&"api_key"),
+            "http should support api_key"
+        );
+        assert!(
+            integration_ids.contains(&"basic_auth"),
+            "http should support basic_auth"
+        );
+    }
+
+    #[test]
+    fn test_sftp_integration_ids() {
+        let sftp_module = find_agent_module("sftp").unwrap();
+        let integration_ids = sftp_module.integration_ids;
+
+        assert!(
+            integration_ids.contains(&"sftp"),
+            "sftp should support sftp integration"
+        );
+    }
 }

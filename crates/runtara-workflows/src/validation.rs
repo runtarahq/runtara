@@ -1009,8 +1009,8 @@ fn compute_execution_order(graph: &ExecutionGraph) -> Vec<String> {
 
 fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
     // Get available agents
-    let available_agents: Vec<String> = runtara_dsl::agent_meta::AGENT_MODULES
-        .iter()
+    let available_agents: Vec<String> = runtara_dsl::agent_meta::get_all_agent_modules()
+        .into_iter()
         .map(|m| m.id.to_string())
         .collect();
 
