@@ -643,15 +643,15 @@ pub async fn get_tenant_metrics(
                 SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END) AS success_count,
                 SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failure_count,
                 SUM(CASE WHEN i.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
-                AVG(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
+                (AVG(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
-                    ELSE NULL END) AS avg_duration_ms,
-                MIN(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
+                    ELSE NULL END))::FLOAT8 AS avg_duration_ms,
+                (MIN(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
-                    ELSE NULL END) AS min_duration_ms,
-                MAX(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
+                    ELSE NULL END))::FLOAT8 AS min_duration_ms,
+                (MAX(CASE WHEN i.started_at IS NOT NULL AND i.finished_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM (i.finished_at - i.started_at)) * 1000
-                    ELSE NULL END) AS max_duration_ms,
+                    ELSE NULL END))::FLOAT8 AS max_duration_ms,
                 AVG(i.memory_peak_bytes)::FLOAT8 AS avg_memory_bytes,
                 MAX(i.memory_peak_bytes) AS max_memory_bytes
             FROM instances i
