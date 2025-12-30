@@ -19,8 +19,6 @@ use runtara_environment::runner::MockRunner;
 use runtara_environment::runner::Runner;
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
 /// Test context that manages database, server, and client for E2E tests.
 pub struct TestContext {
     pub pool: PgPool,
@@ -34,15 +32,13 @@ impl TestContext {
     /// Create a new test context.
     pub async fn new() -> Option<Self> {
         // Get database URL from environment
-        let database_url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
-            .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
-            .ok()?;
+        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL").ok()?;
 
         // Connect to test database
         let pool = PgPool::connect(&database_url).await.ok()?;
 
-        // Run migrations
-        MIGRATOR.run(&pool).await.ok()?;
+        // Run migrations (core + environment)
+        runtara_environment::migrations::run(&pool).await.ok()?;
 
         // Create temp directory for data
         let temp_dir = tempfile::TempDir::new().ok()?;
@@ -184,9 +180,8 @@ impl TestContext {
 #[macro_export]
 macro_rules! skip_if_no_env_db {
     () => {
-        if std::env::var("TEST_ENVIRONMENT_DATABASE_URL").is_err()
-            && std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL").is_err() {
-            eprintln!("Skipping test: TEST_ENVIRONMENT_DATABASE_URL or RUNTARA_ENVIRONMENT_DATABASE_URL not set");
+        if std::env::var("TEST_RUNTARA_DATABASE_URL").is_err() {
+            eprintln!("Skipping test: TEST_RUNTARA_DATABASE_URL not set");
             return;
         }
     };

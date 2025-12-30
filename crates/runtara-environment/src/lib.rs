@@ -144,6 +144,19 @@
 
 #![deny(missing_docs)]
 
+/// Database migrations for runtara-environment.
+///
+/// Environment extends runtara-core's schema. Calling `migrations::run()` will
+/// apply both core and environment migrations in the correct order.
+///
+/// ```ignore
+/// use runtara_environment::migrations;
+///
+/// let pool = PgPool::connect(&database_url).await?;
+/// migrations::run(&pool).await?;
+/// ```
+pub mod migrations;
+
 /// Server configuration loaded from environment variables.
 pub mod config;
 

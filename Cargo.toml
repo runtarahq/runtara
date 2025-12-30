@@ -20,7 +20,7 @@ default-members = ["crates/runtara-core"]
 
 [workspace.package]
 edition = "2024"
-version = "1.0.24"
+version = "1.3.1"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtara/runtara"
 homepage = "https://runtara.com"

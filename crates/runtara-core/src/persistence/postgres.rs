@@ -1067,11 +1067,11 @@ pub async fn list_instances(
 mod tests {
     use super::*;
 
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
+    use crate::migrations::POSTGRES as MIGRATOR;
 
     // Helper to get a test database pool
     async fn test_pool() -> Option<PgPool> {
-        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let url = std::env::var("TEST_RUNTARA_DATABASE_URL").ok()?;
         let pool = PgPool::connect(&url).await.ok()?;
         MIGRATOR.run(&pool).await.ok()?;
         Some(pool)

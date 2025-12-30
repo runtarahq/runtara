@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
         info!(result = row.0, "Database health check passed");
 
         info!("Running database migrations...");
-        sqlx::migrate!("./migrations/postgresql").run(&pool).await?;
+        runtara_core::migrations::run_postgres(&pool).await?;
         info!("Migrations completed");
 
         Arc::new(PostgresPersistence::new(pool))
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         info!("Database connection established (SQLite)");
 
         info!("Running database migrations...");
-        sqlx::migrate!("./migrations/sqlite").run(&pool).await?;
+        runtara_core::migrations::run_sqlite(&pool).await?;
         info!("Migrations completed");
 
         Arc::new(SqlitePersistence::new(pool))

@@ -50,13 +50,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Connected to database");
 
-    // Create environment-specific tables if they don't exist
-    // (Core manages _sqlx_migrations, so we use raw SQL here)
-    sqlx::raw_sql(include_str!("../migrations/schema.sql"))
-        .execute(&pool)
-        .await?;
-
-    info!("Database schema verified");
+    // Run migrations (core + environment)
+    info!("Running database migrations...");
+    runtara_environment::migrations::run(&pool).await?;
+    info!("Migrations completed");
 
     // Create OCI runner
     let runner = Arc::new(OciRunner::from_env());

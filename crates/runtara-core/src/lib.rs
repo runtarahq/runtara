@@ -144,6 +144,18 @@
 
 #![deny(missing_docs)]
 
+/// Database migrations for runtara-core.
+///
+/// Products embedding runtara-core can use this module to run migrations:
+///
+/// ```ignore
+/// use runtara_core::migrations;
+///
+/// let pool = PgPool::connect(&database_url).await?;
+/// migrations::run_postgres(&pool).await?;
+/// ```
+pub mod migrations;
+
 /// Persistence layer for instances, checkpoints, events, and signals.
 pub mod persistence;
 

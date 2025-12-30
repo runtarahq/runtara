@@ -14,10 +14,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use runtara_core::instance_handlers::InstanceHandlerState;
+use runtara_core::migrations::POSTGRES as MIGRATOR;
 use runtara_core::persistence::{Persistence, PostgresPersistence};
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgresql");
 
 /// Test context that manages database, server, and client for E2E tests.
 pub struct TestContext {
@@ -31,13 +30,13 @@ impl TestContext {
     /// Create a new test context.
     ///
     /// This sets up:
-    /// 1. Database connection from TEST_DATABASE_URL
+    /// 1. Database connection from TEST_RUNTARA_DATABASE_URL
     /// 2. Instance QUIC server on an available port
     /// 3. QUIC client connected to the server
     /// 4. Persistence layer for direct database operations
     pub async fn new() -> Option<Self> {
         // 1. Get database URL from environment
-        let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL").ok()?;
 
         // 2. Connect to test database
         let pool = PgPool::connect(&database_url).await.ok()?;
@@ -274,12 +273,12 @@ impl TestContext {
     }
 }
 
-/// Helper macro to skip tests if TEST_DATABASE_URL is not set.
+/// Helper macro to skip tests if TEST_RUNTARA_DATABASE_URL is not set.
 #[macro_export]
 macro_rules! skip_if_no_db {
     () => {
-        if std::env::var("TEST_DATABASE_URL").is_err() {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        if std::env::var("TEST_RUNTARA_DATABASE_URL").is_err() {
+            eprintln!("Skipping test: TEST_RUNTARA_DATABASE_URL not set");
             return;
         }
     };
