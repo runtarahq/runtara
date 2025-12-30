@@ -10,7 +10,7 @@ This software is licensed under the **GNU Affero General Public License v3.0** (
 
 You can redistribute and/or modify it under the terms of the AGPL-3.0 as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-See the [LICENSE](runtara/LICENSE) file for the full license text.
+See the [LICENSE](LICENSE) file for the full license text.
 
 ### What this means
 
