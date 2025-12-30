@@ -61,6 +61,3 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
-tempfile = "3"
-runtara-management-sdk = { path = "../runtara-management-sdk" }
-# sha2 is already in dependencies, but re-listing for clarity

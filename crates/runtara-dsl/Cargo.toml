@@ -18,4 +18,3 @@ serde_json = "1.0"
 schemars = "0.8"
 inventory = "0.3"
 utoipa = { version = "5.3", optional = true }
-strum = { version = "0.26", features = ["derive"] }
