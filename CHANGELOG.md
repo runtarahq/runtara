@@ -22,7 +22,6 @@ Initial open-source release of Runtara.
 - **runtara-agents**: Built-in agents (HTTP, delay, transform, conditional, child workflow)
 - **runtara-agent-macro**: `#[agent]` proc macro for custom agent definitions
 - **runtara-workflow-stdlib**: Standard library for compiled workflows
-- **runtara-tui**: Terminal UI for monitoring instances
 - **runtara-test-harness**: Testing utilities for agent development
 - **durable-example**: Example workflows demonstrating SDK usage patterns
 

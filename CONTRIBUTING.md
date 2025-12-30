@@ -152,7 +152,6 @@ crates/
 ├── runtara-agents/        # Built-in agents
 ├── runtara-agent-macro/   # #[agent] macro
 ├── runtara-workflow-stdlib/# Workflow standard library
-├── runtara-tui/           # Monitoring TUI
 ├── runtara-test-harness/  # Agent testing utilities
 └── durable-example/       # SDK examples
 ```

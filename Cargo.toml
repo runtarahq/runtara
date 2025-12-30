@@ -17,8 +17,6 @@ members = [
     "crates/runtara-agent-macro",
     # Agent testing
     "crates/runtara-test-harness",
-    # TUI monitoring
-    "crates/runtara-tui",
     # Examples
     "crates/workflows-example"]
 default-members = ["crates/runtara-core"]
