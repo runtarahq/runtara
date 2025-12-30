@@ -418,6 +418,48 @@ Products can provide their own workflow stdlib that extends `runtara-workflow-st
    export RUNTARA_STDLIB_NAME=my_product_stdlib
    ```
 
+## Database Migrations
+
+Runtara uses an inheritance model for database migrations:
+
+### Migration Hierarchy
+
+```
+runtara-core (base)
+    └── runtara-environment (extends core)
+```
+
+- **runtara-core**: Owns the base schema for instances, checkpoints, events, signals, and wake queue
+- **runtara-environment**: Extends core with image registry, container tracking, and lifecycle tables
+
+### Running Migrations
+
+**Core-only deployment** (durability without managed containers):
+```rust
+use runtara_core::migrations;
+
+let pool = PgPool::connect(&database_url).await?;
+migrations::run_postgres(&pool).await?;
+```
+
+**Full deployment** (includes environment):
+```rust
+use runtara_environment::migrations;
+
+let pool = PgPool::connect(&database_url).await?;
+migrations::run(&pool).await?;  // Runs core + environment migrations
+```
+
+Environment's `migrations::run()` automatically includes all core migrations, merging them into a single unified migrator. You only need one call - no need to run core migrations separately.
+
+### Testing
+
+Use `TEST_RUNTARA_DATABASE_URL` for database tests:
+```bash
+TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-core
+TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-environment
+```
+
 ## Crates
 
 | Crate | Description |
@@ -444,7 +486,7 @@ cargo build
 cargo test
 
 # Run tests with database
-TEST_DATABASE_URL=postgres://... cargo test -p runtara-core
+TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-core
 ```
 
 ## License
