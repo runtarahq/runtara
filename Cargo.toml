@@ -7,8 +7,6 @@ members = [
     "crates/runtara-management-sdk",
     "crates/runtara-sdk",
     "crates/runtara-sdk-macros",
-    "crates/durable-example",
-    "crates/durable-examples-embedded",
     # Workflow compilation library
     "crates/runtara-dsl",
     "crates/runtara-workflows",
@@ -17,8 +15,7 @@ members = [
     "crates/runtara-agent-macro",
     # Agent testing
     "crates/runtara-test-harness",
-    # Examples
-    "crates/workflows-example"]
+]
 default-members = ["crates/runtara-core"]
 
 [workspace.package]
