@@ -320,7 +320,7 @@ fn emit_connection_fetch(
 
                     // Re-fetch connection after waiting
                     __conn_response = fetch_connection(
-                        CONNECTION_SERVICE_URL.expect("connection service URL"),
+                        __conn_service_url,
                         TENANT_ID,
                         #conn_id
                     ).map_err(|e| format!("Step {} failed to re-fetch connection {}: {}",
@@ -335,8 +335,10 @@ fn emit_connection_fetch(
     let code = quote! {
         let #final_inputs = {
             // Fetch connection from external service
+            let __conn_service_url = get_connection_service_url()
+                .ok_or_else(|| format!("Step {} requires CONNECTION_SERVICE_URL to be configured", #step_id))?;
             let mut __conn_response = fetch_connection(
-                CONNECTION_SERVICE_URL.expect("connection service URL"),
+                __conn_service_url,
                 TENANT_ID,
                 #conn_id
             ).map_err(|e| format!("Step {} failed to fetch connection {}: {}",

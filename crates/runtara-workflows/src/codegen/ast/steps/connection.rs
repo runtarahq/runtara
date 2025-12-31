@@ -28,22 +28,17 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> TokenStream {
     let result_var = ctx.temp_var("conn_result");
     let steps_context = ctx.steps_context_var.clone();
 
-    // Check if connection service is configured
-    let Some(_service_url) = &ctx.connection_service_url else {
-        // No connection service URL - emit error
-        return quote! {
-            compile_error!("Connection step requires CONNECTION_SERVICE_URL to be configured");
-        };
-    };
-
     // Generate connection fetch code with rate limit handling
     // NOTE: We intentionally do NOT emit debug events for connection steps
     // to prevent sensitive data from being logged
+    // CONNECTION_SERVICE_URL can be provided at compile-time or runtime via env var
     quote! {
         // Fetch connection from external service (no debug logging for security)
         let #result_var = {
+            let __conn_service_url = get_connection_service_url()
+                .ok_or_else(|| format!("Step {} requires CONNECTION_SERVICE_URL to be configured", #step_id))?;
             let mut __conn_response = fetch_connection(
-                CONNECTION_SERVICE_URL.expect("connection service URL"),
+                __conn_service_url,
                 TENANT_ID,
                 #connection_id
             ).map_err(|e| format!("Step {} failed to fetch connection {}: {}",
@@ -77,7 +72,7 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> TokenStream {
 
                     // Re-fetch connection after waiting
                     __conn_response = fetch_connection(
-                        CONNECTION_SERVICE_URL.expect("connection service URL"),
+                        __conn_service_url,
                         TENANT_ID,
                         #connection_id
                     ).map_err(|e| format!("Step {} failed to re-fetch connection {}: {}",

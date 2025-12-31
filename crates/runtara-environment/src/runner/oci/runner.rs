@@ -113,6 +113,8 @@ pub struct OciRunnerConfig {
     pub bundle_config: BundleConfig,
     /// Skip TLS certificate verification (passed to instances)
     pub skip_cert_verification: bool,
+    /// Connection service URL for fetching credentials at runtime (passed to instances)
+    pub connection_service_url: Option<String>,
 }
 
 impl OciRunnerConfig {
@@ -148,6 +150,7 @@ impl OciRunnerConfig {
                 config
             },
             skip_cert_verification: parse_env_bool("RUNTARA_SKIP_CERT_VERIFICATION", false),
+            connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL").ok(),
         }
     }
 }
@@ -237,6 +240,9 @@ impl OciRunner {
         }
         if let Some(cp_id) = checkpoint_id {
             env.insert("RUNTARA_CHECKPOINT_ID".to_string(), cp_id.to_string());
+        }
+        if let Some(ref url) = self.config.connection_service_url {
+            env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
         }
         env
     }

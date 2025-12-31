@@ -89,14 +89,30 @@ pub fn emit_program(graph: &ExecutionGraph, ctx: &mut EmitContext) -> TokenStrea
 
 /// Emit compile-time constants (connection service URL, tenant ID, etc.)
 fn emit_constants(ctx: &EmitContext) -> TokenStream {
+    // CONNECTION_SERVICE_URL: prefer runtime env var, fallback to compile-time value
     let connection_url = if let Some(url) = &ctx.connection_service_url {
         quote! {
-            /// Connection service URL for fetching credentials at runtime
+            /// Connection service URL for fetching credentials at runtime.
+            /// Prefers CONNECTION_SERVICE_URL env var, falls back to compile-time value.
+            fn get_connection_service_url() -> Option<&'static str> {
+                // Check env var first (set by OciRunner), then fall back to compile-time default
+                static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+                URL.get_or_init(|| {
+                    std::env::var("CONNECTION_SERVICE_URL").ok()
+                }).as_deref().or(Some(#url))
+            }
             const CONNECTION_SERVICE_URL: Option<&str> = Some(#url);
         }
     } else {
         quote! {
-            /// Connection service not configured
+            /// Connection service URL for fetching credentials at runtime.
+            /// Reads from CONNECTION_SERVICE_URL env var (no compile-time default configured).
+            fn get_connection_service_url() -> Option<&'static str> {
+                static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+                URL.get_or_init(|| {
+                    std::env::var("CONNECTION_SERVICE_URL").ok()
+                }).as_deref()
+            }
             const CONNECTION_SERVICE_URL: Option<&str> = None;
         }
     };
