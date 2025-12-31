@@ -62,8 +62,11 @@ async fn main() -> anyhow::Result<()> {
     // Create shared persistence for checkpoints, events, signals
     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
 
-    // Start the runtime
-    let runtime = EnvironmentRuntime::builder()
+    // Parse core bind address if provided
+    let core_bind_addr: Option<std::net::SocketAddr> = config.core_addr.parse().ok();
+
+    // Start the runtime with embedded Core
+    let mut builder = EnvironmentRuntime::builder()
         .pool(pool)
         .runner(runner)
         .core_persistence(persistence)
@@ -72,12 +75,21 @@ async fn main() -> anyhow::Result<()> {
         .data_dir(&config.data_dir)
         .request_timeout(std::time::Duration::from_millis(
             config.db_request_timeout_ms,
-        ))
-        .build()?
-        .start()
-        .await?;
+        ));
 
-    info!(addr = %config.quic_addr, "Environment server ready");
+    // Enable embedded Core server
+    if let Some(addr) = core_bind_addr {
+        info!(core_addr = %addr, "Embedding runtara-core server");
+        builder = builder.core_bind_addr(addr);
+    }
+
+    let runtime = builder.build()?.start().await?;
+
+    info!(
+        env_addr = %config.quic_addr,
+        core_addr = %config.core_addr,
+        "Runtara server ready (Environment + embedded Core)"
+    );
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

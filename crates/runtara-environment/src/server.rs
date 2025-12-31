@@ -667,6 +667,7 @@ async fn handle_get_instance_status(
 ) -> Result<environment_proto::GetInstanceStatusResponse, crate::error::Error> {
     match db::get_instance_full(&state.pool, &req.instance_id).await? {
         Some(inst) => Ok(environment_proto::GetInstanceStatusResponse {
+            found: true,
             instance_id: inst.instance_id,
             status: convert_instance_status(&inst.status),
             checkpoint_id: inst.checkpoint_id,
@@ -688,6 +689,7 @@ async fn handle_get_instance_status(
             cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
         }),
         None => Ok(environment_proto::GetInstanceStatusResponse {
+            found: false,
             instance_id: req.instance_id,
             status: environment_proto::InstanceStatus::StatusUnknown as i32,
             checkpoint_id: None,
@@ -695,7 +697,7 @@ async fn handle_get_instance_status(
             started_at_ms: None,
             finished_at_ms: None,
             output: None,
-            error: Some("Instance not found".to_string()),
+            error: None,
             // Extended fields - defaults for not found
             image_id: String::new(),
             image_name: String::new(),

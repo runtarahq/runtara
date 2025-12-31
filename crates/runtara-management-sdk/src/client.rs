@@ -163,8 +163,8 @@ impl ManagementSdk {
 
         match response {
             Response::GetInstanceStatus(resp) => {
-                // Check if instance was not found
-                if resp.error.as_ref().is_some_and(|e| e.contains("not found")) {
+                // Check if instance was not found using explicit `found` field
+                if !resp.found {
                     return Err(SdkError::InstanceNotFound(instance_id.to_string()));
                 }
 

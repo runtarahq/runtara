@@ -165,25 +165,26 @@ message GetInstanceStatusRequest {
 }
 
 message GetInstanceStatusResponse {
-  string instance_id = 1;
-  InstanceStatus status = 2;
-  optional string checkpoint_id = 3;  // Last known checkpoint
-  int64 created_at_ms = 4;
-  optional int64 started_at_ms = 5;
-  optional int64 finished_at_ms = 6;
-  optional bytes output = 7;          // If completed
-  optional string error = 8;          // If failed
+  bool found = 1;                     // Whether the instance was found
+  string instance_id = 2;
+  InstanceStatus status = 3;
+  optional string checkpoint_id = 4;  // Last known checkpoint
+  int64 created_at_ms = 5;
+  optional int64 started_at_ms = 6;
+  optional int64 finished_at_ms = 7;
+  optional bytes output = 8;          // If completed
+  optional string error = 9;          // If failed (execution error, NOT "not found")
   // Extended fields for detailed instance info
-  string image_id = 9;                // Image UUID used for this instance
-  string image_name = 10;             // Human-readable image name
-  string tenant_id = 11;              // Tenant that owns this instance
-  optional bytes input = 12;          // Input data provided when starting
-  optional int64 heartbeat_at_ms = 13; // Last heartbeat timestamp
-  uint32 retry_count = 14;            // Current retry attempt number
-  uint32 max_retries = 15;            // Maximum allowed retries
+  string image_id = 10;               // Image UUID used for this instance
+  string image_name = 11;             // Human-readable image name
+  string tenant_id = 12;              // Tenant that owns this instance
+  optional bytes input = 13;          // Input data provided when starting
+  optional int64 heartbeat_at_ms = 14; // Last heartbeat timestamp
+  uint32 retry_count = 15;            // Current retry attempt number
+  uint32 max_retries = 16;            // Maximum allowed retries
   // Execution metrics (available for terminal states)
-  optional uint64 memory_peak_bytes = 16;   // Peak memory usage in bytes
-  optional uint64 cpu_usage_usec = 17;      // Total CPU time in microseconds
+  optional uint64 memory_peak_bytes = 17;   // Peak memory usage in bytes
+  optional uint64 cpu_usage_usec = 18;      // Total CPU time in microseconds
 }
 
 // List instances
