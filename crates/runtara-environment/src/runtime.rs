@@ -5,7 +5,9 @@
 //! This module provides [`EnvironmentRuntime`] which allows embedding runtara-environment
 //! into an existing tokio application instead of running it as a standalone server.
 //!
-//! # Example
+//! # Basic Example (External Core)
+//!
+//! When running with an external runtara-core server:
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
@@ -20,7 +22,7 @@
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
 //!         .runner(runner)
-//!         .core_addr("127.0.0.1:8001")
+//!         .core_addr("127.0.0.1:8001")  // External Core server
 //!         .bind_addr("0.0.0.0:8002".parse()?)
 //!         .build()?
 //!         .start()
@@ -28,8 +30,43 @@
 //!
 //!     // ... run your application ...
 //!
-//!     // Graceful shutdown
 //!     runtime.shutdown().await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Embedded Core Example
+//!
+//! To run both Environment and Core in a single process, provide `core_persistence`
+//! and `core_bind_addr`:
+//!
+//! ```rust,ignore
+//! use std::sync::Arc;
+//! use runtara_core::persistence::PostgresPersistence;
+//! use runtara_environment::runtime::EnvironmentRuntime;
+//! use runtara_environment::runner::oci::OciRunner;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let pool = sqlx::PgPool::connect("postgres://...").await?;
+//!     let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+//!     let runner = Arc::new(OciRunner::from_env());
+//!
+//!     let runtime = EnvironmentRuntime::builder()
+//!         .pool(pool)
+//!         .runner(runner)
+//!         .core_persistence(persistence)               // Share persistence with Core
+//!         .core_bind_addr("0.0.0.0:8001".parse()?)     // Start embedded Core on this address
+//!         .core_addr("127.0.0.1:8001")                 // Address instances use to connect
+//!         .bind_addr("0.0.0.0:8002".parse()?)
+//!         .build()?
+//!         .start()
+//!         .await?;
+//!
+//!     // Both Environment QUIC server (8002) and Core QUIC server (8001) are now running
+//!     // in this single process, sharing the same persistence layer.
+//!
+//!     runtime.shutdown().await?;  // Shuts down both Environment and embedded Core
 //!     Ok(())
 //! }
 //! ```
@@ -41,6 +78,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use runtara_core::persistence::Persistence;
+use runtara_core::runtime::CoreRuntime;
 use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -59,6 +97,7 @@ pub struct EnvironmentRuntimeBuilder {
     runner: Option<Arc<dyn Runner>>,
     bind_addr: SocketAddr,
     core_addr: String,
+    core_bind_addr: Option<SocketAddr>,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -77,6 +116,7 @@ impl Default for EnvironmentRuntimeBuilder {
             runner: None,
             bind_addr: "0.0.0.0:8002".parse().unwrap(),
             core_addr: "127.0.0.1:8001".to_string(),
+            core_bind_addr: None,
             data_dir: PathBuf::from(".data"),
             wake_poll_interval: Duration::from_secs(5),
             wake_batch_size: 10,
@@ -129,6 +169,21 @@ impl EnvironmentRuntimeBuilder {
     /// Default: `127.0.0.1:8001`
     pub fn core_addr(mut self, addr: impl Into<String>) -> Self {
         self.core_addr = addr.into();
+        self
+    }
+
+    /// Set the bind address for the embedded runtara-core QUIC server.
+    ///
+    /// When set along with [`core_persistence`](Self::core_persistence), an embedded
+    /// `CoreRuntime` will be started that listens on this address for instance connections.
+    /// This allows running both Environment and Core in a single process.
+    ///
+    /// If not set, no embedded Core is started and instances must connect to an external
+    /// runtara-core server at `core_addr`.
+    ///
+    /// Default: `None` (no embedded Core)
+    pub fn core_bind_addr(mut self, addr: SocketAddr) -> Self {
+        self.core_bind_addr = Some(addr);
         self
     }
 
@@ -213,6 +268,7 @@ impl EnvironmentRuntimeBuilder {
             runner,
             bind_addr: self.bind_addr,
             core_addr: self.core_addr,
+            core_bind_addr: self.core_bind_addr,
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
@@ -232,6 +288,7 @@ pub struct EnvironmentRuntimeConfig {
     runner: Arc<dyn Runner>,
     bind_addr: SocketAddr,
     core_addr: String,
+    core_bind_addr: Option<SocketAddr>,
     data_dir: PathBuf,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
@@ -245,6 +302,33 @@ pub struct EnvironmentRuntimeConfig {
 impl EnvironmentRuntimeConfig {
     /// Start the runtime, spawning the QUIC server and wake scheduler tasks.
     pub async fn start(self) -> Result<EnvironmentRuntime> {
+        // Start embedded CoreRuntime if both core_persistence and core_bind_addr are configured
+        let core_runtime = if let (Some(persistence), Some(core_bind_addr)) =
+            (&self.core_persistence, self.core_bind_addr)
+        {
+            info!(
+                bind_addr = %core_bind_addr,
+                "Starting embedded CoreRuntime"
+            );
+
+            let core = CoreRuntime::builder()
+                .persistence(persistence.clone())
+                .bind_addr(core_bind_addr)
+                .build()?
+                .start()
+                .await?;
+
+            Some(core)
+        } else {
+            if self.core_persistence.is_some() && self.core_bind_addr.is_none() {
+                debug!(
+                    core_addr = %self.core_addr,
+                    "core_persistence set but core_bind_addr not configured; instances will connect to external Core"
+                );
+            }
+            None
+        };
+
         // Create handler state
         let state = if let Some(ref persistence) = self.core_persistence {
             Arc::new(
@@ -344,6 +428,7 @@ impl EnvironmentRuntimeConfig {
         info!(
             bind_addr = %bind_addr,
             core_addr = %self.core_addr,
+            embedded_core = core_runtime.is_some(),
             "EnvironmentRuntime started"
         );
 
@@ -352,6 +437,7 @@ impl EnvironmentRuntimeConfig {
             wake_handle,
             cleanup_handle,
             heartbeat_handle,
+            core_runtime,
             server_shutdown_tx,
             wake_shutdown,
             cleanup_shutdown,
@@ -369,6 +455,7 @@ impl EnvironmentRuntimeConfig {
 /// - Wake scheduler for durable sleep wake-ups
 /// - Cleanup worker for removing old run directories
 /// - Heartbeat monitor for detecting and failing stale instances
+/// - Embedded runtara-core (optional, when `core_bind_addr` is configured)
 ///
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
@@ -376,6 +463,7 @@ pub struct EnvironmentRuntime {
     wake_handle: JoinHandle<()>,
     cleanup_handle: JoinHandle<()>,
     heartbeat_handle: Option<JoinHandle<()>>,
+    core_runtime: Option<CoreRuntime>,
     server_shutdown_tx: watch::Sender<bool>,
     wake_shutdown: Arc<Notify>,
     cleanup_shutdown: Arc<Notify>,
@@ -402,8 +490,9 @@ impl EnvironmentRuntime {
 
     /// Gracefully shut down the runtime.
     ///
-    /// This signals the QUIC server, wake scheduler, cleanup worker, and heartbeat
-    /// monitor to stop, then waits for them to complete.
+    /// This signals the QUIC server, wake scheduler, cleanup worker, heartbeat
+    /// monitor, and embedded CoreRuntime (if present) to stop, then waits for
+    /// them to complete.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
@@ -438,6 +527,13 @@ impl EnvironmentRuntime {
             }
         }
 
+        // Shutdown embedded CoreRuntime (if running)
+        if let Some(core) = self.core_runtime
+            && let Err(e) = core.shutdown().await
+        {
+            error!("Embedded CoreRuntime error during shutdown: {}", e);
+        }
+
         // Wait for server
         match self.server_handle.await {
             Ok(Ok(())) => {
@@ -460,12 +556,20 @@ impl EnvironmentRuntime {
         let heartbeat_running = self
             .heartbeat_handle
             .as_ref()
-            .map_or(true, |h| !h.is_finished());
+            .is_none_or(|h| !h.is_finished());
+
+        let core_running = self.core_runtime.as_ref().is_none_or(|c| c.is_running());
 
         !self.server_handle.is_finished()
             && !self.wake_handle.is_finished()
             && !self.cleanup_handle.is_finished()
             && heartbeat_running
+            && core_running
+    }
+
+    /// Get a reference to the embedded CoreRuntime, if running.
+    pub fn core_runtime(&self) -> Option<&CoreRuntime> {
+        self.core_runtime.as_ref()
     }
 }
 
@@ -541,6 +645,7 @@ mod tests {
             "0.0.0.0:8002".parse::<SocketAddr>().unwrap()
         );
         assert_eq!(builder.core_addr, "127.0.0.1:8001");
+        assert!(builder.core_bind_addr.is_none());
         assert_eq!(builder.data_dir, PathBuf::from(".data"));
         assert_eq!(builder.wake_poll_interval, Duration::from_secs(5));
         assert_eq!(builder.wake_batch_size, 10);
@@ -553,6 +658,7 @@ mod tests {
 
         assert_eq!(builder_new.bind_addr, builder_default.bind_addr);
         assert_eq!(builder_new.core_addr, builder_default.core_addr);
+        assert_eq!(builder_new.core_bind_addr, builder_default.core_bind_addr);
         assert_eq!(builder_new.data_dir, builder_default.data_dir);
         assert_eq!(
             builder_new.wake_poll_interval,
@@ -585,6 +691,24 @@ mod tests {
         let builder = EnvironmentRuntimeBuilder::new().core_addr(addr);
 
         assert_eq!(builder.core_addr, "custom-host:8001");
+    }
+
+    #[test]
+    fn test_builder_core_bind_addr() {
+        let builder =
+            EnvironmentRuntimeBuilder::new().core_bind_addr("0.0.0.0:8001".parse().unwrap());
+
+        assert_eq!(
+            builder.core_bind_addr,
+            Some("0.0.0.0:8001".parse::<SocketAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_builder_core_bind_addr_default_none() {
+        let builder = EnvironmentRuntimeBuilder::new();
+
+        assert!(builder.core_bind_addr.is_none());
     }
 
     #[test]
