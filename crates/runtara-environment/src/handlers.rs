@@ -20,6 +20,21 @@ use crate::instance_output::{InstanceOutput, InstanceOutputStatus, output_file_p
 use crate::runner::oci::create_bundle_at_path;
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 
+/// Convert a path to absolute if it's relative.
+///
+/// This is critical for paths stored in DB (like bundle_path) - they must be
+/// absolute so the OCI runner can find them regardless of the current working
+/// directory at launch time.
+fn ensure_absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
 /// Shared state for environment handlers.
 ///
 /// Contains database connection, runner, and configuration shared across all handlers.
@@ -61,7 +76,7 @@ impl EnvironmentHandlerState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             runner,
             core_addr,
-            data_dir,
+            data_dir: ensure_absolute_path(data_dir),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
@@ -85,7 +100,7 @@ impl EnvironmentHandlerState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             runner,
             core_addr,
-            data_dir,
+            data_dir: ensure_absolute_path(data_dir),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
