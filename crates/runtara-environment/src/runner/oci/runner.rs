@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::fs;
-use tokio::io::AsyncReadExt;
+
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
@@ -898,6 +898,34 @@ impl Runner for OciRunner {
 
         let use_pasta = matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta);
 
+        // Open stderr log file for the spawned process.
+        // IMPORTANT: We redirect stderr to a file instead of using Stdio::piped() because
+        // when the Child handle is dropped (after try_wait), the pipe's read end closes.
+        // If pasta/crun then writes to stderr (e.g., "No routable interface for IPv6"),
+        // it receives SIGPIPE and exits with code 101 before the container completes.
+        // Using a file avoids this issue while still preserving stderr for debugging.
+        let stderr_file = match std::fs::File::create(&log_path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(
+                    instance_id = %options.instance_id,
+                    error = %e,
+                    path = %log_path.display(),
+                    "Failed to create stderr log file, using null"
+                );
+                // Fall back to null if we can't create the file
+                std::fs::File::open("/dev/null")?
+            }
+        };
+
+        // Helper closure to read stderr from the log file for error messages
+        let read_stderr_log = || -> String {
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+
         // For pasta mode: pasta wraps crun (creates namespace, then crun runs inside)
         // For other modes: just run crun directly
         if use_pasta {
@@ -915,7 +943,7 @@ impl Runner for OciRunner {
                 .arg("--config")
                 .arg(&config_path)
                 .arg(&container_id)
-                .stderr(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::from(stderr_file.try_clone()?))
                 .stdout(std::process::Stdio::null());
 
             let mut child = match cmd.spawn() {
@@ -938,7 +966,7 @@ impl Runner for OciRunner {
                             .arg("--config")
                             .arg(&config_path)
                             .arg(&container_id)
-                            .stderr(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::from(stderr_file.try_clone()?))
                             .stdout(std::process::Stdio::null());
 
                         cmd.spawn()?
@@ -958,14 +986,11 @@ impl Runner for OciRunner {
                     let error_msg = if let Some(err) = scenario_error {
                         err
                     } else {
-                        let mut stderr_msg = String::new();
-                        if let Some(mut stderr) = child.stderr.take() {
-                            let _ = stderr.read_to_string(&mut stderr_msg).await;
-                        }
+                        let stderr_msg = read_stderr_log();
                         if stderr_msg.is_empty() {
                             format!("pasta/crun exited with status: {}", status)
                         } else {
-                            format!("pasta/crun failed: {}", stderr_msg.trim())
+                            format!("pasta/crun failed: {}", stderr_msg)
                         }
                     };
 
@@ -1014,7 +1039,7 @@ impl Runner for OciRunner {
                 .arg("--config")
                 .arg(&config_path)
                 .arg(&container_id)
-                .stderr(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::from(stderr_file))
                 .stdout(std::process::Stdio::null());
 
             let mut child = match cmd.spawn() {
@@ -1034,15 +1059,11 @@ impl Runner for OciRunner {
                     let error_msg = if let Some(err) = scenario_error {
                         err
                     } else {
-                        let mut stderr_msg = String::new();
-                        if let Some(mut stderr) = child.stderr.take() {
-                            use tokio::io::AsyncReadExt;
-                            let _ = stderr.read_to_string(&mut stderr_msg).await;
-                        }
+                        let stderr_msg = read_stderr_log();
                         if stderr_msg.is_empty() {
                             format!("crun exited with status: {}", status)
                         } else {
-                            format!("crun failed: {}", stderr_msg.trim())
+                            format!("crun failed: {}", stderr_msg)
                         }
                     };
 

@@ -393,16 +393,20 @@ async fn handle_register_image_stream(
     use sha2::{Digest, Sha256};
     use std::io::Write;
 
+    eprintln!("DEBUG SERVER: data_dir = {:?}", state.data_dir);
     info!(
         tenant_id = %req.tenant_id,
         name = %req.name,
         binary_size = req.binary_size,
+        data_dir = ?state.data_dir,
         "Streaming image registration started"
     );
 
     // Create temp file for binary
     let image_id = uuid::Uuid::new_v4().to_string();
     let images_dir = state.data_dir.join("images").join(&image_id);
+    eprintln!("DEBUG SERVER: images_dir = {:?}", images_dir);
+    info!(images_dir = ?images_dir, "Creating image directory");
     let binary_path = images_dir.join("binary");
     let bundle_path = images_dir.join("bundle");
 
