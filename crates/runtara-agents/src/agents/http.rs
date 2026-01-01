@@ -228,14 +228,6 @@ pub struct HttpRequestInput {
     )]
     pub url: String,
 
-    /// Optional connection ID for automatic authentication
-    #[field(
-        display_name = "Connection ID",
-        description = "Connection ID for automatic authentication and URL prefixing"
-    )]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-
     /// HTTP headers
     #[field(
         display_name = "Headers",
@@ -328,7 +320,6 @@ impl Default for HttpRequestInput {
         HttpRequestInput {
             method: HttpMethod::default(),
             url: String::new(),
-            connection_id: None,
             headers: HashMap::new(),
             query_parameters: HashMap::new(),
             body: HttpBody(Value::Null),

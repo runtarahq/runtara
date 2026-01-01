@@ -217,10 +217,6 @@ pub struct FileInfo {
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "SFTP List Files Input")]
 pub struct SftpListFilesInput {
-    /// Connection ID for SFTP credentials (auto-injected by runtime)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-
     /// The directory path to list
     #[field(
         display_name = "Directory Path",
@@ -239,10 +235,6 @@ pub struct SftpListFilesInput {
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "SFTP Download File Input")]
 pub struct SftpDownloadFileInput {
-    /// Connection ID for SFTP credentials (auto-injected by runtime)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-
     /// The file path to download
     #[field(
         display_name = "File Path",
@@ -275,10 +267,6 @@ fn default_response_format() -> String {
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "SFTP Upload File Input")]
 pub struct SftpUploadFileInput {
-    /// Connection ID for SFTP credentials (auto-injected by runtime)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-
     /// The destination file path
     #[field(
         display_name = "Destination Path",
@@ -319,10 +307,6 @@ fn default_content_format() -> String {
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "SFTP Delete File Input")]
 pub struct SftpDeleteFileInput {
-    /// Connection ID for SFTP credentials (auto-injected by runtime)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<String>,
-
     /// The file path to delete
     #[field(
         display_name = "File Path",
