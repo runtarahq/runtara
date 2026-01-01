@@ -950,41 +950,6 @@ pub fn validate_agent_metadata_or_panic() {
 }
 
 // ============================================================================
-// Current Input Context (for connection resolution)
-// ============================================================================
-
-use std::cell::RefCell;
-
-thread_local! {
-    /// Thread-local storage for the current capability input JSON.
-    /// This allows connection resolution to access the `_connection` field
-    /// that was injected by the generated workflow code.
-    static CURRENT_INPUT: RefCell<Option<serde_json::Value>> = const { RefCell::new(None) };
-}
-
-/// Store the current input JSON in thread-local storage.
-/// Called by the generated capability executor before invoking the capability function.
-pub fn set_current_input(input: &serde_json::Value) {
-    CURRENT_INPUT.with(|c| {
-        *c.borrow_mut() = Some(input.clone());
-    });
-}
-
-/// Clear the current input from thread-local storage.
-/// Called by the generated capability executor after the capability function returns.
-pub fn clear_current_input() {
-    CURRENT_INPUT.with(|c| {
-        *c.borrow_mut() = None;
-    });
-}
-
-/// Get the current input JSON from thread-local storage.
-/// Returns None if no input is currently stored.
-pub fn get_current_input() -> Option<serde_json::Value> {
-    CURRENT_INPUT.with(|c| c.borrow().clone())
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 

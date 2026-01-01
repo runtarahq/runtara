@@ -278,15 +278,9 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         // Executor wrapper function
         #[doc(hidden)]
         fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
-            // Store raw input in thread-local for connection resolution
-            runtara_dsl::agent_meta::set_current_input(&input);
-
             let typed_input: #input_type_ident = serde_json::from_value(input)
                 .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
             let result = #fn_name(typed_input)?;
-
-            // Clear thread-local after execution
-            runtara_dsl::agent_meta::clear_current_input();
 
             serde_json::to_value(result)
                 .map_err(|e| format!("Failed to serialize result: {}", e))

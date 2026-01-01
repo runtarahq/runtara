@@ -159,17 +159,11 @@ fn create_sftp_session(credentials: &SftpCredentials) -> Result<ssh2::Sftp, Stri
         .map_err(|e| format!("Failed to create SFTP session: {}", e))
 }
 
-/// Parse credentials from connection resolved via resolve_connection()
-fn get_credentials_from_input(
-    connection_id: &str,
-    _input_json: Option<&serde_json::Value>,
+/// Parse credentials from connection data
+fn get_credentials_from_connection(
+    connection: &crate::connections::RawConnection,
 ) -> Result<SftpCredentials, String> {
-    // Use resolve_connection which checks:
-    // 1. Current capability input (has _connection from connection service)
-    // 2. Thread-local storage (legacy - testing service)
-    let raw_conn = crate::connections::resolve_connection(connection_id)?;
-
-    serde_json::from_value(raw_conn.parameters.clone())
+    serde_json::from_value(connection.parameters.clone())
         .map_err(|e| format!("Failed to parse SFTP credentials: {}", e))
 }
 
@@ -234,6 +228,11 @@ pub struct SftpListFilesInput {
         example = "/data/uploads"
     )]
     pub path: String,
+
+    /// Connection data injected by workflow runtime (internal use)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[field(skip)]
+    pub _connection: Option<crate::connections::RawConnection>,
 }
 
 /// Input for SFTP download file operation
@@ -261,6 +260,11 @@ pub struct SftpDownloadFileInput {
     )]
     #[serde(default = "default_response_format")]
     pub response_format: String,
+
+    /// Connection data injected by workflow runtime (internal use)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[field(skip)]
+    pub _connection: Option<crate::connections::RawConnection>,
 }
 
 fn default_response_format() -> String {
@@ -300,6 +304,11 @@ pub struct SftpUploadFileInput {
     )]
     #[serde(default = "default_content_format")]
     pub content_format: String,
+
+    /// Connection data injected by workflow runtime (internal use)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[field(skip)]
+    pub _connection: Option<crate::connections::RawConnection>,
 }
 
 fn default_content_format() -> String {
@@ -321,6 +330,11 @@ pub struct SftpDeleteFileInput {
         example = "/data/uploads/old-file.txt"
     )]
     pub path: String,
+
+    /// Connection data injected by workflow runtime (internal use)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[field(skip)]
+    pub _connection: Option<crate::connections::RawConnection>,
 }
 
 /// Response for successful delete operation
@@ -356,8 +370,12 @@ pub struct DeleteFileResponse {
     description = "List files and directories in an SFTP directory"
 )]
 pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, String> {
-    // Get credentials from input (provided by caller via _connection)
-    let credentials = get_credentials_from_input(&input.connection_id, None)?;
+    // Get credentials from connection data
+    let connection = input
+        ._connection
+        .as_ref()
+        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let credentials = get_credentials_from_connection(connection)?;
 
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;
@@ -395,8 +413,12 @@ pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, Strin
     description = "Download a file from SFTP and return its content"
 )]
 pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, String> {
-    // Get credentials from input (provided by caller via _connection)
-    let credentials = get_credentials_from_input(&input.connection_id, None)?;
+    // Get credentials from connection data
+    let connection = input
+        ._connection
+        .as_ref()
+        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let credentials = get_credentials_from_connection(connection)?;
 
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;
@@ -429,8 +451,12 @@ pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, String
     side_effects = true
 )]
 pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, String> {
-    // Get credentials from input (provided by caller via _connection)
-    let credentials = get_credentials_from_input(&input.connection_id, None)?;
+    // Get credentials from connection data
+    let connection = input
+        ._connection
+        .as_ref()
+        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let credentials = get_credentials_from_connection(connection)?;
 
     // Decode content based on format
     let content_bytes = match input.content_format.as_str() {
@@ -467,8 +493,12 @@ pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, String> {
     side_effects = true
 )]
 pub fn sftp_delete_file(input: SftpDeleteFileInput) -> Result<DeleteFileResponse, String> {
-    // Get credentials from input (provided by caller via _connection)
-    let credentials = get_credentials_from_input(&input.connection_id, None)?;
+    // Get credentials from connection data
+    let connection = input
+        ._connection
+        .as_ref()
+        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let credentials = get_credentials_from_connection(connection)?;
 
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;

@@ -316,6 +316,11 @@ pub struct HttpRequestInput {
     )]
     #[serde(default = "default_fail_on_error")]
     pub fail_on_error: bool,
+
+    /// Connection data injected by workflow runtime (internal use)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[field(skip)]
+    pub _connection: Option<crate::connections::RawConnection>,
 }
 
 impl Default for HttpRequestInput {
@@ -332,6 +337,7 @@ impl Default for HttpRequestInput {
             body_type: BodyType::default(),
             multipart: Vec::new(),
             fail_on_error: default_fail_on_error(),
+            _connection: None,
         }
     }
 }
@@ -429,10 +435,9 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     let mut query_parameters = input.query_parameters.clone();
     let mut url = input.url.clone();
 
-    // If connection_id provided, extract config and merge
-    if let Some(ref conn_id) = input.connection_id {
-        let raw = crate::connections::resolve_connection(conn_id)?;
-        let config = extract_connection_config(&raw)?;
+    // If connection data is provided, extract config and merge
+    if let Some(ref raw) = input._connection {
+        let config = extract_connection_config(raw)?;
 
         // Prepend url_prefix if URL is relative (doesn't start with http)
         if !url.starts_with("http://") && !url.starts_with("https://") {
