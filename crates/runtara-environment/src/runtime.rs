@@ -143,8 +143,8 @@ impl EnvironmentRuntimeBuilder {
 
     /// Set the Core persistence layer for shared database access.
     ///
-    /// When set, the wake scheduler will query Core's `sleep_until` column
-    /// directly instead of using the legacy `wake_queue` table.
+    /// When set, enables the wake scheduler to query Core's `sleep_until` column
+    /// for durable sleep wake-ups. Also enables the heartbeat monitor.
     pub fn core_persistence(mut self, persistence: Arc<dyn Persistence>) -> Self {
         self.core_persistence = Some(persistence);
         self
@@ -353,31 +353,33 @@ impl EnvironmentRuntimeConfig {
             )
         };
 
-        // Create wake scheduler
-        let wake_config = WakeSchedulerConfig {
-            poll_interval: self.wake_poll_interval,
-            batch_size: self.wake_batch_size,
-            core_addr: self.core_addr.clone(),
-            data_dir: self.data_dir.clone(),
-        };
+        // Create wake scheduler (requires core_persistence to query sleeping instances)
+        let (wake_handle, wake_shutdown) = if let Some(ref persistence) = self.core_persistence {
+            let wake_config = WakeSchedulerConfig {
+                poll_interval: self.wake_poll_interval,
+                batch_size: self.wake_batch_size,
+                core_addr: self.core_addr.clone(),
+                data_dir: self.data_dir.clone(),
+            };
 
-        let wake_scheduler = if let Some(ref persistence) = self.core_persistence {
-            WakeScheduler::with_core_persistence(
+            let wake_scheduler = WakeScheduler::new(
                 self.pool.clone(),
                 persistence.clone(),
                 self.runner.clone(),
                 wake_config,
-            )
+            );
+
+            let shutdown = wake_scheduler.shutdown_handle();
+
+            let handle = tokio::spawn(async move {
+                wake_scheduler.run().await;
+            });
+
+            (Some(handle), Some(shutdown))
         } else {
-            WakeScheduler::new(self.pool.clone(), self.runner.clone(), wake_config)
+            info!("Wake scheduler disabled: core_persistence not configured");
+            (None, None)
         };
-
-        let wake_shutdown = wake_scheduler.shutdown_handle();
-
-        // Start wake scheduler task
-        let wake_handle = tokio::spawn(async move {
-            wake_scheduler.run().await;
-        });
 
         // Create cleanup worker
         let cleanup_config = CleanupWorkerConfig {
@@ -460,12 +462,12 @@ impl EnvironmentRuntimeConfig {
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
     server_handle: JoinHandle<Result<()>>,
-    wake_handle: JoinHandle<()>,
+    wake_handle: Option<JoinHandle<()>>,
     cleanup_handle: JoinHandle<()>,
     heartbeat_handle: Option<JoinHandle<()>>,
     core_runtime: Option<CoreRuntime>,
     server_shutdown_tx: watch::Sender<bool>,
-    wake_shutdown: Arc<Notify>,
+    wake_shutdown: Option<Arc<Notify>>,
     cleanup_shutdown: Arc<Notify>,
     heartbeat_shutdown: Option<Arc<Notify>>,
     state: Arc<EnvironmentHandlerState>,
@@ -499,8 +501,10 @@ impl EnvironmentRuntime {
         // Signal server shutdown
         let _ = self.server_shutdown_tx.send(true);
 
-        // Signal wake scheduler shutdown
-        self.wake_shutdown.notify_one();
+        // Signal wake scheduler shutdown (if running)
+        if let Some(ref shutdown) = self.wake_shutdown {
+            shutdown.notify_one();
+        }
 
         // Signal cleanup worker shutdown
         self.cleanup_shutdown.notify_one();
@@ -510,9 +514,11 @@ impl EnvironmentRuntime {
             shutdown.notify_one();
         }
 
-        // Wait for wake scheduler
-        if let Err(e) = self.wake_handle.await {
-            error!("Wake scheduler task panicked: {}", e);
+        // Wait for wake scheduler (if running)
+        if let Some(handle) = self.wake_handle {
+            if let Err(e) = handle.await {
+                error!("Wake scheduler task panicked: {}", e);
+            }
         }
 
         // Wait for cleanup worker
@@ -561,7 +567,7 @@ impl EnvironmentRuntime {
         let core_running = self.core_runtime.as_ref().is_none_or(|c| c.is_running());
 
         !self.server_handle.is_finished()
-            && !self.wake_handle.is_finished()
+            && self.wake_handle.as_ref().is_none_or(|h| !h.is_finished())
             && !self.cleanup_handle.is_finished()
             && heartbeat_running
             && core_running

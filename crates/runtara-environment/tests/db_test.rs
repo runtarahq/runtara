@@ -6,7 +6,6 @@
 
 mod common;
 
-use chrono::Utc;
 use uuid::Uuid;
 
 /// Skip test if database URL is not set
@@ -327,125 +326,6 @@ async fn test_list_instances() {
             .await
             .ok();
     }
-    sqlx::query("DELETE FROM images WHERE image_id = $1")
-        .bind(&image_id)
-        .execute(&pool)
-        .await
-        .ok();
-}
-
-// ============================================================================
-// Wake Queue Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_schedule_and_get_wake() {
-    skip_if_no_db!();
-    let pool = get_pool().await.expect("Failed to connect to database");
-
-    let instance_id = Uuid::new_v4().to_string();
-    let tenant_id = "test-tenant-wake";
-    let image_id = Uuid::new_v4().to_string();
-
-    // Create test image and instance
-    create_test_image(&pool, &image_id, tenant_id)
-        .await
-        .expect("Failed to create test image");
-
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
-        .await
-        .expect("Failed to create instance");
-
-    // Schedule wake in the past (so it's immediately available)
-    let wake_at = Utc::now() - chrono::Duration::seconds(1);
-    runtara_environment::db::schedule_wake(&pool, &instance_id, "checkpoint-1", wake_at)
-        .await
-        .expect("Failed to schedule wake");
-
-    // Get pending wakes
-    let wakes = runtara_environment::db::get_pending_wakes(&pool, 10)
-        .await
-        .expect("Failed to get pending wakes");
-
-    assert!(wakes.iter().any(|w| w.instance_id == instance_id));
-
-    // Remove wake
-    runtara_environment::db::remove_wake(&pool, &instance_id)
-        .await
-        .expect("Failed to remove wake");
-
-    // Verify removed
-    let wakes = runtara_environment::db::get_pending_wakes(&pool, 10)
-        .await
-        .expect("Failed to get pending wakes");
-
-    assert!(!wakes.iter().any(|w| w.instance_id == instance_id));
-
-    // Cleanup
-    sqlx::query("DELETE FROM instances WHERE instance_id = $1")
-        .bind(&instance_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM images WHERE image_id = $1")
-        .bind(&image_id)
-        .execute(&pool)
-        .await
-        .ok();
-}
-
-#[tokio::test]
-async fn test_schedule_wake_updates_existing() {
-    skip_if_no_db!();
-    let pool = get_pool().await.expect("Failed to connect to database");
-
-    let instance_id = Uuid::new_v4().to_string();
-    let tenant_id = "test-tenant-wake-update";
-    let image_id = Uuid::new_v4().to_string();
-
-    // Create test image and instance
-    create_test_image(&pool, &image_id, tenant_id)
-        .await
-        .expect("Failed to create test image");
-
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
-        .await
-        .expect("Failed to create instance");
-
-    // Schedule first wake
-    let wake_at1 = Utc::now() + chrono::Duration::hours(1);
-    runtara_environment::db::schedule_wake(&pool, &instance_id, "checkpoint-1", wake_at1)
-        .await
-        .expect("Failed to schedule wake");
-
-    // Schedule second wake (should update)
-    let wake_at2 = Utc::now() - chrono::Duration::seconds(1);
-    runtara_environment::db::schedule_wake(&pool, &instance_id, "checkpoint-2", wake_at2)
-        .await
-        .expect("Failed to schedule wake");
-
-    // Should be pending now (wake_at2 is in the past)
-    let wakes = runtara_environment::db::get_pending_wakes(&pool, 10)
-        .await
-        .expect("Failed to get pending wakes");
-
-    let wake = wakes
-        .iter()
-        .find(|w| w.instance_id == instance_id)
-        .expect("Wake not found");
-    assert_eq!(wake.checkpoint_id, "checkpoint-2");
-
-    // Cleanup
-    sqlx::query("DELETE FROM wake_queue WHERE instance_id = $1")
-        .bind(&instance_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM instances WHERE instance_id = $1")
-        .bind(&instance_id)
-        .execute(&pool)
-        .await
-        .ok();
     sqlx::query("DELETE FROM images WHERE image_id = $1")
         .bind(&image_id)
         .execute(&pool)

@@ -482,6 +482,7 @@ pub async fn handle_start_instance(
                 handle,
                 tenant_id_for_monitor,
                 state.data_dir.clone(),
+                state.core_persistence.clone(),
             );
 
             Ok(StartInstanceResponse {
@@ -756,6 +757,7 @@ pub async fn handle_resume_instance(
                 handle,
                 tenant_id_for_monitor,
                 state.data_dir.clone(),
+                state.core_persistence.clone(),
             );
 
             Ok(ResumeInstanceResponse {
@@ -781,6 +783,7 @@ pub async fn handle_resume_instance(
 struct OutputProcessorState {
     pool: PgPool,
     data_dir: PathBuf,
+    core_persistence: Option<Arc<dyn Persistence>>,
 }
 
 /// Spawn a background task that monitors the container and processes output when done.
@@ -793,6 +796,7 @@ pub fn spawn_container_monitor(
     handle: RunnerHandle,
     tenant_id: String,
     data_dir: PathBuf,
+    core_persistence: Option<Arc<dyn Persistence>>,
 ) {
     let instance_id = handle.instance_id.clone();
 
@@ -842,6 +846,7 @@ pub fn spawn_container_monitor(
                 let output_state = OutputProcessorState {
                     pool: pool.clone(),
                     data_dir: data_dir.clone(),
+                    core_persistence: core_persistence.clone(),
                 };
 
                 if let Err(e) = process_output(&output_state, &instance_id, &tenant_id).await {
@@ -1010,7 +1015,7 @@ async fn process_output_inner(
             }
         }
         InstanceOutputStatus::Sleeping => {
-            // For sleeping, we need to schedule a wake
+            // For sleeping, we need to schedule a wake via Core's sleep_until column
             if let (Some(wake_after_ms), Some(checkpoint_id)) =
                 (output.wake_after_ms, output.checkpoint_id)
             {
@@ -1029,14 +1034,28 @@ async fn process_output_inner(
 
                 // Only schedule wake if we actually updated the status
                 if updated {
-                    db::schedule_wake(&state.pool, instance_id, &checkpoint_id, wake_at).await?;
-
-                    info!(
-                        instance_id = %instance_id,
-                        wake_at = %wake_at,
-                        checkpoint_id = %checkpoint_id,
-                        "Scheduled wake for sleeping instance"
-                    );
+                    // Set sleep_until via Core persistence for wake scheduler
+                    if let Some(ref persistence) = state.core_persistence {
+                        if let Err(e) = persistence.set_instance_sleep(instance_id, wake_at).await {
+                            error!(
+                                instance_id = %instance_id,
+                                error = %e,
+                                "Failed to set sleep_until"
+                            );
+                        } else {
+                            info!(
+                                instance_id = %instance_id,
+                                wake_at = %wake_at,
+                                checkpoint_id = %checkpoint_id,
+                                "Scheduled wake for sleeping instance"
+                            );
+                        }
+                    } else {
+                        warn!(
+                            instance_id = %instance_id,
+                            "Cannot schedule wake: core_persistence not configured"
+                        );
+                    }
                 } else {
                     debug!(
                         instance_id = %instance_id,

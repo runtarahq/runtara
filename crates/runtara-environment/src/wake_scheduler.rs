@@ -3,11 +3,8 @@
 //! Wake scheduler for durable sleep.
 //!
 //! Periodically polls for sleeping instances and relaunches them
-//! when their wake time arrives.
-//!
-//! The scheduler supports two modes:
-//! 1. Legacy mode: polls the `wake_queue` table in Environment's database
-//! 2. Core persistence mode: queries `sleep_until` column via Core's Persistence trait
+//! when their wake time arrives. Queries `sleep_until` column via
+//! Core's Persistence trait.
 
 use runtara_core::persistence::Persistence;
 use sqlx::PgPool;
@@ -50,8 +47,7 @@ impl Default for WakeSchedulerConfig {
 pub struct WakeScheduler {
     pool: PgPool,
     /// Core persistence layer for querying sleeping instances.
-    /// When set, uses `get_sleeping_instances_due()` instead of `wake_queue`.
-    core_persistence: Option<Arc<dyn Persistence>>,
+    persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
     image_registry: ImageRegistry,
     config: WakeSchedulerConfig,
@@ -59,33 +55,20 @@ pub struct WakeScheduler {
 }
 
 impl WakeScheduler {
-    /// Create a new wake scheduler (legacy mode using wake_queue table).
-    pub fn new(pool: PgPool, runner: Arc<dyn Runner>, config: WakeSchedulerConfig) -> Self {
-        let image_registry = ImageRegistry::new(pool.clone());
-        Self {
-            pool,
-            core_persistence: None,
-            runner,
-            image_registry,
-            config,
-            shutdown: Arc::new(Notify::new()),
-        }
-    }
-
-    /// Create a new wake scheduler with Core persistence.
+    /// Create a new wake scheduler.
     ///
-    /// When Core persistence is provided, the scheduler queries `sleep_until`
-    /// from Core's instances table instead of the legacy `wake_queue`.
-    pub fn with_core_persistence(
+    /// The scheduler queries `sleep_until` from Core's instances table
+    /// via the provided persistence layer.
+    pub fn new(
         pool: PgPool,
-        core_persistence: Arc<dyn Persistence>,
+        persistence: Arc<dyn Persistence>,
         runner: Arc<dyn Runner>,
         config: WakeSchedulerConfig,
     ) -> Self {
         let image_registry = ImageRegistry::new(pool.clone());
         Self {
             pool,
-            core_persistence: Some(core_persistence),
+            persistence,
             runner,
             image_registry,
             config,
@@ -123,20 +106,8 @@ impl WakeScheduler {
 
     /// Process pending wakes.
     async fn process_pending_wakes(&self) -> crate::error::Result<()> {
-        // Use Core persistence if available, otherwise fall back to wake_queue
-        if let Some(ref persistence) = self.core_persistence {
-            self.process_wakes_from_core_persistence(persistence).await
-        } else {
-            self.process_wakes_from_legacy_queue().await
-        }
-    }
-
-    /// Process wakes using Core's sleep_until column.
-    async fn process_wakes_from_core_persistence(
-        &self,
-        persistence: &Arc<dyn Persistence>,
-    ) -> crate::error::Result<()> {
-        let sleeping_instances = persistence
+        let sleeping_instances = self
+            .persistence
             .get_sleeping_instances_due(self.config.batch_size)
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
@@ -148,11 +119,11 @@ impl WakeScheduler {
 
         info!(
             count = sleeping_instances.len(),
-            "Processing sleeping instances from Core persistence"
+            "Processing sleeping instances"
         );
 
         for instance in sleeping_instances {
-            if let Err(e) = self.wake_instance_from_core(&instance, persistence).await {
+            if let Err(e) = self.wake_instance(&instance).await {
                 error!(
                     instance_id = %instance.instance_id,
                     error = %e,
@@ -165,16 +136,15 @@ impl WakeScheduler {
         Ok(())
     }
 
-    /// Wake an instance using Core persistence data.
-    async fn wake_instance_from_core(
+    /// Wake an instance.
+    async fn wake_instance(
         &self,
         instance: &runtara_core::persistence::InstanceRecord,
-        persistence: &Arc<dyn Persistence>,
     ) -> crate::error::Result<()> {
         info!(
             instance_id = %instance.instance_id,
             checkpoint_id = ?instance.checkpoint_id,
-            "Waking instance from Core persistence"
+            "Waking instance"
         );
 
         // Get checkpoint_id from instance
@@ -248,7 +218,8 @@ impl WakeScheduler {
                 }
 
                 // Clear sleep_until via Core persistence
-                if let Err(e) = persistence
+                if let Err(e) = self
+                    .persistence
                     .clear_instance_sleep(&instance.instance_id)
                     .await
                 {
@@ -262,133 +233,12 @@ impl WakeScheduler {
                     handle,
                     instance.tenant_id.clone(),
                     self.config.data_dir.clone(),
+                    Some(self.persistence.clone()),
                 );
             }
             Err(e) => {
                 warn!(
                     instance_id = %instance.instance_id,
-                    error = %e,
-                    "Failed to wake instance"
-                );
-                return Err(e.into());
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Process wakes using the legacy wake_queue table.
-    async fn process_wakes_from_legacy_queue(&self) -> crate::error::Result<()> {
-        let wakes = db::get_pending_wakes(&self.pool, self.config.batch_size).await?;
-
-        if wakes.is_empty() {
-            debug!("No pending wakes to process");
-            return Ok(());
-        }
-
-        info!(count = wakes.len(), "Processing pending wakes");
-
-        for wake in wakes {
-            if let Err(e) = self.wake_instance_legacy(&wake).await {
-                error!(
-                    instance_id = %wake.instance_id,
-                    error = %e,
-                    "Failed to wake instance"
-                );
-                // Continue processing other wakes
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Wake a single instance (legacy mode using wake_queue).
-    async fn wake_instance_legacy(&self, wake: &db::WakeEntry) -> crate::error::Result<()> {
-        info!(
-            instance_id = %wake.instance_id,
-            checkpoint_id = %wake.checkpoint_id,
-            "Waking instance"
-        );
-
-        // Get the image to find bundle path
-        let image = self
-            .image_registry
-            .get(&wake.image_id)
-            .await?
-            .ok_or_else(|| crate::error::Error::ImageNotFound(wake.image_id.to_string()))?;
-
-        // Ensure bundle exists
-        let bundle_path = image
-            .bundle_path
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                crate::error::Error::ImageNotFound(format!(
-                    "Image '{}' has no bundle",
-                    wake.image_id
-                ))
-            })?;
-
-        // Build launch options (using the shared image bundle)
-        let options = LaunchOptions {
-            instance_id: wake.instance_id.clone(),
-            tenant_id: wake.tenant_id.clone(),
-            bundle_path,
-            input: serde_json::json!({}), // Input was already consumed on first run
-            timeout: Duration::from_secs(300), // Default timeout
-            runtara_core_addr: self.config.core_addr.clone(),
-            checkpoint_id: Some(wake.checkpoint_id.clone()),
-        };
-
-        // Launch the instance
-        match self.runner.launch_detached(&options).await {
-            Ok(handle) => {
-                info!(
-                    instance_id = %wake.instance_id,
-                    handle_id = %handle.handle_id,
-                    "Instance woken successfully"
-                );
-
-                // Register in container registry
-                let container_registry = ContainerRegistry::new(self.pool.clone());
-                let container_info = ContainerInfo {
-                    container_id: handle.handle_id.clone(),
-                    instance_id: wake.instance_id.clone(),
-                    tenant_id: wake.tenant_id.clone(),
-                    binary_path: image.binary_path.clone(),
-                    bundle_path: image.bundle_path.clone(),
-                    started_at: handle.started_at,
-                    pid: None,
-                    timeout_seconds: Some(300), // Default timeout for woken instances
-                };
-                if let Err(e) = container_registry.register(&container_info).await {
-                    warn!(error = %e, "Failed to register container (instance still running)");
-                }
-
-                // Update instance status to running
-                db::update_instance_status(
-                    &self.pool,
-                    &wake.instance_id,
-                    "running",
-                    Some(&wake.checkpoint_id),
-                )
-                .await?;
-
-                // Spawn background task to monitor container and process output when done
-                spawn_container_monitor(
-                    self.pool.clone(),
-                    self.runner.clone(),
-                    handle,
-                    wake.tenant_id.clone(),
-                    self.config.data_dir.clone(),
-                );
-
-                // Remove from wake queue
-                db::remove_wake(&self.pool, &wake.instance_id).await?;
-            }
-            Err(e) => {
-                warn!(
-                    instance_id = %wake.instance_id,
                     error = %e,
                     "Failed to wake instance"
                 );
