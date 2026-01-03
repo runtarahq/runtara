@@ -133,15 +133,15 @@ fn test_custom_capabilities_registered() {
     );
 }
 
-#[test]
-fn test_custom_capability_execution() {
+#[tokio::test]
+async fn test_custom_capability_execution() {
     use runtara_dsl::agent_meta::execute_capability;
 
     let input = serde_json::json!({
         "value": "hello world"
     });
 
-    let result = execute_capability("custom_test", "custom-test-action", input);
+    let result = execute_capability("custom_test", "custom-test-action", input).await;
     assert!(result.is_ok(), "Capability execution should succeed");
 
     let output = result.unwrap();

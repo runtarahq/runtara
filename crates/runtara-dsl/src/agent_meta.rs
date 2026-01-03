@@ -5,6 +5,9 @@
 //! These types are used by the `runtara-agent-macro` crate to generate
 //! metadata that can be collected at runtime using the `inventory` crate.
 
+use std::future::Future;
+use std::pin::Pin;
+
 /// Trait for types that can provide their enum variant names.
 /// Used by the CapabilityInput macro to extract enum values for API metadata.
 pub trait EnumVariants {
@@ -15,8 +18,14 @@ pub trait EnumVariants {
 /// Function pointer type for getting enum variant names
 pub type EnumVariantsFn = fn() -> &'static [&'static str];
 
-/// Function pointer type for capability executors
-pub type CapabilityExecutorFn = fn(serde_json::Value) -> Result<serde_json::Value, String>;
+/// Async executor function type - returns a boxed future.
+/// This allows both sync and async capabilities to be executed uniformly:
+/// - Async capabilities return futures directly
+/// - Sync capabilities are wrapped with tokio::task::spawn_blocking
+pub type CapabilityExecutorFn =
+    fn(
+        serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>;
 
 /// Executor for an agent capability - registered via inventory
 pub struct CapabilityExecutor {
@@ -31,8 +40,9 @@ pub struct CapabilityExecutor {
 // Register CapabilityExecutor with inventory
 inventory::collect!(&'static CapabilityExecutor);
 
-/// Execute a capability by module and capability_id using inventory-registered executors
-pub fn execute_capability(
+/// Execute a capability by module and capability_id using inventory-registered executors.
+/// This is an async function that awaits the capability's future.
+pub async fn execute_capability(
     module: &str,
     capability_id: &str,
     input: serde_json::Value,
@@ -41,7 +51,7 @@ pub fn execute_capability(
 
     for executor in inventory::iter::<&'static CapabilityExecutor> {
         if executor.module == module_lower && executor.capability_id == capability_id {
-            return (executor.execute)(input);
+            return (executor.execute)(input).await;
         }
     }
 

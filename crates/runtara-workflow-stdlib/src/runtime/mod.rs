@@ -11,10 +11,8 @@
 //! - Signal handling (pause, cancel, resume)
 //! - Heartbeat/tick for liveness monitoring
 
-mod context;
 mod error;
 
-pub use context::RuntimeContext;
 pub use error::{Error, Result};
 
 // Re-export SDK types for workflows

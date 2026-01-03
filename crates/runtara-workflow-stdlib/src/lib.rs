@@ -46,7 +46,7 @@ pub use runtara_sdk;
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types
-    pub use crate::runtime::{Error, Result, RuntimeContext};
+    pub use crate::runtime::{Error, Result};
 
     // SDK types for durability
     pub use crate::runtime::{RuntaraSdk, SdkConfig, durable, register_sdk, sdk};
@@ -72,4 +72,4 @@ pub mod prelude {
 
 // Direct access to commonly used modules
 pub use runtara_agents::registry;
-pub use runtime::{Error, Result, RuntimeContext};
+pub use runtime::{Error, Result};

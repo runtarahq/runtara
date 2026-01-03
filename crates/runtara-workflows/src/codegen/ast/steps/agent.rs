@@ -188,7 +188,7 @@ fn emit_durable_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            let result = registry::execute_capability(agent_id, capability_id, inputs)
+            let result = registry::execute_capability(agent_id, capability_id, inputs).await
                 .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
                     step_id, agent_id, capability_id, e))?;
             Ok(result)
@@ -244,7 +244,7 @@ fn emit_durable_rate_limited_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            let result = registry::execute_capability(agent_id, capability_id, inputs)
+            let result = registry::execute_capability(agent_id, capability_id, inputs).await
                 .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
                     step_id, agent_id, capability_id, e))?;
             Ok(result)

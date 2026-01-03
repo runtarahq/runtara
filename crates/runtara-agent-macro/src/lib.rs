@@ -253,6 +253,42 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             None
         };
 
+    // Detect if the function is async
+    let is_async = input_fn.sig.asyncness.is_some();
+
+    // Generate executor wrapper based on sync/async
+    let executor_wrapper = if is_async {
+        // Async function: directly await the result
+        quote! {
+            #[doc(hidden)]
+            fn #executor_fn_ident(input: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>> {
+                Box::pin(async move {
+                    let typed_input: #input_type_ident = serde_json::from_value(input)
+                        .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
+                    let result = #fn_name(typed_input).await?;
+                    serde_json::to_value(result)
+                        .map_err(|e| format!("Failed to serialize result: {}", e))
+                })
+            }
+        }
+    } else {
+        // Sync function: wrap with spawn_blocking
+        quote! {
+            #[doc(hidden)]
+            fn #executor_fn_ident(input: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>> {
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || {
+                        let typed_input: #input_type_ident = serde_json::from_value(input)
+                            .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
+                        let result = #fn_name(typed_input)?;
+                        serde_json::to_value(result)
+                            .map_err(|e| format!("Failed to serialize result: {}", e))
+                    }).await.map_err(|e| format!("Task panicked: {}", e))?
+                })
+            }
+        }
+    };
+
     let expanded = quote! {
         #input_fn
 
@@ -275,16 +311,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             &#meta_ident
         }
 
-        // Executor wrapper function
-        #[doc(hidden)]
-        fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
-            let typed_input: #input_type_ident = serde_json::from_value(input)
-                .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
-            let result = #fn_name(typed_input)?;
-
-            serde_json::to_value(result)
-                .map_err(|e| format!("Failed to serialize result: {}", e))
-        }
+        #executor_wrapper
 
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]

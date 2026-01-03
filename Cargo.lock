@@ -1568,6 +1568,7 @@ dependencies = [
  "sha2",
  "ssh2",
  "strum",
+ "tokio",
  "ureq",
  "urlencoding",
 ]
@@ -1601,6 +1602,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tokio",
  "utoipa",
 ]
 

@@ -20,9 +20,6 @@ pub struct EmitContext {
     /// Whether debug mode is enabled (generates extra logging)
     pub debug_mode: bool,
 
-    /// Runtime context variable name (for checkpointing, rate limiting, etc.)
-    pub runtime_ctx_var: Ident,
-
     /// Steps context variable name (for storing step results)
     pub steps_context_var: Ident,
 
@@ -47,7 +44,6 @@ impl EmitContext {
             step_results: HashMap::new(),
             counter: 0,
             debug_mode,
-            runtime_ctx_var: Ident::new("ctx", Span::call_site()),
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios: HashMap::new(),
@@ -67,7 +63,6 @@ impl EmitContext {
             step_results: HashMap::new(),
             counter: 0,
             debug_mode,
-            runtime_ctx_var: Ident::new("ctx", Span::call_site()),
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios,
