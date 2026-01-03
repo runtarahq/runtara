@@ -16,7 +16,6 @@ use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Read;
 use strum::VariantNames;
 
 // ============================================================================
@@ -413,14 +412,14 @@ pub fn extract_connection_config(
 // Operations
 // ============================================================================
 
-/// Execute an HTTP request using native ureq
+/// Execute an HTTP request using async reqwest
 #[capability(
     module = "http",
     display_name = "HTTP Request",
     description = "Execute an HTTP request with the specified method, URL, headers, and body",
     side_effects = true
 )]
-pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
+pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     // Start with input values
     let mut headers = input.headers.clone();
     let mut query_parameters = input.query_parameters.clone();
@@ -463,125 +462,106 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
         }
     }
 
-    // Create ureq agent with timeout
-    let agent = ureq::AgentBuilder::new()
+    // Create reqwest client with timeout
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(input.timeout_ms))
-        .build();
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     // Build request based on method
-    let request = match input.method {
-        HttpMethod::Get => agent.get(&url),
-        HttpMethod::Post => agent.post(&url),
-        HttpMethod::Put => agent.put(&url),
-        HttpMethod::Delete => agent.delete(&url),
-        HttpMethod::Patch => agent.patch(&url),
-        HttpMethod::Head => agent.head(&url),
-        HttpMethod::Options => agent.request("OPTIONS", &url),
+    let method = match input.method {
+        HttpMethod::Get => reqwest::Method::GET,
+        HttpMethod::Post => reqwest::Method::POST,
+        HttpMethod::Put => reqwest::Method::PUT,
+        HttpMethod::Delete => reqwest::Method::DELETE,
+        HttpMethod::Patch => reqwest::Method::PATCH,
+        HttpMethod::Head => reqwest::Method::HEAD,
+        HttpMethod::Options => reqwest::Method::OPTIONS,
     };
 
+    let mut request = client.request(method, &url);
+
     // Add headers
-    let mut request = request;
     for (key, value) in &headers {
-        request = request.set(key, value);
+        request = request.header(key, value);
     }
 
-    // Execute request with body if applicable
-    let response = match input.method {
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => {
-            request.call()
-        }
+    // Add body if applicable
+    request = match input.method {
+        HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => request,
         HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
             if let Some(body_str) = input.body.to_string_body() {
                 // Set content-type if not already set
                 if !headers.contains_key("Content-Type") && !headers.contains_key("content-type") {
-                    request = request.set("Content-Type", "application/json");
+                    request = request.header("Content-Type", "application/json");
                 }
-                request.send_string(&body_str)
+                request.body(body_str)
             } else {
-                request.call()
+                request
             }
         }
     };
 
-    // Handle response
-    match response {
-        Ok(resp) => {
-            let status_code = resp.status();
+    // Execute request
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request to {} failed: {}", input.url, e))?;
 
-            // Extract headers
-            let mut headers = HashMap::new();
-            for name in resp.headers_names() {
-                if let Some(value) = resp.header(&name) {
-                    headers.insert(name, value.to_string());
-                }
-            }
+    let status_code = response.status().as_u16();
+    let success = response.status().is_success();
 
-            // Read body
-            let body = match input.response_type {
-                ResponseType::Json => match resp.into_string() {
-                    Ok(text) => match serde_json::from_str(&text) {
-                        Ok(json_value) => HttpResponseBody::Json(json_value),
-                        Err(_) => HttpResponseBody::Text(text),
-                    },
-                    Err(e) => return Err(format!("Failed to read response body: {}", e)),
-                },
-                ResponseType::Text => match resp.into_string() {
-                    Ok(text) => HttpResponseBody::Text(text),
-                    Err(e) => return Err(format!("Failed to read response body: {}", e)),
-                },
-                ResponseType::Binary => {
-                    let mut bytes = Vec::new();
-                    match resp.into_reader().read_to_end(&mut bytes) {
-                        Ok(_) => HttpResponseBody::Binary(bytes),
-                        Err(e) => return Err(format!("Failed to read response body: {}", e)),
-                    }
-                }
-            };
-
-            let success = status_code >= 200 && status_code < 300;
-
-            Ok(HttpResponse {
-                status_code,
-                headers,
-                body,
-                success,
-            })
+    // Extract headers
+    let mut response_headers = HashMap::new();
+    for (name, value) in response.headers() {
+        if let Ok(v) = value.to_str() {
+            response_headers.insert(name.to_string(), v.to_string());
         }
-        Err(ureq::Error::Status(status_code, resp)) => {
-            // HTTP error response (4xx, 5xx)
-            let mut headers = HashMap::new();
-            for name in resp.headers_names() {
-                if let Some(value) = resp.header(&name) {
-                    headers.insert(name, value.to_string());
-                }
-            }
-
-            let body_text = resp.into_string().unwrap_or_default();
-            let body = match serde_json::from_str(&body_text) {
-                Ok(json_value) => HttpResponseBody::Json(json_value),
-                Err(_) => HttpResponseBody::Text(body_text.clone()),
-            };
-
-            // If fail_on_error is true, return an error instead of a response
-            if input.fail_on_error {
-                return Err(format!(
-                    "HTTP request failed with status {}: {}",
-                    status_code, body_text
-                ));
-            }
-
-            Ok(HttpResponse {
-                status_code,
-                headers,
-                body,
-                success: false,
-            })
-        }
-        Err(ureq::Error::Transport(transport)) => Err(format!(
-            "HTTP request to {} failed: {}",
-            input.url, transport
-        )),
     }
+
+    // Check for error status before consuming body
+    if !success && input.fail_on_error {
+        let body_text = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(format!(
+            "HTTP request failed with status {}: {}",
+            status_code, body_text
+        ));
+    }
+
+    // Read body based on response type
+    let body = match input.response_type {
+        ResponseType::Json => {
+            let text = response
+                .text()
+                .await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            match serde_json::from_str(&text) {
+                Ok(json_value) => HttpResponseBody::Json(json_value),
+                Err(_) => HttpResponseBody::Text(text),
+            }
+        }
+        ResponseType::Text => {
+            let text = response
+                .text()
+                .await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            HttpResponseBody::Text(text)
+        }
+        ResponseType::Binary => {
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            HttpResponseBody::Binary(bytes.to_vec())
+        }
+    };
+
+    Ok(HttpResponse {
+        status_code,
+        headers: response_headers,
+        body,
+        success,
+    })
 }
 
 /// URL encoding helper module
@@ -622,5 +602,457 @@ mod base64_string {
         general_purpose::STANDARD
             .decode(encoded.as_bytes())
             .map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{body_string, header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_get_request_json_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": 1, "name": "John"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/users", mock_server.uri()),
+            response_type: ResponseType::Json,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status_code, 200);
+        assert!(response.success);
+        assert!(matches!(response.body, HttpResponseBody::Json(_)));
+
+        if let HttpResponseBody::Json(json) = response.body {
+            assert_eq!(json["id"], 1);
+            assert_eq!(json["name"], "John");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_post_request_with_json_body() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/users"))
+            .and(header("Content-Type", "application/json"))
+            .and(body_string(r#"{"name":"Jane"}"#))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(serde_json::json!({"id": 2, "name": "Jane"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Post,
+            url: format!("{}/users", mock_server.uri()),
+            body: HttpBody(serde_json::json!({"name": "Jane"})),
+            response_type: ResponseType::Json,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status_code, 201);
+        assert!(response.success);
+    }
+
+    #[tokio::test]
+    async fn test_get_request_with_query_parameters() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(query_param("q", "rust"))
+            .and(query_param("page", "1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": []})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut query_params = HashMap::new();
+        query_params.insert("q".to_string(), "rust".to_string());
+        query_params.insert("page".to_string(), "1".to_string());
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/search", mock_server.uri()),
+            query_parameters: query_params,
+            response_type: ResponseType::Json,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_get_request_with_custom_headers() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/protected"))
+            .and(header("Authorization", "Bearer token123"))
+            .and(header("X-Custom-Header", "custom-value"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer token123".to_string());
+        headers.insert("X-Custom-Header".to_string(), "custom-value".to_string());
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/protected", mock_server.uri()),
+            headers,
+            response_type: ResponseType::Json,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_text_response_type() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/text"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Hello, World!"))
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/text", mock_server.uri()),
+            response_type: ResponseType::Text,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert!(matches!(response.body, HttpResponseBody::Text(_)));
+
+        if let HttpResponseBody::Text(text) = response.body {
+            assert_eq!(text, "Hello, World!");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_binary_response_type() {
+        let mock_server = MockServer::start().await;
+
+        let binary_data = vec![0x89, 0x50, 0x4E, 0x47]; // PNG header bytes
+
+        Mock::given(method("GET"))
+            .and(path("/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(binary_data.clone()))
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/image", mock_server.uri()),
+            response_type: ResponseType::Binary,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert!(matches!(response.body, HttpResponseBody::Binary(_)));
+
+        if let HttpResponseBody::Binary(bytes) = response.body {
+            assert_eq!(bytes, binary_data);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_put_request() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/users/1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"updated": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Put,
+            url: format!("{}/users/1", mock_server.uri()),
+            body: HttpBody(serde_json::json!({"name": "Updated"})),
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_delete_request() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/users/1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Delete,
+            url: format!("{}/users/1", mock_server.uri()),
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status_code, 204);
+    }
+
+    #[tokio::test]
+    async fn test_patch_request() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PATCH"))
+            .and(path("/users/1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"patched": true})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Patch,
+            url: format!("{}/users/1", mock_server.uri()),
+            body: HttpBody(serde_json::json!({"status": "active"})),
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_error_response_with_fail_on_error_true() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/not-found"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(serde_json::json!({"error": "Not found"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/not-found", mock_server.uri()),
+            fail_on_error: true,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn test_error_response_with_fail_on_error_false() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/not-found"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(serde_json::json!({"error": "Not found"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/not-found", mock_server.uri()),
+            fail_on_error: false,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status_code, 404);
+        assert!(!response.success);
+    }
+
+    #[tokio::test]
+    async fn test_server_error_with_fail_on_error_false() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/error"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({"error": "Internal server error"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/error", mock_server.uri()),
+            fail_on_error: false,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status_code, 500);
+        assert!(!response.success);
+    }
+
+    #[tokio::test]
+    async fn test_response_headers_captured() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/headers"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-Custom-Response", "custom-value")
+                    .insert_header("X-Request-Id", "12345")
+                    .set_body_json(serde_json::json!({})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/headers", mock_server.uri()),
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(
+            response.headers.get("x-custom-response"),
+            Some(&"custom-value".to_string())
+        );
+        assert_eq!(
+            response.headers.get("x-request-id"),
+            Some(&"12345".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_head_request() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("HEAD"))
+            .and(path("/resource"))
+            .respond_with(ResponseTemplate::new(200).insert_header("Content-Length", "1024"))
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Head,
+            url: format!("{}/resource", mock_server.uri()),
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn test_options_request() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("OPTIONS"))
+            .and(path("/api"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("Allow", "GET, POST, PUT, DELETE"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Options,
+            url: format!("{}/api", mock_server.uri()),
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        assert_eq!(response.status_code, 200);
+        assert!(response.headers.get("allow").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_json_response_fallback_to_text() {
+        let mock_server = MockServer::start().await;
+
+        // Return invalid JSON when JSON response is expected
+        Mock::given(method("GET"))
+            .and(path("/invalid-json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not valid json"))
+            .mount(&mock_server)
+            .await;
+
+        let input = HttpRequestInput {
+            method: HttpMethod::Get,
+            url: format!("{}/invalid-json", mock_server.uri()),
+            response_type: ResponseType::Json,
+            ..Default::default()
+        };
+
+        let result = http_request(input).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap();
+        // Should fall back to text when JSON parsing fails
+        assert!(matches!(response.body, HttpResponseBody::Text(_)));
+
+        if let HttpResponseBody::Text(text) = response.body {
+            assert_eq!(text, "not valid json");
+        }
     }
 }

@@ -31,7 +31,7 @@ strum = { version = "0.26", features = ["derive"] }
 tokio = { version = "1", features = ["rt"] }
 # Native implementations
 rand = "0.8"
-ureq = { version = "2.10", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2.1"
 ssh2 = "0.9"
 # Vendored OpenSSL for musl static builds (required by ssh2/libssh2-sys)
@@ -39,3 +39,4 @@ openssl = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+wiremock = "0.6"
