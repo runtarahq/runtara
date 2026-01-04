@@ -278,23 +278,9 @@ fn emit_connection_fetch(
         return (quote! {}, inputs_var.clone());
     };
 
-    let Some(_service_url) = &ctx.connection_service_url else {
-        // No service URL - just inject connection_id into inputs for legacy support
-        let final_inputs = proc_macro2::Ident::new(
-            &format!("{}_with_conn", inputs_var),
-            proc_macro2::Span::call_site(),
-        );
-        let code = quote! {
-            let #final_inputs = {
-                let mut inputs = #inputs_var.clone();
-                if let serde_json::Value::Object(ref mut map) = inputs {
-                    map.insert("connection_id".to_string(), serde_json::Value::String(#conn_id.to_string()));
-                }
-                inputs
-            };
-        };
-        return (code, final_inputs);
-    };
+    // connection_service_url must be configured when connection_id is specified
+    // Generate code that checks at runtime (since URL can come from env var)
+    let _ = &ctx.connection_service_url; // Acknowledge we checked it, but defer to runtime
 
     // Generate connection fetch code with rate limit handling
     let final_inputs = proc_macro2::Ident::new(

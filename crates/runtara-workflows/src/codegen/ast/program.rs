@@ -600,8 +600,10 @@ pub fn emit_graph_as_function(
     graph: &ExecutionGraph,
     parent_ctx: &EmitContext,
 ) -> TokenStream {
-    // Create a fresh context for this graph (inherits debug mode only)
+    // Create a fresh context for this graph, inheriting connection configuration
     let mut ctx = EmitContext::new(parent_ctx.debug_mode);
+    ctx.connection_service_url = parent_ctx.connection_service_url.clone();
+    ctx.tenant_id = parent_ctx.tenant_id.clone();
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
