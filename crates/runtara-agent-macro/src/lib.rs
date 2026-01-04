@@ -68,10 +68,12 @@ struct CapabilityArgs {
 
 /// Field attributes for CapabilityInput derive
 #[derive(Debug, FromField)]
-#[darling(attributes(field))]
+#[darling(attributes(field), forward_attrs(serde))]
 struct InputFieldArgs {
     ident: Option<syn::Ident>,
     ty: syn::Type,
+    /// Forwarded serde attributes to detect #[serde(default)]
+    attrs: Vec<syn::Attribute>,
     #[darling(default)]
     display_name: Option<String>,
     #[darling(default)]
@@ -441,8 +443,8 @@ pub fn derive_capability_input(input: TokenStream) -> TokenStream {
             let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let type_str = type_to_string(&f.ty);
             let (inner_type, is_option_type) = unwrap_option_type(&type_str);
-            // Field is optional if it's Option<T> OR has a default value
-            let is_optional = is_option_type || f.default.is_some();
+            // Field is optional if it's Option<T>, has #[field(default = "...")], or has #[serde(default)]
+            let is_optional = is_option_type || f.default.is_some() || has_serde_default(&f.attrs);
 
             let display_name_token = option_to_tokens(&f.display_name);
             let description_token = option_to_tokens(&f.description);
@@ -500,10 +502,12 @@ pub fn derive_capability_input(input: TokenStream) -> TokenStream {
 
 /// Field attributes for ConnectionParams derive
 #[derive(Debug, FromField)]
-#[darling(attributes(field))]
+#[darling(attributes(field), forward_attrs(serde))]
 struct ConnectionFieldArgs {
     ident: Option<syn::Ident>,
     ty: syn::Type,
+    /// Forwarded serde attributes to detect #[serde(default)]
+    attrs: Vec<syn::Attribute>,
     #[darling(default)]
     display_name: Option<String>,
     #[darling(default)]
@@ -584,8 +588,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let name = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
             let type_str = type_to_string(&f.ty);
             let (inner_type, is_option_type) = unwrap_option_type(&type_str);
-            // Field is optional if it's Option<T> OR has a default value
-            let is_optional = is_option_type || f.default.is_some();
+            // Field is optional if it's Option<T>, has #[field(default = "...")], or has #[serde(default)]
+            let is_optional = is_option_type || f.default.is_some() || has_serde_default(&f.attrs);
 
             let display_name_token = option_to_tokens(&f.display_name);
             let description_token = option_to_tokens(&f.description);
@@ -660,6 +664,25 @@ fn unwrap_option_type(type_str: &str) -> (String, bool) {
     } else {
         (type_str.to_string(), false)
     }
+}
+
+/// Check if a field has `#[serde(default)]` or `#[serde(default = "...")]` attribute
+fn has_serde_default(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("serde") {
+            let mut found_default = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("default") {
+                    found_default = true;
+                }
+                Ok(())
+            });
+            if found_default {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Analyze a type string and extract nested type information
