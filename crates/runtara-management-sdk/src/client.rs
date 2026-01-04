@@ -286,6 +286,7 @@ impl ManagementSdk {
                 instance_id: options.instance_id,
                 input: input_bytes,
                 timeout_seconds: options.timeout_seconds,
+                env: options.env,
             }))
             .await?;
 

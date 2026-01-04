@@ -191,6 +191,8 @@ pub struct StartInstanceOptions {
     pub input: Option<serde_json::Value>,
     /// Execution timeout in seconds.
     pub timeout_seconds: Option<u32>,
+    /// Custom environment variables (override system vars).
+    pub env: std::collections::HashMap<String, String>,
 }
 
 impl StartInstanceOptions {
@@ -218,6 +220,18 @@ impl StartInstanceOptions {
     /// Set the timeout.
     pub fn with_timeout(mut self, seconds: u32) -> Self {
         self.timeout_seconds = Some(seconds);
+        self
+    }
+
+    /// Set custom environment variables (override system vars).
+    pub fn with_env(mut self, env: std::collections::HashMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// Add a single environment variable.
+    pub fn with_env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
         self
     }
 }

@@ -780,6 +780,8 @@ impl Runner for OciRunner {
             "INPUT_JSON".to_string(),
             serde_json::to_string(&options.input).unwrap_or_default(),
         );
+        // Apply custom environment variables (override system vars)
+        env.extend(options.env.clone());
 
         // Generate per-instance config.json in the run directory
         let run_dir = self
@@ -875,6 +877,8 @@ impl Runner for OciRunner {
             "INPUT_JSON".to_string(),
             serde_json::to_string(&options.input).unwrap_or_default(),
         );
+        // Apply custom environment variables (override system vars)
+        env.extend(options.env.clone());
 
         // Generate container ID
         let container_id = self.container_id(&options.instance_id);

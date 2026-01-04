@@ -324,6 +324,8 @@ pub struct StartInstanceRequest {
     pub input: Option<serde_json::Value>,
     /// Optional execution timeout in seconds.
     pub timeout_seconds: Option<u64>,
+    /// Custom environment variables (override system vars).
+    pub env: std::collections::HashMap<String, String>,
 }
 
 /// Response from starting an instance.
@@ -441,6 +443,7 @@ pub async fn handle_start_instance(
         timeout,
         runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: None,
+        env: request.env,
     };
 
     // Launch via runner (detached)
@@ -709,6 +712,7 @@ pub async fn handle_resume_instance(
         timeout: Duration::from_secs(300),
         runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: Some(checkpoint_id.clone()),
+        env: std::collections::HashMap::new(), // Resume uses original env
     };
 
     // Launch
@@ -1194,6 +1198,7 @@ pub async fn handle_test_capability(
         timeout,
         runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(), // Test harness doesn't need custom env
     };
 
     // Run synchronously (wait for completion)

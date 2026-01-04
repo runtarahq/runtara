@@ -234,6 +234,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(30),
             runtara_core_addr: "127.0.0.1:8001".to_string(),
             checkpoint_id: None,
+            env: std::collections::HashMap::new(),
         }
     }
 

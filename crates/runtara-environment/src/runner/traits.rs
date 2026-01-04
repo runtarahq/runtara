@@ -86,6 +86,8 @@ pub struct LaunchOptions {
     pub runtara_core_addr: String,
     /// Checkpoint ID to resume from (for wakes/resumes)
     pub checkpoint_id: Option<String>,
+    /// Custom environment variables (applied after system vars, can override)
+    pub env: std::collections::HashMap<String, String>,
 }
 
 /// Handle for a launched instance (detached execution).

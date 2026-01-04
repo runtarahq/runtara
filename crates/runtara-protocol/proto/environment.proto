@@ -129,6 +129,7 @@ message StartInstanceRequest {
   optional string instance_id = 3;  // Optional custom instance ID (UUID generated if not provided)
   bytes input = 4;                  // JSON input data
   optional uint32 timeout_seconds = 5; // Execution timeout (default: 300)
+  map<string, string> env = 6;      // Custom environment variables (override system vars)
 }
 
 message StartInstanceResponse {

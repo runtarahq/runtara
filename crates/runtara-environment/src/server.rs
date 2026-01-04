@@ -177,6 +177,7 @@ async fn handle_stream(
                 instance_id: req.instance_id,
                 input: serde_json::from_slice(&req.input).ok(),
                 timeout_seconds: req.timeout_seconds.map(|t| t as u64),
+                env: req.env,
             };
             match handle_start_instance(&state, handler_req).await {
                 Ok(resp) => Response::StartInstance(environment_proto::StartInstanceResponse {

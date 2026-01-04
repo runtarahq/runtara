@@ -190,6 +190,7 @@ impl WakeScheduler {
             timeout: Duration::from_secs(300),
             runtara_core_addr: self.config.core_addr.clone(),
             checkpoint_id: Some(checkpoint_id.clone()),
+            env: std::collections::HashMap::new(), // Wake uses original env
         };
 
         // Launch the instance
