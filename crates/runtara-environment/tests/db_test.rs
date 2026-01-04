@@ -66,7 +66,7 @@ async fn test_create_and_get_instance() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .expect("Failed to create instance");
 
@@ -109,7 +109,7 @@ async fn test_update_instance_status() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .expect("Failed to create instance");
 
@@ -173,7 +173,7 @@ async fn test_update_instance_result() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .expect("Failed to create instance");
 
@@ -228,7 +228,7 @@ async fn test_update_instance_result_with_error() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .expect("Failed to create instance");
 
@@ -282,7 +282,7 @@ async fn test_list_instances() {
     // Create multiple instances
     let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
     for id in &ids {
-        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id)
+        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id, None)
             .await
             .expect("Failed to create instance");
     }
@@ -347,4 +347,118 @@ async fn test_health_check() {
         .expect("Health check failed");
 
     assert!(healthy);
+}
+
+// ============================================================================
+// Environment Variable Persistence Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_instance_with_env() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-env";
+    let image_id = Uuid::new_v4().to_string();
+
+    // Create test image first
+    create_test_image(&pool, &image_id, tenant_id)
+        .await
+        .expect("Failed to create test image");
+
+    // Create instance with custom env vars
+    let mut env = std::collections::HashMap::new();
+    env.insert("API_URL".to_string(), "https://api.example.com".to_string());
+    env.insert("DEBUG".to_string(), "true".to_string());
+
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, Some(&env))
+        .await
+        .expect("Failed to create instance with env");
+
+    // Retrieve and verify env vars
+    let result = runtara_environment::db::get_instance_image_with_env(&pool, &instance_id)
+        .await
+        .expect("Failed to get instance env");
+
+    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+
+    assert_eq!(retrieved_image_id, image_id);
+    assert_eq!(retrieved_env.len(), 2);
+    assert_eq!(
+        retrieved_env.get("API_URL").unwrap(),
+        "https://api.example.com"
+    );
+    assert_eq!(retrieved_env.get("DEBUG").unwrap(), "true");
+
+    // Cleanup
+    sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+        .bind(&instance_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_create_instance_without_env() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-no-env";
+    let image_id = Uuid::new_v4().to_string();
+
+    // Create test image first
+    create_test_image(&pool, &image_id, tenant_id)
+        .await
+        .expect("Failed to create test image");
+
+    // Create instance without env vars
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+        .await
+        .expect("Failed to create instance");
+
+    // Retrieve and verify empty env
+    let result = runtara_environment::db::get_instance_image_with_env(&pool, &instance_id)
+        .await
+        .expect("Failed to get instance env");
+
+    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+
+    assert_eq!(retrieved_image_id, image_id);
+    assert!(
+        retrieved_env.is_empty(),
+        "Expected empty env, got {:?}",
+        retrieved_env
+    );
+
+    // Cleanup
+    sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+        .bind(&instance_id)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_get_instance_image_with_env_not_found() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    let result =
+        runtara_environment::db::get_instance_image_with_env(&pool, "nonexistent-instance")
+            .await
+            .expect("Query should succeed");
+
+    assert!(result.is_none(), "Expected None for nonexistent instance");
 }

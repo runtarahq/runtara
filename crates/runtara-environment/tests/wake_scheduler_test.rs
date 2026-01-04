@@ -144,7 +144,7 @@ async fn test_create_and_get_instance() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .expect("Failed to create instance");
 
@@ -176,7 +176,7 @@ async fn test_update_instance_status() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .unwrap();
 
@@ -221,7 +221,7 @@ async fn test_update_instance_result() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .unwrap();
 
@@ -264,7 +264,7 @@ async fn test_update_instance_result_with_error() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id)
+    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
         .await
         .unwrap();
 
@@ -311,13 +311,13 @@ async fn test_list_instances() {
     let instance2 = Uuid::new_v4().to_string();
     let instance3 = Uuid::new_v4().to_string();
 
-    db::create_instance(&pool, &instance1, "list-test-tenant-a", &image_id)
+    db::create_instance(&pool, &instance1, "list-test-tenant-a", &image_id, None)
         .await
         .unwrap();
-    db::create_instance(&pool, &instance2, "list-test-tenant-a", &image_id)
+    db::create_instance(&pool, &instance2, "list-test-tenant-a", &image_id, None)
         .await
         .unwrap();
-    db::create_instance(&pool, &instance3, "list-test-tenant-b", &image_id)
+    db::create_instance(&pool, &instance3, "list-test-tenant-b", &image_id, None)
         .await
         .unwrap();
 

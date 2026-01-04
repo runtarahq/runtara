@@ -316,6 +316,7 @@ async fn test_start_instance_success() {
         instance_id: None,
         input: Some(serde_json::json!({"key": "value"})),
         timeout_seconds: Some(60),
+        env: std::collections::HashMap::new(),
     };
 
     let response = handle_start_instance(&state, request)
@@ -369,6 +370,7 @@ async fn test_start_instance_with_custom_id() {
         instance_id: Some(custom_instance_id.clone()),
         input: None,
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
@@ -396,6 +398,7 @@ async fn test_start_instance_empty_image_id() {
         instance_id: None,
         input: None,
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
@@ -427,6 +430,7 @@ async fn test_start_instance_image_not_found() {
         instance_id: None,
         input: None,
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
@@ -490,7 +494,7 @@ async fn test_stop_instance_with_registered_container() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
         .await
         .unwrap();
 
@@ -582,7 +586,7 @@ async fn test_resume_instance_wrong_status() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
         .await
         .unwrap();
     db::update_instance_status(&pool, &instance_id, "running", None)
@@ -635,7 +639,7 @@ async fn test_resume_instance_no_checkpoint() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
         .await
         .unwrap();
     db::update_instance_status(&pool, &instance_id, "suspended", None)
@@ -682,7 +686,7 @@ async fn test_resume_instance_success() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
         .await
         .unwrap();
     db::update_instance_status(&pool, &instance_id, "suspended", Some("checkpoint-123"))
@@ -770,6 +774,7 @@ async fn test_start_instance_tenant_isolation() {
         instance_id: None,
         input: None,
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
@@ -821,6 +826,7 @@ async fn test_start_instance_same_tenant_allowed() {
         instance_id: None,
         input: None,
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
 
     let response = handle_start_instance(&state, request).await.unwrap();
@@ -1061,4 +1067,123 @@ async fn test_test_capability_no_harness_binary() {
         "Error should mention harness issue: {}",
         error
     );
+}
+
+// ============================================================================
+// Environment Variable Persistence Tests
+// ============================================================================
+
+/// Test that env vars passed to start_instance are stored in the database
+#[tokio::test]
+async fn test_start_instance_stores_env() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
+
+    // Register an image
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-env-{}", image_id);
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
+        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Create env vars
+    let mut env = std::collections::HashMap::new();
+    env.insert("API_URL".to_string(), "https://api.example.com".to_string());
+    env.insert("SECRET_KEY".to_string(), "my-secret".to_string());
+
+    let request = StartInstanceRequest {
+        image_id: image_id.clone(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: None,
+        input: None,
+        timeout_seconds: None,
+        env,
+    };
+
+    let response = handle_start_instance(&state, request).await.unwrap();
+    assert!(response.success, "Error: {:?}", response.error);
+
+    // Verify env vars were stored in the database
+    let result = db::get_instance_image_with_env(&pool, &response.instance_id)
+        .await
+        .expect("Failed to get instance env");
+
+    let (retrieved_image_id, retrieved_env) = result.expect("Instance not found");
+    assert_eq!(retrieved_image_id, image_id);
+    assert_eq!(retrieved_env.len(), 2);
+    assert_eq!(
+        retrieved_env.get("API_URL").unwrap(),
+        "https://api.example.com"
+    );
+    assert_eq!(retrieved_env.get("SECRET_KEY").unwrap(), "my-secret");
+
+    cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
+}
+
+/// Test that empty env is handled correctly
+#[tokio::test]
+async fn test_start_instance_empty_env() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
+
+    // Register an image
+    let image_id = Uuid::new_v4().to_string();
+    let image_name = format!("test-image-no-env-{}", image_id);
+    sqlx::query(
+        r#"
+        INSERT INTO images (image_id, tenant_id, name, description, binary_path, bundle_path, runner_type)
+        VALUES ($1, 'test-tenant', $2, 'desc', '/bin/true', '/tmp/test-bundle', 'mock')
+        "#,
+    )
+    .bind(&image_id)
+    .bind(&image_name)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let request = StartInstanceRequest {
+        image_id: image_id.clone(),
+        tenant_id: "test-tenant".to_string(),
+        instance_id: None,
+        input: None,
+        timeout_seconds: None,
+        env: std::collections::HashMap::new(), // Empty env
+    };
+
+    let response = handle_start_instance(&state, request).await.unwrap();
+    assert!(response.success, "Error: {:?}", response.error);
+
+    // Verify empty env is stored correctly (should return empty HashMap)
+    let result = db::get_instance_image_with_env(&pool, &response.instance_id)
+        .await
+        .expect("Failed to get instance env");
+
+    let (_, retrieved_env) = result.expect("Instance not found");
+    assert!(
+        retrieved_env.is_empty(),
+        "Expected empty env, got {:?}",
+        retrieved_env
+    );
+
+    cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
 }

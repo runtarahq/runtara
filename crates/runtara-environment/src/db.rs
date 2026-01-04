@@ -106,12 +106,14 @@ pub struct InstanceFull {
 /// Create a new instance record and associate it with an image.
 ///
 /// This creates the instance in Core's table and adds the image mapping
-/// in the instance_images table.
+/// in the instance_images table, including custom env vars for persistence
+/// across resume/wake cycles.
 pub async fn create_instance(
     pool: &PgPool,
     instance_id: &str,
     tenant_id: &str,
     image_id: &str,
+    env: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), sqlx::Error> {
     // Create instance in Core's table
     sqlx::query(
@@ -125,8 +127,8 @@ pub async fn create_instance(
     .execute(pool)
     .await?;
 
-    // Associate with image
-    associate_instance_image(pool, instance_id, image_id, tenant_id).await?;
+    // Associate with image and store env
+    associate_instance_image(pool, instance_id, image_id, tenant_id, env).await?;
 
     Ok(())
 }
@@ -432,25 +434,32 @@ pub async fn health_check(pool: &PgPool) -> Result<bool, sqlx::Error> {
 // Instance Images
 // ============================================================================
 
-/// Associate an instance with an image.
+/// Associate an instance with an image and store custom env vars.
 pub async fn associate_instance_image(
     pool: &PgPool,
     instance_id: &str,
     image_id: &str,
     tenant_id: &str,
+    env: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), sqlx::Error> {
+    let env_json = env
+        .filter(|e| !e.is_empty())
+        .map(|e| serde_json::to_value(e).unwrap_or_default());
+
     sqlx::query(
         r#"
-        INSERT INTO instance_images (instance_id, image_id, tenant_id, created_at)
-        VALUES ($1, $2, $3, NOW())
+        INSERT INTO instance_images (instance_id, image_id, tenant_id, env, created_at)
+        VALUES ($1, $2, $3, $4, NOW())
         ON CONFLICT (instance_id) DO UPDATE SET
             image_id = $2,
-            tenant_id = $3
+            tenant_id = $3,
+            env = $4
         "#,
     )
     .bind(instance_id)
     .bind(image_id)
     .bind(tenant_id)
+    .bind(env_json)
     .execute(pool)
     .await?;
 
@@ -472,6 +481,28 @@ pub async fn get_instance_image_id(
     .await?;
 
     Ok(result.map(|(id,)| id))
+}
+
+/// Get the image ID and custom env vars for an instance.
+pub async fn get_instance_image_with_env(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<Option<(String, std::collections::HashMap<String, String>)>, sqlx::Error> {
+    let result: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
+        r#"
+        SELECT image_id, env FROM instance_images WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result.map(|(image_id, env_json)| {
+        let env = env_json
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        (image_id, env)
+    }))
 }
 
 /// Remove instance-image association.

@@ -416,12 +416,18 @@ pub async fn handle_start_instance(
     // Parse input for runner (not stored in DB, Core doesn't track it)
     let input = request.input.unwrap_or(serde_json::json!({}));
 
-    // Create instance record
+    // Create instance record (with env for persistence across resume/wake)
+    let env_for_db = if request.env.is_empty() {
+        None
+    } else {
+        Some(&request.env)
+    };
     if let Err(e) = db::create_instance(
         &state.pool,
         &instance_id,
         &request.tenant_id,
         &request.image_id,
+        env_for_db,
     )
     .await
     {
@@ -655,16 +661,17 @@ pub async fn handle_resume_instance(
         }
     };
 
-    // Get image ID from instance_images table
-    let image_id = match db::get_instance_image_id(&state.pool, &request.instance_id).await? {
-        Some(id) => id,
-        None => {
-            return Ok(ResumeInstanceResponse {
-                success: false,
-                error: Some("Instance has no associated image".to_string()),
-            });
-        }
-    };
+    // Get image ID and stored env from instance_images table
+    let (image_id, stored_env) =
+        match db::get_instance_image_with_env(&state.pool, &request.instance_id).await? {
+            Some(result) => result,
+            None => {
+                return Ok(ResumeInstanceResponse {
+                    success: false,
+                    error: Some("Instance has no associated image".to_string()),
+                });
+            }
+        };
 
     let image_registry = ImageRegistry::new(state.pool.clone());
     let image = match image_registry.get(&image_id).await? {
@@ -703,7 +710,7 @@ pub async fn handle_resume_instance(
         }
     };
 
-    // Build launch options with checkpoint
+    // Build launch options with checkpoint and restored env
     let options = LaunchOptions {
         instance_id: request.instance_id.clone(),
         tenant_id: instance.tenant_id.clone(),
@@ -712,7 +719,7 @@ pub async fn handle_resume_instance(
         timeout: Duration::from_secs(300),
         runtara_core_addr: state.core_addr.clone(),
         checkpoint_id: Some(checkpoint_id.clone()),
-        env: std::collections::HashMap::new(), // Resume uses original env
+        env: stored_env, // Restore env from initial launch
     };
 
     // Launch

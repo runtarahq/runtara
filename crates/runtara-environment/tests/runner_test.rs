@@ -119,6 +119,7 @@ fn test_launch_options_creation() {
         timeout: Duration::from_secs(300),
         runtara_core_addr: "127.0.0.1:8001".to_string(),
         checkpoint_id: Some("cp-1".to_string()),
+        env: std::collections::HashMap::new(),
     };
 
     assert_eq!(options.instance_id, "inst-123");
@@ -140,6 +141,7 @@ fn test_launch_options_without_checkpoint() {
         timeout: Duration::from_secs(60),
         runtara_core_addr: "localhost:7001".to_string(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(),
     };
 
     assert!(options.checkpoint_id.is_none());
@@ -155,6 +157,7 @@ fn test_launch_options_clone() {
         timeout: Duration::from_secs(100),
         runtara_core_addr: "addr:8000".to_string(),
         checkpoint_id: Some("cp".to_string()),
+        env: std::collections::HashMap::new(),
     };
 
     let cloned = options.clone();
@@ -635,6 +638,7 @@ async fn test_mock_runner_launch_detached() {
         timeout: Duration::from_secs(60),
         runtara_core_addr: "127.0.0.1:8001".to_string(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(),
     };
 
     let handle = runner.launch_detached(&options).await.unwrap();
@@ -655,6 +659,7 @@ async fn test_mock_runner_is_running() {
         timeout: Duration::from_secs(60),
         runtara_core_addr: "127.0.0.1:8001".to_string(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(),
     };
 
     let handle = runner.launch_detached(&options).await.unwrap();
@@ -675,6 +680,7 @@ async fn test_mock_runner_stop() {
         timeout: Duration::from_secs(60),
         runtara_core_addr: "127.0.0.1:8001".to_string(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(),
     };
 
     let handle = runner.launch_detached(&options).await.unwrap();
@@ -692,6 +698,7 @@ async fn test_mock_runner_collect_result() {
         timeout: Duration::from_secs(60),
         runtara_core_addr: "127.0.0.1:8001".to_string(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(),
     };
 
     let handle = runner.launch_detached(&options).await.unwrap();
@@ -714,6 +721,7 @@ async fn test_mock_runner_run() {
         timeout: Duration::from_secs(60),
         runtara_core_addr: "127.0.0.1:8001".to_string(),
         checkpoint_id: None,
+        env: std::collections::HashMap::new(),
     };
 
     let result = runner.run(&options, None).await.unwrap();

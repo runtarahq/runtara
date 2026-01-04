@@ -155,15 +155,16 @@ impl WakeScheduler {
             ))
         })?;
 
-        // Look up image_id from instance_images table
-        let image_id = db::get_instance_image_id(&self.pool, &instance.instance_id)
-            .await?
-            .ok_or_else(|| {
-                crate::error::Error::Other(format!(
-                    "No image association found for instance '{}'",
-                    instance.instance_id
-                ))
-            })?;
+        // Look up image_id and stored env from instance_images table
+        let (image_id, stored_env) =
+            db::get_instance_image_with_env(&self.pool, &instance.instance_id)
+                .await?
+                .ok_or_else(|| {
+                    crate::error::Error::Other(format!(
+                        "No image association found for instance '{}'",
+                        instance.instance_id
+                    ))
+                })?;
 
         // Get the image to find bundle path
         let image = self
@@ -181,7 +182,7 @@ impl WakeScheduler {
                 crate::error::Error::ImageNotFound(format!("Image '{}' has no bundle", image_id))
             })?;
 
-        // Build launch options
+        // Build launch options with restored env
         let options = LaunchOptions {
             instance_id: instance.instance_id.clone(),
             tenant_id: instance.tenant_id.clone(),
@@ -190,7 +191,7 @@ impl WakeScheduler {
             timeout: Duration::from_secs(300),
             runtara_core_addr: self.config.core_addr.clone(),
             checkpoint_id: Some(checkpoint_id.clone()),
-            env: std::collections::HashMap::new(), // Wake uses original env
+            env: stored_env, // Restore env from initial launch
         };
 
         // Launch the instance

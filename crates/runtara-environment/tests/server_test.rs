@@ -197,6 +197,7 @@ async fn test_start_instance_invalid_image() {
         instance_id: None,
         input: vec![],
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
     let rpc_request = wrap_start_instance(request);
 
@@ -229,6 +230,7 @@ async fn test_start_instance_invalid_image_id() {
         instance_id: None,
         input: vec![],
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
     let rpc_request = wrap_start_instance(request);
 
@@ -500,6 +502,7 @@ async fn test_start_instance_success() {
         instance_id: None,
         input: serde_json::to_vec(&input).unwrap(),
         timeout_seconds: Some(60),
+        env: std::collections::HashMap::new(),
     };
     let rpc_request = wrap_start_instance(request);
 
@@ -560,6 +563,7 @@ async fn test_start_instance_with_custom_id() {
         instance_id: Some(custom_instance_id.clone()),
         input: vec![],
         timeout_seconds: None,
+        env: std::collections::HashMap::new(),
     };
     let rpc_request = wrap_start_instance(request);
 
