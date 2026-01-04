@@ -24,6 +24,9 @@ pub use runtara_agents as agents;
 // Runtime module (wraps runtara-sdk)
 pub mod runtime;
 
+// Condition helpers for generated conditional steps
+pub mod conditions;
+
 // Connection management (fetches connections from external service)
 pub mod connections;
 
@@ -50,6 +53,9 @@ pub mod prelude {
 
     // SDK types for durability
     pub use crate::runtime::{RuntaraSdk, SdkConfig, durable, register_sdk, sdk};
+
+    // Condition helpers for generated conditional steps
+    pub use crate::conditions::{is_truthy, to_number, values_equal};
 
     // Connection types
     pub use crate::connections::{
