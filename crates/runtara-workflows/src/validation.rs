@@ -1617,7 +1617,7 @@ fn check_type_compatibility(
     let expected_lower = expected_type.to_lowercase();
 
     let is_compatible = match expected_lower.as_str() {
-        "any" => true,  // "any" type accepts any JSON value
+        "any" => true, // "any" type accepts any JSON value
         "string" => actual_value.is_string(),
         "integer" | "int" | "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => {
             actual_value.is_i64() || actual_value.is_u64()
