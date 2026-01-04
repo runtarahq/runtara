@@ -33,7 +33,6 @@
 //!
 //! Same format as workflow instances (`InstanceOutput`).
 
-use runtara_dsl::agent_meta::{clear_current_input, set_current_input};
 use runtara_workflow_stdlib::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::process::ExitCode;
@@ -115,16 +114,8 @@ async fn execute_capability_test(
         }
     }
 
-    // Set current input for connection resolution (thread-local storage)
-    set_current_input(&input);
-
     // Execute the capability via the registry
-    let result = registry::execute_capability(&request.agent_id, &request.capability_id, input);
-
-    // Clear thread-local input
-    clear_current_input();
-
-    result
+    registry::execute_capability(&request.agent_id, &request.capability_id, input).await
 }
 
 #[cfg(test)]
