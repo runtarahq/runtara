@@ -559,7 +559,7 @@ fn rust_to_json_schema_type(rust_type: &str) -> (String, Option<String>, Option<
         "bool" => ("boolean".to_string(), None, None),
         "i32" | "i64" | "u32" | "u64" | "usize" => ("integer".to_string(), None, None),
         "f32" | "f64" => ("number".to_string(), Some("double".to_string()), None),
-        "Value" => ("object".to_string(), None, None),
+        "Value" => ("any".to_string(), None, None),  // Value can be any JSON type
         "()" => ("null".to_string(), None, None),
         t if t.starts_with("Vec<") => {
             let inner = t.trim_start_matches("Vec<").trim_end_matches('>');

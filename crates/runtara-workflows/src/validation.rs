@@ -1057,10 +1057,20 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
 
             // Validate required inputs are provided
             if let Some(inputs) = capability_inputs {
+                // Extract root field names from provided keys.
+                // Input mappings can use nested paths like "data.field_name" to build nested objects.
+                // We need to extract the root field name ("data") to check if it's provided.
                 let provided_keys: HashSet<String> = agent_step
                     .input_mapping
                     .as_ref()
-                    .map(|m| m.keys().cloned().collect())
+                    .map(|m| {
+                        m.keys()
+                            .map(|k| {
+                                // Extract root field name from nested path
+                                k.split('.').next().unwrap_or(k).to_string()
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 let available_fields: Vec<String> = inputs.iter().map(|f| f.name.clone()).collect();
@@ -1607,6 +1617,7 @@ fn check_type_compatibility(
     let expected_lower = expected_type.to_lowercase();
 
     let is_compatible = match expected_lower.as_str() {
+        "any" => true,  // "any" type accepts any JSON value
         "string" => actual_value.is_string(),
         "integer" | "int" | "i32" | "i64" | "u32" | "u64" | "isize" | "usize" => {
             actual_value.is_i64() || actual_value.is_u64()
