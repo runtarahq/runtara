@@ -424,6 +424,7 @@ mod tests {
             connect_timeout_ms: 5000,
             request_timeout_ms: 30000,
             signal_poll_interval_ms: 1000,
+            heartbeat_interval_ms: 30000,
         }
     }
 
@@ -553,6 +554,7 @@ mod tests {
             connect_timeout_ms: 2000,
             request_timeout_ms: 5000,
             signal_poll_interval_ms: 1000,
+            heartbeat_interval_ms: 30000,
         };
 
         let backend = QuicBackend::new(&sdk_config).unwrap();

@@ -184,7 +184,7 @@ pub use types::{
 pub use config::SdkConfig;
 
 // Global SDK registry for #[durable] macro
-pub use registry::{register_sdk, sdk, try_sdk};
+pub use registry::{register_sdk, sdk, stop_heartbeat, try_sdk};
 
 // Re-export the #[durable] macro
 pub use runtara_sdk_macros::durable;

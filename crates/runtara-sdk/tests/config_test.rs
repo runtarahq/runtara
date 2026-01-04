@@ -20,6 +20,7 @@ fn test_new_config() {
     assert_eq!(config.connect_timeout_ms, 10_000);
     assert_eq!(config.request_timeout_ms, 30_000);
     assert_eq!(config.signal_poll_interval_ms, 1_000);
+    assert_eq!(config.heartbeat_interval_ms, 30_000);
 }
 
 #[test]
@@ -114,4 +115,29 @@ fn test_various_server_addresses() {
         let config = SdkConfig::new("inst", "tenant").with_server_addr(addr.parse().unwrap());
         assert_eq!(config.server_addr.to_string(), addr);
     }
+}
+
+#[test]
+fn test_with_heartbeat_interval() {
+    let config = SdkConfig::new("inst", "tenant").with_heartbeat_interval_ms(15_000);
+    assert_eq!(config.heartbeat_interval_ms, 15_000);
+}
+
+#[test]
+fn test_heartbeat_interval_disabled() {
+    let config = SdkConfig::new("inst", "tenant").with_heartbeat_interval_ms(0);
+    assert_eq!(config.heartbeat_interval_ms, 0);
+}
+
+#[test]
+fn test_builder_chain_with_heartbeat() {
+    let config = SdkConfig::new("my-instance", "my-tenant")
+        .with_server_addr("10.0.0.1:9000".parse().unwrap())
+        .with_skip_cert_verification(true)
+        .with_signal_poll_interval_ms(2000)
+        .with_heartbeat_interval_ms(60_000);
+
+    assert_eq!(config.instance_id, "my-instance");
+    assert_eq!(config.signal_poll_interval_ms, 2000);
+    assert_eq!(config.heartbeat_interval_ms, 60_000);
 }

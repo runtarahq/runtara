@@ -30,6 +30,7 @@ runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "1.0" }
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "time"] }
+tokio-util = "0.7"
 async-trait = "0.1"
 
 # Serialization

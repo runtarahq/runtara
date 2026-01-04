@@ -26,6 +26,11 @@ pub struct SdkConfig {
     pub request_timeout_ms: u64,
     /// Signal poll interval in milliseconds (default: 1_000)
     pub signal_poll_interval_ms: u64,
+    /// Background heartbeat interval in milliseconds (default: 30_000).
+    /// Set to 0 to disable automatic heartbeats.
+    /// Heartbeats run in a background task and keep the instance alive
+    /// during long-running operations that don't checkpoint frequently.
+    pub heartbeat_interval_ms: u64,
 }
 
 impl SdkConfig {
@@ -42,6 +47,7 @@ impl SdkConfig {
     /// - `RUNTARA_CONNECT_TIMEOUT_MS` - Connection timeout (default: 10000)
     /// - `RUNTARA_REQUEST_TIMEOUT_MS` - Request timeout (default: 30000)
     /// - `RUNTARA_SIGNAL_POLL_INTERVAL_MS` - Signal poll interval (default: 1000)
+    /// - `RUNTARA_HEARTBEAT_INTERVAL_MS` - Background heartbeat interval (default: 30000, 0 to disable)
     pub fn from_env() -> Result<Self> {
         let instance_id = env::var("RUNTARA_INSTANCE_ID")
             .map_err(|_| SdkError::Config("RUNTARA_INSTANCE_ID is required".to_string()))?;
@@ -76,6 +82,11 @@ impl SdkConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_000);
 
+        let heartbeat_interval_ms = env::var("RUNTARA_HEARTBEAT_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000);
+
         Ok(Self {
             instance_id,
             tenant_id,
@@ -85,6 +96,7 @@ impl SdkConfig {
             connect_timeout_ms,
             request_timeout_ms,
             signal_poll_interval_ms,
+            heartbeat_interval_ms,
         })
     }
 
@@ -103,6 +115,7 @@ impl SdkConfig {
             connect_timeout_ms: 10_000,
             request_timeout_ms: 30_000,
             signal_poll_interval_ms: 1_000,
+            heartbeat_interval_ms: 30_000,
         }
     }
 
@@ -117,6 +130,7 @@ impl SdkConfig {
             connect_timeout_ms: 10_000,
             request_timeout_ms: 30_000,
             signal_poll_interval_ms: 1_000,
+            heartbeat_interval_ms: 30_000,
         }
     }
 
@@ -141,6 +155,13 @@ impl SdkConfig {
     /// Set the signal poll interval.
     pub fn with_signal_poll_interval_ms(mut self, interval_ms: u64) -> Self {
         self.signal_poll_interval_ms = interval_ms;
+        self
+    }
+
+    /// Set the background heartbeat interval.
+    /// Set to 0 to disable automatic heartbeats.
+    pub fn with_heartbeat_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.heartbeat_interval_ms = interval_ms;
         self
     }
 }
@@ -168,5 +189,35 @@ mod tests {
         assert_eq!(config.server_addr, "192.168.1.1:8000".parse().unwrap());
         assert!(config.skip_cert_verification);
         assert_eq!(config.signal_poll_interval_ms, 500);
+    }
+
+    #[test]
+    fn test_heartbeat_interval_default() {
+        let config = SdkConfig::new("inst", "tenant");
+        assert_eq!(config.heartbeat_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn test_heartbeat_interval_localhost_default() {
+        let config = SdkConfig::localhost("inst", "tenant");
+        assert_eq!(config.heartbeat_interval_ms, 30_000);
+    }
+
+    #[test]
+    fn test_heartbeat_interval_builder() {
+        let config = SdkConfig::new("inst", "tenant").with_heartbeat_interval_ms(15_000);
+        assert_eq!(config.heartbeat_interval_ms, 15_000);
+    }
+
+    #[test]
+    fn test_heartbeat_interval_disabled() {
+        let config = SdkConfig::new("inst", "tenant").with_heartbeat_interval_ms(0);
+        assert_eq!(config.heartbeat_interval_ms, 0);
+    }
+
+    #[test]
+    fn test_heartbeat_interval_custom_value() {
+        let config = SdkConfig::new("inst", "tenant").with_heartbeat_interval_ms(60_000);
+        assert_eq!(config.heartbeat_interval_ms, 60_000);
     }
 }

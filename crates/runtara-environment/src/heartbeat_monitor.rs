@@ -2,15 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Background worker for detecting and failing stale instances.
 //!
-//! Instances that are registered as running but haven't sent heartbeats
-//! within the configured timeout are marked as failed. This prevents
-//! instances from getting stuck in the "running" state when:
+//! Instances that are registered as running but haven't sent any events
+//! (checkpoints, heartbeats, custom events) within the configured timeout
+//! are marked as failed. This prevents instances from getting stuck in
+//! the "running" state when:
 //! - The container crashes without sending a failed event
-//! - Network issues prevent heartbeat delivery
+//! - Network issues prevent event delivery
 //! - The process is killed externally
 //!
-//! The monitor queries for running containers that lack recent heartbeats
-//! and marks them as failed in the Core persistence layer.
+//! The monitor queries Core's `instance_events` table to find the most recent
+//! activity for each running container and marks those without recent activity
+//! as failed.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,7 +57,8 @@ pub struct HeartbeatMonitor {
 struct StaleContainer {
     instance_id: String,
     started_at: DateTime<Utc>,
-    last_heartbeat: Option<DateTime<Utc>>,
+    /// Last activity timestamp from instance_events table (any event counts as activity).
+    last_activity: Option<DateTime<Utc>>,
 }
 
 /// Information about an orphaned instance.
@@ -172,43 +175,46 @@ impl HeartbeatMonitor {
         Ok(())
     }
 
-    /// Get containers that are registered but haven't sent heartbeats recently.
+    /// Get containers that are registered but haven't sent any events recently.
     ///
     /// A container is considered stale if:
     /// 1. It's in the container_registry (meaning it was launched and is expected to be running)
     /// 2. Either:
-    ///    - It has never sent a heartbeat, OR
-    ///    - Its last heartbeat is older than the cutoff time
+    ///    - It has never sent any event (checkpoint, heartbeat, custom), OR
+    ///    - Its last event is older than the cutoff time
+    ///
+    /// This queries Core's `instance_events` table to find the most recent activity
+    /// for each container, treating any event as proof of life.
     async fn get_stale_containers(
         &self,
         cutoff: DateTime<Utc>,
     ) -> crate::error::Result<Vec<StaleContainer>> {
-        // Query for containers that are registered but have stale/missing heartbeats
+        // Query for containers that are registered but have no recent events.
+        // We join container_registry with instance_events to find the last activity.
         let stale: Vec<StaleContainer> =
             sqlx::query_as::<_, (String, DateTime<Utc>, Option<DateTime<Utc>>)>(
                 r#"
             SELECT
                 cr.instance_id,
                 cr.started_at,
-                ch.last_heartbeat
+                (SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) as last_activity
             FROM container_registry cr
-            LEFT JOIN container_heartbeats ch ON cr.instance_id = ch.instance_id
             WHERE
-                -- Never received a heartbeat and container started before cutoff
-                (ch.last_heartbeat IS NULL AND cr.started_at < $1)
+                -- Never received any event and container started before cutoff
+                (NOT EXISTS (SELECT 1 FROM instance_events ie WHERE ie.instance_id = cr.instance_id) AND cr.started_at < $1)
                 OR
-                -- Last heartbeat is older than cutoff
-                (ch.last_heartbeat IS NOT NULL AND ch.last_heartbeat < $1)
+                -- Last event is older than cutoff
+                ((SELECT MAX(ie.created_at) FROM instance_events ie WHERE ie.instance_id = cr.instance_id) < $1)
             "#,
             )
             .bind(cutoff)
             .fetch_all(&self.pool)
             .await?
             .into_iter()
-            .map(|(instance_id, started_at, last_heartbeat)| StaleContainer {
+            .map(|(instance_id, started_at, last_activity)| StaleContainer {
                 instance_id,
                 started_at,
-                last_heartbeat,
+                last_activity,
             })
             .collect();
 
@@ -217,14 +223,14 @@ impl HeartbeatMonitor {
 
     /// Mark a stale instance as failed.
     async fn fail_stale_instance(&self, container: &StaleContainer) -> crate::error::Result<()> {
-        let error_message = match container.last_heartbeat {
-            Some(last_hb) => format!(
-                "Instance stale: no heartbeat since {} (timeout: {}s)",
-                last_hb.format("%Y-%m-%d %H:%M:%S UTC"),
+        let error_message = match container.last_activity {
+            Some(last_event) => format!(
+                "Instance stale: no activity since {} (timeout: {}s)",
+                last_event.format("%Y-%m-%d %H:%M:%S UTC"),
                 self.config.heartbeat_timeout.as_secs()
             ),
             None => format!(
-                "Instance stale: no heartbeat received since start at {} (timeout: {}s)",
+                "Instance stale: no activity received since start at {} (timeout: {}s)",
                 container.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
                 self.config.heartbeat_timeout.as_secs()
             ),
@@ -233,7 +239,7 @@ impl HeartbeatMonitor {
         warn!(
             instance_id = %container.instance_id,
             started_at = %container.started_at,
-            last_heartbeat = ?container.last_heartbeat,
+            last_activity = ?container.last_activity,
             "Marking stale instance as failed"
         );
 

@@ -102,25 +102,38 @@ async fn register_container(pool: &PgPool, instance_id: &str, tenant_id: &str, i
     .expect("Failed to register container");
 }
 
-/// Record a heartbeat for a container
-async fn record_heartbeat(pool: &PgPool, instance_id: &str, minutes_ago: i64) {
-    let heartbeat_time = Utc::now() - ChronoDuration::minutes(minutes_ago);
+/// Record an event in instance_events table (used by HeartbeatMonitor for activity detection)
+async fn record_instance_event(
+    pool: &PgPool,
+    instance_id: &str,
+    tenant_id: &str,
+    minutes_ago: i64,
+) {
+    let event_time = Utc::now() - ChronoDuration::minutes(minutes_ago);
+    let event_id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
-        INSERT INTO container_heartbeats (instance_id, last_heartbeat)
-        VALUES ($1, $2)
-        ON CONFLICT (instance_id) DO UPDATE SET last_heartbeat = $2
+        INSERT INTO instance_events (event_id, instance_id, tenant_id, event_type, payload, created_at)
+        VALUES ($1, $2, $3, 'heartbeat', $4, $5)
         "#,
     )
+    .bind(&event_id)
     .bind(instance_id)
-    .bind(heartbeat_time)
+    .bind(tenant_id)
+    .bind(b"{}".as_slice())
+    .bind(event_time)
     .execute(pool)
     .await
-    .expect("Failed to record heartbeat");
+    .expect("Failed to record instance event");
 }
 
 /// Clean up test data
 async fn cleanup(pool: &PgPool, instance_id: &str) {
+    sqlx::query("DELETE FROM instance_events WHERE instance_id = $1")
+        .bind(instance_id)
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM container_heartbeats WHERE instance_id = $1")
         .bind(instance_id)
         .execute(pool)
@@ -556,10 +569,10 @@ async fn test_stale_container_old_heartbeat() {
     let image_id = create_test_image(&pool, &tenant_id).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    // Create instance, register container, and record old heartbeat
+    // Create instance, register container, and record old event in instance_events
     create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
-    record_heartbeat(&pool, &instance_id, 10).await; // 10 minutes ago
+    record_instance_event(&pool, &instance_id, &tenant_id, 10).await; // 10 minutes ago
 
     let persistence = Arc::new(MockPersistence::new());
     let config = HeartbeatMonitorConfig {
@@ -582,13 +595,13 @@ async fn test_stale_container_old_heartbeat() {
     shutdown.notify_one();
     handle.await.ok();
 
-    // The container should have been marked as failed (old heartbeat)
+    // The container should have been marked as failed (old activity)
     let completed = persistence.get_completed_instances();
     assert!(
         completed.iter().any(|(id, _, err)| {
             id == &instance_id && err.as_ref().map_or(false, |e| e.contains("stale"))
         }),
-        "Instance should have been marked as stale due to old heartbeat"
+        "Instance should have been marked as stale due to old activity in instance_events"
     );
 
     cleanup(&pool, &instance_id).await;
@@ -607,10 +620,10 @@ async fn test_container_with_recent_heartbeat_not_stale() {
     let image_id = create_test_image(&pool, &tenant_id).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    // Create instance, register container, and record recent heartbeat
+    // Create instance, register container, and record recent event in instance_events
     create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
-    record_heartbeat(&pool, &instance_id, 0).await; // Just now
+    record_instance_event(&pool, &instance_id, &tenant_id, 0).await; // Just now
 
     let persistence = Arc::new(MockPersistence::new());
     let config = HeartbeatMonitorConfig {
@@ -633,11 +646,11 @@ async fn test_container_with_recent_heartbeat_not_stale() {
     shutdown.notify_one();
     handle.await.ok();
 
-    // The container should NOT have been marked as failed (recent heartbeat)
+    // The container should NOT have been marked as failed (recent activity)
     let completed = persistence.get_completed_instances();
     assert!(
         !completed.iter().any(|(id, _, _)| id == &instance_id),
-        "Instance with recent heartbeat should not be marked as stale"
+        "Instance with recent activity in instance_events should not be marked as stale"
     );
 
     cleanup(&pool, &instance_id).await;
@@ -710,7 +723,7 @@ async fn test_tracked_instance_not_orphaned() {
     let image_id = create_test_image(&pool, &tenant_id).await;
     let instance_id = Uuid::new_v4().to_string();
 
-    // Create instance in both Core persistence AND container_registry with recent heartbeat
+    // Create instance in both Core persistence AND container_registry with recent activity
     let started_at = Utc::now() - ChronoDuration::hours(1);
     let persistence = Arc::new(MockPersistence::new().with_running_instance(
         &instance_id,
@@ -718,9 +731,9 @@ async fn test_tracked_instance_not_orphaned() {
         started_at,
     ));
 
-    // Register in container_registry and send heartbeat
+    // Register in container_registry and record fresh activity in instance_events
     register_container(&pool, &instance_id, &tenant_id, &image_id).await;
-    record_heartbeat(&pool, &instance_id, 0).await; // Fresh heartbeat
+    record_instance_event(&pool, &instance_id, &tenant_id, 0).await; // Fresh activity
 
     let config = HeartbeatMonitorConfig {
         poll_interval: Duration::from_millis(50),
@@ -746,7 +759,7 @@ async fn test_tracked_instance_not_orphaned() {
     let completed = persistence.get_completed_instances();
     assert!(
         !completed.iter().any(|(id, _, _)| id == &instance_id),
-        "Tracked instance with recent heartbeat should not be marked as orphaned or stale"
+        "Tracked instance with recent activity should not be marked as orphaned or stale"
     );
 
     cleanup(&pool, &instance_id).await;
@@ -970,4 +983,176 @@ async fn test_completed_instance_in_core_not_flagged() {
         !completed.iter().any(|(id, _, _)| id == &instance_id),
         "Already completed instance should not be flagged again"
     );
+}
+
+// ============================================================================
+// Instance Events Based Activity Detection Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_checkpoint_event_counts_as_activity() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let tenant_id = format!("test-tenant-checkpoint-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    // Create instance, register container
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+
+    // Record a checkpoint event (simulating SDK checkpoint call)
+    let event_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO instance_events (event_id, instance_id, tenant_id, event_type, payload, created_at)
+        VALUES ($1, $2, $3, 'checkpoint', $4, NOW())
+        "#,
+    )
+    .bind(&event_id)
+    .bind(&instance_id)
+    .bind(&tenant_id)
+    .bind(b"{}".as_slice())
+    .execute(&pool)
+    .await
+    .expect("Failed to record checkpoint event");
+
+    let persistence = Arc::new(MockPersistence::new());
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(120),
+    };
+
+    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let shutdown = monitor.shutdown_handle();
+
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.notify_one();
+    handle.await.ok();
+
+    // Instance should NOT be marked as stale (checkpoint event is recent activity)
+    let completed = persistence.get_completed_instances();
+    assert!(
+        !completed.iter().any(|(id, _, _)| id == &instance_id),
+        "Instance with recent checkpoint event should not be marked as stale"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
+#[tokio::test]
+async fn test_any_event_type_counts_as_activity() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let tenant_id = format!("test-tenant-anyevent-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+
+    // Record a custom event type (not heartbeat or checkpoint)
+    let event_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO instance_events (event_id, instance_id, tenant_id, event_type, payload, created_at)
+        VALUES ($1, $2, $3, 'custom_event', $4, NOW())
+        "#,
+    )
+    .bind(&event_id)
+    .bind(&instance_id)
+    .bind(&tenant_id)
+    .bind(b"{}".as_slice())
+    .execute(&pool)
+    .await
+    .expect("Failed to record custom event");
+
+    let persistence = Arc::new(MockPersistence::new());
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(120),
+    };
+
+    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let shutdown = monitor.shutdown_handle();
+
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.notify_one();
+    handle.await.ok();
+
+    // Any event type should count as activity
+    let completed = persistence.get_completed_instances();
+    assert!(
+        !completed.iter().any(|(id, _, _)| id == &instance_id),
+        "Instance with any recent event should not be marked as stale"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
+#[tokio::test]
+async fn test_multiple_events_uses_most_recent() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let tenant_id = format!("test-tenant-multi-events-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    register_container(&pool, &instance_id, &tenant_id, &image_id).await;
+
+    // Record an old event (10 minutes ago)
+    record_instance_event(&pool, &instance_id, &tenant_id, 10).await;
+
+    // Record a recent event (just now)
+    record_instance_event(&pool, &instance_id, &tenant_id, 0).await;
+
+    let persistence = Arc::new(MockPersistence::new());
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
+    };
+
+    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let shutdown = monitor.shutdown_handle();
+
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.notify_one();
+    handle.await.ok();
+
+    // Should use the most recent event, so instance should be alive
+    let completed = persistence.get_completed_instances();
+    assert!(
+        !completed.iter().any(|(id, _, _)| id == &instance_id),
+        "Instance with recent event among multiple should not be marked as stale"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
 }

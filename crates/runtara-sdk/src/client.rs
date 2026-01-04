@@ -93,6 +93,8 @@ pub struct RuntaraSdk {
     /// Signal poll interval (ms) - only used with QUIC
     #[cfg(feature = "quic")]
     signal_poll_interval_ms: u64,
+    /// Background heartbeat interval (ms). 0 = disabled.
+    heartbeat_interval_ms: u64,
 }
 
 impl RuntaraSdk {
@@ -106,6 +108,7 @@ impl RuntaraSdk {
         use crate::backend::quic::QuicBackend;
 
         let signal_poll_interval_ms = config.signal_poll_interval_ms;
+        let heartbeat_interval_ms = config.heartbeat_interval_ms;
         let backend = QuicBackend::new(&config)?;
 
         Ok(Self {
@@ -114,6 +117,7 @@ impl RuntaraSdk {
             last_signal_poll: Instant::now() - Duration::from_secs(60), // Allow immediate first poll
             pending_signal: None,
             signal_poll_interval_ms,
+            heartbeat_interval_ms,
         })
     }
 
@@ -162,6 +166,7 @@ impl RuntaraSdk {
             pending_signal: None,
             #[cfg(feature = "quic")]
             signal_poll_interval_ms: 1_000,
+            heartbeat_interval_ms: 30_000,
         }
     }
 
@@ -609,6 +614,12 @@ impl RuntaraSdk {
     pub fn is_registered(&self) -> bool {
         self.registered
     }
+
+    /// Get the configured heartbeat interval in milliseconds.
+    /// Returns 0 if automatic heartbeats are disabled.
+    pub fn heartbeat_interval_ms(&self) -> u64 {
+        self.heartbeat_interval_ms
+    }
 }
 
 #[cfg(test)]
@@ -651,6 +662,7 @@ mod tests {
             request_timeout_ms: 5000,
             connect_timeout_ms: 3000,
             signal_poll_interval_ms: 500,
+            heartbeat_interval_ms: 30000,
         };
 
         // May fail in sandboxed environments
