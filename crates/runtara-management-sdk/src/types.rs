@@ -134,6 +134,9 @@ pub struct InstanceInfo {
     pub output: Option<serde_json::Value>,
     /// Error message (if failed).
     pub error: Option<String>,
+    /// Raw stderr output from the container (for debugging/logging).
+    /// This is separate from `error` to allow product to decide whether to show it to users.
+    pub stderr: Option<String>,
 
     // Retry tracking
     /// Current retry attempt number.
@@ -1592,6 +1595,7 @@ mod tests {
             input: None,
             output: Some(json!({"result": "success"})),
             error: None,
+            stderr: None,
             retry_count: 0,
             max_retries: 3,
             memory_peak_bytes: Some(536_870_912), // 512 MB
@@ -1618,6 +1622,7 @@ mod tests {
             input: Some(json!({"key": "value"})),
             output: None,
             error: None,
+            stderr: None,
             retry_count: 0,
             max_retries: 3,
             memory_peak_bytes: None,
@@ -1644,6 +1649,7 @@ mod tests {
             input: None,
             output: Some(json!("done")),
             error: None,
+            stderr: None,
             retry_count: 1,
             max_retries: 3,
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
@@ -1656,5 +1662,35 @@ mod tests {
         assert_eq!(deserialized.instance_id, "inst-123");
         assert_eq!(deserialized.memory_peak_bytes, Some(1_073_741_824));
         assert_eq!(deserialized.cpu_usage_usec, Some(5_000_000));
+    }
+
+    #[test]
+    fn test_instance_info_with_stderr() {
+        let info = InstanceInfo {
+            instance_id: "inst-123".to_string(),
+            image_id: "img-456".to_string(),
+            image_name: "my-workflow:v1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            status: InstanceStatus::Failed,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            heartbeat_at: None,
+            input: None,
+            output: None,
+            error: Some("Connection refused".to_string()),
+            stderr: Some("thread 'main' panicked at 'assertion failed'".to_string()),
+            retry_count: 3,
+            max_retries: 3,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
+        };
+
+        assert_eq!(info.error, Some("Connection refused".to_string()));
+        assert_eq!(
+            info.stderr,
+            Some("thread 'main' panicked at 'assertion failed'".to_string())
+        );
     }
 }

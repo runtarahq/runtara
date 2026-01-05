@@ -681,6 +681,7 @@ async fn handle_get_instance_status(
             finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
             output: inst.output,
             error: inst.error,
+            stderr: inst.stderr,
             // Extended fields
             image_id: inst.image_id.unwrap_or_default(),
             image_name: inst.image_name.unwrap_or_default(),
@@ -703,6 +704,7 @@ async fn handle_get_instance_status(
             finished_at_ms: None,
             output: None,
             error: None,
+            stderr: None,
             // Extended fields - defaults for not found
             image_id: String::new(),
             image_name: String::new(),

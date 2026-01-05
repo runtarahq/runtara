@@ -195,6 +195,7 @@ impl ManagementSdk {
                         .output
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
                     error: resp.error,
+                    stderr: resp.stderr,
                     retry_count: resp.retry_count,
                     max_retries: resp.max_retries,
                     memory_peak_bytes: resp.memory_peak_bytes,

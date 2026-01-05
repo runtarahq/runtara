@@ -175,6 +175,7 @@ message GetInstanceStatusResponse {
   optional int64 finished_at_ms = 7;
   optional bytes output = 8;          // If completed
   optional string error = 9;          // If failed (execution error, NOT "not found")
+  optional string stderr = 19;        // Raw stderr output (for debugging/logging)
   // Extended fields for detailed instance info
   string image_id = 10;               // Image UUID used for this instance
   string image_name = 11;             // Human-readable image name
