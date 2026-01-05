@@ -127,8 +127,12 @@ pub struct LaunchResult {
     pub success: bool,
     /// Output data from successful execution.
     pub output: Option<Value>,
-    /// Error message from failed execution.
+    /// Error message from failed execution (user-facing).
     pub error: Option<String>,
+    /// Raw stderr output from the container (for debugging/logging).
+    /// This is separate from `error` to allow product to decide whether to show it to users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
     /// Execution duration in milliseconds.
     pub duration_ms: u64,
     /// Resource metrics from execution.

@@ -820,25 +820,34 @@ impl Runner for OciRunner {
                         success: true,
                         output: Some(output),
                         error: None,
+                        stderr: None,
                         duration_ms,
                         metrics,
                     }),
-                    Err(e) => Ok(LaunchResult {
-                        instance_id: options.instance_id.clone(),
-                        success: false,
-                        output: None,
-                        error: Some(format!("Failed to load output: {}", e)),
-                        duration_ms,
-                        metrics,
-                    }),
+                    Err(e) => {
+                        // Container exited but didn't produce output - check stderr for diagnostics
+                        let stderr = self
+                            .load_error(&options.tenant_id, &options.instance_id)
+                            .await;
+                        Ok(LaunchResult {
+                            instance_id: options.instance_id.clone(),
+                            success: false,
+                            output: None,
+                            error: Some(format!("Failed to load output: {}", e)),
+                            stderr,
+                            duration_ms,
+                            metrics,
+                        })
+                    }
                 }
             }
             Err(e) => {
-                let error_msg = match self
+                // Container execution failed - get stderr for diagnostics
+                let stderr = self
                     .load_error(&options.tenant_id, &options.instance_id)
-                    .await
-                {
-                    Some(msg) => msg,
+                    .await;
+                let error_msg = match &stderr {
+                    Some(msg) => msg.clone(),
                     None => e.to_string(),
                 };
                 Ok(LaunchResult {
@@ -846,6 +855,7 @@ impl Runner for OciRunner {
                     success: false,
                     output: None,
                     error: Some(error_msg),
+                    stderr,
                     duration_ms,
                     metrics,
                 })

@@ -111,6 +111,7 @@ impl Runner for MockRunner {
                 success: false,
                 output: None,
                 error: Some("Mock failure".to_string()),
+                stderr: None,
                 duration_ms,
                 metrics: ContainerMetrics::default(),
             })
@@ -123,6 +124,7 @@ impl Runner for MockRunner {
                     "result": options.input.clone()
                 })),
                 error: None,
+                stderr: None,
                 duration_ms,
                 metrics: ContainerMetrics::default(),
             })

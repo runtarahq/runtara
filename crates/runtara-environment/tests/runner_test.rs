@@ -276,6 +276,7 @@ fn test_launch_result_success() {
         success: true,
         output: Some(json!({"result": "ok"})),
         error: None,
+        stderr: None,
         duration_ms: 1234,
         metrics: ContainerMetrics::default(),
     };
@@ -294,6 +295,7 @@ fn test_launch_result_failure() {
         success: false,
         output: None,
         error: Some("execution failed".to_string()),
+        stderr: None,
         duration_ms: 500,
         metrics: ContainerMetrics::default(),
     };
@@ -310,6 +312,7 @@ fn test_launch_result_serialization() {
         success: true,
         output: Some(json!(42)),
         error: None,
+        stderr: None,
         duration_ms: 100,
         metrics: ContainerMetrics::default(),
     };
@@ -322,6 +325,134 @@ fn test_launch_result_serialization() {
     let parsed: LaunchResult = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.instance_id, "inst");
     assert!(parsed.success);
+}
+
+#[test]
+fn test_launch_result_with_stderr() {
+    // Test case: container fails and produces stderr output
+    let result = LaunchResult {
+        instance_id: "inst-stderr".to_string(),
+        success: false,
+        output: None,
+        error: Some("Process exited with code 1".to_string()),
+        stderr: Some("Error: pasta network failed to initialize\nConnection refused".to_string()),
+        duration_ms: 150,
+        metrics: ContainerMetrics::default(),
+    };
+
+    assert!(!result.success);
+    assert!(result.error.is_some());
+    assert!(result.stderr.is_some());
+    assert!(result.stderr.as_ref().unwrap().contains("pasta"));
+    // error and stderr are separate - product can choose what to display
+    assert_ne!(result.error, result.stderr);
+}
+
+#[test]
+fn test_launch_result_stderr_serialization() {
+    // Test that stderr is properly serialized when present
+    let result = LaunchResult {
+        instance_id: "inst".to_string(),
+        success: false,
+        output: None,
+        error: Some("Failed to load output: OutputNotFound".to_string()),
+        stderr: Some("thread 'main' panicked at 'index out of bounds'".to_string()),
+        duration_ms: 50,
+        metrics: ContainerMetrics::default(),
+    };
+
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(json.contains("\"stderr\":"));
+    assert!(json.contains("panicked"));
+
+    let parsed: LaunchResult = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        parsed.stderr,
+        Some("thread 'main' panicked at 'index out of bounds'".to_string())
+    );
+}
+
+#[test]
+fn test_launch_result_stderr_skipped_when_none() {
+    // Test that stderr is omitted from JSON when None (skip_serializing_if)
+    let result = LaunchResult {
+        instance_id: "inst".to_string(),
+        success: true,
+        output: Some(json!({"ok": true})),
+        error: None,
+        stderr: None,
+        duration_ms: 100,
+        metrics: ContainerMetrics::default(),
+    };
+
+    let json = serde_json::to_string(&result).unwrap();
+    // stderr should NOT appear in JSON when None
+    assert!(!json.contains("\"stderr\""));
+}
+
+#[test]
+fn test_launch_result_backward_compatible_deserialization() {
+    // Test that old JSON without stderr field can still be deserialized
+    let old_json = r#"{
+        "instance_id": "old-inst",
+        "success": true,
+        "output": {"result": "ok"},
+        "error": null,
+        "duration_ms": 200,
+        "metrics": {}
+    }"#;
+
+    let parsed: LaunchResult = serde_json::from_str(old_json).unwrap();
+    assert_eq!(parsed.instance_id, "old-inst");
+    assert!(parsed.success);
+    assert!(parsed.stderr.is_none()); // defaults to None
+}
+
+#[test]
+fn test_launch_result_failure_with_both_error_and_stderr() {
+    // Common scenario: container crashes, we have both a user-friendly error
+    // and raw stderr for debugging
+    let result = LaunchResult {
+        instance_id: "crash-inst".to_string(),
+        success: false,
+        output: None,
+        error: Some("Container execution failed".to_string()), // user-facing
+        stderr: Some(
+            "RUST_BACKTRACE=1\n\
+             thread 'main' panicked at 'assertion failed: x > 0', src/main.rs:42:5\n\
+             stack backtrace:\n\
+                0: std::panicking::begin_panic\n\
+                1: workflow::main\n"
+                .to_string(),
+        ), // for logging/debugging
+        duration_ms: 75,
+        metrics: ContainerMetrics::default(),
+    };
+
+    // Product can decide: show error to user, log stderr for debugging
+    assert_eq!(result.error.as_deref(), Some("Container execution failed"));
+    assert!(result.stderr.as_ref().unwrap().contains("panicked"));
+    assert!(result.stderr.as_ref().unwrap().contains("src/main.rs:42"));
+}
+
+#[test]
+fn test_launch_result_output_missing_with_stderr() {
+    // Test case: container exits successfully (crun returns 0) but no output.json
+    // This is the bug scenario where stderr wasn't being captured
+    let result = LaunchResult {
+        instance_id: "no-output-inst".to_string(),
+        success: false,
+        output: None,
+        error: Some("Failed to load output: OutputNotFound".to_string()),
+        stderr: Some("Warning: workflow completed without writing output\nExiting...".to_string()),
+        duration_ms: 500,
+        metrics: ContainerMetrics::default(),
+    };
+
+    assert!(!result.success);
+    assert!(result.error.as_ref().unwrap().contains("OutputNotFound"));
+    // stderr is now captured even when output is missing
+    assert!(result.stderr.is_some());
 }
 
 // ============================================================================
