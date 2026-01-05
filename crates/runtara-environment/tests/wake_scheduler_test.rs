@@ -235,6 +235,7 @@ async fn test_update_instance_result() {
         Some(&output_bytes),
         None,
         Some("cp-done"),
+        None, // stderr
     )
     .await
     .unwrap();
@@ -246,6 +247,7 @@ async fn test_update_instance_result() {
     assert_eq!(instance.status, "completed");
     assert_eq!(instance.output, Some(output_bytes));
     assert!(instance.error.is_none());
+    assert!(instance.stderr.is_none());
     assert_eq!(instance.checkpoint_id, Some("cp-done".to_string()));
 
     cleanup(&pool, &instance_id).await;
@@ -275,6 +277,7 @@ async fn test_update_instance_result_with_error() {
         None,
         Some("Connection refused"),
         None,
+        Some("error: could not connect to server"), // stderr
     )
     .await
     .unwrap();
@@ -286,6 +289,10 @@ async fn test_update_instance_result_with_error() {
     assert_eq!(instance.status, "failed");
     assert!(instance.output.is_none());
     assert_eq!(instance.error, Some("Connection refused".to_string()));
+    assert_eq!(
+        instance.stderr,
+        Some("error: could not connect to server".to_string())
+    );
 
     cleanup(&pool, &instance_id).await;
     cleanup_image(&pool, &image_id).await;
@@ -408,6 +415,7 @@ fn test_instance_debug() {
         finished_at: None,
         output: None,
         error: None,
+        stderr: None,
     };
 
     let debug_str = format!("{:?}", instance);
@@ -430,6 +438,7 @@ fn test_instance_clone() {
         finished_at: None,
         output: None,
         error: None,
+        stderr: None,
     };
 
     let cloned = instance.clone();

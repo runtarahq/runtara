@@ -187,6 +187,7 @@ async fn test_update_instance_result() {
         Some(&output_bytes),
         None,
         None,
+        None, // stderr
     )
     .await
     .expect("Failed to update result");
@@ -199,6 +200,7 @@ async fn test_update_instance_result() {
     assert_eq!(instance.status, "completed");
     assert_eq!(instance.output, Some(output_bytes));
     assert!(instance.error.is_none());
+    assert!(instance.stderr.is_none());
 
     // Cleanup
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")
@@ -232,7 +234,7 @@ async fn test_update_instance_result_with_error() {
         .await
         .expect("Failed to create instance");
 
-    // Update with error result
+    // Update with error result (include stderr for debugging)
     runtara_environment::db::update_instance_result(
         &pool,
         &instance_id,
@@ -240,6 +242,7 @@ async fn test_update_instance_result_with_error() {
         None,
         Some("Something went wrong"),
         None,
+        Some("thread 'main' panicked at 'assertion failed'"), // stderr
     )
     .await
     .expect("Failed to update result");
@@ -252,6 +255,10 @@ async fn test_update_instance_result_with_error() {
     assert_eq!(instance.status, "failed");
     assert!(instance.output.is_none());
     assert_eq!(instance.error, Some("Something went wrong".to_string()));
+    assert_eq!(
+        instance.stderr,
+        Some("thread 'main' panicked at 'assertion failed'".to_string())
+    );
 
     // Cleanup
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")

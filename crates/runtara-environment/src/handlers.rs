@@ -825,8 +825,8 @@ pub fn spawn_container_monitor(
                     "Container finished, processing output"
                 );
 
-                // Collect metrics from cgroup before container cleanup
-                let (_output, _error, metrics) = runner.collect_result(&handle).await;
+                // Collect metrics and stderr from cgroup before container cleanup
+                let (_output, stderr, metrics) = runner.collect_result(&handle).await;
 
                 // Store metrics in database
                 if metrics.memory_peak_bytes.is_some() || metrics.cpu_usage_usec.is_some() {
@@ -849,6 +849,25 @@ pub fn spawn_container_monitor(
                             memory_peak_bytes = ?metrics.memory_peak_bytes,
                             cpu_usage_usec = ?metrics.cpu_usage_usec,
                             "Stored container metrics"
+                        );
+                    }
+                }
+
+                // Store stderr in database for debugging (even if instance succeeds via Core)
+                if let Some(ref stderr_content) = stderr {
+                    if let Err(e) =
+                        db::update_instance_stderr(&pool, &instance_id, stderr_content).await
+                    {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to store container stderr"
+                        );
+                    } else {
+                        debug!(
+                            instance_id = %instance_id,
+                            stderr_len = stderr_content.len(),
+                            "Stored container stderr"
                         );
                     }
                 }
@@ -981,6 +1000,7 @@ async fn process_output_inner(
                 "completed",
                 result_bytes.as_deref(),
                 None,
+                None, // stderr - not available from output.json
                 None,
             )
             .await?;
@@ -998,6 +1018,7 @@ async fn process_output_inner(
                 "failed",
                 None,
                 output.error.as_deref(),
+                None, // stderr - not available from output.json
                 None,
             )
             .await?;
@@ -1015,6 +1036,7 @@ async fn process_output_inner(
                 "suspended",
                 None,
                 None,
+                None, // stderr
                 output.checkpoint_id.as_deref(),
             )
             .await?;
@@ -1039,6 +1061,7 @@ async fn process_output_inner(
                     "suspended",
                     None,
                     None,
+                    None, // stderr
                     Some(&checkpoint_id),
                 )
                 .await?;
@@ -1084,6 +1107,7 @@ async fn process_output_inner(
                     "failed",
                     None,
                     Some("Invalid sleep output"),
+                    None, // stderr
                     None,
                 )
                 .await?;
@@ -1096,6 +1120,7 @@ async fn process_output_inner(
                 "cancelled",
                 None,
                 None,
+                None, // stderr
                 None,
             )
             .await?;

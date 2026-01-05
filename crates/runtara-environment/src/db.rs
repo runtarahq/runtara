@@ -31,8 +31,10 @@ pub struct Instance {
     pub finished_at: Option<DateTime<Utc>>,
     /// Output data from successful completion.
     pub output: Option<Vec<u8>>,
-    /// Error message from failure.
+    /// Error message from failure (user-facing).
     pub error: Option<String>,
+    /// Raw stderr output from the container (for debugging/logging).
+    pub stderr: Option<String>,
 }
 
 /// Instance with image info (joined from instance_images).
@@ -58,8 +60,10 @@ pub struct InstanceWithImage {
     pub finished_at: Option<DateTime<Utc>>,
     /// Output data.
     pub output: Option<Vec<u8>>,
-    /// Error message.
+    /// Error message (user-facing).
     pub error: Option<String>,
+    /// Raw stderr output from the container (for debugging/logging).
+    pub stderr: Option<String>,
     /// Image ID (from instance_images table).
     pub image_id: Option<String>,
     /// Image name (from images table).
@@ -81,8 +85,10 @@ pub struct InstanceFull {
     pub status: String,
     /// Output data.
     pub output: Option<Vec<u8>>,
-    /// Error message.
+    /// Error message (user-facing).
     pub error: Option<String>,
+    /// Raw stderr output from the container (for debugging/logging).
+    pub stderr: Option<String>,
     /// Last checkpoint ID.
     pub checkpoint_id: Option<String>,
     /// When the instance was created.
@@ -142,7 +148,7 @@ pub async fn get_instance(
         r#"
         SELECT instance_id, tenant_id, status::TEXT as status, checkpoint_id,
                attempt, max_attempts, created_at, started_at, finished_at,
-               output, error
+               output, error, stderr
         FROM instances
         WHERE instance_id = $1
         "#,
@@ -160,7 +166,7 @@ pub async fn get_instance_full(
     sqlx::query_as::<_, InstanceFull>(
         r#"
         SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
-               i.status::TEXT as status, i.output, i.error, i.checkpoint_id,
+               i.status::TEXT as status, i.output, i.error, i.stderr, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
                ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts,
                i.memory_peak_bytes, i.cpu_usage_usec
@@ -209,6 +215,7 @@ pub async fn update_instance_result(
     status: &str,
     output: Option<&[u8]>,
     error: Option<&str>,
+    stderr: Option<&str>,
     checkpoint_id: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -217,7 +224,8 @@ pub async fn update_instance_result(
         SET status = $2::instance_status,
             output = $3,
             error = $4,
-            checkpoint_id = COALESCE($5, checkpoint_id),
+            stderr = $5,
+            checkpoint_id = COALESCE($6, checkpoint_id),
             finished_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW() ELSE finished_at END
         WHERE instance_id = $1
         "#,
@@ -226,6 +234,7 @@ pub async fn update_instance_result(
     .bind(status)
     .bind(output)
     .bind(error)
+    .bind(stderr)
     .bind(checkpoint_id)
     .execute(pool)
     .await?;
@@ -247,6 +256,7 @@ pub async fn update_instance_result_if_running(
     status: &str,
     output: Option<&[u8]>,
     error: Option<&str>,
+    stderr: Option<&str>,
     checkpoint_id: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
@@ -255,7 +265,8 @@ pub async fn update_instance_result_if_running(
         SET status = $2::instance_status,
             output = $3,
             error = $4,
-            checkpoint_id = COALESCE($5, checkpoint_id),
+            stderr = $5,
+            checkpoint_id = COALESCE($6, checkpoint_id),
             finished_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW() ELSE finished_at END
         WHERE instance_id = $1 AND status = 'running'
         "#,
@@ -264,6 +275,7 @@ pub async fn update_instance_result_if_running(
     .bind(status)
     .bind(output)
     .bind(error)
+    .bind(stderr)
     .bind(checkpoint_id)
     .execute(pool)
     .await?;
@@ -292,6 +304,30 @@ pub async fn update_instance_metrics(
     .bind(instance_id)
     .bind(memory_peak_bytes.map(|v| v as i64))
     .bind(cpu_usage_usec.map(|v| v as i64))
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Update instance stderr (raw container stderr output).
+///
+/// Stores stderr from container execution for debugging/logging purposes.
+/// Only updates if stderr is not already set (first writer wins).
+pub async fn update_instance_stderr(
+    pool: &PgPool,
+    instance_id: &str,
+    stderr: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE instances
+        SET stderr = COALESCE(stderr, $2)
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(stderr)
     .execute(pool)
     .await?;
 
@@ -348,7 +384,7 @@ pub async fn list_instances(
         r#"
         SELECT i.instance_id, i.tenant_id, i.status::TEXT as status, i.checkpoint_id,
                i.attempt, i.max_attempts, i.created_at, i.started_at, i.finished_at,
-               i.output, i.error, ii.image_id, img.name as image_name
+               i.output, i.error, i.stderr, ii.image_id, img.name as image_name
         FROM instances i
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
@@ -825,6 +861,7 @@ mod tests {
             finished_at: None,
             output: None,
             error: None,
+            stderr: None,
         };
 
         let debug_str = format!("{:?}", instance);
@@ -847,6 +884,7 @@ mod tests {
             finished_at: Some(Utc::now()),
             output: Some(b"result".to_vec()),
             error: None,
+            stderr: None,
         };
 
         let cloned = instance.clone();
@@ -874,11 +912,13 @@ mod tests {
             finished_at: Some(Utc::now()),
             output: None,
             error: Some("Something went wrong".to_string()),
+            stderr: Some("thread 'main' panicked".to_string()),
         };
 
         assert_eq!(instance.status, "failed");
         assert_eq!(instance.error, Some("Something went wrong".to_string()));
         assert!(instance.output.is_none());
+        assert!(instance.stderr.is_some());
     }
 
     // ==========================================================================
@@ -899,6 +939,7 @@ mod tests {
             finished_at: None,
             output: None,
             error: None,
+            stderr: None,
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow:v1".to_string()),
         };
@@ -923,6 +964,7 @@ mod tests {
             finished_at: None,
             output: None,
             error: None,
+            stderr: None,
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow".to_string()),
         };
@@ -947,6 +989,7 @@ mod tests {
             finished_at: None,
             output: None,
             error: None,
+            stderr: None,
             image_id: None,
             image_name: None,
         };
@@ -969,6 +1012,7 @@ mod tests {
             status: "running".to_string(),
             output: None,
             error: None,
+            stderr: None,
             checkpoint_id: Some("cp-5".to_string()),
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -998,6 +1042,7 @@ mod tests {
             status: "completed".to_string(),
             output: Some(b"result".to_vec()),
             error: None,
+            stderr: None,
             checkpoint_id: Some("cp-10".to_string()),
             created_at: now,
             started_at: Some(now),
@@ -1028,6 +1073,7 @@ mod tests {
             status: "pending".to_string(),
             output: None,
             error: None,
+            stderr: None,
             checkpoint_id: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1055,6 +1101,7 @@ mod tests {
             status: "completed".to_string(),
             output: Some(b"done".to_vec()),
             error: None,
+            stderr: None,
             checkpoint_id: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -1082,6 +1129,7 @@ mod tests {
             status: "completed".to_string(),
             output: Some(b"done".to_vec()),
             error: None,
+            stderr: None,
             checkpoint_id: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
