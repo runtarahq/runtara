@@ -66,7 +66,7 @@ async fn test_create_and_get_instance() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
         .await
         .expect("Failed to create instance");
 
@@ -109,7 +109,7 @@ async fn test_update_instance_status() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
         .await
         .expect("Failed to create instance");
 
@@ -173,7 +173,7 @@ async fn test_update_instance_result() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
         .await
         .expect("Failed to create instance");
 
@@ -230,7 +230,7 @@ async fn test_update_instance_result_with_error() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
         .await
         .expect("Failed to create instance");
 
@@ -289,7 +289,7 @@ async fn test_list_instances() {
     // Create multiple instances
     let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
     for id in &ids {
-        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id, None)
+        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id, None, None)
             .await
             .expect("Failed to create instance");
     }
@@ -379,9 +379,16 @@ async fn test_create_instance_with_env() {
     env.insert("API_URL".to_string(), "https://api.example.com".to_string());
     env.insert("DEBUG".to_string(), "true".to_string());
 
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, Some(&env))
-        .await
-        .expect("Failed to create instance with env");
+    runtara_environment::db::create_instance(
+        &pool,
+        &instance_id,
+        tenant_id,
+        &image_id,
+        None,
+        Some(&env),
+    )
+    .await
+    .expect("Failed to create instance with env");
 
     // Retrieve and verify env vars
     let result = runtara_environment::db::get_instance_image_with_env(&pool, &instance_id)
@@ -426,7 +433,7 @@ async fn test_create_instance_without_env() {
         .expect("Failed to create test image");
 
     // Create instance without env vars
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None)
+    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
         .await
         .expect("Failed to create instance");
 

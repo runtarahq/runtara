@@ -686,7 +686,7 @@ async fn handle_get_instance_status(
             image_id: inst.image_id.unwrap_or_default(),
             image_name: inst.image_name.unwrap_or_default(),
             tenant_id: inst.tenant_id,
-            input: None, // Core doesn't store input
+            input: inst.input,
             heartbeat_at_ms: inst.heartbeat_at.map(|t| t.timestamp_millis()),
             retry_count: inst.attempt as u32,
             max_retries: inst.max_attempts as u32,

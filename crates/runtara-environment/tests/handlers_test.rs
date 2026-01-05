@@ -494,7 +494,7 @@ async fn test_stop_instance_with_registered_container() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
         .await
         .unwrap();
 
@@ -586,7 +586,7 @@ async fn test_resume_instance_wrong_status() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
         .await
         .unwrap();
     db::update_instance_status(&pool, &instance_id, "running", None)
@@ -639,7 +639,7 @@ async fn test_resume_instance_no_checkpoint() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
         .await
         .unwrap();
     db::update_instance_status(&pool, &instance_id, "suspended", None)
@@ -686,7 +686,7 @@ async fn test_resume_instance_success() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None)
+    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
         .await
         .unwrap();
     db::update_instance_status(&pool, &instance_id, "suspended", Some("checkpoint-123"))

@@ -83,6 +83,8 @@ pub struct InstanceFull {
     pub image_name: Option<String>,
     /// Current status.
     pub status: String,
+    /// Input data provided when starting the instance.
+    pub input: Option<Vec<u8>>,
     /// Output data.
     pub output: Option<Vec<u8>>,
     /// Error message (user-facing).
@@ -119,17 +121,19 @@ pub async fn create_instance(
     instance_id: &str,
     tenant_id: &str,
     image_id: &str,
+    input: Option<&[u8]>,
     env: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<(), sqlx::Error> {
     // Create instance in Core's table
     sqlx::query(
         r#"
-        INSERT INTO instances (instance_id, tenant_id, status, created_at)
-        VALUES ($1, $2, 'pending', NOW())
+        INSERT INTO instances (instance_id, tenant_id, status, input, created_at)
+        VALUES ($1, $2, 'pending', $3, NOW())
         "#,
     )
     .bind(instance_id)
     .bind(tenant_id)
+    .bind(input)
     .execute(pool)
     .await?;
 
@@ -166,7 +170,7 @@ pub async fn get_instance_full(
     sqlx::query_as::<_, InstanceFull>(
         r#"
         SELECT i.instance_id, i.tenant_id, ii.image_id, img.name as image_name,
-               i.status::TEXT as status, i.output, i.error, i.stderr, i.checkpoint_id,
+               i.status::TEXT as status, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
                ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts,
                i.memory_peak_bytes, i.cpu_usage_usec
@@ -1010,6 +1014,7 @@ mod tests {
             image_id: Some("img-123".to_string()),
             image_name: Some("my-workflow:v1".to_string()),
             status: "running".to_string(),
+            input: Some(b"{\"key\":\"value\"}".to_vec()),
             output: None,
             error: None,
             stderr: None,
@@ -1040,6 +1045,7 @@ mod tests {
             image_id: Some("img-123".to_string()),
             image_name: Some("workflow".to_string()),
             status: "completed".to_string(),
+            input: Some(b"{}".to_vec()),
             output: Some(b"result".to_vec()),
             error: None,
             stderr: None,
@@ -1071,6 +1077,7 @@ mod tests {
             image_id: None,
             image_name: None,
             status: "pending".to_string(),
+            input: None,
             output: None,
             error: None,
             stderr: None,
@@ -1099,6 +1106,7 @@ mod tests {
             image_id: Some("img-123".to_string()),
             image_name: Some("cpu-intensive-workflow".to_string()),
             status: "completed".to_string(),
+            input: Some(b"{\"task\":\"compute\"}".to_vec()),
             output: Some(b"done".to_vec()),
             error: None,
             stderr: None,
@@ -1127,6 +1135,7 @@ mod tests {
             image_id: Some("img-123".to_string()),
             image_name: Some("quick-workflow".to_string()),
             status: "completed".to_string(),
+            input: None,
             output: Some(b"done".to_vec()),
             error: None,
             stderr: None,

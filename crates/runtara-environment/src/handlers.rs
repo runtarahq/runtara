@@ -413,10 +413,13 @@ pub async fn handle_start_instance(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    // Parse input for runner (not stored in DB, Core doesn't track it)
+    // Parse input for runner
     let input = request.input.unwrap_or(serde_json::json!({}));
 
-    // Create instance record (with env for persistence across resume/wake)
+    // Serialize input for DB storage
+    let input_bytes = serde_json::to_vec(&input).ok();
+
+    // Create instance record (with input and env for persistence across resume/wake)
     let env_for_db = if request.env.is_empty() {
         None
     } else {
@@ -427,6 +430,7 @@ pub async fn handle_start_instance(
         &instance_id,
         &request.tenant_id,
         &request.image_id,
+        input_bytes.as_deref(),
         env_for_db,
     )
     .await
