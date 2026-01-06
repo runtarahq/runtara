@@ -47,16 +47,31 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
     let true_step_id = steps::find_next_step_for_label(step_id, "true", execution_plan);
     let false_step_id = steps::find_next_step_for_label(step_id, "false", execution_plan);
 
-    // Emit code for the true branch
+    // Find the merge point where both branches converge (if any)
+    // This prevents duplicate code generation for diamond patterns
+    let merge_point = find_merge_point(
+        true_step_id.map(|s| s.to_string()),
+        false_step_id.map(|s| s.to_string()),
+        graph,
+    );
+
+    // Emit code for the true branch (stopping at merge point)
     let true_branch_code = if let Some(start_step_id) = true_step_id {
-        emit_branch_code(start_step_id, graph, ctx)
+        emit_branch_code(start_step_id, graph, ctx, merge_point.as_deref())
     } else {
         quote! {}
     };
 
-    // Emit code for the false branch
+    // Emit code for the false branch (stopping at merge point)
     let false_branch_code = if let Some(start_step_id) = false_step_id {
-        emit_branch_code(start_step_id, graph, ctx)
+        emit_branch_code(start_step_id, graph, ctx, merge_point.as_deref())
+    } else {
+        quote! {}
+    };
+
+    // Emit code for the common suffix path after the merge point
+    let common_suffix_code = if let Some(ref merge_step_id) = merge_point {
+        emit_branch_code(merge_step_id, graph, ctx, None)
     } else {
         quote! {}
     };
@@ -99,11 +114,116 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
         } else {
             #false_branch_code
         }
+
+        // Execute common suffix path after merge point (if any)
+        #common_suffix_code
     }
 }
 
-/// Collect all steps along a branch until we hit a Finish step or another Conditional.
-fn collect_branch_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<String> {
+/// Find the merge point where two branches converge (diamond pattern detection).
+///
+/// This function traces both branches from a conditional and finds the first step
+/// that is reachable from both paths. This is the "merge point" where the diamond
+/// pattern converges.
+///
+/// Returns `None` if:
+/// - Either branch is None (one-sided conditional)
+/// - Branches don't converge (both end in Finish steps or different paths)
+/// - Branches are the same step (no branching)
+fn find_merge_point(
+    true_start: Option<String>,
+    false_start: Option<String>,
+    graph: &ExecutionGraph,
+) -> Option<String> {
+    let true_start = true_start?;
+    let false_start = false_start?;
+
+    // Collect all steps reachable from the true branch
+    let true_reachable = collect_reachable_steps(&true_start, graph);
+
+    // Collect all steps reachable from the false branch
+    let false_reachable = collect_reachable_steps(&false_start, graph);
+
+    // Find the first step in true_reachable that is also in false_reachable
+    // We iterate in order (BFS order from true branch) to find the earliest merge point
+    for step_id in &true_reachable {
+        if false_reachable.contains(step_id) {
+            return Some(step_id.clone());
+        }
+    }
+
+    None
+}
+
+/// Collect all steps reachable from a starting point using BFS.
+/// Returns steps in BFS order (closest first).
+fn collect_reachable_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<String> {
+    use std::collections::VecDeque;
+
+    let mut reachable = Vec::new();
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    queue.push_back(start_step_id.to_string());
+
+    while let Some(current_step_id) = queue.pop_front() {
+        if visited.contains(&current_step_id) {
+            continue;
+        }
+        visited.insert(current_step_id.clone());
+        reachable.push(current_step_id.clone());
+
+        // Get the step
+        let step = match graph.steps.get(&current_step_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Stop at Finish steps (they return, no further steps)
+        if matches!(step, Step::Finish(_)) {
+            continue;
+        }
+
+        // For Conditional steps, add both branches to the queue
+        if matches!(step, Step::Conditional(_)) {
+            for edge in &graph.execution_plan {
+                if edge.from_step == current_step_id {
+                    let label = edge.label.as_deref().unwrap_or("");
+                    if label == "true" || label == "false" {
+                        if !visited.contains(&edge.to_step) {
+                            queue.push_back(edge.to_step.clone());
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Find the next step (follow "next" label or unlabeled edge)
+        for edge in &graph.execution_plan {
+            if edge.from_step == current_step_id {
+                let label = edge.label.as_deref().unwrap_or("");
+                // Follow "next" or unlabeled edges, skip "true"/"false" branches
+                if label == "next" || label.is_empty() {
+                    if !visited.contains(&edge.to_step) {
+                        queue.push_back(edge.to_step.clone());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    reachable
+}
+
+/// Collect all steps along a branch until we hit a Finish step, another Conditional,
+/// or the specified stop_at step (merge point).
+fn collect_branch_steps(
+    start_step_id: &str,
+    graph: &ExecutionGraph,
+    stop_at: Option<&str>,
+) -> Vec<String> {
     let mut branch_steps = Vec::new();
     let mut visited = HashSet::new();
     let mut current_step_id = start_step_id.to_string();
@@ -112,6 +232,14 @@ fn collect_branch_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<Stri
         if visited.contains(&current_step_id) {
             break;
         }
+
+        // Stop before the merge point (it will be emitted separately after the if/else)
+        if let Some(merge_point) = stop_at {
+            if current_step_id == merge_point {
+                break;
+            }
+        }
+
         visited.insert(current_step_id.clone());
 
         // Get the step
@@ -156,12 +284,15 @@ fn collect_branch_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<Stri
 }
 
 /// Emit code for a branch (sequence of steps).
+///
+/// If `stop_at` is provided, the branch will stop before that step (used for merge points).
 fn emit_branch_code(
     start_step_id: &str,
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
+    stop_at: Option<&str>,
 ) -> TokenStream {
-    let branch_steps = collect_branch_steps(start_step_id, graph);
+    let branch_steps = collect_branch_steps(start_step_id, graph, stop_at);
 
     let step_codes: Vec<TokenStream> = branch_steps
         .iter()
@@ -557,4 +688,349 @@ pub fn path_to_json_pointer(path: &str) -> String {
         .replace("\"]", "");
     let parts: Vec<&str> = normalized.split('.').collect();
     format!("/{}", parts.join("/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::{ExecutionPlanEdge, FinishStep, LogLevel, LogStep};
+    use std::collections::HashMap;
+
+    /// Helper to create a simple Log step for testing
+    fn make_log_step(id: &str) -> Step {
+        Step::Log(LogStep {
+            id: id.to_string(),
+            name: Some(format!("Log {}", id)),
+            message: "test".to_string(),
+            level: LogLevel::Info,
+            context: None,
+        })
+    }
+
+    /// Helper to create a Finish step for testing
+    fn make_finish_step(id: &str) -> Step {
+        Step::Finish(FinishStep {
+            id: id.to_string(),
+            name: Some(format!("Finish {}", id)),
+            input_mapping: None,
+        })
+    }
+
+    /// Helper to create a Conditional step for testing
+    fn make_conditional_step(id: &str) -> Step {
+        Step::Conditional(ConditionalStep {
+            id: id.to_string(),
+            name: Some(format!("Conditional {}", id)),
+            condition: ConditionExpression::Value(MappingValue::Immediate(
+                runtara_dsl::ImmediateValue {
+                    value: serde_json::json!(true),
+                },
+            )),
+        })
+    }
+
+    /// Helper to create an edge in the execution plan
+    fn edge(from: &str, to: &str, label: Option<&str>) -> ExecutionPlanEdge {
+        ExecutionPlanEdge {
+            from_step: from.to_string(),
+            to_step: to.to_string(),
+            label: label.map(|s| s.to_string()),
+        }
+    }
+
+    /// Helper to create a minimal ExecutionGraph for testing
+    fn make_graph(
+        entry_point: &str,
+        steps: HashMap<String, Step>,
+        execution_plan: Vec<ExecutionPlanEdge>,
+    ) -> ExecutionGraph {
+        ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: entry_point.to_string(),
+            steps,
+            execution_plan,
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    #[test]
+    fn test_find_merge_point_diamond_pattern() {
+        // Diamond pattern:
+        //       cond
+        //      /    \
+        //   step1  step2
+        //      \    /
+        //      merge
+        //        |
+        //      finish
+
+        let mut steps = HashMap::new();
+        steps.insert("cond".to_string(), make_conditional_step("cond"));
+        steps.insert("step1".to_string(), make_log_step("step1"));
+        steps.insert("step2".to_string(), make_log_step("step2"));
+        steps.insert("merge".to_string(), make_log_step("merge"));
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "cond",
+            steps,
+            vec![
+                edge("cond", "step1", Some("true")),
+                edge("cond", "step2", Some("false")),
+                edge("step1", "merge", None),
+                edge("step2", "merge", None),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        let merge_point =
+            find_merge_point(Some("step1".to_string()), Some("step2".to_string()), &graph);
+
+        assert_eq!(merge_point, Some("merge".to_string()));
+    }
+
+    #[test]
+    fn test_find_merge_point_no_merge() {
+        // No merge - branches end in different Finish steps:
+        //       cond
+        //      /    \
+        //   step1  step2
+        //      |      |
+        //   finish1 finish2
+
+        let mut steps = HashMap::new();
+        steps.insert("cond".to_string(), make_conditional_step("cond"));
+        steps.insert("step1".to_string(), make_log_step("step1"));
+        steps.insert("step2".to_string(), make_log_step("step2"));
+        steps.insert("finish1".to_string(), make_finish_step("finish1"));
+        steps.insert("finish2".to_string(), make_finish_step("finish2"));
+
+        let graph = make_graph(
+            "cond",
+            steps,
+            vec![
+                edge("cond", "step1", Some("true")),
+                edge("cond", "step2", Some("false")),
+                edge("step1", "finish1", None),
+                edge("step2", "finish2", None),
+            ],
+        );
+
+        let merge_point =
+            find_merge_point(Some("step1".to_string()), Some("step2".to_string()), &graph);
+
+        assert_eq!(merge_point, None);
+    }
+
+    #[test]
+    fn test_find_merge_point_immediate_merge() {
+        // Immediate merge - both branches go directly to the same step:
+        //       cond
+        //      /    \
+        //      merge (both branches)
+        //        |
+        //      finish
+
+        let mut steps = HashMap::new();
+        steps.insert("cond".to_string(), make_conditional_step("cond"));
+        steps.insert("merge".to_string(), make_log_step("merge"));
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "cond",
+            steps,
+            vec![
+                edge("cond", "merge", Some("true")),
+                edge("cond", "merge", Some("false")),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        let merge_point =
+            find_merge_point(Some("merge".to_string()), Some("merge".to_string()), &graph);
+
+        // When both branches start at the same step, that's the merge point
+        assert_eq!(merge_point, Some("merge".to_string()));
+    }
+
+    #[test]
+    fn test_find_merge_point_one_sided_conditional() {
+        // One-sided conditional (only true branch):
+        //       cond
+        //         \
+        //        step1
+        //          |
+        //        finish
+
+        let mut steps = HashMap::new();
+        steps.insert("cond".to_string(), make_conditional_step("cond"));
+        steps.insert("step1".to_string(), make_log_step("step1"));
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "cond",
+            steps,
+            vec![
+                edge("cond", "step1", Some("true")),
+                // No false branch
+                edge("step1", "finish", None),
+            ],
+        );
+
+        let merge_point = find_merge_point(Some("step1".to_string()), None, &graph);
+
+        assert_eq!(merge_point, None);
+    }
+
+    #[test]
+    fn test_find_merge_point_complex_diamond() {
+        // Complex diamond with multiple steps in each branch:
+        //         cond
+        //        /    \
+        //     step1  step3
+        //       |      |
+        //     step2  step4
+        //        \    /
+        //        merge
+        //          |
+        //        finish
+
+        let mut steps = HashMap::new();
+        steps.insert("cond".to_string(), make_conditional_step("cond"));
+        steps.insert("step1".to_string(), make_log_step("step1"));
+        steps.insert("step2".to_string(), make_log_step("step2"));
+        steps.insert("step3".to_string(), make_log_step("step3"));
+        steps.insert("step4".to_string(), make_log_step("step4"));
+        steps.insert("merge".to_string(), make_log_step("merge"));
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "cond",
+            steps,
+            vec![
+                edge("cond", "step1", Some("true")),
+                edge("cond", "step3", Some("false")),
+                edge("step1", "step2", None),
+                edge("step2", "merge", None),
+                edge("step3", "step4", None),
+                edge("step4", "merge", None),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        let merge_point =
+            find_merge_point(Some("step1".to_string()), Some("step3".to_string()), &graph);
+
+        assert_eq!(merge_point, Some("merge".to_string()));
+    }
+
+    #[test]
+    fn test_collect_branch_steps_stops_at_merge_point() {
+        // Same diamond as above
+        let mut steps = HashMap::new();
+        steps.insert("cond".to_string(), make_conditional_step("cond"));
+        steps.insert("step1".to_string(), make_log_step("step1"));
+        steps.insert("step2".to_string(), make_log_step("step2"));
+        steps.insert("merge".to_string(), make_log_step("merge"));
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "cond",
+            steps,
+            vec![
+                edge("cond", "step1", Some("true")),
+                edge("cond", "step2", Some("false")),
+                edge("step1", "merge", None),
+                edge("step2", "merge", None),
+                edge("merge", "finish", None),
+            ],
+        );
+
+        // With merge point, should stop before it
+        let branch_steps_with_stop = collect_branch_steps("step1", &graph, Some("merge"));
+        assert_eq!(branch_steps_with_stop, vec!["step1"]);
+
+        // Without merge point, should include merge and continue to finish
+        let branch_steps_no_stop = collect_branch_steps("step1", &graph, None);
+        assert_eq!(branch_steps_no_stop, vec!["step1", "merge", "finish"]);
+    }
+
+    #[test]
+    fn test_collect_reachable_steps() {
+        // Test the reachability traversal
+        let mut steps = HashMap::new();
+        steps.insert("start".to_string(), make_log_step("start"));
+        steps.insert("middle".to_string(), make_log_step("middle"));
+        steps.insert("end".to_string(), make_finish_step("end"));
+
+        let graph = make_graph(
+            "start",
+            steps,
+            vec![edge("start", "middle", None), edge("middle", "end", None)],
+        );
+
+        let reachable = collect_reachable_steps("start", &graph);
+        assert_eq!(reachable, vec!["start", "middle", "end"]);
+
+        let reachable_from_middle = collect_reachable_steps("middle", &graph);
+        assert_eq!(reachable_from_middle, vec!["middle", "end"]);
+    }
+
+    #[test]
+    fn test_nested_conditionals_with_diamond() {
+        // Nested diamond:
+        //         cond1
+        //        /    \
+        //     step1  cond2
+        //       |    /    \
+        //       | step2  step3
+        //       |    \    /
+        //       |    merge2
+        //        \    /
+        //        merge1
+        //          |
+        //        finish
+
+        let mut steps = HashMap::new();
+        steps.insert("cond1".to_string(), make_conditional_step("cond1"));
+        steps.insert("step1".to_string(), make_log_step("step1"));
+        steps.insert("cond2".to_string(), make_conditional_step("cond2"));
+        steps.insert("step2".to_string(), make_log_step("step2"));
+        steps.insert("step3".to_string(), make_log_step("step3"));
+        steps.insert("merge2".to_string(), make_log_step("merge2"));
+        steps.insert("merge1".to_string(), make_log_step("merge1"));
+        steps.insert("finish".to_string(), make_finish_step("finish"));
+
+        let graph = make_graph(
+            "cond1",
+            steps,
+            vec![
+                edge("cond1", "step1", Some("true")),
+                edge("cond1", "cond2", Some("false")),
+                edge("step1", "merge1", None),
+                edge("cond2", "step2", Some("true")),
+                edge("cond2", "step3", Some("false")),
+                edge("step2", "merge2", None),
+                edge("step3", "merge2", None),
+                edge("merge2", "merge1", None),
+                edge("merge1", "finish", None),
+            ],
+        );
+
+        // For outer conditional, merge point should be merge1
+        let outer_merge =
+            find_merge_point(Some("step1".to_string()), Some("cond2".to_string()), &graph);
+        assert_eq!(outer_merge, Some("merge1".to_string()));
+
+        // For inner conditional, merge point should be merge2
+        let inner_merge =
+            find_merge_point(Some("step2".to_string()), Some("step3".to_string()), &graph);
+        assert_eq!(inner_merge, Some("merge2".to_string()));
+    }
 }
