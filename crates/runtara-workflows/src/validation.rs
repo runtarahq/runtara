@@ -718,16 +718,17 @@ fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResul
         }
     }
 
-    // Recursively validate subgraphs
+    // Recursively validate subgraph structure (entry point, reachability, etc.)
+    // Note: Each individual validation phase (validate_references, validate_agents, etc.)
+    // handles its own subgraph recursion. This allows parent context (like config.variables
+    // from Split steps) to be properly passed to subgraphs during reference validation.
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                let sub_result = validate_workflow(&split_step.subgraph);
-                result.merge(sub_result);
+                validate_graph_structure(&split_step.subgraph, result);
             }
             Step::While(while_step) => {
-                let sub_result = validate_workflow(&while_step.subgraph);
-                result.merge(sub_result);
+                validate_graph_structure(&while_step.subgraph, result);
             }
             _ => {}
         }
@@ -771,8 +772,24 @@ fn compute_reachable_steps(graph: &ExecutionGraph) -> HashSet<String> {
 // ============================================================================
 
 fn validate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_references_with_inherited(graph, &HashSet::new(), result);
+}
+
+/// Validates references in a graph, considering inherited variables from parent scope.
+///
+/// `inherited_variables` contains variable names that are injected from a parent scope
+/// (e.g., from `config.variables` in a Split step). These are valid in addition to
+/// the graph's own declared variables.
+fn validate_references_with_inherited(
+    graph: &ExecutionGraph,
+    inherited_variables: &HashSet<String>,
+    result: &mut ValidationResult,
+) {
     let step_ids: HashSet<String> = graph.steps.keys().cloned().collect();
-    let variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
+
+    // Merge inherited variables with graph's own variables
+    let mut variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
+    variable_names.extend(inherited_variables.iter().cloned());
 
     for (step_id, step) in &graph.steps {
         let mappings = collect_step_mappings(step);
@@ -796,10 +813,21 @@ fn validate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_references(&split_step.subgraph, result);
+                // config.variables keys become available as variables.<name> in the subgraph
+                let injected_vars: HashSet<String> = split_step
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.variables.as_ref())
+                    .map(|v| v.keys().cloned().collect())
+                    .unwrap_or_default();
+                validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
             }
             Step::While(while_step) => {
-                validate_references(&while_step.subgraph, result);
+                validate_references_with_inherited(
+                    &while_step.subgraph,
+                    &HashSet::new(),
+                    result,
+                );
             }
             _ => {}
         }
@@ -4421,6 +4449,299 @@ mod tests {
         assert!(
             check_type_compatibility("step", "field", "CustomType", &serde_json::json!(42))
                 .is_none()
+        );
+    }
+
+    // === Split config.variables Scope Tests ===
+
+    #[test]
+    fn test_split_config_variables_available_in_subgraph() {
+        use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep};
+
+        // Create a subgraph that references a variable from config.variables
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("userId".to_string(), ref_value("variables.parentUserId")); // from config.variables
+        subgraph_steps.insert(
+            "sub_agent".to_string(),
+            create_agent_step("sub_agent", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "sub_agent".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "sub_agent".to_string(),
+                to_step: "sub_finish".to_string(),
+                label: None,
+            }],
+            variables: HashMap::new(), // No variables declared here
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // config.variables injects parentUserId into the subgraph
+        let mut config_variables = HashMap::new();
+        config_variables.insert(
+            "parentUserId".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("user-123"),
+            }),
+        );
+
+        let config = SplitConfig {
+            value: MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!([1, 2, 3]),
+            }),
+            parallelism: None,
+            sequential: None,
+            dont_stop_on_failed: None,
+            variables: Some(config_variables),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split".to_string(),
+            Step::Split(SplitStep {
+                id: "split".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: Some(config),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "split");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "split".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have UnknownVariable error for parentUserId
+        let unknown_var_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::UnknownVariable { .. }))
+            .collect();
+        assert!(
+            unknown_var_errors.is_empty(),
+            "config.variables should be available in subgraph; got errors: {:?}",
+            unknown_var_errors
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_unknown_variable_still_caught() {
+        use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep};
+
+        // Create a subgraph that references a variable NOT in config.variables
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("data".to_string(), ref_value("variables.undeclaredVar")); // NOT defined anywhere
+        subgraph_steps.insert(
+            "sub_agent".to_string(),
+            create_agent_step("sub_agent", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "sub_agent".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "sub_agent".to_string(),
+                to_step: "sub_finish".to_string(),
+                label: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // config.variables has a different variable (not undeclaredVar)
+        let mut config_variables = HashMap::new();
+        config_variables.insert(
+            "someOtherVar".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("value"),
+            }),
+        );
+
+        let config = SplitConfig {
+            value: MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!([1]),
+            }),
+            parallelism: None,
+            sequential: None,
+            dont_stop_on_failed: None,
+            variables: Some(config_variables),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split".to_string(),
+            Step::Split(SplitStep {
+                id: "split".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: Some(config),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "split");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "split".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should have UnknownVariable error for undeclaredVar
+        assert!(
+            result.errors.iter().any(|e| {
+                matches!(e, ValidationError::UnknownVariable { variable_name, .. } if variable_name == "undeclaredVar")
+            }),
+            "Expected UnknownVariable error for 'undeclaredVar', got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_split_both_config_and_subgraph_variables_available() {
+        use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep, Variable, VariableType};
+
+        // Create a subgraph that references variables from both sources
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("fromConfig".to_string(), ref_value("variables.configVar"));
+        mapping.insert(
+            "fromSubgraph".to_string(),
+            ref_value("variables.subgraphVar"),
+        );
+        subgraph_steps.insert(
+            "sub_agent".to_string(),
+            create_agent_step("sub_agent", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+
+        // Declare a variable in the subgraph itself
+        let mut subgraph_variables = HashMap::new();
+        subgraph_variables.insert(
+            "subgraphVar".to_string(),
+            Variable {
+                var_type: VariableType::String,
+                value: serde_json::json!("subgraph-value"),
+                description: None,
+            },
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "sub_agent".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "sub_agent".to_string(),
+                to_step: "sub_finish".to_string(),
+                label: None,
+            }],
+            variables: subgraph_variables,
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // config.variables provides configVar
+        let mut config_variables = HashMap::new();
+        config_variables.insert(
+            "configVar".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("config-value"),
+            }),
+        );
+
+        let config = SplitConfig {
+            value: MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!([1]),
+            }),
+            parallelism: None,
+            sequential: None,
+            dont_stop_on_failed: None,
+            variables: Some(config_variables),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split".to_string(),
+            Step::Split(SplitStep {
+                id: "split".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: Some(config),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "split");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "split".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have any UnknownVariable errors
+        let unknown_var_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::UnknownVariable { .. }))
+            .collect();
+        assert!(
+            unknown_var_errors.is_empty(),
+            "Both config.variables and subgraph.variables should be available; got errors: {:?}",
+            unknown_var_errors
         );
     }
 }
