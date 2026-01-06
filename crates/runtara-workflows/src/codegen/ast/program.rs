@@ -313,15 +313,25 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             register_sdk(sdk_instance);
 
             // Load input from environment variable INPUT_JSON or empty object
-            // The entire INPUT_JSON becomes the "data" for the workflow
-            // Workflow references like "data.input" will access the input JSON directly
-            let data: serde_json::Value = std::env::var("INPUT_JSON")
+            // INPUT_JSON has structure: {"data": {...}, "variables": {...}}
+            // We extract data and variables fields, merging runtime variables with compile-time ones
+            let input_json: serde_json::Value = std::env::var("INPUT_JSON")
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_else(|| serde_json::json!({}));
 
-            // Variables are compile-time constants defined in the scenario
-            let variables = #variables_init;
+            // Extract data field from INPUT_JSON (or empty object if not present)
+            let data = input_json.get("data").cloned().unwrap_or_else(|| serde_json::json!({}));
+
+            // Variables: start with compile-time constants, then merge runtime variables
+            let mut variables = #variables_init;
+            if let Some(runtime_vars) = input_json.get("variables") {
+                if let (Some(base_obj), Some(runtime_obj)) = (variables.as_object_mut(), runtime_vars.as_object()) {
+                    for (key, value) in runtime_obj {
+                        base_obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
 
             let scenario_inputs = ScenarioInputs {
                 data: Arc::new(data),
