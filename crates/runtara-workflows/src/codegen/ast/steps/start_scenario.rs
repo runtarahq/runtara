@@ -112,8 +112,12 @@ fn emit_with_embedded_child(
     );
     let debug_end = emit_step_debug_end(ctx, step_id, step_name, "StartScenario", Some(&step_var));
 
-    // Cache key for the child scenario checkpoint
-    let cache_key = format!("start_scenario::{}", step_id);
+    // Static base for cache key - will be combined with loop indices at runtime
+    let cache_key_base = format!("start_scenario::{}", step_id);
+
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
+
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
 
@@ -125,6 +129,24 @@ fn emit_with_embedded_child(
         let #child_inputs_var = #inputs_code;
 
         #debug_start
+
+        // Build cache key dynamically, including loop indices if inside Split/While
+        let __durable_cache_key = {
+            let base = #cache_key_base;
+            let indices_suffix = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    let indices: Vec<String> = arr.iter()
+                        .map(|v| v.to_string())
+                        .collect();
+                    format!("::[{}]", indices.join(","))
+                })
+                .unwrap_or_default();
+            format!("{}{}", base, indices_suffix)
+        };
 
         // Define the durable child scenario execution function
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
@@ -160,7 +182,7 @@ fn emit_with_embedded_child(
 
         // Execute the durable child scenario function
         let #step_var = #durable_fn_name(
-            #cache_key,
+            &__durable_cache_key,
             #child_inputs_var.clone(),
             #child_scenario_id,
             #step_id,

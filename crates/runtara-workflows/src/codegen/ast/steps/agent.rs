@@ -164,7 +164,11 @@ fn emit_durable_call(
     max_retries: u32,
     retry_delay: u64,
 ) -> TokenStream {
-    let cache_key = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
+    // Static base for cache key - will be combined with loop indices at runtime
+    let cache_key_base = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
+
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
 
     // Generate connection fetching code if connection_id is present and service URL is configured
     let (connection_fetch, final_inputs) = emit_connection_fetch(
@@ -179,6 +183,24 @@ fn emit_durable_call(
     let retry_delay_lit = retry_delay;
 
     quote! {
+        // Build cache key dynamically, including loop indices if inside Split/While
+        let __durable_cache_key = {
+            let base = #cache_key_base;
+            let indices_suffix = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    let indices: Vec<String> = arr.iter()
+                        .map(|v| v.to_string())
+                        .collect();
+                    format!("::[{}]", indices.join(","))
+                })
+                .unwrap_or_default();
+            format!("{}{}", base, indices_suffix)
+        };
+
         // Define the durable agent execution function
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         async fn #durable_fn_name(
@@ -197,7 +219,7 @@ fn emit_durable_call(
         #connection_fetch
 
         let #result_var = #durable_fn_name(
-            #cache_key,
+            &__durable_cache_key,
             #final_inputs.clone(),
             #agent_id,
             #capability_id,
@@ -220,7 +242,11 @@ fn emit_durable_rate_limited_call(
     max_retries: u32,
     retry_delay: u64,
 ) -> TokenStream {
-    let cache_key = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
+    // Static base for cache key - will be combined with loop indices at runtime
+    let cache_key_base = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
+
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
 
     // Generate connection fetching code with rate limit handling
     let (connection_fetch, final_inputs) = emit_connection_fetch(
@@ -235,6 +261,24 @@ fn emit_durable_rate_limited_call(
     let retry_delay_lit = retry_delay;
 
     quote! {
+        // Build cache key dynamically, including loop indices if inside Split/While
+        let __durable_cache_key = {
+            let base = #cache_key_base;
+            let indices_suffix = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    let indices: Vec<String> = arr.iter()
+                        .map(|v| v.to_string())
+                        .collect();
+                    format!("::[{}]", indices.join(","))
+                })
+                .unwrap_or_default();
+            format!("{}{}", base, indices_suffix)
+        };
+
         // Define the durable agent execution function (rate-limited)
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         async fn #durable_fn_name(
@@ -253,7 +297,7 @@ fn emit_durable_rate_limited_call(
         #connection_fetch
 
         let #result_var = #durable_fn_name(
-            #cache_key,
+            &__durable_cache_key,
             #final_inputs.clone(),
             #agent_id,
             #capability_id,

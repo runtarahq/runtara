@@ -109,6 +109,17 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
                     serde_json::Value::Object(m) => m,
                     _ => serde_json::Map::new(),
                 };
+
+                // Build cumulative loop indices array for cache key uniqueness in nested loops
+                let __parent_indices = __loop_vars.get("_loop_indices")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut __all_indices = __parent_indices;
+                __all_indices.push(serde_json::json!(__loop_index));
+                __loop_vars.insert("_loop_indices".to_string(), serde_json::json!(__all_indices));
+
+                // Inject iteration index as _index for backward compatibility
                 __loop_vars.insert("_index".to_string(), serde_json::json!(__loop_index));
 
                 // Include previous iteration outputs in variables

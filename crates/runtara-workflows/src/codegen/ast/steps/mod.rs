@@ -532,4 +532,219 @@ mod tests {
             "Should include original size"
         );
     }
+
+    // Tests for _loop_indices functionality (cache key uniqueness in loops)
+
+    /// Helper to create a minimal ExecutionGraph with just a Finish step
+    fn create_minimal_graph(entry_point: &str) -> runtara_dsl::ExecutionGraph {
+        use runtara_dsl::{ExecutionGraph, FinishStep, Step};
+        use std::collections::HashMap;
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            entry_point.to_string(),
+            Step::Finish(FinishStep {
+                id: entry_point.to_string(),
+                name: Some("Finish".to_string()),
+                input_mapping: None,
+            }),
+        );
+
+        ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: entry_point.to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    #[test]
+    fn test_split_emits_loop_indices_injection() {
+        use runtara_dsl::{ImmediateValue, MappingValue, SplitConfig, SplitStep};
+        use std::collections::HashMap;
+
+        let mut ctx = EmitContext::new(false);
+
+        let split_step = SplitStep {
+            id: "split-test".to_string(),
+            name: Some("Test Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!([]),
+                }),
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                variables: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = split::emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify that _loop_indices injection is present
+        assert!(
+            code.contains("_loop_indices"),
+            "Split should inject _loop_indices into variables"
+        );
+        assert!(
+            code.contains("parent_indices"),
+            "Split should preserve parent loop indices"
+        );
+        assert!(
+            code.contains("all_indices"),
+            "Split should build cumulative indices array"
+        );
+    }
+
+    #[test]
+    fn test_while_emits_loop_indices_injection() {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+            ImmediateValue, MappingValue, ReferenceValue, WhileConfig, WhileStep,
+        };
+
+        let mut ctx = EmitContext::new(false);
+
+        // Create a condition: loop.index < 5
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Lt,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                    value: "loop.index".to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(5),
+                })),
+            ],
+        });
+
+        let while_step = WhileStep {
+            id: "while-test".to_string(),
+            name: Some("Test While".to_string()),
+            condition,
+            config: Some(WhileConfig {
+                max_iterations: Some(10),
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+        };
+
+        let tokens = while_loop::emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify that _loop_indices injection is present
+        assert!(
+            code.contains("_loop_indices"),
+            "While should inject _loop_indices into variables"
+        );
+        assert!(
+            code.contains("__parent_indices"),
+            "While should preserve parent loop indices"
+        );
+        assert!(
+            code.contains("__all_indices"),
+            "While should build cumulative indices array"
+        );
+    }
+
+    #[test]
+    fn test_agent_emits_dynamic_cache_key() {
+        use runtara_dsl::AgentStep;
+
+        let mut ctx = EmitContext::new(false);
+
+        let agent_step = AgentStep {
+            id: "agent-test".to_string(),
+            name: Some("Test Agent".to_string()),
+            agent_id: "http".to_string(),
+            capability_id: "request".to_string(),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            connection_id: None,
+        };
+
+        let tokens = agent::emit(&agent_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify that dynamic cache key generation is present
+        assert!(
+            code.contains("__durable_cache_key"),
+            "Agent should generate dynamic cache key"
+        );
+        assert!(
+            code.contains("_loop_indices"),
+            "Agent should check for _loop_indices in variables"
+        );
+        assert!(
+            code.contains("indices_suffix"),
+            "Agent should build indices suffix for cache key"
+        );
+        // The cache key base is generated as a string literal with the pattern
+        // "agent::<agent_id>::<capability_id>::<step_id>"
+        assert!(
+            code.contains("agent::http::request::agent-test"),
+            "Agent should have correct base cache key: got code: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_start_scenario_emits_dynamic_cache_key() {
+        use runtara_dsl::{ChildVersion, StartScenarioStep};
+        use std::collections::HashMap;
+
+        // Create a context with a child scenario
+        let child_graph = create_minimal_graph("child-finish");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-scenario-test".to_string(), child_graph);
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let start_scenario_step = StartScenarioStep {
+            id: "start-scenario-test".to_string(),
+            name: Some("Test StartScenario".to_string()),
+            child_scenario_id: "child-scenario".to_string(),
+            child_version: ChildVersion::Latest("latest".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let tokens = start_scenario::emit(&start_scenario_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify that dynamic cache key generation is present
+        assert!(
+            code.contains("__durable_cache_key"),
+            "StartScenario should generate dynamic cache key"
+        );
+        assert!(
+            code.contains("_loop_indices"),
+            "StartScenario should check for _loop_indices in variables"
+        );
+        assert!(
+            code.contains("indices_suffix"),
+            "StartScenario should build indices suffix for cache key"
+        );
+    }
 }

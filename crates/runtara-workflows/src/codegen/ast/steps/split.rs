@@ -181,7 +181,17 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                         merged_vars.insert(k.clone(), v.clone());
                     }
                 }
-                // Inject iteration index as _index (0-based)
+
+                // Build cumulative loop indices array for cache key uniqueness in nested loops
+                let parent_indices = merged_vars.get("_loop_indices")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut all_indices = parent_indices;
+                all_indices.push(serde_json::json!(idx));
+                merged_vars.insert("_loop_indices".to_string(), serde_json::json!(all_indices));
+
+                // Inject iteration index as _index (0-based) for backward compatibility
                 merged_vars.insert("_index".to_string(), serde_json::json!(idx));
 
                 let subgraph_inputs = ScenarioInputs {
