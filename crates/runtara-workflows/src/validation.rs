@@ -823,11 +823,7 @@ fn validate_references_with_inherited(
                 validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
             }
             Step::While(while_step) => {
-                validate_references_with_inherited(
-                    &while_step.subgraph,
-                    &HashSet::new(),
-                    result,
-                );
+                validate_references_with_inherited(&while_step.subgraph, &HashSet::new(), result);
             }
             _ => {}
         }
