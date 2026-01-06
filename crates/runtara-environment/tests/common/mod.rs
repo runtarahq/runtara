@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use runtara_core::persistence::PostgresPersistence;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -52,9 +53,13 @@ impl TestContext {
         // Create mock runner
         let runner: Arc<dyn Runner> = Arc::new(MockRunner::new());
 
+        // Create persistence layer
+        let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
         // Create handler state
         let state = Arc::new(EnvironmentHandlerState::new(
             pool.clone(),
+            persistence,
             runner,
             "127.0.0.1:8001".to_string(), // Mock core address
             data_dir.clone(),

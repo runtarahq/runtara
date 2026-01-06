@@ -5,6 +5,7 @@
 mod common;
 
 use chrono::Utc;
+use runtara_core::persistence::{Persistence, PostgresPersistence};
 use runtara_environment::db::{self, Instance};
 use runtara_environment::wake_scheduler::WakeSchedulerConfig;
 use sqlx::PgPool;
@@ -72,6 +73,58 @@ async fn cleanup_image(pool: &PgPool, image_id: &str) {
         .execute(pool)
         .await
         .ok();
+}
+
+/// Helper to create a test instance using the Persistence trait.
+/// This replaces the old `db::create_instance` function that was removed.
+async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .register_instance(instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None)
+        .await
+        .expect("Failed to associate instance image");
+}
+
+/// Helper to update instance status using the Persistence trait.
+/// This replaces the old `db::update_instance_status` function that was removed.
+async fn update_test_instance_status(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    checkpoint_id: Option<&str>,
+) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .update_instance_status(instance_id, status, None)
+        .await
+        .expect("Failed to update instance status");
+    if let Some(cp_id) = checkpoint_id {
+        persistence
+            .update_instance_checkpoint(instance_id, cp_id)
+            .await
+            .expect("Failed to update instance checkpoint");
+    }
+}
+
+/// Helper to update instance result using the Persistence trait.
+/// This replaces the old `db::update_instance_result` function that was removed.
+async fn update_test_instance_result(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    checkpoint_id: Option<&str>,
+    stderr: Option<&str>,
+) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
+        .await
+        .expect("Failed to update instance result");
 }
 
 // ============================================================================
@@ -144,9 +197,7 @@ async fn test_create_and_get_instance() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .expect("Failed to create instance");
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     let instance = db::get_instance_full(&pool, &instance_id)
         .await
@@ -176,14 +227,10 @@ async fn test_update_instance_status() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Update to running
-    db::update_instance_status(&pool, &instance_id, "running", None)
-        .await
-        .unwrap();
+    update_test_instance_status(&pool, &instance_id, "running", None).await;
 
     let instance = db::get_instance(&pool, &instance_id)
         .await
@@ -193,9 +240,7 @@ async fn test_update_instance_status() {
     assert!(instance.started_at.is_some()); // Should be set when status = running
 
     // Update to completed
-    db::update_instance_status(&pool, &instance_id, "completed", Some("cp-final"))
-        .await
-        .unwrap();
+    update_test_instance_status(&pool, &instance_id, "completed", Some("cp-final")).await;
 
     let instance = db::get_instance(&pool, &instance_id)
         .await
@@ -221,14 +266,12 @@ async fn test_update_instance_result() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     let output = serde_json::json!({"result": "success"});
     let output_bytes = serde_json::to_vec(&output).unwrap();
 
-    db::update_instance_result(
+    update_test_instance_result(
         &pool,
         &instance_id,
         "completed",
@@ -237,8 +280,7 @@ async fn test_update_instance_result() {
         Some("cp-done"),
         None, // stderr
     )
-    .await
-    .unwrap();
+    .await;
 
     let instance = db::get_instance(&pool, &instance_id)
         .await
@@ -266,11 +308,9 @@ async fn test_update_instance_result_with_error() {
     let tenant_id = "test-tenant";
     let image_id = create_test_image(&pool, tenant_id).await;
 
-    db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
-    db::update_instance_result(
+    update_test_instance_result(
         &pool,
         &instance_id,
         "failed",
@@ -279,8 +319,7 @@ async fn test_update_instance_result_with_error() {
         None,
         Some("error: could not connect to server"), // stderr
     )
-    .await
-    .unwrap();
+    .await;
 
     let instance = db::get_instance(&pool, &instance_id)
         .await
@@ -318,44 +357,13 @@ async fn test_list_instances() {
     let instance2 = Uuid::new_v4().to_string();
     let instance3 = Uuid::new_v4().to_string();
 
-    db::create_instance(
-        &pool,
-        &instance1,
-        "list-test-tenant-a",
-        &image_id,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    db::create_instance(
-        &pool,
-        &instance2,
-        "list-test-tenant-a",
-        &image_id,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    db::create_instance(
-        &pool,
-        &instance3,
-        "list-test-tenant-b",
-        &image_id,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    create_test_instance(&pool, &instance1, "list-test-tenant-a", &image_id).await;
+    create_test_instance(&pool, &instance2, "list-test-tenant-a", &image_id).await;
+    create_test_instance(&pool, &instance3, "list-test-tenant-b", &image_id).await;
 
     // Update statuses
-    db::update_instance_status(&pool, &instance1, "running", None)
-        .await
-        .unwrap();
-    db::update_instance_status(&pool, &instance2, "completed", None)
-        .await
-        .unwrap();
+    update_test_instance_status(&pool, &instance1, "running", None).await;
+    update_test_instance_status(&pool, &instance2, "completed", None).await;
 
     // List all for tenant-a
     let options = db::ListInstancesOptions {

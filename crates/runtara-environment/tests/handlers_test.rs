@@ -5,6 +5,7 @@
 mod common;
 
 use chrono::Utc;
+use runtara_core::persistence::{Persistence, PostgresPersistence};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest, ResumeInstanceRequest,
@@ -49,7 +50,14 @@ async fn get_test_pool() -> Option<PgPool> {
 /// Create test handler state
 fn create_test_state(pool: PgPool, data_dir: PathBuf) -> EnvironmentHandlerState {
     let runner = Arc::new(MockRunner::new());
-    EnvironmentHandlerState::new(pool, runner, "127.0.0.1:8001".to_string(), data_dir)
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    EnvironmentHandlerState::new(
+        pool,
+        persistence,
+        runner,
+        "127.0.0.1:8001".to_string(),
+        data_dir,
+    )
 }
 
 /// Clean up test data
@@ -92,6 +100,40 @@ async fn cleanup(pool: &PgPool, instance_id: Option<&str>, image_id: Option<&str
             .execute(pool)
             .await
             .ok();
+    }
+}
+
+/// Helper to create a test instance using the Persistence trait.
+/// This replaces the old `db::create_instance` function that was removed.
+async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .register_instance(instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None)
+        .await
+        .expect("Failed to associate instance image");
+}
+
+/// Helper to update instance status using the Persistence trait.
+/// This replaces the old `db::update_instance_status` function that was removed.
+async fn update_test_instance_status(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    checkpoint_id: Option<&str>,
+) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .update_instance_status(instance_id, status, None)
+        .await
+        .expect("Failed to update instance status");
+    if let Some(cp_id) = checkpoint_id {
+        persistence
+            .update_instance_checkpoint(instance_id, cp_id)
+            .await
+            .expect("Failed to update instance checkpoint");
     }
 }
 
@@ -494,9 +536,7 @@ async fn test_stop_instance_with_registered_container() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
 
     // Register in container registry
     let container_registry =
@@ -586,12 +626,8 @@ async fn test_resume_instance_wrong_status() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
-        .await
-        .unwrap();
-    db::update_instance_status(&pool, &instance_id, "running", None)
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    update_test_instance_status(&pool, &instance_id, "running", None).await;
 
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),
@@ -639,12 +675,8 @@ async fn test_resume_instance_no_checkpoint() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
-        .await
-        .unwrap();
-    db::update_instance_status(&pool, &instance_id, "suspended", None)
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    update_test_instance_status(&pool, &instance_id, "suspended", None).await;
 
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),
@@ -686,12 +718,8 @@ async fn test_resume_instance_success() {
     .await
     .unwrap();
 
-    db::create_instance(&pool, &instance_id, "test-tenant", &image_id, None, None)
-        .await
-        .unwrap();
-    db::update_instance_status(&pool, &instance_id, "suspended", Some("checkpoint-123"))
-        .await
-        .unwrap();
+    create_test_instance(&pool, &instance_id, "test-tenant", &image_id).await;
+    update_test_instance_status(&pool, &instance_id, "suspended", Some("checkpoint-123")).await;
 
     let request = ResumeInstanceRequest {
         instance_id: instance_id.clone(),

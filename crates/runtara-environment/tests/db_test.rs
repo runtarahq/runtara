@@ -6,6 +6,9 @@
 
 mod common;
 
+use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_environment::db;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Skip test if database URL is not set
@@ -27,6 +30,76 @@ async fn get_pool() -> Option<sqlx::PgPool> {
         .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
         .ok()?;
     sqlx::PgPool::connect(&database_url).await.ok()
+}
+
+/// Helper to create a test instance using the Persistence trait.
+/// This replaces the old `db::create_instance` function that was removed.
+async fn create_test_instance(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .register_instance(instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, None)
+        .await
+        .expect("Failed to associate instance image");
+}
+
+/// Helper to create a test instance with env vars using the Persistence trait.
+async fn create_test_instance_with_env(
+    pool: &PgPool,
+    instance_id: &str,
+    tenant_id: &str,
+    image_id: &str,
+    env: Option<&std::collections::HashMap<String, String>>,
+) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .register_instance(instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+    db::associate_instance_image(pool, instance_id, image_id, tenant_id, env)
+        .await
+        .expect("Failed to associate instance image");
+}
+
+/// Helper to update instance status using the Persistence trait.
+/// This replaces the old `db::update_instance_status` function that was removed.
+async fn update_test_instance_status(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    checkpoint_id: Option<&str>,
+) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .update_instance_status(instance_id, status, None)
+        .await
+        .expect("Failed to update instance status");
+    if let Some(cp_id) = checkpoint_id {
+        persistence
+            .update_instance_checkpoint(instance_id, cp_id)
+            .await
+            .expect("Failed to update instance checkpoint");
+    }
+}
+
+/// Helper to update instance result using the Persistence trait.
+/// This replaces the old `db::update_instance_result` function that was removed.
+async fn update_test_instance_result(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    checkpoint_id: Option<&str>,
+    stderr: Option<&str>,
+) {
+    let persistence = PostgresPersistence::new(pool.clone());
+    persistence
+        .complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
+        .await
+        .expect("Failed to update instance result");
 }
 
 /// Create a test image with a unique name
@@ -66,12 +139,10 @@ async fn test_create_and_get_instance() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .expect("Failed to create instance");
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Get instance (use get_instance_full to also get image_id)
-    let instance = runtara_environment::db::get_instance_full(&pool, &instance_id)
+    let instance = db::get_instance_full(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -109,16 +180,12 @@ async fn test_update_instance_status() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .expect("Failed to create instance");
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Update to running
-    runtara_environment::db::update_instance_status(&pool, &instance_id, "running", None)
-        .await
-        .expect("Failed to update status");
+    update_test_instance_status(&pool, &instance_id, "running", None).await;
 
-    let instance = runtara_environment::db::get_instance(&pool, &instance_id)
+    let instance = db::get_instance(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -127,16 +194,9 @@ async fn test_update_instance_status() {
     assert!(instance.started_at.is_some());
 
     // Update to completed with checkpoint
-    runtara_environment::db::update_instance_status(
-        &pool,
-        &instance_id,
-        "completed",
-        Some("checkpoint-1"),
-    )
-    .await
-    .expect("Failed to update status");
+    update_test_instance_status(&pool, &instance_id, "completed", Some("checkpoint-1")).await;
 
-    let instance = runtara_environment::db::get_instance(&pool, &instance_id)
+    let instance = db::get_instance(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -173,14 +233,12 @@ async fn test_update_instance_result() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .expect("Failed to create instance");
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Update with success result
     let output = serde_json::json!({"result": "success"});
     let output_bytes = serde_json::to_vec(&output).unwrap();
-    runtara_environment::db::update_instance_result(
+    update_test_instance_result(
         &pool,
         &instance_id,
         "completed",
@@ -189,10 +247,9 @@ async fn test_update_instance_result() {
         None,
         None, // stderr
     )
-    .await
-    .expect("Failed to update result");
+    .await;
 
-    let instance = runtara_environment::db::get_instance(&pool, &instance_id)
+    let instance = db::get_instance(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -230,12 +287,10 @@ async fn test_update_instance_result_with_error() {
         .expect("Failed to create test image");
 
     // Create instance
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .expect("Failed to create instance");
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Update with error result (include stderr for debugging)
-    runtara_environment::db::update_instance_result(
+    update_test_instance_result(
         &pool,
         &instance_id,
         "failed",
@@ -244,10 +299,9 @@ async fn test_update_instance_result_with_error() {
         None,
         Some("thread 'main' panicked at 'assertion failed'"), // stderr
     )
-    .await
-    .expect("Failed to update result");
+    .await;
 
-    let instance = runtara_environment::db::get_instance(&pool, &instance_id)
+    let instance = db::get_instance(&pool, &instance_id)
         .await
         .expect("Failed to get instance")
         .expect("Instance not found");
@@ -289,36 +343,32 @@ async fn test_list_instances() {
     // Create multiple instances
     let ids: Vec<_> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
     for id in &ids {
-        runtara_environment::db::create_instance(&pool, id, tenant_id, &image_id, None, None)
-            .await
-            .expect("Failed to create instance");
+        create_test_instance(&pool, id, tenant_id, &image_id).await;
     }
 
     // Mark one as completed
-    runtara_environment::db::update_instance_status(&pool, &ids[0], "completed", None)
-        .await
-        .expect("Failed to update status");
+    update_test_instance_status(&pool, &ids[0], "completed", None).await;
 
     // List all
-    let options = runtara_environment::db::ListInstancesOptions {
+    let options = db::ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         limit: 100,
         ..Default::default()
     };
-    let instances = runtara_environment::db::list_instances(&pool, &options)
+    let instances = db::list_instances(&pool, &options)
         .await
         .expect("Failed to list instances");
 
     assert_eq!(instances.len(), 3);
 
     // List by status
-    let options = runtara_environment::db::ListInstancesOptions {
+    let options = db::ListInstancesOptions {
         tenant_id: Some(tenant_id.to_string()),
         status: Some("completed".to_string()),
         limit: 100,
         ..Default::default()
     };
-    let completed = runtara_environment::db::list_instances(&pool, &options)
+    let completed = db::list_instances(&pool, &options)
         .await
         .expect("Failed to list instances");
 
@@ -349,9 +399,7 @@ async fn test_health_check() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");
 
-    let healthy = runtara_environment::db::health_check(&pool)
-        .await
-        .expect("Health check failed");
+    let healthy = db::health_check(&pool).await.expect("Health check failed");
 
     assert!(healthy);
 }
@@ -379,19 +427,10 @@ async fn test_create_instance_with_env() {
     env.insert("API_URL".to_string(), "https://api.example.com".to_string());
     env.insert("DEBUG".to_string(), "true".to_string());
 
-    runtara_environment::db::create_instance(
-        &pool,
-        &instance_id,
-        tenant_id,
-        &image_id,
-        None,
-        Some(&env),
-    )
-    .await
-    .expect("Failed to create instance with env");
+    create_test_instance_with_env(&pool, &instance_id, tenant_id, &image_id, Some(&env)).await;
 
     // Retrieve and verify env vars
-    let result = runtara_environment::db::get_instance_image_with_env(&pool, &instance_id)
+    let result = db::get_instance_image_with_env(&pool, &instance_id)
         .await
         .expect("Failed to get instance env");
 
@@ -433,12 +472,10 @@ async fn test_create_instance_without_env() {
         .expect("Failed to create test image");
 
     // Create instance without env vars
-    runtara_environment::db::create_instance(&pool, &instance_id, tenant_id, &image_id, None, None)
-        .await
-        .expect("Failed to create instance");
+    create_test_instance(&pool, &instance_id, tenant_id, &image_id).await;
 
     // Retrieve and verify empty env
-    let result = runtara_environment::db::get_instance_image_with_env(&pool, &instance_id)
+    let result = db::get_instance_image_with_env(&pool, &instance_id)
         .await
         .expect("Failed to get instance env");
 
@@ -469,10 +506,9 @@ async fn test_get_instance_image_with_env_not_found() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");
 
-    let result =
-        runtara_environment::db::get_instance_image_with_env(&pool, "nonexistent-instance")
-            .await
-            .expect("Query should succeed");
+    let result = db::get_instance_image_with_env(&pool, "nonexistent-instance")
+        .await
+        .expect("Query should succeed");
 
     assert!(result.is_none(), "Expected None for nonexistent instance");
 }
