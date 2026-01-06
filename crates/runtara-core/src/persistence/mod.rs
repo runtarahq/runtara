@@ -164,6 +164,91 @@ pub trait Persistence: Send + Sync {
         error: Option<&str>,
     ) -> Result<(), CoreError>;
 
+    /// Complete an instance with extended fields (stderr, checkpoint).
+    ///
+    /// This is an extended version of `complete_instance` that supports additional
+    /// fields needed by the Environment layer. The default implementation calls
+    /// the basic `complete_instance` and ignores the extra fields.
+    ///
+    /// Environment implementations should override this to store stderr and checkpoint.
+    async fn complete_instance_extended(
+        &self,
+        instance_id: &str,
+        status: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        _stderr: Option<&str>,
+        _checkpoint_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        // Default: delegate to basic complete_instance, ignoring stderr/checkpoint
+        let error_for_basic = if status == "failed" { error } else { None };
+        let output_for_basic = if status == "completed" { output } else { None };
+        self.complete_instance(instance_id, output_for_basic, error_for_basic)
+            .await
+    }
+
+    /// Complete an instance only if its current status is 'running'.
+    ///
+    /// This prevents race conditions where both Core (via SDK) and Environment
+    /// (via container monitor) try to complete the same instance. Returns true
+    /// if the update was applied, false if skipped.
+    ///
+    /// Default implementation always applies the update (no guard).
+    async fn complete_instance_if_running(
+        &self,
+        instance_id: &str,
+        status: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        // Default: always apply (returns true)
+        self.complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
+            .await?;
+        Ok(true)
+    }
+
+    /// Update execution metrics for an instance (memory, CPU usage).
+    ///
+    /// This is an environment-specific operation for storing cgroup metrics.
+    /// Core implementations can ignore this (default is no-op).
+    async fn update_instance_metrics(
+        &self,
+        _instance_id: &str,
+        _memory_peak_bytes: Option<u64>,
+        _cpu_usage_usec: Option<u64>,
+    ) -> Result<(), CoreError> {
+        // Default: no-op (Core doesn't track metrics)
+        Ok(())
+    }
+
+    /// Update instance stderr output.
+    ///
+    /// This is an environment-specific operation for storing container stderr.
+    /// Core implementations can ignore this (default is no-op).
+    async fn update_instance_stderr(
+        &self,
+        _instance_id: &str,
+        _stderr: &str,
+    ) -> Result<(), CoreError> {
+        // Default: no-op (Core doesn't track stderr)
+        Ok(())
+    }
+
+    /// Store input data for an instance.
+    ///
+    /// This is an environment-specific operation for storing instance input.
+    /// Core implementations can ignore this (default is no-op).
+    async fn store_instance_input(
+        &self,
+        _instance_id: &str,
+        _input: &[u8],
+    ) -> Result<(), CoreError> {
+        // Default: no-op (Core doesn't store input)
+        Ok(())
+    }
+
     async fn save_checkpoint(
         &self,
         instance_id: &str,

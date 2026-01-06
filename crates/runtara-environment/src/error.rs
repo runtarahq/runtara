@@ -28,6 +28,10 @@ pub enum Error {
     #[error("Runner error: {0}")]
     Runner(#[from] crate::runner::RunnerError),
 
+    /// Core persistence operation failed.
+    #[error("Core error: {0}")]
+    Core(#[from] runtara_core::error::CoreError),
+
     /// Image was not found.
     #[error("Image not found: {0}")]
     ImageNotFound(String),

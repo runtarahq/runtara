@@ -42,8 +42,8 @@ pub struct EnvironmentHandlerState {
     /// PostgreSQL connection pool (for Environment-specific tables: images, containers, etc.).
     pub pool: PgPool,
     /// Core persistence layer (for instance lifecycle, checkpoints, signals).
-    /// When set, instance operations are delegated to Core's shared persistence.
-    pub core_persistence: Option<Arc<dyn Persistence>>,
+    /// All instance write operations are delegated to this shared persistence layer.
+    pub persistence: Arc<dyn Persistence>,
     /// When the server started (for uptime calculation).
     pub start_time: std::time::Instant,
     /// Server version string.
@@ -63,39 +63,24 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl EnvironmentHandlerState {
     /// Create a new environment handler state.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - PostgreSQL pool for Environment-specific queries (reads with JOINs)
+    /// * `persistence` - Core persistence layer for all instance write operations
+    /// * `runner` - Container runner for launching instances
+    /// * `core_addr` - Address of runtara-core for instances to connect
+    /// * `data_dir` - Data directory for images and instance I/O
     pub fn new(
         pool: PgPool,
+        persistence: Arc<dyn Persistence>,
         runner: Arc<dyn Runner>,
         core_addr: String,
         data_dir: PathBuf,
     ) -> Self {
         Self {
             pool,
-            core_persistence: None,
-            start_time: std::time::Instant::now(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            runner,
-            core_addr,
-            data_dir: ensure_absolute_path(data_dir),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-        }
-    }
-
-    /// Create a new environment handler state with Core persistence.
-    ///
-    /// When Core persistence is provided, instance lifecycle operations
-    /// (create, update status, etc.) are delegated to Core's shared persistence layer.
-    /// This enables both Environment and Core to share the same instance data.
-    pub fn with_core_persistence(
-        pool: PgPool,
-        core_persistence: Arc<dyn Persistence>,
-        runner: Arc<dyn Runner>,
-        core_addr: String,
-        data_dir: PathBuf,
-    ) -> Self {
-        Self {
-            pool,
-            core_persistence: Some(core_persistence),
+            persistence,
             start_time: std::time::Instant::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             runner,
@@ -425,17 +410,43 @@ pub async fn handle_start_instance(
     } else {
         Some(&request.env)
     };
-    if let Err(e) = db::create_instance(
+
+    // Create instance in Core's table via Persistence trait
+    if let Err(e) = state
+        .persistence
+        .register_instance(&instance_id, &request.tenant_id)
+        .await
+    {
+        error!(error = %e, "Failed to register instance via Persistence");
+        return Ok(StartInstanceResponse {
+            success: false,
+            instance_id: String::new(),
+            error: Some(format!("Failed to create instance: {}", e)),
+        });
+    }
+
+    // Store input data via Persistence trait
+    if let Some(ref input_data) = input_bytes {
+        if let Err(e) = state
+            .persistence
+            .store_instance_input(&instance_id, input_data)
+            .await
+        {
+            warn!(error = %e, "Failed to store instance input (non-fatal)");
+        }
+    }
+
+    // Associate instance with image in Environment's table (Environment-specific data)
+    if let Err(e) = db::associate_instance_image(
         &state.pool,
         &instance_id,
-        &request.tenant_id,
         &request.image_id,
-        input_bytes.as_deref(),
+        &request.tenant_id,
         env_for_db,
     )
     .await
     {
-        error!(error = %e, "Failed to create instance in DB");
+        error!(error = %e, "Failed to associate instance with image");
         return Ok(StartInstanceResponse {
             success: false,
             instance_id: String::new(),
@@ -485,8 +496,11 @@ pub async fn handle_start_instance(
                 warn!(error = %e, "Failed to register container (instance still running)");
             }
 
-            // Update instance status to running
-            let _ = db::update_instance_status(&state.pool, &instance_id, "running", None).await;
+            // Update instance status to running via Persistence trait
+            let _ = state
+                .persistence
+                .update_instance_status(&instance_id, "running", Some(chrono::Utc::now()))
+                .await;
 
             // Spawn background task to monitor container and process output when done
             spawn_container_monitor(
@@ -495,7 +509,7 @@ pub async fn handle_start_instance(
                 handle,
                 tenant_id_for_monitor,
                 state.data_dir.clone(),
-                state.core_persistence.clone(),
+                state.persistence.clone(),
             );
 
             Ok(StartInstanceResponse {
@@ -506,7 +520,10 @@ pub async fn handle_start_instance(
         }
         Err(e) => {
             error!(error = %e, "Failed to launch instance");
-            let _ = db::update_instance_status(&state.pool, &instance_id, "failed", None).await;
+            let _ = state
+                .persistence
+                .complete_instance(&instance_id, None, Some(&format!("Launch failed: {}", e)))
+                .await;
 
             Ok(StartInstanceResponse {
                 success: false,
@@ -593,8 +610,11 @@ pub async fn handle_stop_instance(
         warn!(error = %e, "Runner stop returned error");
     }
 
-    // Update instance status
-    let _ = db::update_instance_status(&state.pool, &request.instance_id, "cancelled", None).await;
+    // Update instance status to cancelled via Persistence trait
+    let _ = state
+        .persistence
+        .complete_instance_extended(&request.instance_id, "cancelled", None, None, None, None)
+        .await;
 
     // Clean up container registry
     let _ = container_registry.cleanup(&request.instance_id).await;
@@ -756,14 +776,22 @@ pub async fn handle_resume_instance(
                 warn!(error = %e, "Failed to register container");
             }
 
-            // Update status
-            let _ = db::update_instance_status(
-                &state.pool,
-                &request.instance_id,
-                "running",
-                Some(&checkpoint_id),
-            )
-            .await;
+            // Update status via Persistence trait
+            if let Err(e) = state
+                .persistence
+                .update_instance_status(&request.instance_id, "running", Some(chrono::Utc::now()))
+                .await
+            {
+                warn!(error = %e, "Failed to update instance status to running");
+            }
+            // Also update checkpoint_id
+            if let Err(e) = state
+                .persistence
+                .update_instance_checkpoint(&request.instance_id, &checkpoint_id)
+                .await
+            {
+                warn!(error = %e, "Failed to update instance checkpoint");
+            }
 
             // Spawn background task to monitor container and process output when done
             spawn_container_monitor(
@@ -772,7 +800,7 @@ pub async fn handle_resume_instance(
                 handle,
                 tenant_id_for_monitor,
                 state.data_dir.clone(),
-                state.core_persistence.clone(),
+                state.persistence.clone(),
             );
 
             Ok(ResumeInstanceResponse {
@@ -798,7 +826,7 @@ pub async fn handle_resume_instance(
 struct OutputProcessorState {
     pool: PgPool,
     data_dir: PathBuf,
-    core_persistence: Option<Arc<dyn Persistence>>,
+    persistence: Arc<dyn Persistence>,
 }
 
 /// Spawn a background task that monitors the container and processes output when done.
@@ -811,7 +839,7 @@ pub fn spawn_container_monitor(
     handle: RunnerHandle,
     tenant_id: String,
     data_dir: PathBuf,
-    core_persistence: Option<Arc<dyn Persistence>>,
+    persistence: Arc<dyn Persistence>,
 ) {
     let instance_id = handle.instance_id.clone();
 
@@ -832,15 +860,15 @@ pub fn spawn_container_monitor(
                 // Collect metrics and stderr from cgroup before container cleanup
                 let (_output, stderr, metrics) = runner.collect_result(&handle).await;
 
-                // Store metrics in database
+                // Store metrics via Persistence trait
                 if metrics.memory_peak_bytes.is_some() || metrics.cpu_usage_usec.is_some() {
-                    if let Err(e) = db::update_instance_metrics(
-                        &pool,
-                        &instance_id,
-                        metrics.memory_peak_bytes,
-                        metrics.cpu_usage_usec,
-                    )
-                    .await
+                    if let Err(e) = persistence
+                        .update_instance_metrics(
+                            &instance_id,
+                            metrics.memory_peak_bytes,
+                            metrics.cpu_usage_usec,
+                        )
+                        .await
                     {
                         warn!(
                             instance_id = %instance_id,
@@ -857,10 +885,11 @@ pub fn spawn_container_monitor(
                     }
                 }
 
-                // Store stderr in database for debugging (even if instance succeeds via Core)
+                // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
                 if let Some(ref stderr_content) = stderr {
-                    if let Err(e) =
-                        db::update_instance_stderr(&pool, &instance_id, stderr_content).await
+                    if let Err(e) = persistence
+                        .update_instance_stderr(&instance_id, stderr_content)
+                        .await
                     {
                         warn!(
                             instance_id = %instance_id,
@@ -880,7 +909,7 @@ pub fn spawn_container_monitor(
                 let output_state = OutputProcessorState {
                     pool: pool.clone(),
                     data_dir: data_dir.clone(),
-                    core_persistence: core_persistence.clone(),
+                    persistence: persistence.clone(),
                 };
 
                 if let Err(e) = process_output(&output_state, &instance_id, &tenant_id).await {
@@ -980,6 +1009,9 @@ async fn process_output(
 }
 
 /// Inner function to process the output once we have it.
+///
+/// Uses `complete_instance_if_running` from Persistence trait which only updates
+/// if status is 'running' - this prevents race conditions with Core's SDK events.
 async fn process_output_inner(
     state: &OutputProcessorState,
     instance_id: &str,
@@ -991,23 +1023,24 @@ async fn process_output_inner(
         "Processing instance output"
     );
 
-    // Use conditional updates to avoid overwriting status set by Core via SDK events
+    // Use conditional updates via Persistence trait to avoid overwriting status set by Core
     match output.status {
         InstanceOutputStatus::Completed => {
             let result_bytes = output
                 .result
                 .as_ref()
                 .and_then(|v| serde_json::to_vec(v).ok());
-            let updated = db::update_instance_result_if_running(
-                &state.pool,
-                instance_id,
-                "completed",
-                result_bytes.as_deref(),
-                None,
-                None, // stderr - not available from output.json
-                None,
-            )
-            .await?;
+            let updated = state
+                .persistence
+                .complete_instance_if_running(
+                    instance_id,
+                    "completed",
+                    result_bytes.as_deref(),
+                    None,
+                    None, // stderr - not available from output.json
+                    None,
+                )
+                .await?;
             if !updated {
                 debug!(
                     instance_id = %instance_id,
@@ -1016,16 +1049,17 @@ async fn process_output_inner(
             }
         }
         InstanceOutputStatus::Failed => {
-            let updated = db::update_instance_result_if_running(
-                &state.pool,
-                instance_id,
-                "failed",
-                None,
-                output.error.as_deref(),
-                None, // stderr - not available from output.json
-                None,
-            )
-            .await?;
+            let updated = state
+                .persistence
+                .complete_instance_if_running(
+                    instance_id,
+                    "failed",
+                    None,
+                    output.error.as_deref(),
+                    None, // stderr - not available from output.json
+                    None,
+                )
+                .await?;
             if !updated {
                 debug!(
                     instance_id = %instance_id,
@@ -1034,16 +1068,17 @@ async fn process_output_inner(
             }
         }
         InstanceOutputStatus::Suspended => {
-            let updated = db::update_instance_result_if_running(
-                &state.pool,
-                instance_id,
-                "suspended",
-                None,
-                None,
-                None, // stderr
-                output.checkpoint_id.as_deref(),
-            )
-            .await?;
+            let updated = state
+                .persistence
+                .complete_instance_if_running(
+                    instance_id,
+                    "suspended",
+                    None,
+                    None,
+                    None, // stderr
+                    output.checkpoint_id.as_deref(),
+                )
+                .await?;
             if !updated {
                 debug!(
                     instance_id = %instance_id,
@@ -1059,39 +1094,37 @@ async fn process_output_inner(
                 let wake_at =
                     chrono::Utc::now() + chrono::Duration::milliseconds(wake_after_ms as i64);
 
-                let updated = db::update_instance_result_if_running(
-                    &state.pool,
-                    instance_id,
-                    "suspended",
-                    None,
-                    None,
-                    None, // stderr
-                    Some(&checkpoint_id),
-                )
-                .await?;
+                let updated = state
+                    .persistence
+                    .complete_instance_if_running(
+                        instance_id,
+                        "suspended",
+                        None,
+                        None,
+                        None, // stderr
+                        Some(&checkpoint_id),
+                    )
+                    .await?;
 
                 // Only schedule wake if we actually updated the status
                 if updated {
-                    // Set sleep_until via Core persistence for wake scheduler
-                    if let Some(ref persistence) = state.core_persistence {
-                        if let Err(e) = persistence.set_instance_sleep(instance_id, wake_at).await {
-                            error!(
-                                instance_id = %instance_id,
-                                error = %e,
-                                "Failed to set sleep_until"
-                            );
-                        } else {
-                            info!(
-                                instance_id = %instance_id,
-                                wake_at = %wake_at,
-                                checkpoint_id = %checkpoint_id,
-                                "Scheduled wake for sleeping instance"
-                            );
-                        }
-                    } else {
-                        warn!(
+                    // Set sleep_until via Persistence trait for wake scheduler
+                    if let Err(e) = state
+                        .persistence
+                        .set_instance_sleep(instance_id, wake_at)
+                        .await
+                    {
+                        error!(
                             instance_id = %instance_id,
-                            "Cannot schedule wake: core_persistence not configured"
+                            error = %e,
+                            "Failed to set sleep_until"
+                        );
+                    } else {
+                        info!(
+                            instance_id = %instance_id,
+                            wake_at = %wake_at,
+                            checkpoint_id = %checkpoint_id,
+                            "Scheduled wake for sleeping instance"
                         );
                     }
                 } else {
@@ -1105,29 +1138,24 @@ async fn process_output_inner(
                     instance_id = %instance_id,
                     "Sleeping output missing wake_after_ms or checkpoint_id"
                 );
-                let _ = db::update_instance_result_if_running(
-                    &state.pool,
-                    instance_id,
-                    "failed",
-                    None,
-                    Some("Invalid sleep output"),
-                    None, // stderr
-                    None,
-                )
-                .await?;
+                let _ = state
+                    .persistence
+                    .complete_instance_if_running(
+                        instance_id,
+                        "failed",
+                        None,
+                        Some("Invalid sleep output"),
+                        None, // stderr
+                        None,
+                    )
+                    .await?;
             }
         }
         InstanceOutputStatus::Cancelled => {
-            let _ = db::update_instance_result_if_running(
-                &state.pool,
-                instance_id,
-                "cancelled",
-                None,
-                None,
-                None, // stderr
-                None,
-            )
-            .await?;
+            let _ = state
+                .persistence
+                .complete_instance_if_running(instance_id, "cancelled", None, None, None, None)
+                .await?;
         }
     }
 

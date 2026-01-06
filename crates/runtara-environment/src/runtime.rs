@@ -261,10 +261,13 @@ impl EnvironmentRuntimeBuilder {
         let runner = self
             .runner
             .ok_or_else(|| anyhow::anyhow!("runner is required"))?;
+        let persistence = self
+            .core_persistence
+            .ok_or_else(|| anyhow::anyhow!("core_persistence is required"))?;
 
         Ok(EnvironmentRuntimeConfig {
             pool,
-            core_persistence: self.core_persistence,
+            persistence,
             runner,
             bind_addr: self.bind_addr,
             core_addr: self.core_addr,
@@ -284,7 +287,7 @@ impl EnvironmentRuntimeBuilder {
 /// Configuration for an [`EnvironmentRuntime`].
 pub struct EnvironmentRuntimeConfig {
     pool: PgPool,
-    core_persistence: Option<Arc<dyn Persistence>>,
+    persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
     bind_addr: SocketAddr,
     core_addr: String,
@@ -302,17 +305,15 @@ pub struct EnvironmentRuntimeConfig {
 impl EnvironmentRuntimeConfig {
     /// Start the runtime, spawning the QUIC server and wake scheduler tasks.
     pub async fn start(self) -> Result<EnvironmentRuntime> {
-        // Start embedded CoreRuntime if both core_persistence and core_bind_addr are configured
-        let core_runtime = if let (Some(persistence), Some(core_bind_addr)) =
-            (&self.core_persistence, self.core_bind_addr)
-        {
+        // Start embedded CoreRuntime if core_bind_addr is configured
+        let core_runtime = if let Some(core_bind_addr) = self.core_bind_addr {
             info!(
                 bind_addr = %core_bind_addr,
                 "Starting embedded CoreRuntime"
             );
 
             let core = CoreRuntime::builder()
-                .persistence(persistence.clone())
+                .persistence(self.persistence.clone())
                 .bind_addr(core_bind_addr)
                 .build()?
                 .start()
@@ -320,66 +321,45 @@ impl EnvironmentRuntimeConfig {
 
             Some(core)
         } else {
-            if self.core_persistence.is_some() && self.core_bind_addr.is_none() {
-                debug!(
-                    core_addr = %self.core_addr,
-                    "core_persistence set but core_bind_addr not configured; instances will connect to external Core"
-                );
-            }
+            debug!(
+                core_addr = %self.core_addr,
+                "core_bind_addr not configured; instances will connect to external Core"
+            );
             None
         };
 
         // Create handler state
-        let state = if let Some(ref persistence) = self.core_persistence {
-            Arc::new(
-                EnvironmentHandlerState::with_core_persistence(
-                    self.pool.clone(),
-                    persistence.clone(),
-                    self.runner.clone(),
-                    self.core_addr.clone(),
-                    self.data_dir.clone(),
-                )
-                .with_request_timeout(self.request_timeout),
-            )
-        } else {
-            Arc::new(
-                EnvironmentHandlerState::new(
-                    self.pool.clone(),
-                    self.runner.clone(),
-                    self.core_addr.clone(),
-                    self.data_dir.clone(),
-                )
-                .with_request_timeout(self.request_timeout),
-            )
-        };
-
-        // Create wake scheduler (requires core_persistence to query sleeping instances)
-        let (wake_handle, wake_shutdown) = if let Some(ref persistence) = self.core_persistence {
-            let wake_config = WakeSchedulerConfig {
-                poll_interval: self.wake_poll_interval,
-                batch_size: self.wake_batch_size,
-                core_addr: self.core_addr.clone(),
-                data_dir: self.data_dir.clone(),
-            };
-
-            let wake_scheduler = WakeScheduler::new(
+        let state = Arc::new(
+            EnvironmentHandlerState::new(
                 self.pool.clone(),
-                persistence.clone(),
+                self.persistence.clone(),
                 self.runner.clone(),
-                wake_config,
-            );
+                self.core_addr.clone(),
+                self.data_dir.clone(),
+            )
+            .with_request_timeout(self.request_timeout),
+        );
 
-            let shutdown = wake_scheduler.shutdown_handle();
-
-            let handle = tokio::spawn(async move {
-                wake_scheduler.run().await;
-            });
-
-            (Some(handle), Some(shutdown))
-        } else {
-            info!("Wake scheduler disabled: core_persistence not configured");
-            (None, None)
+        // Create wake scheduler
+        let wake_config = WakeSchedulerConfig {
+            poll_interval: self.wake_poll_interval,
+            batch_size: self.wake_batch_size,
+            core_addr: self.core_addr.clone(),
+            data_dir: self.data_dir.clone(),
         };
+
+        let wake_scheduler = WakeScheduler::new(
+            self.pool.clone(),
+            self.persistence.clone(),
+            self.runner.clone(),
+            wake_config,
+        );
+
+        let wake_shutdown = wake_scheduler.shutdown_handle();
+
+        let wake_handle = tokio::spawn(async move {
+            wake_scheduler.run().await;
+        });
 
         // Create cleanup worker
         let cleanup_config = CleanupWorkerConfig {
@@ -395,26 +375,21 @@ impl EnvironmentRuntimeConfig {
             cleanup_worker.run().await;
         });
 
-        // Create heartbeat monitor (only if core_persistence is available)
-        let (heartbeat_handle, heartbeat_shutdown) =
-            if let Some(ref persistence) = self.core_persistence {
-                let heartbeat_config = HeartbeatMonitorConfig {
-                    poll_interval: self.heartbeat_poll_interval,
-                    heartbeat_timeout: self.heartbeat_timeout,
-                };
-                let heartbeat_monitor =
-                    HeartbeatMonitor::new(self.pool.clone(), persistence.clone(), heartbeat_config);
-                let shutdown = heartbeat_monitor.shutdown_handle();
+        // Create heartbeat monitor
+        let heartbeat_config = HeartbeatMonitorConfig {
+            poll_interval: self.heartbeat_poll_interval,
+            heartbeat_timeout: self.heartbeat_timeout,
+        };
+        let heartbeat_monitor = HeartbeatMonitor::new(
+            self.pool.clone(),
+            self.persistence.clone(),
+            heartbeat_config,
+        );
+        let heartbeat_shutdown = heartbeat_monitor.shutdown_handle();
 
-                let handle = tokio::spawn(async move {
-                    heartbeat_monitor.run().await;
-                });
-
-                (Some(handle), Some(shutdown))
-            } else {
-                info!("Heartbeat monitor disabled: core_persistence not configured");
-                (None, None)
-            };
+        let heartbeat_handle = tokio::spawn(async move {
+            heartbeat_monitor.run().await;
+        });
 
         // Start QUIC server task
         let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
@@ -462,14 +437,14 @@ impl EnvironmentRuntimeConfig {
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct EnvironmentRuntime {
     server_handle: JoinHandle<Result<()>>,
-    wake_handle: Option<JoinHandle<()>>,
+    wake_handle: JoinHandle<()>,
     cleanup_handle: JoinHandle<()>,
-    heartbeat_handle: Option<JoinHandle<()>>,
+    heartbeat_handle: JoinHandle<()>,
     core_runtime: Option<CoreRuntime>,
     server_shutdown_tx: watch::Sender<bool>,
-    wake_shutdown: Option<Arc<Notify>>,
+    wake_shutdown: Arc<Notify>,
     cleanup_shutdown: Arc<Notify>,
-    heartbeat_shutdown: Option<Arc<Notify>>,
+    heartbeat_shutdown: Arc<Notify>,
     state: Arc<EnvironmentHandlerState>,
     bind_addr: SocketAddr,
 }
@@ -501,24 +476,18 @@ impl EnvironmentRuntime {
         // Signal server shutdown
         let _ = self.server_shutdown_tx.send(true);
 
-        // Signal wake scheduler shutdown (if running)
-        if let Some(ref shutdown) = self.wake_shutdown {
-            shutdown.notify_one();
-        }
+        // Signal wake scheduler shutdown
+        self.wake_shutdown.notify_one();
 
         // Signal cleanup worker shutdown
         self.cleanup_shutdown.notify_one();
 
-        // Signal heartbeat monitor shutdown (if running)
-        if let Some(ref shutdown) = self.heartbeat_shutdown {
-            shutdown.notify_one();
-        }
+        // Signal heartbeat monitor shutdown
+        self.heartbeat_shutdown.notify_one();
 
-        // Wait for wake scheduler (if running)
-        if let Some(handle) = self.wake_handle {
-            if let Err(e) = handle.await {
-                error!("Wake scheduler task panicked: {}", e);
-            }
+        // Wait for wake scheduler
+        if let Err(e) = self.wake_handle.await {
+            error!("Wake scheduler task panicked: {}", e);
         }
 
         // Wait for cleanup worker
@@ -526,11 +495,9 @@ impl EnvironmentRuntime {
             error!("Cleanup worker task panicked: {}", e);
         }
 
-        // Wait for heartbeat monitor (if running)
-        if let Some(handle) = self.heartbeat_handle {
-            if let Err(e) = handle.await {
-                error!("Heartbeat monitor task panicked: {}", e);
-            }
+        // Wait for heartbeat monitor
+        if let Err(e) = self.heartbeat_handle.await {
+            error!("Heartbeat monitor task panicked: {}", e);
         }
 
         // Shutdown embedded CoreRuntime (if running)
@@ -559,17 +526,12 @@ impl EnvironmentRuntime {
 
     /// Check if the runtime is still running.
     pub fn is_running(&self) -> bool {
-        let heartbeat_running = self
-            .heartbeat_handle
-            .as_ref()
-            .is_none_or(|h| !h.is_finished());
-
         let core_running = self.core_runtime.as_ref().is_none_or(|c| c.is_running());
 
         !self.server_handle.is_finished()
-            && self.wake_handle.as_ref().is_none_or(|h| !h.is_finished())
+            && !self.wake_handle.is_finished()
             && !self.cleanup_handle.is_finished()
-            && heartbeat_running
+            && !self.heartbeat_handle.is_finished()
             && core_running
     }
 

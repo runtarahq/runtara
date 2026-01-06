@@ -194,6 +194,164 @@ pub async fn complete_instance(
     Ok(())
 }
 
+/// Complete an instance with extended fields (stderr, checkpoint).
+///
+/// This is the full version that supports all fields needed by Environment.
+pub async fn complete_instance_extended(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    stderr: Option<&str>,
+    checkpoint_id: Option<&str>,
+) -> Result<(), CoreError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE instances
+        SET status = $2::instance_status,
+            output = $3,
+            error = $4,
+            stderr = COALESCE($5, stderr),
+            checkpoint_id = COALESCE($6, checkpoint_id),
+            finished_at = CASE
+                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
+                ELSE finished_at
+            END
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(status)
+    .bind(output)
+    .bind(error)
+    .bind(stderr)
+    .bind(checkpoint_id)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(CoreError::InstanceNotFound {
+            instance_id: instance_id.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Complete an instance only if its current status is 'running'.
+///
+/// This prevents race conditions where both Core (via SDK) and Environment
+/// (via container monitor) try to complete the same instance.
+/// Returns true if the update was applied, false if skipped.
+pub async fn complete_instance_if_running(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    stderr: Option<&str>,
+    checkpoint_id: Option<&str>,
+) -> Result<bool, CoreError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE instances
+        SET status = $2::instance_status,
+            output = $3,
+            error = $4,
+            stderr = COALESCE($5, stderr),
+            checkpoint_id = COALESCE($6, checkpoint_id),
+            finished_at = CASE
+                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
+                ELSE finished_at
+            END
+        WHERE instance_id = $1 AND status = 'running'
+        "#,
+    )
+    .bind(instance_id)
+    .bind(status)
+    .bind(output)
+    .bind(error)
+    .bind(stderr)
+    .bind(checkpoint_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Update execution metrics for an instance.
+///
+/// Stores cgroup-collected resource usage metrics (memory, CPU) after container execution.
+/// Only updates if metrics are not already set (first writer wins).
+pub async fn update_instance_metrics(
+    pool: &PgPool,
+    instance_id: &str,
+    memory_peak_bytes: Option<u64>,
+    cpu_usage_usec: Option<u64>,
+) -> Result<(), CoreError> {
+    sqlx::query(
+        r#"
+        UPDATE instances
+        SET memory_peak_bytes = COALESCE(memory_peak_bytes, $2),
+            cpu_usage_usec = COALESCE(cpu_usage_usec, $3)
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(memory_peak_bytes.map(|v| v as i64))
+    .bind(cpu_usage_usec.map(|v| v as i64))
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Update instance stderr (raw container stderr output).
+///
+/// Stores stderr from container execution for debugging/logging purposes.
+/// Only updates if stderr is not already set (first writer wins).
+pub async fn update_instance_stderr(
+    pool: &PgPool,
+    instance_id: &str,
+    stderr: &str,
+) -> Result<(), CoreError> {
+    sqlx::query(
+        r#"
+        UPDATE instances
+        SET stderr = COALESCE(stderr, $2)
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(stderr)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Store input data for an instance.
+pub async fn store_instance_input(
+    pool: &PgPool,
+    instance_id: &str,
+    input: &[u8],
+) -> Result<(), CoreError> {
+    sqlx::query(
+        r#"
+        UPDATE instances
+        SET input = $2
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(input)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 // ============================================================================
 // Checkpoint Operations
 // ============================================================================
@@ -1002,6 +1160,69 @@ impl Persistence for PostgresPersistence {
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
         count_events(&self.pool, instance_id, filter).await
+    }
+
+    async fn complete_instance_extended(
+        &self,
+        instance_id: &str,
+        status: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        complete_instance_extended(
+            &self.pool,
+            instance_id,
+            status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
+        )
+        .await
+    }
+
+    async fn complete_instance_if_running(
+        &self,
+        instance_id: &str,
+        status: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        complete_instance_if_running(
+            &self.pool,
+            instance_id,
+            status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
+        )
+        .await
+    }
+
+    async fn update_instance_metrics(
+        &self,
+        instance_id: &str,
+        memory_peak_bytes: Option<u64>,
+        cpu_usage_usec: Option<u64>,
+    ) -> Result<(), CoreError> {
+        update_instance_metrics(&self.pool, instance_id, memory_peak_bytes, cpu_usage_usec).await
+    }
+
+    async fn update_instance_stderr(
+        &self,
+        instance_id: &str,
+        stderr: &str,
+    ) -> Result<(), CoreError> {
+        update_instance_stderr(&self.pool, instance_id, stderr).await
+    }
+
+    async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
+        store_instance_input(&self.pool, instance_id, input).await
     }
 }
 

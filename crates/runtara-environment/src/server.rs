@@ -819,19 +819,9 @@ async fn handle_send_signal(
         "Sending signal via shared persistence"
     );
 
-    // Check if we have Core persistence available
-    let persistence = match &state.core_persistence {
-        Some(p) => p,
-        None => {
-            return Ok(environment_proto::SendSignalResponse {
-                success: false,
-                error: "Core persistence not configured".to_string(),
-            });
-        }
-    };
-
     // Validate instance exists
-    let instance = persistence
+    let instance = state
+        .persistence
         .get_instance(&req.instance_id)
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to get instance: {}", e)))?;
@@ -872,7 +862,8 @@ async fn handle_send_signal(
     };
 
     // Insert pending signal via persistence
-    persistence
+    state
+        .persistence
         .insert_signal(&req.instance_id, signal_type, &req.payload)
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to insert signal: {}", e)))?;
@@ -895,19 +886,9 @@ async fn handle_send_custom_signal(
         "Sending custom signal via shared persistence"
     );
 
-    // Check if we have Core persistence available
-    let persistence = match &state.core_persistence {
-        Some(p) => p,
-        None => {
-            return Ok(environment_proto::SendCustomSignalResponse {
-                success: false,
-                error: "Core persistence not configured".to_string(),
-            });
-        }
-    };
-
     // Validate instance exists
-    let instance = persistence
+    let instance = state
+        .persistence
         .get_instance(&req.instance_id)
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to get instance: {}", e)))?;
@@ -928,7 +909,8 @@ async fn handle_send_custom_signal(
     }
 
     // Store pending custom signal via persistence
-    persistence
+    state
+        .persistence
         .insert_custom_signal(&req.instance_id, &req.checkpoint_id, &req.payload)
         .await
         .map_err(|e| {
@@ -955,16 +937,6 @@ async fn handle_list_checkpoints(
         "Listing checkpoints via shared persistence"
     );
 
-    // Check if we have Core persistence available
-    let persistence = match &state.core_persistence {
-        Some(p) => p,
-        None => {
-            return Err(crate::error::Error::Other(
-                "Core persistence not configured".to_string(),
-            ));
-        }
-    };
-
     // Parse timestamps from milliseconds
     let created_after = req
         .created_after_ms
@@ -977,7 +949,8 @@ async fn handle_list_checkpoints(
     let offset = req.offset.unwrap_or(0) as i64;
 
     // Get checkpoints from persistence
-    let checkpoints = persistence
+    let checkpoints = state
+        .persistence
         .list_checkpoints(
             &req.instance_id,
             req.checkpoint_id.as_deref(),
@@ -990,7 +963,8 @@ async fn handle_list_checkpoints(
         .map_err(|e| crate::error::Error::Other(format!("Failed to list checkpoints: {}", e)))?;
 
     // Get total count for pagination
-    let total_count = persistence
+    let total_count = state
+        .persistence
         .count_checkpoints(
             &req.instance_id,
             req.checkpoint_id.as_deref(),
@@ -1029,17 +1003,8 @@ async fn handle_get_checkpoint(
         "Getting checkpoint via shared persistence"
     );
 
-    // Check if we have Core persistence available
-    let persistence = match &state.core_persistence {
-        Some(p) => p,
-        None => {
-            return Err(crate::error::Error::Other(
-                "Core persistence not configured".to_string(),
-            ));
-        }
-    };
-
-    let checkpoint = persistence
+    let checkpoint = state
+        .persistence
         .load_checkpoint(&req.instance_id, &req.checkpoint_id)
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to load checkpoint: {}", e)))?;
@@ -1078,16 +1043,6 @@ async fn handle_list_events(
         "Listing events via shared persistence"
     );
 
-    // Check if we have Core persistence available
-    let persistence = match &state.core_persistence {
-        Some(p) => p,
-        None => {
-            return Err(crate::error::Error::Other(
-                "Core persistence not configured".to_string(),
-            ));
-        }
-    };
-
     // Parse timestamps from milliseconds
     let created_after = req
         .created_after_ms
@@ -1109,13 +1064,15 @@ async fn handle_list_events(
     };
 
     // Get events from persistence
-    let events = persistence
+    let events = state
+        .persistence
         .list_events(&req.instance_id, &filter, limit, offset)
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to list events: {}", e)))?;
 
     // Get total count for pagination
-    let total_count = persistence
+    let total_count = state
+        .persistence
         .count_events(&req.instance_id, &filter)
         .await
         .map_err(|e| crate::error::Error::Other(format!("Failed to count events: {}", e)))?;

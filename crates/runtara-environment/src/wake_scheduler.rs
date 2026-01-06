@@ -235,7 +235,7 @@ impl WakeScheduler {
                     handle,
                     instance.tenant_id.clone(),
                     self.config.data_dir.clone(),
-                    Some(self.persistence.clone()),
+                    self.persistence.clone(),
                 );
             }
             Err(e) => {

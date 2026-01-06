@@ -202,6 +202,132 @@ impl Persistence for SqlitePersistence {
         Ok(())
     }
 
+    async fn complete_instance_extended(
+        &self,
+        instance_id: &str,
+        status: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = ?1,
+                finished_at = CURRENT_TIMESTAMP,
+                output = ?2,
+                error = ?3,
+                stderr = ?4,
+                checkpoint_id = COALESCE(?5, checkpoint_id)
+            WHERE instance_id = ?6
+            "#,
+        )
+        .bind(status)
+        .bind(output)
+        .bind(error)
+        .bind(stderr)
+        .bind(checkpoint_id)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn complete_instance_if_running(
+        &self,
+        instance_id: &str,
+        status: &str,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = ?1,
+                finished_at = CURRENT_TIMESTAMP,
+                output = ?2,
+                error = ?3,
+                stderr = ?4,
+                checkpoint_id = COALESCE(?5, checkpoint_id)
+            WHERE instance_id = ?6
+              AND status = 'running'
+            "#,
+        )
+        .bind(status)
+        .bind(output)
+        .bind(error)
+        .bind(stderr)
+        .bind(checkpoint_id)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_instance_metrics(
+        &self,
+        instance_id: &str,
+        memory_peak_bytes: Option<u64>,
+        cpu_usage_usec: Option<u64>,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            r#"
+            UPDATE instances
+            SET memory_peak_bytes = ?1,
+                cpu_usage_usec = ?2
+            WHERE instance_id = ?3
+            "#,
+        )
+        .bind(memory_peak_bytes.map(|v| v as i64))
+        .bind(cpu_usage_usec.map(|v| v as i64))
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_instance_stderr(
+        &self,
+        instance_id: &str,
+        stderr: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            r#"
+            UPDATE instances
+            SET stderr = ?1
+            WHERE instance_id = ?2
+            "#,
+        )
+        .bind(stderr)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
+        sqlx::query(
+            r#"
+            UPDATE instances
+            SET input = ?1
+            WHERE instance_id = ?2
+            "#,
+        )
+        .bind(input)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     async fn save_checkpoint(
         &self,
         instance_id: &str,
@@ -1299,5 +1425,198 @@ mod tests {
             .expect("Failed to count active instances");
 
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_complete_instance_extended() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        persistence
+            .complete_instance_extended(
+                &instance_id,
+                "completed",
+                Some(b"output data"),
+                None,
+                Some("stderr output"),
+                Some("final-checkpoint"),
+            )
+            .await
+            .expect("Failed to complete instance extended");
+
+        // Verify via raw query (InstanceRecord doesn't include stderr)
+        let row: (String, Option<Vec<u8>>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, output, stderr, checkpoint_id FROM instances WHERE instance_id = ?",
+        )
+        .bind(&instance_id)
+        .fetch_one(&persistence.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, "completed");
+        assert_eq!(row.1, Some(b"output data".to_vec()));
+        assert_eq!(row.2, Some("stderr output".to_string()));
+        assert_eq!(row.3, Some("final-checkpoint".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_complete_instance_if_running_success() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        let applied = persistence
+            .complete_instance_if_running(
+                &instance_id,
+                "completed",
+                Some(b"done"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to complete instance");
+
+        assert!(applied);
+
+        let instance = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn test_complete_instance_if_running_skipped() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        // Status is 'pending', not 'running'
+
+        let applied = persistence
+            .complete_instance_if_running(
+                &instance_id,
+                "completed",
+                Some(b"done"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("Query should succeed");
+
+        assert!(!applied);
+
+        let instance = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.status, "pending"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn test_update_instance_metrics() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        persistence
+            .update_instance_metrics(&instance_id, Some(1024 * 1024), Some(500_000))
+            .await
+            .expect("Failed to update metrics");
+
+        // Verify via raw query
+        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+            "SELECT memory_peak_bytes, cpu_usage_usec FROM instances WHERE instance_id = ?",
+        )
+        .bind(&instance_id)
+        .fetch_one(&persistence.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(row.0, Some(1024 * 1024));
+        assert_eq!(row.1, Some(500_000));
+    }
+
+    #[tokio::test]
+    async fn test_update_instance_stderr() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        persistence
+            .update_instance_stderr(&instance_id, "Error: something went wrong\n")
+            .await
+            .expect("Failed to update stderr");
+
+        // Verify via raw query
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT stderr FROM instances WHERE instance_id = ?")
+                .bind(&instance_id)
+                .fetch_one(&persistence.pool)
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, Some("Error: something went wrong\n".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_store_instance_input() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let input_data = br#"{"key": "value"}"#;
+        persistence
+            .store_instance_input(&instance_id, input_data)
+            .await
+            .expect("Failed to store input");
+
+        // Verify via raw query
+        let row: (Option<Vec<u8>>,) =
+            sqlx::query_as("SELECT input FROM instances WHERE instance_id = ?")
+                .bind(&instance_id)
+                .fetch_one(&persistence.pool)
+                .await
+                .unwrap();
+
+        assert_eq!(row.0, Some(input_data.to_vec()));
     }
 }
