@@ -484,12 +484,14 @@ fn test_bundle_config_custom() {
         network_mode: NetworkMode::Pasta,
         enable_seccomp: true,
         drop_capabilities: true,
+        dns_servers: vec!["1.1.1.1".to_string()],
     };
 
     assert_eq!(config.memory_limit, 268435456);
     assert_eq!(config.cpu_quota, 100000);
     assert_eq!(config.user, (1000, 1000));
     assert_eq!(config.network_mode, NetworkMode::Pasta);
+    assert_eq!(config.dns_servers, vec!["1.1.1.1"]);
 }
 
 #[test]
@@ -503,6 +505,7 @@ fn test_bundle_config_clone() {
         network_mode: NetworkMode::None,
         enable_seccomp: false,
         drop_capabilities: false,
+        dns_servers: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
     };
 
     let cloned = config.clone();
@@ -510,6 +513,7 @@ fn test_bundle_config_clone() {
     assert_eq!(config.cpu_quota, cloned.cpu_quota);
     assert_eq!(config.user, cloned.user);
     assert_eq!(config.network_mode, cloned.network_mode);
+    assert_eq!(config.dns_servers, cloned.dns_servers);
 }
 
 // ============================================================================

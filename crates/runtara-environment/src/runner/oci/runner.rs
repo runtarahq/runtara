@@ -44,6 +44,18 @@ fn parse_network_mode(var: &str) -> NetworkMode {
     }
 }
 
+/// Parse DNS servers from environment variable.
+/// Format: comma-separated list of IP addresses (e.g., "1.1.1.1,8.8.8.8")
+/// This is needed on hosts with systemd-resolved where /etc/resolv.conf contains 127.0.0.53.
+fn parse_dns_servers(var: &str) -> Vec<String> {
+    std::env::var(var)
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Get the host's IP address on the default route interface.
 /// Note: With the new `pasta --config-net` approach, this is no longer needed
 /// for address transformation, but kept for tests and potential future use.
@@ -147,6 +159,7 @@ impl OciRunnerConfig {
             bundle_config: {
                 let mut config = BundleConfig::default();
                 config.network_mode = parse_network_mode("RUNTARA_NETWORK_MODE");
+                config.dns_servers = parse_dns_servers("RUNTARA_PASTA_DNS");
                 config
             },
             skip_cert_verification: parse_env_bool("RUNTARA_SKIP_CERT_VERIFICATION", false),
@@ -390,6 +403,10 @@ impl OciRunner {
             // and crun runs inside that namespace.
             let mut cmd = Command::new("pasta");
             cmd.arg("--config-net"); // Configure the tap interface
+            // Add custom DNS servers if configured (needed for systemd-resolved hosts)
+            for dns in &self.config.bundle_config.dns_servers {
+                cmd.arg("--dns").arg(dns);
+            }
             cmd.arg("--");
             cmd.arg("crun");
             cmd.arg("run");
@@ -946,6 +963,10 @@ impl Runner for OciRunner {
             // Pasta wraps crun: `pasta -- crun run --bundle ... container_id`
             let mut cmd = Command::new("pasta");
             cmd.arg("--config-net"); // Configure the tap interface
+            // Add custom DNS servers if configured (needed for systemd-resolved hosts)
+            for dns in &self.config.bundle_config.dns_servers {
+                cmd.arg("--dns").arg(dns);
+            }
             cmd.arg("--");
             cmd.arg("crun");
             cmd.arg("run");

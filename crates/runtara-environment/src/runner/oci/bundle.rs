@@ -175,6 +175,9 @@ pub struct BundleConfig {
     pub enable_seccomp: bool,
     /// Drop all capabilities except minimal set (default: true)
     pub drop_capabilities: bool,
+    /// DNS servers for pasta networking (empty = use pasta defaults).
+    /// Required on hosts with systemd-resolved where /etc/resolv.conf contains 127.0.0.53.
+    pub dns_servers: Vec<String>,
 }
 
 impl Default for BundleConfig {
@@ -190,6 +193,7 @@ impl Default for BundleConfig {
             network_mode: NetworkMode::Pasta,
             enable_seccomp: true,    // Seccomp filtering enabled by default
             drop_capabilities: true, // Drop dangerous capabilities by default
+            dns_servers: Vec::new(), // Empty = use pasta defaults (works unless host uses systemd-resolved)
         }
     }
 }
@@ -1134,6 +1138,7 @@ mod tests {
             network_mode: NetworkMode::Host,
             enable_seccomp: false,
             drop_capabilities: false,
+            dns_servers: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
         };
 
         assert_eq!(config.memory_limit, 1024 * 1024 * 1024);
