@@ -13,19 +13,22 @@ use std::path::Path;
 ///
 /// The bundle contains:
 /// - rootfs/binary: The compiled workflow binary
+/// - rootfs/data/input.json: Input file (if input is provided)
 /// - config.json: OCI runtime specification
 ///
 /// # Arguments
 /// * `bundle_path` - Path where the bundle will be created
 /// * `binary_path` - Path to the compiled workflow binary
 /// * `env_vars` - Additional environment variables for the container
+/// * `input` - Optional input JSON to write to /data/input.json
 ///
 /// # Returns
 /// Ok(()) on success, or an IO error
-pub fn create_oci_bundle(
+pub fn create_oci_bundle_with_input(
     bundle_path: &Path,
     binary_path: &Path,
     env_vars: &[(&str, &str)],
+    input: Option<&str>,
 ) -> io::Result<()> {
     let rootfs = bundle_path.join("rootfs");
     fs::create_dir_all(&rootfs)?;
@@ -41,11 +44,27 @@ pub fn create_oci_bundle(
         fs::set_permissions(&binary_dest, fs::Permissions::from_mode(0o755))?;
     }
 
+    // Create /data directory with input.json if provided
+    let data_dir = rootfs.join("data");
+    fs::create_dir_all(&data_dir)?;
+    if let Some(input_json) = input {
+        fs::write(data_dir.join("input.json"), input_json)?;
+    }
+
     // Generate OCI config
     let config = generate_oci_config(env_vars);
     fs::write(bundle_path.join("config.json"), config)?;
 
     Ok(())
+}
+
+/// Create an OCI bundle at the specified path (legacy API without input file).
+pub fn create_oci_bundle(
+    bundle_path: &Path,
+    binary_path: &Path,
+    env_vars: &[(&str, &str)],
+) -> io::Result<()> {
+    create_oci_bundle_with_input(bundle_path, binary_path, env_vars, None)
 }
 
 /// Generate a minimal OCI runtime specification.

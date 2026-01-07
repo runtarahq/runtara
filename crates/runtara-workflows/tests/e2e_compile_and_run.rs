@@ -1322,7 +1322,7 @@ fn test_run_in_oci_container() {
     let bundle_path = temp_dir.path().join("bundle");
     let input_json = serde_json::json!({ "data": { "input": "hello" } }).to_string();
 
-    oci::create_oci_bundle(
+    oci::create_oci_bundle_with_input(
         &bundle_path,
         &result.binary_path,
         &[
@@ -1330,8 +1330,8 @@ fn test_run_in_oci_container() {
             ("RUNTARA_TENANT_ID", "test-tenant"),
             ("RUNTARA_SERVER_ADDR", "127.0.0.1:8001"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
-            ("INPUT_JSON", &input_json),
         ],
+        Some(&input_json),
     )
     .expect("Failed to create OCI bundle");
 
@@ -1405,7 +1405,7 @@ fn test_run_split_workflow_in_oci_container() {
     })
     .to_string();
 
-    oci::create_oci_bundle(
+    oci::create_oci_bundle_with_input(
         &bundle_path,
         &result.binary_path,
         &[
@@ -1413,8 +1413,8 @@ fn test_run_split_workflow_in_oci_container() {
             ("RUNTARA_TENANT_ID", "test-tenant"),
             ("RUNTARA_SERVER_ADDR", "127.0.0.1:8001"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
-            ("INPUT_JSON", &input_json),
         ],
+        Some(&input_json),
     )
     .expect("Failed to create OCI bundle");
 
@@ -1493,7 +1493,7 @@ fn test_run_start_scenario_workflow_in_oci_container() {
     })
     .to_string();
 
-    oci::create_oci_bundle(
+    oci::create_oci_bundle_with_input(
         &bundle_path,
         &result.binary_path,
         &[
@@ -1501,8 +1501,8 @@ fn test_run_start_scenario_workflow_in_oci_container() {
             ("RUNTARA_TENANT_ID", "test-tenant"),
             ("RUNTARA_SERVER_ADDR", "127.0.0.1:8001"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
-            ("INPUT_JSON", &input_json),
         ],
+        Some(&input_json),
     )
     .expect("Failed to create OCI bundle");
 

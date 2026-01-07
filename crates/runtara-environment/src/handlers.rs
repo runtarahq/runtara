@@ -1197,7 +1197,7 @@ pub struct TestCapabilityResponse {
 /// Handle test capability request.
 ///
 /// This runs the test harness binary in an OCI container, passing the test request
-/// as INPUT_JSON and reading the result from output.json.
+/// via /data/input.json and reading the result from /data/output.json.
 pub async fn handle_test_capability(
     state: &EnvironmentHandlerState,
     request: TestCapabilityRequest,
@@ -1227,7 +1227,7 @@ pub async fn handle_test_capability(
             }
         };
 
-    // Build test request JSON for INPUT_JSON
+    // Build test request JSON for input.json
     let test_input = serde_json::json!({
         "agent_id": request.agent_id,
         "capability_id": request.capability_id,

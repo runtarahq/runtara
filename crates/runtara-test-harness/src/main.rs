@@ -9,7 +9,7 @@
 //! The test harness runs inside OCI containers, matching the production
 //! workflow execution environment.
 //!
-//! ## Input Format (via `INPUT_JSON` env var)
+//! ## Input Format (via `input.json` file)
 //!
 //! ```json
 //! {
@@ -72,11 +72,11 @@ fn main() -> ExitCode {
 }
 
 async fn async_main() -> ExitCode {
-    // Parse INPUT_JSON from environment
-    let input_json = match std::env::var("INPUT_JSON") {
+    // Read input from /data/input.json (mounted by OCI runner)
+    let input_json = match std::fs::read_to_string("/data/input.json") {
         Ok(json) => json,
-        Err(_) => {
-            let _ = write_failed("INPUT_JSON environment variable not set");
+        Err(e) => {
+            let _ = write_failed(format!("Failed to read /data/input.json: {}", e));
             return ExitCode::FAILURE;
         }
     };
@@ -84,7 +84,7 @@ async fn async_main() -> ExitCode {
     let request: TestRequest = match serde_json::from_str(&input_json) {
         Ok(req) => req,
         Err(e) => {
-            let _ = write_failed(format!("Failed to parse INPUT_JSON: {}", e));
+            let _ = write_failed(format!("Failed to parse input.json: {}", e));
             return ExitCode::FAILURE;
         }
     };

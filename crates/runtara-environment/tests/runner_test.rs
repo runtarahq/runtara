@@ -565,12 +565,18 @@ fn test_bundle_manager_update_bundle_env() {
     let binary = vec![0x7f, 0x45, 0x4c, 0x46];
     manager.prepare_bundle("inst-2", &binary).unwrap();
 
+    // Create run directory for the instance
+    let run_dir = temp_dir.path().join("runs").join("inst-2");
+    fs::create_dir_all(&run_dir).unwrap();
+
     // Update environment
     let mut env = HashMap::new();
     env.insert("RUNTARA_INSTANCE_ID".to_string(), "inst-2".to_string());
     env.insert("RUNTARA_TENANT_ID".to_string(), "tenant-1".to_string());
 
-    manager.update_bundle_env("inst-2", &env, None).unwrap();
+    manager
+        .update_bundle_env("inst-2", &env, &run_dir, None)
+        .unwrap();
 
     // Read and verify config.json was updated
     let bundle_path = manager.bundle_path("inst-2");

@@ -241,10 +241,6 @@ impl OciRunner {
         };
 
         env.insert("RUNTARA_SERVER_ADDR".to_string(), server_addr);
-        env.insert(
-            "DATA_DIR".to_string(),
-            self.config.data_dir.to_string_lossy().to_string(),
-        );
         if self.config.skip_cert_verification {
             env.insert(
                 "RUNTARA_SKIP_CERT_VERIFICATION".to_string(),
@@ -792,11 +788,6 @@ impl Runner for OciRunner {
             &options.runtara_core_addr,
             options.checkpoint_id.as_deref(),
         );
-        // Also pass input as env var for generated workflow code
-        env.insert(
-            "INPUT_JSON".to_string(),
-            serde_json::to_string(&options.input).unwrap_or_default(),
-        );
         // Apply custom environment variables (override system vars)
         env.extend(options.env.clone());
 
@@ -809,7 +800,7 @@ impl Runner for OciRunner {
             .join(&options.instance_id);
         let config_path = run_dir.join("config.json");
         self.bundle_manager
-            .write_config_to_path(&config_path, &env, None)?;
+            .write_config_to_path(&config_path, &env, &run_dir, None)?;
 
         // Launch container and wait for completion (using shared bundle + per-instance config)
         let (result, metrics) = self
@@ -899,11 +890,6 @@ impl Runner for OciRunner {
             &options.runtara_core_addr,
             options.checkpoint_id.as_deref(),
         );
-        // Also pass input as env var for generated workflow code
-        env.insert(
-            "INPUT_JSON".to_string(),
-            serde_json::to_string(&options.input).unwrap_or_default(),
-        );
         // Apply custom environment variables (override system vars)
         env.extend(options.env.clone());
 
@@ -924,8 +910,12 @@ impl Runner for OciRunner {
 
         // Generate per-instance config.json in the run directory
         let config_path = run_dir.join("config.json");
-        self.bundle_manager
-            .write_config_to_path(&config_path, &env, Some(&log_path_str))?;
+        self.bundle_manager.write_config_to_path(
+            &config_path,
+            &env,
+            &run_dir,
+            Some(&log_path_str),
+        )?;
 
         let use_pasta = matches!(self.config.bundle_config.network_mode, NetworkMode::Pasta);
 

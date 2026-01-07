@@ -5,12 +5,8 @@
 //! Workflows communicate their exit state via output.json file.
 //! Environment reads this file to determine the next action (scheduling wake, marking completed, etc.).
 //!
-//! The output file path is constructed from environment variables:
-//! - DATA_DIR: Base data directory (defaults to current dir)
-//! - RUNTARA_TENANT_ID: Tenant identifier
-//! - RUNTARA_INSTANCE_ID: Instance identifier
-//!
-//! Output path: $DATA_DIR/$TENANT_ID/runs/$INSTANCE_ID/output.json
+//! The instance run directory is mounted at `/data` by the OCI runner.
+//! Output path: /data/output.json
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -131,18 +127,11 @@ impl InstanceOutput {
     }
 }
 
-/// Get the output file path for the current instance from environment variables.
+/// Get the output file path for the current instance.
+///
+/// The instance run directory is mounted at `/data` by the OCI runner.
 pub fn get_output_file_path() -> PathBuf {
-    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string());
-    let tenant_id = std::env::var("RUNTARA_TENANT_ID").unwrap_or_else(|_| "default".to_string());
-    let instance_id =
-        std::env::var("RUNTARA_INSTANCE_ID").unwrap_or_else(|_| "unknown".to_string());
-
-    PathBuf::from(data_dir)
-        .join(tenant_id)
-        .join("runs")
-        .join(instance_id)
-        .join("output.json")
+    PathBuf::from("/data/output.json")
 }
 
 /// Convenience function to write completed output.

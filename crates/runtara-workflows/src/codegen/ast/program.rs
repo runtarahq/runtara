@@ -312,15 +312,15 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Register SDK globally for #[durable] functions
             register_sdk(sdk_instance);
 
-            // Load input from environment variable INPUT_JSON or empty object
-            // INPUT_JSON has structure: {"data": {...}, "variables": {...}}
+            // Load input from /data/input.json (mounted by OCI runner)
+            // Input has structure: {"data": {...}, "variables": {...}}
             // We extract data and variables fields, merging runtime variables with compile-time ones
-            let input_json: serde_json::Value = std::env::var("INPUT_JSON")
+            let input_json: serde_json::Value = std::fs::read_to_string("/data/input.json")
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_else(|| serde_json::json!({}));
 
-            // Extract data field from INPUT_JSON (or empty object if not present)
+            // Extract data field from input (or empty object if not present)
             let data = input_json.get("data").cloned().unwrap_or_else(|| serde_json::json!({}));
 
             // Variables: start with compile-time constants, then merge runtime variables
@@ -1502,8 +1502,8 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(
-            code.contains("INPUT_JSON"),
-            "Should read INPUT_JSON env var"
+            code.contains("/data/input.json"),
+            "Should read from /data/input.json"
         );
         assert!(
             code.contains(". get (\"data\")"),

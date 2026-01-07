@@ -250,10 +250,11 @@ impl BundleManager {
         &self,
         instance_id: &str,
         env: &HashMap<String, String>,
+        run_dir: &Path,
         log_path: Option<&str>,
     ) -> Result<()> {
         let bundle_dir = self.bundle_path(instance_id);
-        self.update_bundle_env_at_path(&bundle_dir, env, log_path)
+        self.update_bundle_env_at_path(&bundle_dir, env, run_dir, log_path)
     }
 
     /// Update config.json at the given bundle path
@@ -261,17 +262,22 @@ impl BundleManager {
         &self,
         bundle_path: &Path,
         env: &HashMap<String, String>,
+        run_dir: &Path,
         log_path: Option<&str>,
     ) -> Result<()> {
         let config_path = bundle_path.join("config.json");
-        self.write_config_to_path(&config_path, env, log_path)
+        self.write_config_to_path(&config_path, env, run_dir, log_path)
     }
 
     /// Write a config.json to a specific path (for per-instance configs)
+    ///
+    /// The `run_dir` is mounted at `/data` inside the container, providing
+    /// isolated access to only this instance's input/output files.
     pub fn write_config_to_path(
         &self,
         config_path: &Path,
         env: &HashMap<String, String>,
+        run_dir: &Path,
         log_path: Option<&str>,
     ) -> Result<()> {
         // Build env list in OCI format (KEY=value)
@@ -280,13 +286,10 @@ impl BundleManager {
             env_list.push(format!("{}={}", key, value));
         }
 
-        // Extract DATA_DIR for mounting
-        let data_dir = env.get("DATA_DIR").map(|s| s.as_str());
-
         tracing::debug!(
             config_path = %config_path.display(),
             env_count = env.len(),
-            data_dir = ?data_dir,
+            run_dir = %run_dir.display(),
             log_path = ?log_path,
             "Writing OCI config.json"
         );
@@ -297,7 +300,7 @@ impl BundleManager {
         }
 
         // Generate and write config.json
-        let config = self.generate_oci_config(env_list, data_dir, log_path);
+        let config = self.generate_oci_config(env_list, Some(run_dir), log_path);
         let config_json = serde_json::to_string_pretty(&config)?;
         fs::write(config_path, config_json)?;
 
@@ -308,7 +311,7 @@ impl BundleManager {
     fn generate_oci_config(
         &self,
         mut env: Vec<String>,
-        data_dir: Option<&str>,
+        run_dir: Option<&Path>,
         log_path: Option<&str>,
     ) -> OciSpec {
         let mut mounts = vec![
@@ -352,12 +355,12 @@ impl BundleManager {
             },
         ];
 
-        // Add data directory mount if provided
-        if let Some(dir) = data_dir {
+        // Mount instance run directory at /data for input/output (if provided)
+        if let Some(dir) = run_dir {
             mounts.push(OciMount {
-                destination: dir.to_string(),
+                destination: "/data".to_string(),
                 mount_type: "bind".to_string(),
-                source: dir.to_string(),
+                source: dir.to_string_lossy().to_string(),
                 options: vec!["bind".to_string(), "rw".to_string(), "noexec".to_string()],
             });
         }
@@ -903,6 +906,8 @@ mod tests {
     fn test_update_bundle_env() {
         let temp_dir = TempDir::new().unwrap();
         let bundles_dir = temp_dir.path().to_path_buf();
+        let run_dir = temp_dir.path().join("runs").join("test-instance");
+        std::fs::create_dir_all(&run_dir).unwrap();
         let manager = BundleManager::new(bundles_dir, BundleConfig::default());
 
         // Create a bundle first
@@ -913,7 +918,7 @@ mod tests {
         env.insert("RUNTARA_INSTANCE_ID".to_string(), "inst-123".to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), "tenant-456".to_string());
 
-        let result = manager.update_bundle_env("test-instance", &env, None);
+        let result = manager.update_bundle_env("test-instance", &env, &run_dir, None);
         assert!(result.is_ok());
 
         // Read config.json and verify env
@@ -934,18 +939,28 @@ mod tests {
                 .iter()
                 .any(|e| e.starts_with("RUNTARA_TENANT_ID="))
         );
+
+        // Verify /data mount exists
+        let mounts = config["mounts"].as_array().unwrap();
+        let data_mount = mounts
+            .iter()
+            .find(|m| m["destination"].as_str() == Some("/data"));
+        assert!(data_mount.is_some(), "Should have /data mount");
     }
 
     #[test]
     fn test_update_bundle_env_with_log_path() {
         let temp_dir = TempDir::new().unwrap();
         let bundles_dir = temp_dir.path().to_path_buf();
+        let run_dir = temp_dir.path().join("runs").join("test-instance");
+        std::fs::create_dir_all(&run_dir).unwrap();
         let manager = BundleManager::new(bundles_dir, BundleConfig::default());
 
         manager.prepare_bundle("test-instance", b"binary").unwrap();
 
         let env = HashMap::new();
-        let result = manager.update_bundle_env("test-instance", &env, Some("/var/log/test.log"));
+        let result =
+            manager.update_bundle_env("test-instance", &env, &run_dir, Some("/var/log/test.log"));
         assert!(result.is_ok());
 
         // Read config and verify STDERR_LOG_PATH
