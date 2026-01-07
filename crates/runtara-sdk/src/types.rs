@@ -261,6 +261,10 @@ impl Default for RetryConfig {
 mod tests {
     use super::*;
 
+    // ============================================================================
+    // InstanceStatus Tests
+    // ============================================================================
+
     #[cfg(feature = "quic")]
     #[test]
     fn test_instance_status_conversion() {
@@ -276,6 +280,79 @@ mod tests {
 
     #[cfg(feature = "quic")]
     #[test]
+    fn test_instance_status_all_variants() {
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusUnknown),
+            InstanceStatus::Unknown
+        );
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusPending),
+            InstanceStatus::Pending
+        );
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusRunning),
+            InstanceStatus::Running
+        );
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusSuspended),
+            InstanceStatus::Suspended
+        );
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusCompleted),
+            InstanceStatus::Completed
+        );
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusFailed),
+            InstanceStatus::Failed
+        );
+        assert_eq!(
+            InstanceStatus::from(proto::InstanceStatus::StatusCancelled),
+            InstanceStatus::Cancelled
+        );
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_instance_status_from_i32_valid() {
+        // Valid proto values
+        assert_eq!(InstanceStatus::from(0i32), InstanceStatus::Unknown);
+        assert_eq!(InstanceStatus::from(1i32), InstanceStatus::Pending);
+        assert_eq!(InstanceStatus::from(2i32), InstanceStatus::Running);
+        assert_eq!(InstanceStatus::from(3i32), InstanceStatus::Suspended);
+        assert_eq!(InstanceStatus::from(4i32), InstanceStatus::Completed);
+        assert_eq!(InstanceStatus::from(5i32), InstanceStatus::Failed);
+        assert_eq!(InstanceStatus::from(6i32), InstanceStatus::Cancelled);
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_instance_status_from_i32_invalid() {
+        // Invalid values should return Unknown
+        assert_eq!(InstanceStatus::from(100i32), InstanceStatus::Unknown);
+        assert_eq!(InstanceStatus::from(-1i32), InstanceStatus::Unknown);
+        assert_eq!(InstanceStatus::from(i32::MAX), InstanceStatus::Unknown);
+    }
+
+    #[test]
+    fn test_instance_status_clone_eq() {
+        let status = InstanceStatus::Running;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn test_instance_status_debug() {
+        let status = InstanceStatus::Completed;
+        let debug_str = format!("{:?}", status);
+        assert!(debug_str.contains("Completed"));
+    }
+
+    // ============================================================================
+    // SignalType Tests
+    // ============================================================================
+
+    #[cfg(feature = "quic")]
+    #[test]
     fn test_signal_type_conversion() {
         assert_eq!(
             SignalType::from(proto::SignalType::SignalCancel),
@@ -286,6 +363,397 @@ mod tests {
             proto::SignalType::SignalPause
         );
     }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_signal_type_all_variants() {
+        assert_eq!(
+            SignalType::from(proto::SignalType::SignalCancel),
+            SignalType::Cancel
+        );
+        assert_eq!(
+            SignalType::from(proto::SignalType::SignalPause),
+            SignalType::Pause
+        );
+        assert_eq!(
+            SignalType::from(proto::SignalType::SignalResume),
+            SignalType::Resume
+        );
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_signal_type_to_proto() {
+        assert_eq!(
+            proto::SignalType::from(SignalType::Cancel),
+            proto::SignalType::SignalCancel
+        );
+        assert_eq!(
+            proto::SignalType::from(SignalType::Pause),
+            proto::SignalType::SignalPause
+        );
+        assert_eq!(
+            proto::SignalType::from(SignalType::Resume),
+            proto::SignalType::SignalResume
+        );
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_signal_type_from_i32_valid() {
+        assert_eq!(SignalType::from(0i32), SignalType::Cancel);
+        assert_eq!(SignalType::from(1i32), SignalType::Pause);
+        assert_eq!(SignalType::from(2i32), SignalType::Resume);
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_signal_type_from_i32_invalid() {
+        // Invalid values should default to Cancel
+        assert_eq!(SignalType::from(100i32), SignalType::Cancel);
+        assert_eq!(SignalType::from(-1i32), SignalType::Cancel);
+    }
+
+    #[test]
+    fn test_signal_type_clone_eq() {
+        let signal = SignalType::Pause;
+        let cloned = signal;
+        assert_eq!(signal, cloned);
+    }
+
+    // ============================================================================
+    // Signal Tests
+    // ============================================================================
+
+    #[test]
+    fn test_signal_creation() {
+        let signal = Signal {
+            signal_type: SignalType::Cancel,
+            payload: vec![1, 2, 3],
+            checkpoint_id: Some("checkpoint-1".to_string()),
+        };
+
+        assert_eq!(signal.signal_type, SignalType::Cancel);
+        assert_eq!(signal.payload, vec![1, 2, 3]);
+        assert_eq!(signal.checkpoint_id, Some("checkpoint-1".to_string()));
+    }
+
+    #[test]
+    fn test_signal_without_checkpoint() {
+        let signal = Signal {
+            signal_type: SignalType::Pause,
+            payload: vec![],
+            checkpoint_id: None,
+        };
+
+        assert_eq!(signal.signal_type, SignalType::Pause);
+        assert!(signal.payload.is_empty());
+        assert!(signal.checkpoint_id.is_none());
+    }
+
+    #[test]
+    fn test_signal_clone() {
+        let signal = Signal {
+            signal_type: SignalType::Resume,
+            payload: vec![42],
+            checkpoint_id: Some("cp".to_string()),
+        };
+
+        let cloned = signal.clone();
+        assert_eq!(signal, cloned);
+    }
+
+    #[test]
+    fn test_signal_debug() {
+        let signal = Signal {
+            signal_type: SignalType::Cancel,
+            payload: vec![1],
+            checkpoint_id: None,
+        };
+        let debug_str = format!("{:?}", signal);
+        assert!(debug_str.contains("Cancel"));
+    }
+
+    // ============================================================================
+    // CheckpointResult Tests
+    // ============================================================================
+
+    #[test]
+    fn test_checkpoint_result_existing_state_found() {
+        let result = CheckpointResult {
+            found: true,
+            state: vec![1, 2, 3],
+            pending_signal: None,
+            custom_signal: None,
+        };
+
+        assert!(result.found);
+        assert_eq!(result.existing_state(), Some(&[1u8, 2, 3][..]));
+    }
+
+    #[test]
+    fn test_checkpoint_result_existing_state_not_found() {
+        let result = CheckpointResult {
+            found: false,
+            state: vec![1, 2, 3], // State might be present but found=false means new checkpoint
+            pending_signal: None,
+            custom_signal: None,
+        };
+
+        assert!(!result.found);
+        assert_eq!(result.existing_state(), None);
+    }
+
+    #[test]
+    fn test_checkpoint_result_should_pause() {
+        let result = CheckpointResult {
+            found: false,
+            state: vec![],
+            pending_signal: Some(Signal {
+                signal_type: SignalType::Pause,
+                payload: vec![],
+                checkpoint_id: None,
+            }),
+            custom_signal: None,
+        };
+
+        assert!(result.should_pause());
+        assert!(!result.should_cancel());
+        assert!(result.should_exit()); // Pause means exit
+    }
+
+    #[test]
+    fn test_checkpoint_result_should_cancel() {
+        let result = CheckpointResult {
+            found: false,
+            state: vec![],
+            pending_signal: Some(Signal {
+                signal_type: SignalType::Cancel,
+                payload: vec![],
+                checkpoint_id: None,
+            }),
+            custom_signal: None,
+        };
+
+        assert!(result.should_cancel());
+        assert!(!result.should_pause());
+        assert!(result.should_exit()); // Cancel means exit
+    }
+
+    #[test]
+    fn test_checkpoint_result_should_not_exit_on_resume() {
+        let result = CheckpointResult {
+            found: false,
+            state: vec![],
+            pending_signal: Some(Signal {
+                signal_type: SignalType::Resume,
+                payload: vec![],
+                checkpoint_id: None,
+            }),
+            custom_signal: None,
+        };
+
+        assert!(!result.should_pause());
+        assert!(!result.should_cancel());
+        assert!(!result.should_exit()); // Resume doesn't mean exit
+    }
+
+    #[test]
+    fn test_checkpoint_result_no_signal() {
+        let result = CheckpointResult {
+            found: true,
+            state: vec![42],
+            pending_signal: None,
+            custom_signal: None,
+        };
+
+        assert!(!result.should_pause());
+        assert!(!result.should_cancel());
+        assert!(!result.should_exit());
+    }
+
+    #[test]
+    fn test_checkpoint_result_with_custom_signal() {
+        let result = CheckpointResult {
+            found: false,
+            state: vec![],
+            pending_signal: None,
+            custom_signal: Some(CustomSignal {
+                checkpoint_id: "wait-key".to_string(),
+                payload: vec![10, 20, 30],
+            }),
+        };
+
+        // Custom signal doesn't affect should_pause/cancel/exit
+        assert!(!result.should_pause());
+        assert!(!result.should_cancel());
+        assert!(!result.should_exit());
+
+        // But we can access it
+        let custom = result.custom_signal.as_ref().unwrap();
+        assert_eq!(custom.checkpoint_id, "wait-key");
+        assert_eq!(custom.payload, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_checkpoint_result_clone() {
+        let result = CheckpointResult {
+            found: true,
+            state: vec![1, 2, 3],
+            pending_signal: Some(Signal {
+                signal_type: SignalType::Pause,
+                payload: vec![4],
+                checkpoint_id: Some("cp".to_string()),
+            }),
+            custom_signal: Some(CustomSignal {
+                checkpoint_id: "key".to_string(),
+                payload: vec![5],
+            }),
+        };
+
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    #[test]
+    fn test_checkpoint_result_empty_state() {
+        let result = CheckpointResult {
+            found: true,
+            state: vec![],
+            pending_signal: None,
+            custom_signal: None,
+        };
+
+        // Empty state is still "found"
+        assert_eq!(result.existing_state(), Some(&[][..]));
+    }
+
+    // ============================================================================
+    // CustomSignal Tests
+    // ============================================================================
+
+    #[test]
+    fn test_custom_signal_creation() {
+        let signal = CustomSignal {
+            checkpoint_id: "my-wait-key".to_string(),
+            payload: vec![1, 2, 3, 4],
+        };
+
+        assert_eq!(signal.checkpoint_id, "my-wait-key");
+        assert_eq!(signal.payload, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_custom_signal_empty_payload() {
+        let signal = CustomSignal {
+            checkpoint_id: "empty-payload".to_string(),
+            payload: vec![],
+        };
+
+        assert!(signal.payload.is_empty());
+    }
+
+    #[test]
+    fn test_custom_signal_clone_eq() {
+        let signal = CustomSignal {
+            checkpoint_id: "test".to_string(),
+            payload: vec![42],
+        };
+
+        let cloned = signal.clone();
+        assert_eq!(signal, cloned);
+    }
+
+    // ============================================================================
+    // StatusResponse Tests
+    // ============================================================================
+
+    #[test]
+    fn test_status_response_not_found() {
+        let response = StatusResponse {
+            found: false,
+            status: InstanceStatus::Unknown,
+            checkpoint_id: None,
+            output: None,
+            error: None,
+        };
+
+        assert!(!response.found);
+        assert_eq!(response.status, InstanceStatus::Unknown);
+    }
+
+    #[test]
+    fn test_status_response_completed() {
+        let response = StatusResponse {
+            found: true,
+            status: InstanceStatus::Completed,
+            checkpoint_id: Some("final".to_string()),
+            output: Some(vec![1, 2, 3]),
+            error: None,
+        };
+
+        assert!(response.found);
+        assert_eq!(response.status, InstanceStatus::Completed);
+        assert_eq!(response.output, Some(vec![1, 2, 3]));
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn test_status_response_failed() {
+        let response = StatusResponse {
+            found: true,
+            status: InstanceStatus::Failed,
+            checkpoint_id: Some("step-3".to_string()),
+            output: None,
+            error: Some("something went wrong".to_string()),
+        };
+
+        assert!(response.found);
+        assert_eq!(response.status, InstanceStatus::Failed);
+        assert!(response.output.is_none());
+        assert_eq!(response.error, Some("something went wrong".to_string()));
+    }
+
+    #[test]
+    fn test_status_response_clone() {
+        let response = StatusResponse {
+            found: true,
+            status: InstanceStatus::Running,
+            checkpoint_id: Some("cp".to_string()),
+            output: Some(vec![42]),
+            error: None,
+        };
+
+        let cloned = response.clone();
+        assert_eq!(cloned.found, response.found);
+        assert_eq!(cloned.status, response.status);
+        assert_eq!(cloned.checkpoint_id, response.checkpoint_id);
+        assert_eq!(cloned.output, response.output);
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn test_status_response_from_proto() {
+        let proto_response = proto::GetInstanceStatusResponse {
+            instance_id: "test-instance".to_string(),
+            status: proto::InstanceStatus::StatusCompleted.into(),
+            checkpoint_id: Some("last-cp".to_string()),
+            output: Some(vec![99]),
+            error: None,
+            started_at_ms: 1000,
+            finished_at_ms: Some(2000),
+        };
+
+        let response = StatusResponse::from(proto_response);
+        assert!(response.found);
+        assert_eq!(response.status, InstanceStatus::Completed);
+        assert_eq!(response.checkpoint_id, Some("last-cp".to_string()));
+        assert_eq!(response.output, Some(vec![99]));
+    }
+
+    // ============================================================================
+    // RetryConfig Tests
+    // ============================================================================
 
     #[test]
     fn test_retry_config_default() {
@@ -321,5 +789,61 @@ mod tests {
     #[test]
     fn test_retry_strategy_default() {
         assert_eq!(RetryStrategy::default(), RetryStrategy::ExponentialBackoff);
+    }
+
+    #[test]
+    fn test_retry_config_new() {
+        let config = RetryConfig::new(5, 500, RetryStrategy::ExponentialBackoff);
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.delay_ms, 500);
+        assert_eq!(config.strategy, RetryStrategy::ExponentialBackoff);
+    }
+
+    #[test]
+    fn test_retry_config_delay_attempt_zero() {
+        let config = RetryConfig::new(3, 100, RetryStrategy::ExponentialBackoff);
+        // Attempt 0 uses saturating_sub, so 2^(0-1) = 2^u32::MAX = saturates
+        // Actually: 0.saturating_sub(1) = 0, so 2^0 = 1
+        assert_eq!(
+            config.delay_for_attempt(0),
+            std::time::Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn test_retry_config_delay_large_attempt() {
+        let config = RetryConfig::new(10, 100, RetryStrategy::ExponentialBackoff);
+        // Attempt 10: 100ms * 2^9 = 100 * 512 = 51200ms
+        assert_eq!(
+            config.delay_for_attempt(10),
+            std::time::Duration::from_millis(51200)
+        );
+    }
+
+    #[test]
+    fn test_retry_config_delay_overflow_protection() {
+        // Test that we don't overflow with very large values
+        let config = RetryConfig::new(100, u64::MAX, RetryStrategy::ExponentialBackoff);
+        // This should use saturating_mul and not panic
+        let _delay = config.delay_for_attempt(64); // 2^63 would overflow
+        // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_retry_config_clone() {
+        let config = RetryConfig::new(3, 200, RetryStrategy::ExponentialBackoff);
+        let cloned = config.clone();
+        assert_eq!(config.max_retries, cloned.max_retries);
+        assert_eq!(config.delay_ms, cloned.delay_ms);
+        assert_eq!(config.strategy, cloned.strategy);
+    }
+
+    #[test]
+    fn test_retry_config_debug() {
+        let config = RetryConfig::new(2, 1000, RetryStrategy::ExponentialBackoff);
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("max_retries"));
+        assert!(debug_str.contains("delay_ms"));
+        assert!(debug_str.contains("strategy"));
     }
 }

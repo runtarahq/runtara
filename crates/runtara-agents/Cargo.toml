@@ -13,6 +13,10 @@ name = "runtara_agents"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[[bin]]
+name = "generate_dsl_spec"
+path = "src/bin/generate_dsl_spec.rs"
+
 [dependencies]
 runtara-dsl = { path = "../runtara-dsl", version = "1.0" }
 runtara-agent-macro = { path = "../runtara-agent-macro", version = "1.0" }

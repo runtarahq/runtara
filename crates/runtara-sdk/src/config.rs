@@ -170,6 +170,10 @@ impl SdkConfig {
 mod tests {
     use super::*;
 
+    // ============================================================================
+    // Basic Configuration Tests
+    // ============================================================================
+
     #[test]
     fn test_localhost_config() {
         let config = SdkConfig::localhost("test-instance", "test-tenant");
@@ -178,6 +182,35 @@ mod tests {
         assert!(config.skip_cert_verification);
         assert_eq!(config.server_addr, "127.0.0.1:8001".parse().unwrap());
     }
+
+    #[test]
+    fn test_new_config() {
+        let config = SdkConfig::new("my-instance", "my-tenant");
+        assert_eq!(config.instance_id, "my-instance");
+        assert_eq!(config.tenant_id, "my-tenant");
+        // new() defaults to cert verification enabled
+        assert!(!config.skip_cert_verification);
+        assert_eq!(config.server_addr, "127.0.0.1:8001".parse().unwrap());
+        assert_eq!(config.server_name, "localhost");
+    }
+
+    #[test]
+    fn test_config_with_string_types() {
+        let config = SdkConfig::new(String::from("inst"), String::from("tenant"));
+        assert_eq!(config.instance_id, "inst");
+        assert_eq!(config.tenant_id, "tenant");
+    }
+
+    #[test]
+    fn test_localhost_config_with_string_types() {
+        let config = SdkConfig::localhost(String::from("inst"), String::from("tenant"));
+        assert_eq!(config.instance_id, "inst");
+        assert_eq!(config.tenant_id, "tenant");
+    }
+
+    // ============================================================================
+    // Builder Pattern Tests
+    // ============================================================================
 
     #[test]
     fn test_builder_pattern() {
@@ -190,6 +223,65 @@ mod tests {
         assert!(config.skip_cert_verification);
         assert_eq!(config.signal_poll_interval_ms, 500);
     }
+
+    #[test]
+    fn test_with_server_addr() {
+        let config =
+            SdkConfig::new("inst", "tenant").with_server_addr("10.0.0.1:9000".parse().unwrap());
+        assert_eq!(config.server_addr, "10.0.0.1:9000".parse().unwrap());
+    }
+
+    #[test]
+    fn test_with_server_name() {
+        let config = SdkConfig::new("inst", "tenant").with_server_name("my-server.example.com");
+        assert_eq!(config.server_name, "my-server.example.com");
+    }
+
+    #[test]
+    fn test_with_server_name_string() {
+        let config =
+            SdkConfig::new("inst", "tenant").with_server_name(String::from("server.local"));
+        assert_eq!(config.server_name, "server.local");
+    }
+
+    #[test]
+    fn test_with_skip_cert_verification_true() {
+        let config = SdkConfig::new("inst", "tenant").with_skip_cert_verification(true);
+        assert!(config.skip_cert_verification);
+    }
+
+    #[test]
+    fn test_with_skip_cert_verification_false() {
+        // Start with localhost (which has skip=true) and set to false
+        let config = SdkConfig::localhost("inst", "tenant").with_skip_cert_verification(false);
+        assert!(!config.skip_cert_verification);
+    }
+
+    #[test]
+    fn test_with_signal_poll_interval_ms() {
+        let config = SdkConfig::new("inst", "tenant").with_signal_poll_interval_ms(250);
+        assert_eq!(config.signal_poll_interval_ms, 250);
+    }
+
+    #[test]
+    fn test_builder_chaining() {
+        let config = SdkConfig::new("inst", "tenant")
+            .with_server_addr("172.16.0.1:7000".parse().unwrap())
+            .with_server_name("custom-server")
+            .with_skip_cert_verification(true)
+            .with_signal_poll_interval_ms(100)
+            .with_heartbeat_interval_ms(5000);
+
+        assert_eq!(config.server_addr, "172.16.0.1:7000".parse().unwrap());
+        assert_eq!(config.server_name, "custom-server");
+        assert!(config.skip_cert_verification);
+        assert_eq!(config.signal_poll_interval_ms, 100);
+        assert_eq!(config.heartbeat_interval_ms, 5000);
+    }
+
+    // ============================================================================
+    // Heartbeat Interval Tests
+    // ============================================================================
 
     #[test]
     fn test_heartbeat_interval_default() {
@@ -219,5 +311,83 @@ mod tests {
     fn test_heartbeat_interval_custom_value() {
         let config = SdkConfig::new("inst", "tenant").with_heartbeat_interval_ms(60_000);
         assert_eq!(config.heartbeat_interval_ms, 60_000);
+    }
+
+    // ============================================================================
+    // Default Timeout Tests
+    // ============================================================================
+
+    #[test]
+    fn test_connect_timeout_default() {
+        let config = SdkConfig::new("inst", "tenant");
+        assert_eq!(config.connect_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn test_request_timeout_default() {
+        let config = SdkConfig::new("inst", "tenant");
+        assert_eq!(config.request_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn test_signal_poll_interval_default() {
+        let config = SdkConfig::new("inst", "tenant");
+        assert_eq!(config.signal_poll_interval_ms, 1_000);
+    }
+
+    // ============================================================================
+    // Clone and Debug Tests
+    // ============================================================================
+
+    #[test]
+    fn test_config_clone() {
+        let config = SdkConfig::new("inst", "tenant")
+            .with_server_addr("10.0.0.1:8080".parse().unwrap())
+            .with_skip_cert_verification(true);
+
+        let cloned = config.clone();
+        assert_eq!(cloned.instance_id, config.instance_id);
+        assert_eq!(cloned.tenant_id, config.tenant_id);
+        assert_eq!(cloned.server_addr, config.server_addr);
+        assert_eq!(cloned.skip_cert_verification, config.skip_cert_verification);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = SdkConfig::new("test-inst", "test-tenant");
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("test-inst"));
+        assert!(debug_str.contains("test-tenant"));
+        assert!(debug_str.contains("server_addr"));
+    }
+
+    // ============================================================================
+    // Edge Cases
+    // ============================================================================
+
+    #[test]
+    fn test_empty_instance_id() {
+        let config = SdkConfig::new("", "tenant");
+        assert_eq!(config.instance_id, "");
+    }
+
+    #[test]
+    fn test_empty_tenant_id() {
+        let config = SdkConfig::new("inst", "");
+        assert_eq!(config.tenant_id, "");
+    }
+
+    #[test]
+    fn test_special_characters_in_ids() {
+        let config = SdkConfig::new("inst-123_test", "tenant/special:chars");
+        assert_eq!(config.instance_id, "inst-123_test");
+        assert_eq!(config.tenant_id, "tenant/special:chars");
+    }
+
+    #[test]
+    fn test_ipv6_server_addr() {
+        let config =
+            SdkConfig::new("inst", "tenant").with_server_addr("[::1]:8001".parse().unwrap());
+        assert_eq!(config.server_addr, "[::1]:8001".parse().unwrap());
     }
 }

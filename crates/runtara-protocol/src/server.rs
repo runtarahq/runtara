@@ -768,4 +768,161 @@ mod tests {
         let server = RuntaraServer::new(config);
         assert!(server.is_ok());
     }
+
+    // ========== Additional ServerError Tests ==========
+
+    #[test]
+    fn test_server_error_display_bind() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        let err = ServerError::Bind(io_err);
+        let msg = format!("{}", err);
+        assert!(msg.contains("bind error"));
+    }
+
+    #[test]
+    fn test_server_error_display_frame() {
+        let frame_err = FrameError::FrameTooLarge(100);
+        let err = ServerError::Frame(frame_err);
+        let msg = format!("{}", err);
+        assert!(msg.contains("frame error"));
+    }
+
+    #[test]
+    fn test_server_error_debug() {
+        let err = ServerError::Tls("test error".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Tls"));
+
+        let err = ServerError::Closed;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Closed"));
+    }
+
+    #[test]
+    fn test_server_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let err: ServerError = io_err.into();
+        match err {
+            ServerError::Bind(_) => {}
+            _ => panic!("Expected Bind error"),
+        }
+    }
+
+    #[test]
+    fn test_server_error_from_frame_error() {
+        let frame_err = FrameError::ConnectionClosed;
+        let err: ServerError = frame_err.into();
+        match err {
+            ServerError::Frame(_) => {}
+            _ => panic!("Expected Frame error"),
+        }
+    }
+
+    // ========== Config from_env Tests ==========
+
+    #[test]
+    fn test_config_from_env_returns_config() {
+        // Simply verify from_env() returns a valid config
+        // Note: We can't safely modify env vars in Rust 2024 edition without unsafe blocks
+        let config = RuntaraServerConfig::from_env();
+
+        // Verify the config has the expected structure
+        // Values may be defaults or from env vars - both are valid
+        assert!(config.max_incoming > 0);
+        assert!(config.max_bi_streams > 0);
+        assert!(config.max_uni_streams > 0);
+        assert!(config.idle_timeout_ms > 0);
+        // keep_alive_interval_ms can be 0 (disabled)
+        // udp buffer sizes should be positive
+        assert!(config.udp_receive_buffer_size > 0);
+        assert!(config.udp_send_buffer_size > 0);
+        // max_concurrent_handlers can be 0 (unlimited)
+    }
+
+    // ========== Server Config Access Tests ==========
+
+    #[tokio::test]
+    async fn test_server_config_accessor() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server = RuntaraServer::localhost(addr).unwrap();
+        let config = server.config();
+        // Config should be accessible and have reasonable values
+        assert_eq!(config.max_incoming, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_server_localhost_with_custom_config() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let custom_config = RuntaraServerConfig {
+            max_incoming: 5000,
+            max_bi_streams: 500,
+            ..RuntaraServerConfig::from_env()
+        };
+        let server = RuntaraServer::localhost_with_config(addr, custom_config);
+        assert!(server.is_ok());
+        let server = server.unwrap();
+        let config = server.config();
+        assert_eq!(config.max_incoming, 5000);
+        assert_eq!(config.max_bi_streams, 500);
+    }
+
+    // ========== Build Server Config Edge Cases ==========
+
+    #[test]
+    fn test_build_server_config_no_keepalive() {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let config = RuntaraServerConfig {
+            cert_pem: cert.cert.pem().into_bytes(),
+            key_pem: cert.key_pair.serialize_pem().into_bytes(),
+            keep_alive_interval_ms: 0, // Disabled
+            ..Default::default()
+        };
+        let result = RuntaraServer::build_server_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_server_config_malformed_cert() {
+        let config = RuntaraServerConfig {
+            cert_pem: b"-----BEGIN CERTIFICATE-----\nMALFORMED\n-----END CERTIFICATE-----".to_vec(),
+            key_pem: b"-----BEGIN PRIVATE KEY-----\nMALFORMED\n-----END PRIVATE KEY-----".to_vec(),
+            ..Default::default()
+        };
+        let result = RuntaraServer::build_server_config(&config);
+        assert!(result.is_err());
+    }
+
+    // ========== IPv6 Support Test ==========
+
+    #[tokio::test]
+    async fn test_server_ipv6_binding() {
+        // Try to bind to IPv6 localhost
+        let addr: SocketAddr = "[::1]:0".parse().unwrap();
+        let server = RuntaraServer::localhost(addr);
+        // May fail on systems without IPv6, that's ok
+        if let Ok(server) = server {
+            let local_addr = server.local_addr().unwrap();
+            assert!(local_addr.is_ipv6());
+            server.close();
+        }
+    }
+
+    // ========== Multiple Server Instances ==========
+
+    #[tokio::test]
+    async fn test_multiple_server_instances() {
+        let addr1: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let server1 = RuntaraServer::localhost(addr1).unwrap();
+        let server2 = RuntaraServer::localhost(addr2).unwrap();
+
+        // Both should have different ports
+        let port1 = server1.local_addr().unwrap().port();
+        let port2 = server2.local_addr().unwrap().port();
+        assert_ne!(port1, port2);
+
+        server1.close();
+        server2.close();
+    }
 }
