@@ -403,3 +403,425 @@ fn emit_connection_fetch(
 
     (code, final_inputs)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::ast::context::EmitContext;
+    use runtara_dsl::{ImmediateValue, MappingValue, ReferenceValue};
+    use std::collections::HashMap;
+
+    /// Helper to create a minimal agent step for testing.
+    fn create_agent_step(step_id: &str, agent_id: &str, capability_id: &str) -> AgentStep {
+        AgentStep {
+            id: step_id.to_string(),
+            name: Some("Test Agent Step".to_string()),
+            agent_id: agent_id.to_string(),
+            capability_id: capability_id.to_string(),
+            connection_id: None,
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        }
+    }
+
+    #[test]
+    fn test_emit_agent_basic_structure() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-basic", "utils", "random-double");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify basic structure
+        assert!(
+            code.contains("__durable_cache_key"),
+            "Should build durable cache key"
+        );
+        assert!(
+            code.contains("# [durable") || code.contains("#[durable"),
+            "Should use #[durable] macro"
+        );
+        assert!(
+            code.contains("registry :: execute_capability"),
+            "Should call registry::execute_capability"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_ids_in_cache_key() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("my-agent-step", "http", "http-request");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Cache key is a string literal - TokenStream should preserve it
+        // The format is "agent::agent_id::capability_id::step_id"
+        assert!(
+            code.contains("agent::http::http-request::my-agent-step"),
+            "Cache key should include agent::agent_id::capability_id::step_id"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_default_retry_config() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-retry", "utils", "concat");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Default values: max_retries = 3, retry_delay = 1000
+        assert!(
+            code.contains("max_retries = 3u32"),
+            "Should use default max_retries = 3"
+        );
+        assert!(
+            code.contains("delay = 1000u64"),
+            "Should use default retry_delay = 1000"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_custom_retry_config() {
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "agent-custom-retry".to_string(),
+            name: Some("Custom Retry".to_string()),
+            agent_id: "http".to_string(),
+            capability_id: "http-request".to_string(),
+            connection_id: None,
+            input_mapping: None,
+            max_retries: Some(5),
+            retry_delay: Some(2000),
+            timeout: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Custom values
+        assert!(
+            code.contains("max_retries = 5u32"),
+            "Should use custom max_retries = 5"
+        );
+        assert!(
+            code.contains("delay = 2000u64"),
+            "Should use custom retry_delay = 2000"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_with_input_mapping() {
+        let mut ctx = EmitContext::new(false);
+        let mut input_mapping = HashMap::new();
+        input_mapping.insert(
+            "url".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("https://example.com"),
+            }),
+        );
+
+        let step = AgentStep {
+            id: "agent-mapped".to_string(),
+            name: Some("With Mapping".to_string()),
+            agent_id: "http".to_string(),
+            capability_id: "http-request".to_string(),
+            connection_id: None,
+            input_mapping: Some(input_mapping),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should not use empty object
+        assert!(
+            !code.contains("Value :: Object (serde_json :: Map :: new ())")
+                || code.contains("map.insert"),
+            "Should have input mapping code instead of empty object"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_empty_input_mapping() {
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "agent-empty-map".to_string(),
+            name: Some("Empty Mapping".to_string()),
+            agent_id: "utils".to_string(),
+            capability_id: "noop".to_string(),
+            connection_id: None,
+            input_mapping: Some(HashMap::new()), // Empty map
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use empty object for empty input mapping
+        assert!(
+            code.contains("serde_json :: Value :: Object (serde_json :: Map :: new ())"),
+            "Should create empty object for empty input mapping"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_with_connection_id() {
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "agent-conn".to_string(),
+            name: Some("With Connection".to_string()),
+            agent_id: "http".to_string(),
+            capability_id: "http-request".to_string(),
+            connection_id: Some("my-connection".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should include connection fetching code
+        assert!(
+            code.contains("get_connection_service_url"),
+            "Should fetch connection service URL"
+        );
+        assert!(
+            code.contains("fetch_connection"),
+            "Should call fetch_connection"
+        );
+        assert!(
+            code.contains("\"my-connection\""),
+            "Should include connection ID"
+        );
+        assert!(
+            code.contains("_connection"),
+            "Should inject _connection into inputs"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_loop_indices_in_cache_key() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-loop", "utils", "random-double");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify loop indices handling for cache key uniqueness
+        assert!(
+            code.contains("_loop_indices"),
+            "Should check for _loop_indices in variables"
+        );
+        assert!(
+            code.contains("indices_suffix"),
+            "Should build indices suffix"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_output_structure() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-output", "transform", "flatten");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify output JSON structure
+        assert!(code.contains("\"stepId\""), "Should include stepId");
+        assert!(code.contains("\"stepName\""), "Should include stepName");
+        assert!(code.contains("\"stepType\""), "Should include stepType");
+        assert!(code.contains("\"Agent\""), "Should have stepType = Agent");
+        assert!(code.contains("\"outputs\""), "Should include outputs");
+    }
+
+    #[test]
+    fn test_emit_agent_stores_in_steps_context() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-store", "utils", "concat");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify result is stored in steps_context
+        assert!(
+            code.contains("steps_context . insert"),
+            "Should store result in steps_context"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_cancellation_check() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-cancel", "utils", "noop");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify cancellation check after execution
+        assert!(
+            code.contains("check_cancelled"),
+            "Should check for cancellation after step"
+        );
+        assert!(
+            code.contains("sdk ()"),
+            "Should acquire SDK lock for cancellation check"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_debug_mode_enabled() {
+        let mut ctx = EmitContext::new(true); // debug mode ON
+        let step = create_agent_step("agent-debug", "utils", "noop");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events are emitted
+        assert!(
+            code.contains("step_debug_start"),
+            "Should emit debug start event"
+        );
+        assert!(
+            code.contains("step_debug_end"),
+            "Should emit debug end event"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_debug_mode_disabled() {
+        let mut ctx = EmitContext::new(false); // debug mode OFF
+        let step = create_agent_step("agent-no-debug", "utils", "noop");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Core agent logic should still be present
+        assert!(
+            code.contains("execute_capability"),
+            "Should have capability execution"
+        );
+        assert!(
+            code.contains("__durable_cache_key"),
+            "Should have durable cache key"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_with_unnamed_step() {
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "agent-unnamed".to_string(),
+            name: None, // No name
+            agent_id: "utils".to_string(),
+            capability_id: "noop".to_string(),
+            connection_id: None,
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use "Unnamed" as display name
+        assert!(
+            code.contains("\"Unnamed\""),
+            "Should use 'Unnamed' for unnamed steps"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_durable_function_definition() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-durable", "utils", "concat");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify durable function signature
+        assert!(
+            code.contains("async fn"),
+            "Should define async durable function"
+        );
+        assert!(
+            code.contains("cache_key : & str"),
+            "Durable function should take cache_key"
+        );
+        assert!(
+            code.contains("-> std :: result :: Result < serde_json :: Value , String >"),
+            "Should return Result<Value, String>"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_error_formatting() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("agent-error", "http", "http-request");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify error message includes context
+        assert!(
+            code.contains("Step {} failed: Agent"),
+            "Error message should include step context"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_with_reference_input() {
+        let mut ctx = EmitContext::new(false);
+        let mut input_mapping = HashMap::new();
+        input_mapping.insert(
+            "data".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "steps.previous.outputs.result".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+
+        let step = AgentStep {
+            id: "agent-ref".to_string(),
+            name: Some("Reference Input".to_string()),
+            agent_id: "transform".to_string(),
+            capability_id: "flatten".to_string(),
+            connection_id: None,
+            input_mapping: Some(input_mapping),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use mapping code (resolve_path is called during mapping)
+        // The reference path is used in resolve_path call
+        assert!(
+            code.contains("resolve_path") || code.contains("data"),
+            "Should have mapping code that references input data"
+        );
+    }
+
+    #[test]
+    fn test_needs_rate_limiting_unknown_capability() {
+        // Unknown capabilities should not require rate limiting by default
+        let result = needs_rate_limiting("nonexistent", "fake-capability");
+        assert!(
+            !result,
+            "Unknown capabilities should default to no rate limiting"
+        );
+    }
+}

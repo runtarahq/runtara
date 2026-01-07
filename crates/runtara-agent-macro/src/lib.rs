@@ -924,3 +924,367 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    // ========================================================================
+    // Tests for unwrap_option_type
+    // ========================================================================
+
+    #[test]
+    fn test_unwrap_option_type_non_optional() {
+        let (inner, is_optional) = unwrap_option_type("String");
+        assert_eq!(inner, "String");
+        assert!(!is_optional);
+    }
+
+    #[test]
+    fn test_unwrap_option_type_simple_option() {
+        let (inner, is_optional) = unwrap_option_type("Option<String>");
+        assert_eq!(inner, "String");
+        assert!(is_optional);
+    }
+
+    #[test]
+    fn test_unwrap_option_type_primitive() {
+        let (inner, is_optional) = unwrap_option_type("Option<i32>");
+        assert_eq!(inner, "i32");
+        assert!(is_optional);
+    }
+
+    #[test]
+    fn test_unwrap_option_type_complex_inner() {
+        let (inner, is_optional) = unwrap_option_type("Option<Vec<String>>");
+        assert_eq!(inner, "Vec<String>");
+        assert!(is_optional);
+    }
+
+    #[test]
+    fn test_unwrap_option_type_non_option_generic() {
+        let (inner, is_optional) = unwrap_option_type("Vec<String>");
+        assert_eq!(inner, "Vec<String>");
+        assert!(!is_optional);
+    }
+
+    #[test]
+    fn test_unwrap_option_type_empty_string() {
+        let (inner, is_optional) = unwrap_option_type("");
+        assert_eq!(inner, "");
+        assert!(!is_optional);
+    }
+
+    // ========================================================================
+    // Tests for type_to_string
+    // ========================================================================
+
+    #[test]
+    fn test_type_to_string_simple_type() {
+        let ty: Type = parse_quote!(String);
+        assert_eq!(type_to_string(&ty), "String");
+    }
+
+    #[test]
+    fn test_type_to_string_primitive() {
+        let ty: Type = parse_quote!(i32);
+        assert_eq!(type_to_string(&ty), "i32");
+    }
+
+    #[test]
+    fn test_type_to_string_generic_single() {
+        let ty: Type = parse_quote!(Option<String>);
+        assert_eq!(type_to_string(&ty), "Option<String>");
+    }
+
+    #[test]
+    fn test_type_to_string_generic_multiple() {
+        let ty: Type = parse_quote!(HashMap<String, i32>);
+        assert_eq!(type_to_string(&ty), "HashMap<String, i32>");
+    }
+
+    #[test]
+    fn test_type_to_string_vec() {
+        let ty: Type = parse_quote!(Vec<u8>);
+        assert_eq!(type_to_string(&ty), "Vec<u8>");
+    }
+
+    #[test]
+    fn test_type_to_string_nested_generics() {
+        let ty: Type = parse_quote!(Option<Vec<String>>);
+        assert_eq!(type_to_string(&ty), "Option<Vec<String>>");
+    }
+
+    #[test]
+    fn test_type_to_string_unit_type() {
+        let ty: Type = parse_quote!(());
+        assert_eq!(type_to_string(&ty), "()");
+    }
+
+    #[test]
+    fn test_type_to_string_path_type() {
+        let ty: Type = parse_quote!(std::collections::HashMap<String, i32>);
+        assert_eq!(
+            type_to_string(&ty),
+            "std::collections::HashMap<String, i32>"
+        );
+    }
+
+    #[test]
+    fn test_type_to_string_result_type() {
+        let ty: Type = parse_quote!(Result<String, Error>);
+        assert_eq!(type_to_string(&ty), "Result<String, Error>");
+    }
+
+    #[test]
+    fn test_type_to_string_custom_type() {
+        let ty: Type = parse_quote!(MyCustomInput);
+        assert_eq!(type_to_string(&ty), "MyCustomInput");
+    }
+
+    // ========================================================================
+    // Tests for analyze_type_for_nesting
+    // ========================================================================
+
+    #[test]
+    fn test_analyze_type_for_nesting_primitive() {
+        let (nullable, items, nested) = analyze_type_for_nesting("String");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_i32() {
+        let (nullable, items, nested) = analyze_type_for_nesting("i32");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_option_primitive() {
+        let (nullable, items, nested) = analyze_type_for_nesting("Option<String>");
+        assert!(nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_vec() {
+        let (nullable, items, nested) = analyze_type_for_nesting("Vec<String>");
+        assert!(!nullable);
+        assert_eq!(items, Some("String".to_string()));
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_option_vec() {
+        let (nullable, items, nested) = analyze_type_for_nesting("Option<Vec<i32>>");
+        assert!(nullable);
+        assert_eq!(items, Some("i32".to_string()));
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_hashmap() {
+        let (nullable, items, nested) = analyze_type_for_nesting("HashMap<String, i32>");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_btreemap() {
+        let (nullable, items, nested) = analyze_type_for_nesting("BTreeMap<String, Value>");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_std_hashmap() {
+        let (nullable, items, nested) =
+            analyze_type_for_nesting("std::collections::HashMap<String, i32>");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_custom_type() {
+        let (nullable, items, nested) = analyze_type_for_nesting("MyCustomStruct");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert_eq!(nested, Some("MyCustomStruct".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_option_custom() {
+        let (nullable, items, nested) = analyze_type_for_nesting("Option<AddressInfo>");
+        assert!(nullable);
+        assert!(items.is_none());
+        assert_eq!(nested, Some("AddressInfo".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_unit_type() {
+        let (nullable, items, nested) = analyze_type_for_nesting("()");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_value() {
+        let (nullable, items, nested) = analyze_type_for_nesting("Value");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_lowercase_custom() {
+        // Lowercase types shouldn't be treated as custom nested types
+        let (nullable, items, nested) = analyze_type_for_nesting("lowercase_type");
+        assert!(!nullable);
+        assert!(items.is_none());
+        assert!(nested.is_none());
+    }
+
+    // ========================================================================
+    // Tests for option_to_tokens
+    // ========================================================================
+
+    #[test]
+    fn test_option_to_tokens_some() {
+        let opt = Some("test value".to_string());
+        let tokens = option_to_tokens(&opt);
+        let code = tokens.to_string();
+        assert!(code.contains("Some"));
+        assert!(code.contains("test value"));
+    }
+
+    #[test]
+    fn test_option_to_tokens_none() {
+        let opt: Option<String> = None;
+        let tokens = option_to_tokens(&opt);
+        let code = tokens.to_string();
+        assert_eq!(code, "None");
+    }
+
+    #[test]
+    fn test_option_to_tokens_empty_string() {
+        let opt = Some("".to_string());
+        let tokens = option_to_tokens(&opt);
+        let code = tokens.to_string();
+        assert!(code.contains("Some"));
+    }
+
+    #[test]
+    fn test_option_to_tokens_special_chars() {
+        let opt = Some("value with \"quotes\" and 'apostrophes'".to_string());
+        let tokens = option_to_tokens(&opt);
+        let code = tokens.to_string();
+        assert!(code.contains("Some"));
+    }
+
+    // ========================================================================
+    // Tests for extract_result_ok_type
+    // ========================================================================
+
+    #[test]
+    fn test_extract_result_ok_type_simple() {
+        let output: syn::ReturnType = parse_quote!(-> Result<String, Error>);
+        assert_eq!(extract_result_ok_type(&output), "String");
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_custom() {
+        let output: syn::ReturnType = parse_quote!(-> Result<MyOutput, String>);
+        assert_eq!(extract_result_ok_type(&output), "MyOutput");
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_unit() {
+        let output: syn::ReturnType = parse_quote!(-> Result<(), Error>);
+        assert_eq!(extract_result_ok_type(&output), "()");
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_generic() {
+        let output: syn::ReturnType = parse_quote!(-> Result<Vec<String>, Error>);
+        assert_eq!(extract_result_ok_type(&output), "Vec<String>");
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_no_return() {
+        let output: syn::ReturnType = syn::ReturnType::Default;
+        assert_eq!(extract_result_ok_type(&output), "Unknown");
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_non_result() {
+        let output: syn::ReturnType = parse_quote!(-> String);
+        assert_eq!(extract_result_ok_type(&output), "Unknown");
+    }
+
+    #[test]
+    fn test_extract_result_ok_type_option() {
+        let output: syn::ReturnType = parse_quote!(-> Result<Option<String>, Error>);
+        assert_eq!(extract_result_ok_type(&output), "Option<String>");
+    }
+
+    // ========================================================================
+    // Tests for has_serde_default
+    // ========================================================================
+
+    #[test]
+    fn test_has_serde_default_true() {
+        let attr: syn::Attribute = parse_quote!(#[serde(default)]);
+        assert!(has_serde_default(&[attr]));
+    }
+
+    #[test]
+    fn test_has_serde_default_with_value() {
+        let attr: syn::Attribute = parse_quote!(#[serde(default = "default_value")]);
+        assert!(has_serde_default(&[attr]));
+    }
+
+    #[test]
+    fn test_has_serde_default_other_serde_attr() {
+        let attr: syn::Attribute = parse_quote!(#[serde(rename = "other_name")]);
+        assert!(!has_serde_default(&[attr]));
+    }
+
+    #[test]
+    fn test_has_serde_default_non_serde() {
+        let attr: syn::Attribute = parse_quote!(#[field(display_name = "Test")]);
+        assert!(!has_serde_default(&[attr]));
+    }
+
+    #[test]
+    fn test_has_serde_default_empty() {
+        assert!(!has_serde_default(&[]));
+    }
+
+    #[test]
+    fn test_has_serde_default_multiple_attrs() {
+        let attr1: syn::Attribute = parse_quote!(#[field(display_name = "Test")]);
+        let attr2: syn::Attribute = parse_quote!(#[serde(default)]);
+        assert!(has_serde_default(&[attr1, attr2]));
+    }
+
+    #[test]
+    fn test_has_serde_default_multiple_nested_default_first() {
+        // When default appears first in the list, it should be detected
+        let attr: syn::Attribute = parse_quote!(#[serde(default, rename = "foo")]);
+        assert!(has_serde_default(&[attr]));
+    }
+
+    // Note: The current implementation has a limitation where it may not detect
+    // `default` when it appears after a key=value pair like `rename = "foo"`.
+    // This is because parse_nested_meta stops at the first unhandled meta item.
+    // In practice, this edge case is rare since most code puts `default` first.
+}

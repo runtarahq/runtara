@@ -15,6 +15,9 @@ mod http_api_key;
 mod http_bearer;
 mod sftp;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export extractors to ensure they're linked and registered
 pub use http_api_key::HttpApiKeyExtractor;
 pub use http_bearer::HttpBearerExtractor;

@@ -13,6 +13,7 @@ use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::{MappingValue, SwitchStep};
 
 /// Emit code for a Switch step.
+#[allow(clippy::too_many_lines)]
 pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
@@ -253,5 +254,447 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::ast::context::EmitContext;
+    use runtara_dsl::{ImmediateValue, ReferenceValue, SwitchCase, SwitchConfig, SwitchMatchType};
+
+    /// Helper to create a minimal switch step for testing.
+    fn create_switch_step(step_id: &str, value_ref: &str, cases: Vec<SwitchCase>) -> SwitchStep {
+        SwitchStep {
+            id: step_id.to_string(),
+            name: Some("Test Switch".to_string()),
+            config: Some(SwitchConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: value_ref.to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                cases,
+                default: Some(serde_json::json!({"result": "default"})),
+            }),
+        }
+    }
+
+    /// Helper to create a switch case.
+    fn create_case(
+        match_type: SwitchMatchType,
+        match_value: serde_json::Value,
+        output: serde_json::Value,
+    ) -> SwitchCase {
+        SwitchCase {
+            match_type,
+            match_value,
+            output,
+        }
+    }
+
+    #[test]
+    fn test_emit_switch_basic_structure() {
+        let mut ctx = EmitContext::new(false);
+        let cases = vec![create_case(
+            SwitchMatchType::Eq,
+            serde_json::json!("test"),
+            serde_json::json!({"matched": true}),
+        )];
+        let step = create_switch_step("switch-basic", "steps.previous.output", cases);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify basic structure elements
+        assert!(code.contains("switch_value"), "Should extract switch value");
+        assert!(code.contains("cases"), "Should extract cases array");
+        assert!(
+            code.contains("default_output"),
+            "Should handle default output"
+        );
+        assert!(
+            code.contains("matched_output"),
+            "Should track matched output"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_value_extraction() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-value", "inputs.status", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Debug: print actual code to see token format
+        // eprintln!("Generated code:\n{}", code);
+
+        // Verify value is extracted from inputs
+        // TokenStream adds spaces around quotes: . get ("value")
+        assert!(
+            code.contains(r#". get ("value")"#),
+            "Should get value from inputs"
+        );
+        assert!(
+            code.contains("unwrap_or (serde_json :: Value :: Null)"),
+            "Should default to Null if value missing"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_cases_iteration() {
+        let mut ctx = EmitContext::new(false);
+        let cases = vec![
+            create_case(
+                SwitchMatchType::Eq,
+                serde_json::json!("pending"),
+                serde_json::json!({"status": "waiting"}),
+            ),
+            create_case(
+                SwitchMatchType::Eq,
+                serde_json::json!("complete"),
+                serde_json::json!({"status": "done"}),
+            ),
+        ];
+        let step = create_switch_step("switch-cases", "data.status", cases);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify case iteration structure
+        assert!(
+            code.contains("for (_case_index , case) in cases . iter () . enumerate ()"),
+            "Should iterate over cases"
+        );
+        assert!(
+            code.contains("if matched_output . is_some ()"),
+            "Should check if already matched"
+        );
+        assert!(code.contains("break"), "Should break on first match");
+    }
+
+    #[test]
+    fn test_emit_switch_match_type_extraction() {
+        let mut ctx = EmitContext::new(false);
+        let cases = vec![create_case(
+            SwitchMatchType::Gt,
+            serde_json::json!(10),
+            serde_json::json!({"result": "large"}),
+        )];
+        let step = create_switch_step("switch-match-type", "value", cases);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify match type is extracted (TokenStream adds spaces)
+        assert!(
+            code.contains(r#". get ("matchType")"#),
+            "Should get matchType from case"
+        );
+        assert!(
+            code.contains(r#". get ("match")"#),
+            "Should get match value from case"
+        );
+        assert!(
+            code.contains(r#". get ("output")"#),
+            "Should get output from case"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_comparison_operators() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-compare", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify comparison operator handling (TokenStream adds spaces)
+        assert!(
+            code.contains(r#"Some ("EQ")"#),
+            "Should handle EQ comparison"
+        );
+        assert!(
+            code.contains(r#"Some ("NE")"#),
+            "Should handle NE comparison"
+        );
+        assert!(
+            code.contains(r#"Some ("GT")"#),
+            "Should handle GT comparison"
+        );
+        assert!(
+            code.contains(r#"Some ("GTE")"#),
+            "Should handle GTE comparison"
+        );
+        assert!(
+            code.contains(r#"Some ("LT")"#),
+            "Should handle LT comparison"
+        );
+        assert!(
+            code.contains(r#"Some ("LTE")"#),
+            "Should handle LTE comparison"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_string_operators() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-string", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify string operator handling (TokenStream adds spaces)
+        assert!(
+            code.contains(r#"Some ("STARTS_WITH")"#),
+            "Should handle STARTS_WITH"
+        );
+        assert!(
+            code.contains(r#"Some ("ENDS_WITH")"#),
+            "Should handle ENDS_WITH"
+        );
+        assert!(
+            code.contains("starts_with"),
+            "Should use starts_with method"
+        );
+        assert!(code.contains("ends_with"), "Should use ends_with method");
+    }
+
+    #[test]
+    fn test_emit_switch_array_operators() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-array", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify array operator handling (TokenStream adds spaces)
+        assert!(
+            code.contains(r#"Some ("CONTAINS")"#),
+            "Should handle CONTAINS"
+        );
+        assert!(code.contains(r#"Some ("IN")"#), "Should handle IN");
+        assert!(code.contains(r#"Some ("NOT_IN")"#), "Should handle NOT_IN");
+        assert!(code.contains("as_array"), "Should check for array type");
+    }
+
+    #[test]
+    fn test_emit_switch_utility_operators() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-utility", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify utility operator handling (TokenStream adds spaces)
+        assert!(
+            code.contains(r#"Some ("IS_DEFINED")"#),
+            "Should handle IS_DEFINED"
+        );
+        assert!(
+            code.contains(r#"Some ("IS_EMPTY")"#),
+            "Should handle IS_EMPTY"
+        );
+        assert!(
+            code.contains(r#"Some ("IS_NOT_EMPTY")"#),
+            "Should handle IS_NOT_EMPTY"
+        );
+        assert!(code.contains("is_null"), "Should check for null");
+        assert!(code.contains("is_empty"), "Should check for empty");
+    }
+
+    #[test]
+    fn test_emit_switch_compound_operators() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-compound", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify compound operator handling (TokenStream adds spaces)
+        assert!(
+            code.contains(r#"Some ("BETWEEN")"#),
+            "Should handle BETWEEN"
+        );
+        assert!(code.contains(r#"Some ("RANGE")"#), "Should handle RANGE");
+    }
+
+    #[test]
+    fn test_emit_switch_default_fallback() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-default", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify default fallback logic
+        assert!(
+            code.contains("unwrap_or_else"),
+            "Should use default when no match"
+        );
+        assert!(
+            code.contains("process_switch_output"),
+            "Should process switch output"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_output_structure() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-output", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify output JSON structure
+        assert!(code.contains("\"stepId\""), "Should include stepId");
+        assert!(code.contains("\"stepName\""), "Should include stepName");
+        assert!(code.contains("\"stepType\""), "Should include stepType");
+        assert!(code.contains("\"Switch\""), "Should have stepType = Switch");
+        assert!(code.contains("\"outputs\""), "Should include outputs");
+    }
+
+    #[test]
+    fn test_emit_switch_stores_in_steps_context() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-store", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify result is stored in steps_context
+        assert!(
+            code.contains("steps_context . insert"),
+            "Should store result in steps_context"
+        );
+        assert!(
+            code.contains("\"switch-store\""),
+            "Should use step_id as key"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_debug_mode_enabled() {
+        let mut ctx = EmitContext::new(true); // debug mode ON
+        let step = create_switch_step("switch-debug", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events are emitted
+        assert!(
+            code.contains("step_debug_start"),
+            "Should emit debug start event"
+        );
+        assert!(
+            code.contains("step_debug_end"),
+            "Should emit debug end event"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_debug_mode_disabled() {
+        let mut ctx = EmitContext::new(false); // debug mode OFF
+        let step = create_switch_step("switch-no-debug", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Core switch logic should still be present
+        assert!(code.contains("switch_value"), "Should have switch logic");
+        assert!(code.contains("matched_output"), "Should track matching");
+    }
+
+    #[test]
+    fn test_emit_switch_with_unnamed_step() {
+        let mut ctx = EmitContext::new(false);
+        let step = SwitchStep {
+            id: "switch-unnamed".to_string(),
+            name: None, // No name
+            config: Some(SwitchConfig {
+                value: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("test"),
+                }),
+                cases: vec![],
+                default: None,
+            }),
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use "Unnamed" as display name
+        assert!(
+            code.contains("\"Unnamed\""),
+            "Should use 'Unnamed' for unnamed steps"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_no_config() {
+        let mut ctx = EmitContext::new(false);
+        let step = SwitchStep {
+            id: "switch-no-config".to_string(),
+            name: Some("Empty Switch".to_string()),
+            config: None, // No config
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should create empty object for inputs
+        assert!(
+            code.contains("serde_json :: Value :: Object (serde_json :: Map :: new ())"),
+            "Should create empty object when no config"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_immediate_value() {
+        let mut ctx = EmitContext::new(false);
+        let step = SwitchStep {
+            id: "switch-immediate".to_string(),
+            name: Some("Immediate Switch".to_string()),
+            config: Some(SwitchConfig {
+                value: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(42),
+                }),
+                cases: vec![create_case(
+                    SwitchMatchType::Eq,
+                    serde_json::json!(42),
+                    serde_json::json!({"matched": true}),
+                )],
+                default: None,
+            }),
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should handle immediate values
+        assert!(
+            code.contains("switch_value"),
+            "Should extract switch value from immediate"
+        );
+    }
+
+    #[test]
+    fn test_emit_switch_helper_functions() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_switch_step("switch-helpers", "value", vec![]);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify helper function calls
+        assert!(
+            code.contains("switch_equals"),
+            "Should use switch_equals helper"
+        );
+        assert!(
+            code.contains("switch_compare"),
+            "Should use switch_compare helper"
+        );
     }
 }

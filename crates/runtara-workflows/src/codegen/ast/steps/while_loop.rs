@@ -18,6 +18,7 @@ use runtara_dsl::WhileStep;
 
 /// Emit code for a While step.
 pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
+    #![allow(clippy::too_many_lines)]
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -175,5 +176,421 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::{
+        ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+        ExecutionGraph, FinishStep, ImmediateValue, MappingValue, ReferenceValue, Step,
+        WhileConfig,
+    };
+    use std::collections::HashMap;
+
+    /// Helper to create a minimal ExecutionGraph with just a Finish step
+    fn create_minimal_graph(entry_point: &str) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            entry_point.to_string(),
+            Step::Finish(FinishStep {
+                id: entry_point.to_string(),
+                name: Some("Finish".to_string()),
+                input_mapping: None,
+            }),
+        );
+
+        ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: entry_point.to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    /// Helper to create a simple while step with loop.index < N condition
+    fn create_while_step(step_id: &str, max_iterations: Option<u32>, limit: i64) -> WhileStep {
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Lt,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                    value: "loop.index".to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(limit),
+                })),
+            ],
+        });
+
+        WhileStep {
+            id: step_id.to_string(),
+            name: Some("Test While".to_string()),
+            condition,
+            config: max_iterations.map(|m| WhileConfig {
+                max_iterations: Some(m),
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+        }
+    }
+
+    #[test]
+    fn test_emit_basic_while_structure() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-1", None, 5);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify basic structure
+        assert!(code.contains("while-1"), "Should contain step ID");
+        assert!(
+            code.contains("__loop_index"),
+            "Should have loop index variable"
+        );
+        assert!(
+            code.contains("__max_iterations"),
+            "Should have max iterations check"
+        );
+        assert!(code.contains("__loop_outputs"), "Should track loop outputs");
+    }
+
+    #[test]
+    fn test_emit_while_default_max_iterations() {
+        let mut ctx = EmitContext::new(false);
+        // No config = default max_iterations of 10
+        let while_step = WhileStep {
+            id: "while-default".to_string(),
+            name: None,
+            condition: ConditionExpression::Value(MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(true),
+            })),
+            config: None,
+            subgraph: Box::new(create_minimal_graph("finish")),
+        };
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Default max_iterations is 10
+        assert!(
+            code.contains("10u32") || code.contains("10 u32") || code.contains(": u32 = 10"),
+            "Should use default max_iterations of 10"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_custom_max_iterations() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-custom", Some(25), 100);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use custom max_iterations
+        assert!(
+            code.contains("25u32") || code.contains("25 u32") || code.contains(": u32 = 25"),
+            "Should use custom max_iterations of 25"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_loop_context_injection() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-ctx", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify loop context is injected
+        assert!(
+            code.contains("\"index\""),
+            "Should inject index into loop context"
+        );
+        assert!(
+            code.contains("\"outputs\""),
+            "Should inject outputs into loop context"
+        );
+        assert!(
+            code.contains("\"loop\""),
+            "Should create loop context object"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_loop_indices_for_cache_key() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-indices", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify _loop_indices is tracked for nested loops
+        assert!(
+            code.contains("_loop_indices"),
+            "Should track _loop_indices for cache key uniqueness"
+        );
+        assert!(
+            code.contains("__parent_indices"),
+            "Should preserve parent loop indices"
+        );
+        assert!(
+            code.contains("__all_indices"),
+            "Should build cumulative indices"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_backward_compat_index() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-compat", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify _index is injected for backward compatibility
+        assert!(
+            code.contains("\"_index\""),
+            "Should inject _index for backward compatibility"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_previous_outputs() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-prev", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify previous outputs are passed to next iteration
+        assert!(
+            code.contains("_previousOutputs"),
+            "Should pass _previousOutputs to subgraph"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_heartbeat() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-hb", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify heartbeat is sent after each iteration
+        assert!(
+            code.contains("heartbeat"),
+            "Should emit heartbeat after each iteration"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_cancellation_check() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-cancel", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify cancellation is checked
+        assert!(
+            code.contains("check_cancelled"),
+            "Should check for cancellation after each iteration"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_subgraph_function() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-subgraph", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify subgraph function is generated
+        assert!(
+            code.contains("_subgraph"),
+            "Should generate subgraph function"
+        );
+        assert!(
+            code.contains("ScenarioInputs"),
+            "Should use ScenarioInputs for subgraph"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_output_structure() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-output", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify output structure
+        assert!(
+            code.contains("\"stepId\""),
+            "Should include stepId in output"
+        );
+        assert!(
+            code.contains("\"stepType\""),
+            "Should include stepType in output"
+        );
+        assert!(code.contains("\"While\""), "Should have stepType = While");
+        assert!(
+            code.contains("\"iterations\""),
+            "Should include iterations count"
+        );
+        assert!(
+            code.contains("\"outputs\""),
+            "Should include outputs in result"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_stores_in_steps_context() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-store", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify result is stored in steps_context
+        assert!(
+            code.contains("steps_context . insert"),
+            "Should store result in steps_context"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_debug_mode_enabled() {
+        let mut ctx = EmitContext::new(true); // debug mode ON
+        let while_step = create_while_step("while-debug", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events are emitted
+        assert!(
+            code.contains("step_debug_start"),
+            "Should emit debug start event"
+        );
+        assert!(
+            code.contains("step_debug_end"),
+            "Should emit debug end event"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_debug_mode_disabled() {
+        let mut ctx = EmitContext::new(false); // debug mode OFF
+        let while_step = create_while_step("while-no-debug", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Debug events should not be present (or minimal)
+        // The debug functions return empty tokens when debug_mode is false
+        // So we just verify the core loop logic is present
+        assert!(code.contains("loop {"), "Should have loop structure");
+    }
+
+    #[test]
+    fn test_emit_while_with_unnamed_step() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = WhileStep {
+            id: "while-unnamed".to_string(),
+            name: None, // No name
+            condition: ConditionExpression::Value(MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(true),
+            })),
+            config: Some(WhileConfig {
+                max_iterations: Some(3),
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+        };
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use "Unnamed" as display name
+        assert!(
+            code.contains("\"Unnamed\""),
+            "Should use 'Unnamed' for unnamed steps"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_condition_evaluation() {
+        let mut ctx = EmitContext::new(false);
+
+        // Complex condition: loop.index < 5 AND loop.outputs != null
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::And,
+            arguments: vec![
+                ConditionArgument::Expression(Box::new(ConditionExpression::Operation(
+                    ConditionOperation {
+                        op: ConditionOperator::Lt,
+                        arguments: vec![
+                            ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                                value: "loop.index".to_string(),
+                                type_hint: None,
+                                default: None,
+                            })),
+                            ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                                value: serde_json::json!(5),
+                            })),
+                        ],
+                    },
+                ))),
+                ConditionArgument::Expression(Box::new(ConditionExpression::Operation(
+                    ConditionOperation {
+                        op: ConditionOperator::IsDefined,
+                        arguments: vec![ConditionArgument::Value(MappingValue::Reference(
+                            ReferenceValue {
+                                value: "loop.outputs".to_string(),
+                                type_hint: None,
+                                default: None,
+                            },
+                        ))],
+                    },
+                ))),
+            ],
+        });
+
+        let while_step = WhileStep {
+            id: "while-complex".to_string(),
+            name: Some("Complex Condition".to_string()),
+            condition,
+            config: Some(WhileConfig {
+                max_iterations: Some(10),
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+        };
+
+        let tokens = emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify condition is evaluated
+        assert!(
+            code.contains("__condition_result"),
+            "Should store condition result"
+        );
+        assert!(
+            code.contains("if ! __condition_result"),
+            "Should break on false condition"
+        );
     }
 }

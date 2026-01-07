@@ -86,3 +86,239 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> TokenStream {
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::ast::context::EmitContext;
+    use runtara_dsl::{ImmediateValue, MappingValue};
+    use std::collections::HashMap;
+
+    /// Helper to create a minimal log step for testing.
+    fn create_log_step(step_id: &str, level: LogLevel, message: &str) -> LogStep {
+        LogStep {
+            id: step_id.to_string(),
+            name: Some("Test Log".to_string()),
+            level,
+            message: message.to_string(),
+            context: None,
+        }
+    }
+
+    #[test]
+    fn test_emit_log_basic_structure() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-basic", LogLevel::Info, "Hello world");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify basic structure
+        assert!(
+            code.contains("custom_event"),
+            "Should emit custom event via SDK"
+        );
+        assert!(
+            code.contains("workflow_log"),
+            "Event type should be workflow_log"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_level_debug() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-debug", LogLevel::Debug, "Debug message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("\"debug\""), "Should have level = debug");
+    }
+
+    #[test]
+    fn test_emit_log_level_info() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-info", LogLevel::Info, "Info message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("\"info\""), "Should have level = info");
+    }
+
+    #[test]
+    fn test_emit_log_level_warn() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-warn", LogLevel::Warn, "Warning message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("\"warn\""), "Should have level = warn");
+    }
+
+    #[test]
+    fn test_emit_log_level_error() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-error", LogLevel::Error, "Error message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("\"error\""), "Should have level = error");
+    }
+
+    #[test]
+    fn test_emit_log_includes_message() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-msg", LogLevel::Info, "Test message content");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("Test message content"),
+            "Should include the log message"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_includes_timestamp() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-ts", LogLevel::Info, "message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("timestamp_ms"),
+            "Should include timestamp_ms field"
+        );
+        assert!(
+            code.contains("SystemTime :: now"),
+            "Should use current system time"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_with_context() {
+        let mut ctx = EmitContext::new(false);
+        let mut context = HashMap::new();
+        context.insert(
+            "user_id".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("user123"),
+            }),
+        );
+
+        let step = LogStep {
+            id: "log-ctx".to_string(),
+            name: Some("With Context".to_string()),
+            level: LogLevel::Info,
+            message: "User action".to_string(),
+            context: Some(context),
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should have context mapping code
+        assert!(
+            code.contains("context"),
+            "Should include context in payload"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_empty_context() {
+        let mut ctx = EmitContext::new(false);
+        let step = LogStep {
+            id: "log-empty-ctx".to_string(),
+            name: Some("Empty Context".to_string()),
+            level: LogLevel::Info,
+            message: "message".to_string(),
+            context: Some(HashMap::new()),
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use empty object for empty context
+        assert!(
+            code.contains("serde_json :: Value :: Object (serde_json :: Map :: new ())"),
+            "Should create empty object for empty context"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_output_structure() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-output", LogLevel::Info, "message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify output JSON structure
+        assert!(code.contains("\"stepId\""), "Should include stepId");
+        assert!(code.contains("\"stepName\""), "Should include stepName");
+        assert!(code.contains("\"stepType\""), "Should include stepType");
+        assert!(code.contains("\"Log\""), "Should have stepType = Log");
+        assert!(code.contains("\"outputs\""), "Should include outputs");
+    }
+
+    #[test]
+    fn test_emit_log_stores_in_steps_context() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-store", LogLevel::Info, "message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify result is stored in steps_context
+        assert!(
+            code.contains("steps_context . insert"),
+            "Should store result in steps_context"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_with_unnamed_step() {
+        let mut ctx = EmitContext::new(false);
+        let step = LogStep {
+            id: "log-unnamed".to_string(),
+            name: None, // No name
+            level: LogLevel::Info,
+            message: "unnamed log".to_string(),
+            context: None,
+        };
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should use "Unnamed" as display name
+        assert!(
+            code.contains("\"Unnamed\""),
+            "Should use 'Unnamed' for unnamed steps"
+        );
+    }
+
+    #[test]
+    fn test_emit_log_sdk_call() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_log_step("log-sdk", LogLevel::Info, "message");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify SDK custom_event call
+        assert!(code.contains("sdk ()"), "Should acquire SDK lock");
+        assert!(
+            code.contains(". custom_event"),
+            "Should call custom_event method"
+        );
+        assert!(
+            code.contains("serde_json :: to_vec"),
+            "Should serialize payload to bytes"
+        );
+    }
+}
