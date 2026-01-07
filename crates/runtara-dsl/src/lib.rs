@@ -148,6 +148,7 @@ impl SchemaFieldType {
             SchemaFieldType::Boolean => "boolean",
             SchemaFieldType::Array => "array",
             SchemaFieldType::Object => "object",
+            SchemaFieldType::File => "file",
         }
     }
 }

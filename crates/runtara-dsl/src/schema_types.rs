@@ -671,6 +671,8 @@ pub enum SchemaFieldType {
     Array,
     /// JSON object
     Object,
+    /// Base64-encoded file data (FileData structure with content, filename, mimeType)
+    File,
 }
 
 /// A typed variable definition with its value.
