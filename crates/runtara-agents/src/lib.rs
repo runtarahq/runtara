@@ -11,6 +11,8 @@
 // Re-export all agent modules from agents/ subdirectory
 #[path = "agents/csv.rs"]
 pub mod csv;
+#[path = "agents/datetime.rs"]
+pub mod datetime;
 #[path = "agents/extractors/mod.rs"]
 pub mod extractors;
 #[path = "agents/http.rs"]

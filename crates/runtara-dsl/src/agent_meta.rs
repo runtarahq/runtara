@@ -397,6 +397,15 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: false,
     },
     AgentModuleConfig {
+        id: "datetime",
+        name: "DateTime",
+        description: "Date and time capabilities for parsing, formatting, calculating, and manipulating dates",
+        has_side_effects: false,
+        supports_connections: false,
+        integration_ids: &[],
+        secure: false,
+    },
+    AgentModuleConfig {
         id: "http",
         name: "HTTP",
         description: "HTTP capabilities for making web requests with JSON/text/binary support (has side effects)",
@@ -972,8 +981,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            8,
-            "Expected 8 built-in agent modules"
+            9,
+            "Expected 9 built-in agent modules"
         );
     }
 
@@ -986,6 +995,7 @@ mod tests {
         assert!(ids.contains(&"csv"), "Missing csv module");
         assert!(ids.contains(&"text"), "Missing text module");
         assert!(ids.contains(&"xml"), "Missing xml module");
+        assert!(ids.contains(&"datetime"), "Missing datetime module");
         assert!(ids.contains(&"http"), "Missing http module");
         assert!(ids.contains(&"sftp"), "Missing sftp module");
         assert!(ids.contains(&"object_model"), "Missing object_model module");
