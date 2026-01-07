@@ -111,6 +111,9 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
         )
     };
 
+    // Clone scenario inputs var for debug events (to access _loop_indices)
+    let scenario_inputs_var = ctx.inputs_var.clone();
+
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
         ctx,
@@ -119,8 +122,16 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
         "Agent",
         Some(&step_inputs_var),
         input_mapping_json.as_deref(),
+        Some(&scenario_inputs_var),
     );
-    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "Agent", Some(&result_var));
+    let debug_end = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "Agent",
+        Some(&result_var),
+        Some(&scenario_inputs_var),
+    );
 
     quote! {
         let #source_var = #build_source;

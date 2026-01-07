@@ -92,7 +92,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
 const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
 
 /// Emit debug event for step execution start.
-/// Captures step metadata, inputs, and input mapping.
+/// Captures step metadata, inputs, input mapping, and loop indices for iteration tracking.
 ///
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
@@ -103,6 +103,7 @@ const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `inputs_var` - Optional Ident of variable holding step inputs (as serde_json::Value)
 /// * `input_mapping_json` - Optional static JSON string of input mapping DSL
+/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices)
 pub fn emit_step_debug_start(
     ctx: &EmitContext,
     step_id: &str,
@@ -110,6 +111,7 @@ pub fn emit_step_debug_start(
     step_type: &str,
     inputs_var: Option<&proc_macro2::Ident>,
     input_mapping_json: Option<&str>,
+    scenario_inputs_var: Option<&proc_macro2::Ident>,
 ) -> TokenStream {
     if !ctx.debug_mode {
         return quote! {};
@@ -135,6 +137,19 @@ pub fn emit_step_debug_start(
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
+    // Extract loop_indices from scenario inputs if available
+    let loop_indices_expr = scenario_inputs_var
+        .map(|v| {
+            quote! {
+                (*#v.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_loop_indices"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Array(vec![]))
+            }
+        })
+        .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
+
     quote! {
         let __step_start_time = std::time::Instant::now();
         {
@@ -153,10 +168,13 @@ pub fn emit_step_debug_start(
                 }
             }
 
+            let __loop_indices = #loop_indices_expr;
+
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
+                "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -173,7 +191,7 @@ pub fn emit_step_debug_start(
 }
 
 /// Emit debug event for step execution end.
-/// Captures step metadata, outputs, and duration.
+/// Captures step metadata, outputs, duration, and loop indices for iteration tracking.
 ///
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
@@ -183,12 +201,14 @@ pub fn emit_step_debug_start(
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `outputs_var` - Optional Ident of variable holding step outputs (as serde_json::Value)
+/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices)
 pub fn emit_step_debug_end(
     ctx: &EmitContext,
     step_id: &str,
     step_name: Option<&str>,
     step_type: &str,
     outputs_var: Option<&proc_macro2::Ident>,
+    scenario_inputs_var: Option<&proc_macro2::Ident>,
 ) -> TokenStream {
     if !ctx.debug_mode {
         return quote! {};
@@ -207,6 +227,19 @@ pub fn emit_step_debug_end(
             }
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
+
+    // Extract loop_indices from scenario inputs if available
+    let loop_indices_expr = scenario_inputs_var
+        .map(|v| {
+            quote! {
+                (*#v.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_loop_indices"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Array(vec![]))
+            }
+        })
+        .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
 
     quote! {
         {
@@ -227,10 +260,13 @@ pub fn emit_step_debug_end(
                 }
             }
 
+            let __loop_indices = #loop_indices_expr;
+
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
+                "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as i64)
@@ -339,7 +375,8 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_disabled_when_not_debug_mode() {
         let ctx = make_non_debug_ctx();
-        let tokens = emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
+        let tokens =
+            emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
         assert!(
             tokens.is_empty(),
             "Should emit nothing when debug_mode is false"
@@ -349,7 +386,8 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_emits_code_in_debug_mode() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
+        let tokens =
+            emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
         let code = tokens.to_string();
 
         // Verify key elements are present in generated code
@@ -365,14 +403,25 @@ mod tests {
         assert!(code.contains("step-1"), "Should include step_id");
         assert!(code.contains("Test Step"), "Should include step_name");
         assert!(code.contains("Agent"), "Should include step_type");
+        assert!(
+            code.contains("loop_indices"),
+            "Should include loop_indices in payload"
+        );
     }
 
     #[test]
     fn test_emit_step_debug_start_with_inputs_var() {
         let ctx = make_debug_ctx();
         let inputs_var = proc_macro2::Ident::new("my_inputs", proc_macro2::Span::call_site());
-        let tokens =
-            emit_step_debug_start(&ctx, "step-2", None, "Conditional", Some(&inputs_var), None);
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step-2",
+            None,
+            "Conditional",
+            Some(&inputs_var),
+            None,
+            None,
+        );
         let code = tokens.to_string();
 
         assert!(
@@ -396,6 +445,7 @@ mod tests {
             "Agent",
             None,
             Some(mapping_json),
+            None,
         );
         let code = tokens.to_string();
 
@@ -410,9 +460,36 @@ mod tests {
     }
 
     #[test]
+    fn test_emit_step_debug_start_with_scenario_inputs() {
+        let ctx = make_debug_ctx();
+        let scenario_var =
+            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step-loop",
+            None,
+            "Agent",
+            None,
+            None,
+            Some(&scenario_var),
+        );
+        let code = tokens.to_string();
+
+        // Verify loop_indices extraction from scenario inputs
+        assert!(
+            code.contains("scenario_inputs"),
+            "Should reference scenario inputs variable"
+        );
+        assert!(
+            code.contains("_loop_indices"),
+            "Should extract _loop_indices from variables"
+        );
+    }
+
+    #[test]
     fn test_emit_step_debug_end_disabled_when_not_debug_mode() {
         let ctx = make_non_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None);
+        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
         assert!(
             tokens.is_empty(),
             "Should emit nothing when debug_mode is false"
@@ -422,7 +499,7 @@ mod tests {
     #[test]
     fn test_emit_step_debug_end_emits_code_in_debug_mode() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None);
+        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
         let code = tokens.to_string();
 
         // Verify key elements are present in generated code
@@ -437,13 +514,17 @@ mod tests {
             code.contains("duration_ms"),
             "Should include duration in payload"
         );
+        assert!(
+            code.contains("loop_indices"),
+            "Should include loop_indices in payload"
+        );
     }
 
     #[test]
     fn test_emit_step_debug_end_with_outputs_var() {
         let ctx = make_debug_ctx();
         let outputs_var = proc_macro2::Ident::new("step_result", proc_macro2::Span::call_site());
-        let tokens = emit_step_debug_end(&ctx, "step-4", None, "Split", Some(&outputs_var));
+        let tokens = emit_step_debug_end(&ctx, "step-4", None, "Split", Some(&outputs_var), None);
         let code = tokens.to_string();
 
         assert!(
@@ -457,9 +538,29 @@ mod tests {
     }
 
     #[test]
+    fn test_emit_step_debug_end_with_scenario_inputs() {
+        let ctx = make_debug_ctx();
+        let scenario_var =
+            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let tokens =
+            emit_step_debug_end(&ctx, "step-loop", None, "Agent", None, Some(&scenario_var));
+        let code = tokens.to_string();
+
+        // Verify loop_indices extraction from scenario inputs
+        assert!(
+            code.contains("scenario_inputs"),
+            "Should reference scenario inputs variable"
+        );
+        assert!(
+            code.contains("_loop_indices"),
+            "Should extract _loop_indices from variables"
+        );
+    }
+
+    #[test]
     fn test_emit_step_debug_start_includes_timestamp() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_start(&ctx, "step-5", None, "Finish", None, None);
+        let tokens = emit_step_debug_start(&ctx, "step-5", None, "Finish", None, None, None);
         let code = tokens.to_string();
 
         assert!(code.contains("timestamp_ms"), "Should include timestamp");
@@ -472,7 +573,7 @@ mod tests {
     #[test]
     fn test_emit_step_debug_end_includes_timestamp_and_duration() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-6", None, "Agent", None);
+        let tokens = emit_step_debug_end(&ctx, "step-6", None, "Agent", None, None);
         let code = tokens.to_string();
 
         assert!(code.contains("timestamp_ms"), "Should include timestamp");
@@ -495,7 +596,7 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_without_name() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_start(&ctx, "nameless-step", None, "Agent", None, None);
+        let tokens = emit_step_debug_start(&ctx, "nameless-step", None, "Agent", None, None, None);
         let code = tokens.to_string();
 
         // Should still work, with None for step_name
@@ -506,7 +607,14 @@ mod tests {
     #[test]
     fn test_emit_step_debug_end_without_outputs() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-no-output", Some("No Output"), "Finish", None);
+        let tokens = emit_step_debug_end(
+            &ctx,
+            "step-no-output",
+            Some("No Output"),
+            "Finish",
+            None,
+            None,
+        );
         let code = tokens.to_string();
 
         // Should still work, with None for outputs
@@ -518,7 +626,8 @@ mod tests {
     fn test_emit_step_debug_generates_truncation_function() {
         let ctx = make_debug_ctx();
         let inputs_var = proc_macro2::Ident::new("big_data", proc_macro2::Span::call_site());
-        let tokens = emit_step_debug_start(&ctx, "step", None, "Agent", Some(&inputs_var), None);
+        let tokens =
+            emit_step_debug_start(&ctx, "step", None, "Agent", Some(&inputs_var), None, None);
         let code = tokens.to_string();
 
         // Verify truncation function is generated
@@ -745,6 +854,380 @@ mod tests {
         assert!(
             code.contains("indices_suffix"),
             "StartScenario should build indices suffix for cache key"
+        );
+    }
+
+    // ==========================================
+    // Tests for loop_indices in debug events
+    // ==========================================
+
+    #[test]
+    fn test_debug_event_includes_loop_indices_field() {
+        let ctx = make_debug_ctx();
+        let tokens =
+            emit_step_debug_start(&ctx, "test-step", Some("Test"), "Agent", None, None, None);
+        let code = tokens.to_string();
+
+        // Verify the payload includes loop_indices field
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Debug start event should include loop_indices field in payload"
+        );
+    }
+
+    #[test]
+    fn test_debug_end_event_includes_loop_indices_field() {
+        let ctx = make_debug_ctx();
+        let tokens = emit_step_debug_end(&ctx, "test-step", Some("Test"), "Agent", None, None);
+        let code = tokens.to_string();
+
+        // Verify the payload includes loop_indices field
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Debug end event should include loop_indices field in payload"
+        );
+    }
+
+    #[test]
+    fn test_debug_event_extracts_loop_indices_from_scenario_inputs() {
+        let ctx = make_debug_ctx();
+        let scenario_var =
+            proc_macro2::Ident::new("my_scenario_inputs", proc_macro2::Span::call_site());
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step-in-loop",
+            Some("Step In Loop"),
+            "Agent",
+            None,
+            None,
+            Some(&scenario_var),
+        );
+        let code = tokens.to_string();
+
+        // Verify loop_indices extraction logic is present
+        assert!(
+            code.contains("my_scenario_inputs"),
+            "Should reference the provided scenario inputs variable"
+        );
+        // proc_macro2 tokenizes with spaces, so `.variables` becomes `. variables`
+        assert!(
+            code.contains(". variables"),
+            "Should access variables from scenario inputs"
+        );
+        assert!(
+            code.contains("\"_loop_indices\""),
+            "Should look for _loop_indices key in variables"
+        );
+        assert!(
+            code.contains("as_object"),
+            "Should use as_object() to access variables map"
+        );
+    }
+
+    #[test]
+    fn test_debug_event_defaults_to_empty_array_without_scenario_inputs() {
+        let ctx = make_debug_ctx();
+        // No scenario_inputs_var provided
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "top-level-step",
+            Some("Top Level"),
+            "Agent",
+            None,
+            None,
+            None,
+        );
+        let code = tokens.to_string();
+
+        // When no scenario inputs var is provided, should default to empty array
+        assert!(
+            code.contains("serde_json :: Value :: Array (vec ! [])"),
+            "Should default to empty array when no scenario inputs provided"
+        );
+    }
+
+    #[test]
+    fn test_debug_event_defaults_to_empty_array_when_loop_indices_missing() {
+        let ctx = make_debug_ctx();
+        let scenario_var =
+            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let tokens =
+            emit_step_debug_start(&ctx, "step", None, "Agent", None, None, Some(&scenario_var));
+        let code = tokens.to_string();
+
+        // Should have fallback to empty array if _loop_indices is not present
+        assert!(
+            code.contains("unwrap_or (serde_json :: Value :: Array (vec ! []))"),
+            "Should fallback to empty array when _loop_indices is missing"
+        );
+    }
+
+    #[test]
+    fn test_split_step_passes_scenario_inputs_to_debug_events() {
+        use runtara_dsl::{ImmediateValue, MappingValue, SplitConfig, SplitStep};
+        use std::collections::HashMap;
+
+        // Enable debug mode to generate debug events
+        let mut ctx = EmitContext::new(true);
+
+        let split_step = SplitStep {
+            id: "split-debug-test".to_string(),
+            name: Some("Debug Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!([1, 2, 3]),
+                }),
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                variables: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = split::emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events are emitted with loop_indices
+        assert!(
+            code.contains("step_debug_start"),
+            "Split should emit debug start event"
+        );
+        assert!(
+            code.contains("step_debug_end"),
+            "Split should emit debug end event"
+        );
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Split debug events should include loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_agent_step_passes_scenario_inputs_to_debug_events() {
+        use runtara_dsl::AgentStep;
+
+        // Enable debug mode
+        let mut ctx = EmitContext::new(true);
+
+        let agent_step = AgentStep {
+            id: "agent-debug-test".to_string(),
+            name: Some("Debug Agent".to_string()),
+            agent_id: "http".to_string(),
+            capability_id: "request".to_string(),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            connection_id: None,
+        };
+
+        let tokens = agent::emit(&agent_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events include loop_indices
+        assert!(
+            code.contains("step_debug_start"),
+            "Agent should emit debug start event"
+        );
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Agent debug events should include loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_while_step_passes_scenario_inputs_to_debug_events() {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+            ImmediateValue, MappingValue, ReferenceValue, WhileConfig, WhileStep,
+        };
+
+        // Enable debug mode
+        let mut ctx = EmitContext::new(true);
+
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Lt,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                    value: "loop.index".to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(3),
+                })),
+            ],
+        });
+
+        let while_step = WhileStep {
+            id: "while-debug-test".to_string(),
+            name: Some("Debug While".to_string()),
+            condition,
+            config: Some(WhileConfig {
+                max_iterations: Some(5),
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+        };
+
+        let tokens = while_loop::emit(&while_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events include loop_indices
+        assert!(
+            code.contains("step_debug_start"),
+            "While should emit debug start event"
+        );
+        assert!(
+            code.contains("\"loop_indices\""),
+            "While debug events should include loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_conditional_step_passes_scenario_inputs_to_debug_events() {
+        use runtara_dsl::{
+            ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
+            ConditionalStep, ImmediateValue, MappingValue,
+        };
+
+        // Enable debug mode
+        let mut ctx = EmitContext::new(true);
+
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Eq,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(true),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(true),
+                })),
+            ],
+        });
+
+        let conditional_step = ConditionalStep {
+            id: "conditional-debug-test".to_string(),
+            name: Some("Debug Conditional".to_string()),
+            condition,
+        };
+
+        let graph = create_minimal_graph("finish");
+        let tokens = conditional::emit(&conditional_step, &mut ctx, &graph);
+        let code = tokens.to_string();
+
+        // Verify debug events include loop_indices
+        assert!(
+            code.contains("step_debug_start"),
+            "Conditional should emit debug start event"
+        );
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Conditional debug events should include loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_finish_step_passes_scenario_inputs_to_debug_events() {
+        use runtara_dsl::FinishStep;
+
+        // Enable debug mode
+        let mut ctx = EmitContext::new(true);
+
+        let finish_step = FinishStep {
+            id: "finish-debug-test".to_string(),
+            name: Some("Debug Finish".to_string()),
+            input_mapping: None,
+        };
+
+        let tokens = finish::emit(&finish_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events include loop_indices
+        assert!(
+            code.contains("step_debug_start"),
+            "Finish should emit debug start event"
+        );
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Finish debug events should include loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_switch_step_passes_scenario_inputs_to_debug_events() {
+        use runtara_dsl::{ImmediateValue, MappingValue, SwitchConfig, SwitchStep};
+
+        // Enable debug mode
+        let mut ctx = EmitContext::new(true);
+
+        let switch_step = SwitchStep {
+            id: "switch-debug-test".to_string(),
+            name: Some("Debug Switch".to_string()),
+            config: Some(SwitchConfig {
+                value: MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("test"),
+                }),
+                cases: vec![],
+                default: None,
+            }),
+        };
+
+        let tokens = switch::emit(&switch_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify debug events include loop_indices
+        assert!(
+            code.contains("step_debug_start"),
+            "Switch should emit debug start event"
+        );
+        assert!(
+            code.contains("\"loop_indices\""),
+            "Switch debug events should include loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_debug_events_not_emitted_when_debug_mode_disabled() {
+        // Debug mode OFF
+        let ctx = make_non_debug_ctx();
+        let scenario_var =
+            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+
+        let start_tokens =
+            emit_step_debug_start(&ctx, "step", None, "Agent", None, None, Some(&scenario_var));
+        let end_tokens =
+            emit_step_debug_end(&ctx, "step", None, "Agent", None, Some(&scenario_var));
+
+        assert!(
+            start_tokens.is_empty(),
+            "Debug start should not emit when debug_mode is false"
+        );
+        assert!(
+            end_tokens.is_empty(),
+            "Debug end should not emit when debug_mode is false"
+        );
+    }
+
+    #[test]
+    fn test_loop_indices_cloned_from_variables() {
+        let ctx = make_debug_ctx();
+        let scenario_var = proc_macro2::Ident::new("inputs", proc_macro2::Span::call_site());
+        let tokens =
+            emit_step_debug_start(&ctx, "step", None, "Agent", None, None, Some(&scenario_var));
+        let code = tokens.to_string();
+
+        // Verify we use .cloned() to avoid ownership issues
+        // proc_macro2 tokenizes `.cloned()` as `. cloned ()`
+        assert!(
+            code.contains(". cloned ()"),
+            "Should use .cloned() to extract loop_indices value"
         );
     }
 }

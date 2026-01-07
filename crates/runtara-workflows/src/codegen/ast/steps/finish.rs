@@ -55,6 +55,9 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
+
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
         ctx,
@@ -63,8 +66,16 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
         "Finish",
         Some(&finish_inputs_var),
         input_mapping_json.as_deref(),
+        Some(&scenario_inputs_var),
     );
-    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "Finish", Some(&step_var));
+    let debug_end = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "Finish",
+        Some(&step_var),
+        Some(&scenario_inputs_var),
+    );
 
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.

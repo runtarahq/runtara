@@ -101,6 +101,9 @@ fn emit_with_embedded_child(
     // Generate the embedded child scenario function using shared recursive emitter
     let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx);
 
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
+
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
         ctx,
@@ -109,14 +112,19 @@ fn emit_with_embedded_child(
         "StartScenario",
         Some(&child_inputs_var),
         input_mapping_json.as_deref(),
+        Some(&scenario_inputs_var),
     );
-    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "StartScenario", Some(&step_var));
+    let debug_end = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "StartScenario",
+        Some(&step_var),
+        Some(&scenario_inputs_var),
+    );
 
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("start_scenario::{}", step_id);
-
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
 
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
@@ -222,6 +230,9 @@ fn emit_placeholder(
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
 
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
+
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
         ctx,
@@ -230,8 +241,16 @@ fn emit_placeholder(
         "StartScenario",
         Some(&placeholder_inputs_var),
         None,
+        Some(&scenario_inputs_var),
     );
-    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "StartScenario", Some(&step_var));
+    let debug_end = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "StartScenario",
+        Some(&step_var),
+        Some(&scenario_inputs_var),
+    );
 
     quote! {
         let #source_var = #build_source;

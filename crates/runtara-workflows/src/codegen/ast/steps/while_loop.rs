@@ -54,6 +54,9 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
     // Serialize condition to JSON for debug events
     let condition_json = serde_json::to_string(&step.condition).ok();
 
+    // Clone scenario inputs var for debug events (to access _loop_indices)
+    let scenario_inputs_var = inputs_var.clone();
+
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
         ctx,
@@ -62,8 +65,16 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
         "While",
         Some(&loop_inputs_var),
         condition_json.as_deref(),
+        Some(&scenario_inputs_var),
     );
-    let debug_end = emit_step_debug_end(ctx, step_id, step_name, "While", Some(&step_var));
+    let debug_end = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "While",
+        Some(&step_var),
+        Some(&scenario_inputs_var),
+    );
 
     quote! {
         let #source_var = #build_source;
