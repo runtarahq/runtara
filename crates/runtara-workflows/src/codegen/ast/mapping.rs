@@ -373,27 +373,613 @@ pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proc_macro2::{Ident, Span};
+
+    // ==========================================
+    // Tests for path_to_json_pointer
+    // ==========================================
 
     #[test]
-    fn test_path_to_json_pointer() {
+    fn test_path_to_json_pointer_simple() {
         assert_eq!(path_to_json_pointer("data"), "/data");
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_nested() {
         assert_eq!(path_to_json_pointer("data.user.name"), "/data/user/name");
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_steps_context() {
         assert_eq!(
             path_to_json_pointer("steps.step1.outputs"),
             "/steps/step1/outputs"
         );
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_bracket_notation() {
         assert_eq!(
             path_to_json_pointer("steps['step-1'].outputs"),
             "/steps/step-1/outputs"
         );
-        // Test numeric array indices
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_double_quote_bracket() {
+        assert_eq!(
+            path_to_json_pointer("steps[\"step-2\"].value"),
+            "/steps/step-2/value"
+        );
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_numeric_array_index() {
         assert_eq!(
             path_to_json_pointer("instances[0].properties.name"),
             "/instances/0/properties/name"
         );
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_complex_path() {
         assert_eq!(
             path_to_json_pointer("steps.get-markup.outputs.instances[0].properties.markup"),
             "/steps/get-markup/outputs/instances/0/properties/markup"
         );
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_multiple_array_indices() {
+        assert_eq!(
+            path_to_json_pointer("data[0].items[1].value"),
+            "/data/0/items/1/value"
+        );
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_deeply_nested() {
+        assert_eq!(path_to_json_pointer("a.b.c.d.e.f.g"), "/a/b/c/d/e/f/g");
+    }
+
+    // ==========================================
+    // Tests for emit_immediate_value
+    // ==========================================
+
+    #[test]
+    fn test_emit_immediate_value_string() {
+        let imm = ImmediateValue {
+            value: serde_json::json!("hello"),
+        };
+        let tokens = emit_immediate_value(&imm);
+        let code = tokens.to_string();
+        assert!(code.contains("hello"));
+        assert!(code.contains("String"));
+    }
+
+    #[test]
+    fn test_emit_immediate_value_number() {
+        let imm = ImmediateValue {
+            value: serde_json::json!(42),
+        };
+        let tokens = emit_immediate_value(&imm);
+        let code = tokens.to_string();
+        assert!(code.contains("42"));
+        assert!(code.contains("Number"));
+    }
+
+    #[test]
+    fn test_emit_immediate_value_boolean() {
+        let imm = ImmediateValue {
+            value: serde_json::json!(true),
+        };
+        let tokens = emit_immediate_value(&imm);
+        let code = tokens.to_string();
+        assert!(code.contains("true"));
+        assert!(code.contains("Bool"));
+    }
+
+    #[test]
+    fn test_emit_immediate_value_null() {
+        let imm = ImmediateValue {
+            value: serde_json::Value::Null,
+        };
+        let tokens = emit_immediate_value(&imm);
+        let code = tokens.to_string();
+        assert!(code.contains("Null"));
+    }
+
+    #[test]
+    fn test_emit_immediate_value_array() {
+        let imm = ImmediateValue {
+            value: serde_json::json!([1, 2, 3]),
+        };
+        let tokens = emit_immediate_value(&imm);
+        let code = tokens.to_string();
+        assert!(code.contains("Array"));
+    }
+
+    #[test]
+    fn test_emit_immediate_value_object() {
+        let imm = ImmediateValue {
+            value: serde_json::json!({"key": "value"}),
+        };
+        let tokens = emit_immediate_value(&imm);
+        let code = tokens.to_string();
+        assert!(code.contains("Object"));
+        assert!(code.contains("key"));
+    }
+
+    // ==========================================
+    // Tests for emit_reference_value
+    // ==========================================
+
+    #[test]
+    fn test_emit_reference_value_basic() {
+        let ref_val = ReferenceValue {
+            value: "data.user.name".to_string(),
+            type_hint: None,
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("source"));
+        assert!(code.contains("pointer"));
+        assert!(code.contains("/data/user/name"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_with_default() {
+        let ref_val = ReferenceValue {
+            value: "data.optional".to_string(),
+            type_hint: None,
+            default: Some(serde_json::json!("default_value")),
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("default_value"));
+        assert!(code.contains("Null"));
+        assert!(code.contains("None"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_type_hint_string() {
+        let ref_val = ReferenceValue {
+            value: "data.value".to_string(),
+            type_hint: Some(ValueType::String),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // String type hint should generate conversion logic
+        assert!(code.contains("String"));
+        assert!(code.contains("to_string"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_type_hint_integer() {
+        let ref_val = ReferenceValue {
+            value: "data.count".to_string(),
+            type_hint: Some(ValueType::Integer),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Integer type hint should generate i64 conversion
+        assert!(code.contains("as_i64"));
+        assert!(code.contains("parse"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_type_hint_number() {
+        let ref_val = ReferenceValue {
+            value: "data.price".to_string(),
+            type_hint: Some(ValueType::Number),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Number type hint should generate f64 conversion
+        assert!(code.contains("as_f64"));
+        assert!(code.contains("from_f64"));
+    }
+
+    #[test]
+    fn test_emit_reference_value_type_hint_boolean() {
+        let ref_val = ReferenceValue {
+            value: "data.enabled".to_string(),
+            type_hint: Some(ValueType::Boolean),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Boolean type hint should generate boolean conversion
+        assert!(code.contains("Bool"));
+        assert!(code.contains("\"true\""));
+        assert!(code.contains("\"1\""));
+    }
+
+    #[test]
+    fn test_emit_reference_value_type_hint_json() {
+        let ref_val = ReferenceValue {
+            value: "data.payload".to_string(),
+            type_hint: Some(ValueType::Json),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Json type hint should pass through as-is (no conversion)
+        assert!(code.contains("pointer"));
+        assert!(code.contains("unwrap_or"));
+    }
+
+    // ==========================================
+    // Tests for emit_mapping_value
+    // ==========================================
+
+    #[test]
+    fn test_emit_mapping_value_reference() {
+        let map_val = MappingValue::Reference(ReferenceValue {
+            value: "data.field".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("src", Span::call_site());
+        let tokens = emit_mapping_value(&map_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("src"));
+        assert!(code.contains("/data/field"));
+    }
+
+    #[test]
+    fn test_emit_mapping_value_immediate() {
+        let map_val = MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!("constant"),
+        });
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("src", Span::call_site());
+        let tokens = emit_mapping_value(&map_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("constant"));
+    }
+
+    // ==========================================
+    // Tests for emit_input_mapping
+    // ==========================================
+
+    #[test]
+    fn test_emit_input_mapping_empty() {
+        let mapping: InputMapping = std::collections::HashMap::new();
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_input_mapping(&mapping, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("serde_json :: Value :: Object"));
+        assert!(code.contains("serde_json :: Map :: new ()"));
+    }
+
+    #[test]
+    fn test_emit_input_mapping_single_field() {
+        let mut mapping: InputMapping = std::collections::HashMap::new();
+        mapping.insert(
+            "output".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.input".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_input_mapping(&mapping, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("output"));
+        assert!(code.contains("insert"));
+        assert!(code.contains("/data/input"));
+    }
+
+    #[test]
+    fn test_emit_input_mapping_multiple_fields() {
+        let mut mapping: InputMapping = std::collections::HashMap::new();
+        mapping.insert(
+            "field1".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("value1"),
+            }),
+        );
+        mapping.insert(
+            "field2".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.source".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_input_mapping(&mapping, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("field1"));
+        assert!(code.contains("field2"));
+        assert!(code.contains("value1"));
+    }
+
+    // ==========================================
+    // Tests for emit_nested_insert (dotted keys)
+    // ==========================================
+
+    #[test]
+    fn test_emit_nested_insert_simple_key() {
+        let dest_var = Ident::new("dest", Span::call_site());
+        let value_tokens = quote! { serde_json::Value::String("test".to_string()) };
+        let tokens = emit_nested_insert(&dest_var, "simple", value_tokens);
+        let code = tokens.to_string();
+
+        assert!(code.contains("dest . insert"));
+        assert!(code.contains("simple"));
+    }
+
+    #[test]
+    fn test_emit_nested_insert_dotted_key_two_levels() {
+        let dest_var = Ident::new("dest", Span::call_site());
+        let value_tokens = quote! { serde_json::Value::String("test".to_string()) };
+        let tokens = emit_nested_insert(&dest_var, "variables.source", value_tokens);
+        let code = tokens.to_string();
+
+        // Should create nested object structure
+        assert!(code.contains("variables"));
+        assert!(code.contains("source"));
+        assert!(code.contains("entry"));
+        assert!(code.contains("Object"));
+    }
+
+    #[test]
+    fn test_emit_nested_insert_dotted_key_three_levels() {
+        let dest_var = Ident::new("dest", Span::call_site());
+        let value_tokens = quote! { serde_json::Value::Bool(true) };
+        let tokens = emit_nested_insert(&dest_var, "a.b.c", value_tokens);
+        let code = tokens.to_string();
+
+        // Should handle multiple levels of nesting
+        assert!(code.contains("path_parts"));
+        assert!(code.contains("a"));
+    }
+
+    // ==========================================
+    // Tests for emit_build_source
+    // ==========================================
+
+    #[test]
+    fn test_emit_build_source() {
+        let ctx = EmitContext::new(false);
+        let tokens = emit_build_source(&ctx);
+        let code = tokens.to_string();
+
+        // Should build source with data, variables, steps, and scenario
+        assert!(code.contains("data"));
+        assert!(code.contains("variables"));
+        assert!(code.contains("steps"));
+        assert!(code.contains("scenario"));
+        assert!(code.contains("source_map"));
+    }
+
+    #[test]
+    fn test_emit_build_source_uses_context_vars() {
+        let ctx = EmitContext::new(false);
+        let tokens = emit_build_source(&ctx);
+        let code = tokens.to_string();
+
+        // Should use the context's input and steps_context variables
+        assert!(code.contains("inputs"));
+        assert!(code.contains("steps_context"));
+    }
+
+    #[test]
+    fn test_emit_build_source_includes_scenario_inputs() {
+        let ctx = EmitContext::new(false);
+        let tokens = emit_build_source(&ctx);
+        let code = tokens.to_string();
+
+        // Should include scenario.inputs structure
+        assert!(code.contains("inputs"));
+        assert!(
+            code.contains("data") && code.contains("variables"),
+            "Should have both data and variables in scenario.inputs"
+        );
+    }
+
+    // ==========================================
+    // Tests for type conversion in references
+    // ==========================================
+
+    #[test]
+    fn test_emit_reference_string_conversion_from_number() {
+        let ref_val = ReferenceValue {
+            value: "data.count".to_string(),
+            type_hint: Some(ValueType::String),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // String conversion should handle Number -> String
+        assert!(code.contains("Number (n)"));
+        assert!(code.contains("n . to_string ()"));
+    }
+
+    #[test]
+    fn test_emit_reference_string_conversion_from_bool() {
+        let ref_val = ReferenceValue {
+            value: "data.flag".to_string(),
+            type_hint: Some(ValueType::String),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // String conversion should handle Bool -> String
+        assert!(code.contains("Bool (b)"));
+        assert!(code.contains("b . to_string ()"));
+    }
+
+    #[test]
+    fn test_emit_reference_integer_from_string() {
+        let ref_val = ReferenceValue {
+            value: "data.str_num".to_string(),
+            type_hint: Some(ValueType::Integer),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Integer conversion should parse string
+        assert!(code.contains("parse :: < i64 >"));
+    }
+
+    #[test]
+    fn test_emit_reference_boolean_from_string() {
+        let ref_val = ReferenceValue {
+            value: "data.str_bool".to_string(),
+            type_hint: Some(ValueType::Boolean),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Boolean conversion should check "true" and "1" strings
+        assert!(code.contains("== \"true\""));
+        assert!(code.contains("== \"1\""));
+    }
+
+    #[test]
+    fn test_emit_reference_boolean_truthy_checks() {
+        let ref_val = ReferenceValue {
+            value: "data.value".to_string(),
+            type_hint: Some(ValueType::Boolean),
+            default: None,
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Boolean should check various truthy values
+        assert!(code.contains("Array"), "Should check arrays for emptiness");
+        assert!(
+            code.contains("Object"),
+            "Should check objects for emptiness"
+        );
+        assert!(code.contains("Null"), "Should handle null as false");
+    }
+
+    // ==========================================
+    // Tests for default value handling
+    // ==========================================
+
+    #[test]
+    fn test_emit_reference_default_used_on_null() {
+        let ref_val = ReferenceValue {
+            value: "data.nullable".to_string(),
+            type_hint: None,
+            default: Some(serde_json::json!("fallback")),
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Default should be used when value is Null or None
+        assert!(code.contains("Null"));
+        assert!(code.contains("None"));
+        assert!(code.contains("fallback"));
+    }
+
+    #[test]
+    fn test_emit_reference_default_complex_value() {
+        let ref_val = ReferenceValue {
+            value: "data.config".to_string(),
+            type_hint: None,
+            default: Some(serde_json::json!({"enabled": true, "count": 5})),
+        };
+        let ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_reference_value(&ref_val, &ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("enabled"));
+        assert!(code.contains("count"));
+    }
+
+    // ==========================================
+    // Tests for edge cases
+    // ==========================================
+
+    #[test]
+    fn test_path_to_json_pointer_empty() {
+        // Empty string becomes just "/"
+        assert_eq!(path_to_json_pointer(""), "/");
+    }
+
+    #[test]
+    fn test_path_to_json_pointer_single_char() {
+        assert_eq!(path_to_json_pointer("x"), "/x");
+    }
+
+    #[test]
+    fn test_emit_mapping_generates_unique_temp_vars() {
+        let mut mapping: InputMapping = std::collections::HashMap::new();
+        mapping.insert(
+            "field".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("value"),
+            }),
+        );
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+
+        let tokens1 = emit_input_mapping(&mapping, &mut ctx, &source_var);
+        let tokens2 = emit_input_mapping(&mapping, &mut ctx, &source_var);
+
+        let code1 = tokens1.to_string();
+        let code2 = tokens2.to_string();
+
+        // Each call should use different temp variable names
+        assert!(code1.contains("mapping_result_1"));
+        assert!(code2.contains("mapping_result_2"));
     }
 }

@@ -287,3 +287,447 @@ fn emit_placeholder(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::{ChildVersion, FinishStep, ImmediateValue, MappingValue, Step};
+    use std::collections::HashMap;
+
+    // =============================================================================
+    // Helper functions
+    // =============================================================================
+
+    fn create_basic_step(id: &str, child_scenario_id: &str) -> StartScenarioStep {
+        StartScenarioStep {
+            id: id.to_string(),
+            name: None,
+            child_scenario_id: child_scenario_id.to_string(),
+            child_version: ChildVersion::Latest("latest".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        }
+    }
+
+    fn create_named_step(id: &str, name: &str, child_scenario_id: &str) -> StartScenarioStep {
+        StartScenarioStep {
+            id: id.to_string(),
+            name: Some(name.to_string()),
+            child_scenario_id: child_scenario_id.to_string(),
+            child_version: ChildVersion::Latest("latest".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+        }
+    }
+
+    fn create_child_graph(name: &str) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: Some("Finish".to_string()),
+                input_mapping: None,
+            }),
+        );
+        ExecutionGraph {
+            name: Some(name.to_string()),
+            description: None,
+            steps,
+            entry_point: "finish".to_string(),
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    // =============================================================================
+    // emit_placeholder tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_placeholder_basic() {
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_placeholder("step-1", None, "Unnamed", "child-scenario", &mut ctx);
+
+        let code = tokens.to_string();
+
+        // Check for placeholder JSON structure
+        assert!(code.contains("childScenarioId"));
+        assert!(code.contains("placeholder"));
+        assert!(code.contains("child-scenario"));
+
+        // Check for warning message
+        assert!(code.contains("WARNING"));
+        assert!(code.contains("not embedded"));
+
+        // Check step result is stored in context
+        assert!(code.contains("steps_context"));
+        assert!(code.contains("insert"));
+    }
+
+    #[test]
+    fn test_emit_placeholder_with_name() {
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_placeholder(
+            "step-1",
+            Some("My Step"),
+            "My Step",
+            "child-scenario",
+            &mut ctx,
+        );
+
+        let code = tokens.to_string();
+
+        // Check step name is used
+        assert!(code.contains("My Step"));
+    }
+
+    #[test]
+    fn test_emit_placeholder_includes_cancellation_check() {
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_placeholder("step-1", None, "Unnamed", "child-scenario", &mut ctx);
+
+        let code = tokens.to_string();
+
+        // Check for cancellation handling
+        assert!(code.contains("check_cancelled"));
+        assert!(code.contains("cancelled"));
+    }
+
+    #[test]
+    fn test_emit_placeholder_debug_mode() {
+        let mut ctx = EmitContext::new(true);
+        let tokens = emit_placeholder("step-1", Some("Test"), "Test", "child-scenario", &mut ctx);
+
+        let code = tokens.to_string();
+
+        // In debug mode, debug events should be emitted
+        // (The actual debug emission depends on emit_step_debug_start/end behavior)
+        assert!(code.contains("steps_context"));
+    }
+
+    // =============================================================================
+    // emit tests (main entry point)
+    // =============================================================================
+
+    #[test]
+    fn test_emit_without_child_graph() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should emit placeholder when no child graph is available
+        assert!(code.contains("WARNING"));
+        assert!(code.contains("not embedded"));
+        assert!(code.contains("child-scenario-id"));
+    }
+
+    #[test]
+    fn test_emit_with_child_graph() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+
+        // Create context with child scenario registered
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-child".to_string(), create_child_graph("Child Graph"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should emit embedded version with durable wrapper
+        assert!(code.contains("durable"));
+        assert!(code.contains("execute_child"));
+        assert!(code.contains("child_scenario_inputs"));
+
+        // Should include cache key handling for loop indices
+        assert!(code.contains("__durable_cache_key"));
+        assert!(code.contains("_loop_indices"));
+    }
+
+    #[test]
+    fn test_emit_default_retry_config() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Default max_retries is 3
+        assert!(code.contains("max_retries = 3"));
+        // Default retry_delay is 1000
+        assert!(code.contains("delay = 1000"));
+    }
+
+    #[test]
+    fn test_emit_custom_retry_config() {
+        let mut step = create_basic_step("start-child", "child-scenario-id");
+        step.max_retries = Some(5);
+        step.retry_delay = Some(2000);
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Custom retry config should be used
+        assert!(code.contains("max_retries = 5"));
+        assert!(code.contains("delay = 2000"));
+    }
+
+    // =============================================================================
+    // emit_with_embedded_child tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_with_embedded_child_structure() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Check structure of generated code
+        // 1. Child function definition
+        assert!(code.contains("execute_child"));
+
+        // 2. Durable wrapper function
+        assert!(code.contains("durable"));
+        assert!(code.contains("async fn"));
+
+        // 3. ScenarioInputs creation for child
+        assert!(code.contains("ScenarioInputs"));
+        assert!(code.contains("data"));
+        assert!(code.contains("variables"));
+
+        // 4. Cache key with loop indices support
+        assert!(code.contains("start_scenario::"));
+        assert!(code.contains("_loop_indices"));
+
+        // 5. Step result stored in context
+        assert!(code.contains("steps_context"));
+        assert!(code.contains("insert"));
+    }
+
+    #[test]
+    fn test_emit_with_embedded_child_input_mapping() {
+        let mut step = create_basic_step("start-child", "child-scenario-id");
+
+        // Add input mapping
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "childParam".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("test-value"),
+            }),
+        );
+        step.input_mapping = Some(mapping);
+
+        let child_graph = create_child_graph("Child");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Input mapping should be processed
+        assert!(code.contains("child_inputs"));
+        assert!(code.contains("test-value"));
+    }
+
+    #[test]
+    fn test_emit_with_embedded_child_empty_input_mapping() {
+        let mut step = create_basic_step("start-child", "child-scenario-id");
+        step.input_mapping = Some(HashMap::new()); // Empty mapping
+
+        let child_graph = create_child_graph("Child");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Should use empty object for inputs
+        assert!(code.contains("Object"));
+        assert!(code.contains("Map :: new"));
+    }
+
+    #[test]
+    fn test_emit_with_embedded_child_result_structure() {
+        let step = create_named_step("start-child", "Test Step", "child-scenario-id");
+        let child_graph = create_child_graph("Child");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Result JSON should have expected structure
+        assert!(code.contains("stepId"));
+        assert!(code.contains("stepName"));
+        assert!(code.contains("stepType"));
+        assert!(code.contains("StartScenario"));
+        assert!(code.contains("childScenarioId"));
+        assert!(code.contains("outputs"));
+    }
+
+    #[test]
+    fn test_emit_with_embedded_child_cancellation_check() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+        let child_graph = create_child_graph("Child");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Should check for cancellation after child completes
+        assert!(code.contains("check_cancelled"));
+        assert!(code.contains("cancelled"));
+    }
+
+    // =============================================================================
+    // Step ID sanitization tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_with_special_characters_in_step_id() {
+        let step = create_basic_step("step-with.special-chars", "child-scenario-id");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert(
+            "step-with.special-chars".to_string(),
+            create_child_graph("Child"),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Step ID should be sanitized in variable names
+        assert!(code.contains("step_with_special_chars"));
+    }
+
+    #[test]
+    fn test_emit_placeholder_with_special_characters() {
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_placeholder(
+            "step.with-special",
+            None,
+            "Unnamed",
+            "child/scenario",
+            &mut ctx,
+        );
+
+        let code = tokens.to_string();
+
+        // Should still work with special characters
+        assert!(code.contains("steps_context"));
+        assert!(code.contains("child/scenario"));
+    }
+
+    // =============================================================================
+    // Debug mode tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_debug_mode_generates_events() {
+        let step = create_named_step("start-child", "Test Step", "child-scenario-id");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+
+        let mut ctx = EmitContext::with_child_scenarios(true, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Debug events depend on emit_step_debug_start/end
+        // The code should still contain the core functionality
+        assert!(code.contains("steps_context"));
+        assert!(code.contains("durable"));
+    }
+
+    // =============================================================================
+    // Variable naming uniqueness tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_generates_unique_variable_names() {
+        let step1 = create_basic_step("step-1", "child-1");
+        let step2 = create_basic_step("step-2", "child-2");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("step-1".to_string(), create_child_graph("Child 1"));
+        child_scenarios.insert("step-2".to_string(), create_child_graph("Child 2"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens1 = emit(&step1, &mut ctx);
+        let tokens2 = emit(&step2, &mut ctx);
+
+        let code1 = tokens1.to_string();
+        let code2 = tokens2.to_string();
+
+        // Each step should have unique variable names
+        assert!(code1.contains("step_step_1"));
+        assert!(code2.contains("step_step_2"));
+    }
+
+    // =============================================================================
+    // Cache key tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_cache_key_includes_step_id() {
+        let step = create_basic_step("unique-step-id", "child-scenario-id");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("unique-step-id".to_string(), create_child_graph("Child"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Cache key should include the step ID (as a string literal in the code)
+        assert!(code.contains("start_scenario"));
+        assert!(code.contains("unique-step-id"));
+        assert!(code.contains("__durable_cache_key"));
+    }
+
+    #[test]
+    fn test_emit_cache_key_loop_indices_handling() {
+        let step = create_basic_step("loop-step", "child-scenario-id");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("loop-step".to_string(), create_child_graph("Child"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should handle loop indices in cache key
+        assert!(code.contains("_loop_indices"));
+        assert!(code.contains("indices_suffix"));
+        // The format! macro becomes code using std::format! or similar in TokenStream
+        assert!(code.contains("base") && code.contains("indices_suffix"));
+    }
+}

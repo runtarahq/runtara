@@ -658,3 +658,1349 @@ fn graph_uses_conditions(graph: &ExecutionGraph) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_dsl::*;
+    use std::collections::HashMap;
+
+    /// Helper to create a minimal ExecutionGraph with a single Finish step.
+    fn create_minimal_finish_graph(entry_point: &str) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            entry_point.to_string(),
+            Step::Finish(FinishStep {
+                id: entry_point.to_string(),
+                name: Some("Finish".to_string()),
+                input_mapping: None,
+            }),
+        );
+
+        ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: entry_point.to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    /// Helper to create an ExecutionGraph with an Agent step.
+    fn create_agent_graph(step_id: &str, agent_id: &str, capability_id: &str) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            step_id.to_string(),
+            Step::Agent(AgentStep {
+                id: step_id.to_string(),
+                name: Some("Agent Step".to_string()),
+                agent_id: agent_id.to_string(),
+                capability_id: capability_id.to_string(),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                connection_id: None,
+            }),
+        );
+
+        ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: step_id.to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    // ==========================================
+    // Tests for collect_used_agents
+    // ==========================================
+
+    #[test]
+    fn test_collect_used_agents_empty_graph() {
+        let graph = create_minimal_finish_graph("finish");
+        let ctx = EmitContext::new(false);
+        let agents = collect_used_agents(&graph, &ctx);
+        assert!(agents.is_empty(), "Finish-only graph should have no agents");
+    }
+
+    #[test]
+    fn test_collect_used_agents_single_agent() {
+        let graph = create_agent_graph("step1", "http", "request");
+        let ctx = EmitContext::new(false);
+        let agents = collect_used_agents(&graph, &ctx);
+        assert_eq!(agents.len(), 1);
+        assert!(agents.contains("http"));
+    }
+
+    #[test]
+    fn test_collect_used_agents_multiple_agents() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "step1".to_string(),
+            Step::Agent(AgentStep {
+                id: "step1".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "request".to_string(),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                connection_id: None,
+            }),
+        );
+        steps.insert(
+            "step2".to_string(),
+            Step::Agent(AgentStep {
+                id: "step2".to_string(),
+                name: None,
+                agent_id: "CSV".to_string(), // Test case-insensitivity
+                capability_id: "parse".to_string(),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                connection_id: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "step1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let ctx = EmitContext::new(false);
+        let agents = collect_used_agents(&graph, &ctx);
+        assert_eq!(agents.len(), 2);
+        assert!(agents.contains("http"));
+        assert!(agents.contains("csv")); // Lowercased
+    }
+
+    #[test]
+    fn test_collect_used_agents_in_split_subgraph() {
+        let subgraph = create_agent_graph("inner", "sftp", "upload");
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split1".to_string(),
+            Step::Split(SplitStep {
+                id: "split1".to_string(),
+                name: None,
+                config: Some(SplitConfig {
+                    value: MappingValue::Immediate(ImmediateValue {
+                        value: serde_json::json!([1, 2, 3]),
+                    }),
+                    parallelism: None,
+                    sequential: None,
+                    dont_stop_on_failed: None,
+                    max_retries: None,
+                    retry_delay: None,
+                    timeout: None,
+                    variables: None,
+                }),
+                subgraph: Box::new(subgraph),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "split1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let ctx = EmitContext::new(false);
+        let agents = collect_used_agents(&graph, &ctx);
+        assert!(
+            agents.contains("sftp"),
+            "Should find agent in split subgraph"
+        );
+    }
+
+    #[test]
+    fn test_collect_used_agents_in_while_subgraph() {
+        let subgraph = create_agent_graph("inner", "xml", "parse");
+
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Lt,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                    value: "loop.index".to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(5),
+                })),
+            ],
+        });
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "while1".to_string(),
+            Step::While(WhileStep {
+                id: "while1".to_string(),
+                name: None,
+                condition,
+                config: None,
+                subgraph: Box::new(subgraph),
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "while1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let ctx = EmitContext::new(false);
+        let agents = collect_used_agents(&graph, &ctx);
+        assert!(
+            agents.contains("xml"),
+            "Should find agent in while subgraph"
+        );
+    }
+
+    #[test]
+    fn test_collect_used_agents_in_start_scenario() {
+        // Create child scenario with an agent
+        let child_graph = create_agent_graph("child-step", "text", "format");
+
+        // Create parent with StartScenario step
+        let mut steps = HashMap::new();
+        steps.insert(
+            "start1".to_string(),
+            Step::StartScenario(StartScenarioStep {
+                id: "start1".to_string(),
+                name: None,
+                child_scenario_id: "child".to_string(),
+                child_version: ChildVersion::Latest("latest".to_string()),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "start1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Create context with child scenario registered
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start1".to_string(), child_graph);
+        let ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let agents = collect_used_agents(&graph, &ctx);
+        assert!(
+            agents.contains("text"),
+            "Should find agent in child scenario"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_constants
+    // ==========================================
+
+    #[test]
+    fn test_emit_constants_no_connection_url() {
+        let ctx = EmitContext::new(false);
+        let tokens = emit_constants(&ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("CONNECTION_SERVICE_URL"),
+            "Should define CONNECTION_SERVICE_URL constant"
+        );
+        assert!(
+            code.contains("None"),
+            "Should be None when no URL configured"
+        );
+        assert!(
+            code.contains("TENANT_ID"),
+            "Should define TENANT_ID constant"
+        );
+    }
+
+    #[test]
+    fn test_emit_constants_with_connection_url() {
+        let ctx = EmitContext::with_child_scenarios(
+            false,
+            HashMap::new(),
+            Some("https://connections.example.com".to_string()),
+            None,
+        );
+        let tokens = emit_constants(&ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("connections.example.com"),
+            "Should include connection URL"
+        );
+        assert!(code.contains("Some"), "Should be Some when URL configured");
+    }
+
+    #[test]
+    fn test_emit_constants_with_tenant_id() {
+        let ctx = EmitContext::with_child_scenarios(
+            false,
+            HashMap::new(),
+            None,
+            Some("tenant-123".to_string()),
+        );
+        let tokens = emit_constants(&ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("tenant-123"), "Should include tenant ID");
+    }
+
+    #[test]
+    fn test_emit_constants_with_both_url_and_tenant() {
+        let ctx = EmitContext::with_child_scenarios(
+            false,
+            HashMap::new(),
+            Some("https://api.example.com".to_string()),
+            Some("my-tenant".to_string()),
+        );
+        let tokens = emit_constants(&ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("api.example.com"),
+            "Should include connection URL"
+        );
+        assert!(code.contains("my-tenant"), "Should include tenant ID");
+    }
+
+    #[test]
+    fn test_emit_constants_generates_runtime_env_fallback() {
+        let ctx = EmitContext::with_child_scenarios(
+            false,
+            HashMap::new(),
+            Some("https://default.example.com".to_string()),
+            None,
+        );
+        let tokens = emit_constants(&ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("CONNECTION_SERVICE_URL"),
+            "Should check env var"
+        );
+        assert!(
+            code.contains("std :: env :: var"),
+            "Should use env var for runtime override"
+        );
+        assert!(
+            code.contains("OnceLock"),
+            "Should use OnceLock for lazy initialization"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_imports
+    // ==========================================
+
+    #[test]
+    fn test_emit_imports_basic() {
+        let graph = create_minimal_finish_graph("finish");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("extern crate"), "Should have extern crate");
+        assert!(code.contains("use std :: sync :: Arc"), "Should import Arc");
+        assert!(
+            code.contains("use std :: process :: ExitCode"),
+            "Should import ExitCode"
+        );
+        assert!(code.contains("prelude"), "Should import prelude");
+        assert!(code.contains("libc"), "Should import libc");
+        assert!(code.contains("tokio"), "Should import tokio");
+    }
+
+    #[test]
+    fn test_emit_imports_with_http_agent() {
+        let graph = create_agent_graph("step1", "http", "request");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("http"), "Should import http agent module");
+    }
+
+    #[test]
+    fn test_emit_imports_with_csv_agent() {
+        let graph = create_agent_graph("step1", "csv", "parse");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("csv"), "Should import csv module");
+        assert!(code.contains("csv_ops"), "CSV should be aliased as csv_ops");
+    }
+
+    #[test]
+    fn test_emit_imports_with_xml_agent() {
+        let graph = create_agent_graph("step1", "xml", "parse");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("xml"), "Should import xml module");
+        assert!(code.contains("xml_ops"), "XML should be aliased as xml_ops");
+    }
+
+    #[test]
+    fn test_emit_imports_with_text_agent() {
+        let graph = create_agent_graph("step1", "text", "format");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("text_ops"),
+            "Text should be aliased as text_ops"
+        );
+    }
+
+    #[test]
+    fn test_emit_imports_with_conditional_includes_hashmap() {
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Eq,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(true),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(true),
+                })),
+            ],
+        });
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "cond1".to_string(),
+            Step::Conditional(ConditionalStep {
+                id: "cond1".to_string(),
+                name: None,
+                condition,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "cond1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("HashMap"),
+            "Conditional graph should import HashMap"
+        );
+    }
+
+    #[test]
+    fn test_emit_imports_unknown_agent_ignored() {
+        let graph = create_agent_graph("step1", "unknown_agent", "capability");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_imports(&graph, &ctx);
+        let code = tokens.to_string();
+
+        // Unknown agents should not cause import errors - they're silently skipped
+        assert!(
+            !code.contains("unknown_agent"),
+            "Unknown agent should not be imported"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_scenario_variables
+    // ==========================================
+
+    #[test]
+    fn test_emit_scenario_variables_empty() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_scenario_variables(&graph);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("serde_json :: Value :: Object"),
+            "Should return empty object"
+        );
+        assert!(
+            code.contains("serde_json :: Map :: new ()"),
+            "Should create new empty map"
+        );
+    }
+
+    #[test]
+    fn test_emit_scenario_variables_with_variables() {
+        let mut variables = HashMap::new();
+        variables.insert(
+            "myVar".to_string(),
+            Variable {
+                var_type: VariableType::String,
+                value: serde_json::json!("hello"),
+                description: None,
+            },
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "finish".to_string(),
+            steps: {
+                let mut s = HashMap::new();
+                s.insert(
+                    "finish".to_string(),
+                    Step::Finish(FinishStep {
+                        id: "finish".to_string(),
+                        name: None,
+                        input_mapping: None,
+                    }),
+                );
+                s
+            },
+            execution_plan: vec![],
+            variables,
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let tokens = emit_scenario_variables(&graph);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("myVar"),
+            "Should include variable name as key"
+        );
+        assert!(code.contains("hello"), "Should include variable value");
+    }
+
+    // ==========================================
+    // Tests for graph_uses_conditions
+    // ==========================================
+
+    #[test]
+    fn test_graph_uses_conditions_false_for_finish_only() {
+        let graph = create_minimal_finish_graph("finish");
+        assert!(!graph_uses_conditions(&graph));
+    }
+
+    #[test]
+    fn test_graph_uses_conditions_true_for_conditional() {
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Eq,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+            ],
+        });
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "cond1".to_string(),
+            Step::Conditional(ConditionalStep {
+                id: "cond1".to_string(),
+                name: None,
+                condition,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "cond1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        assert!(graph_uses_conditions(&graph));
+    }
+
+    #[test]
+    fn test_graph_uses_conditions_in_split_subgraph() {
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Eq,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+            ],
+        });
+
+        let mut subgraph_steps = HashMap::new();
+        subgraph_steps.insert(
+            "inner-cond".to_string(),
+            Step::Conditional(ConditionalStep {
+                id: "inner-cond".to_string(),
+                name: None,
+                condition,
+            }),
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "inner-cond".to_string(),
+            steps: subgraph_steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split1".to_string(),
+            Step::Split(SplitStep {
+                id: "split1".to_string(),
+                name: None,
+                config: Some(SplitConfig {
+                    value: MappingValue::Immediate(ImmediateValue {
+                        value: serde_json::json!([]),
+                    }),
+                    parallelism: None,
+                    sequential: None,
+                    dont_stop_on_failed: None,
+                    max_retries: None,
+                    retry_delay: None,
+                    timeout: None,
+                    variables: None,
+                }),
+                subgraph: Box::new(subgraph),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "split1".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        assert!(
+            graph_uses_conditions(&graph),
+            "Should detect conditional in split subgraph"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_input_structs
+    // ==========================================
+
+    #[test]
+    fn test_emit_input_structs() {
+        let tokens = emit_input_structs();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("ScenarioInputs"),
+            "Should define ScenarioInputs struct"
+        );
+        assert!(code.contains("data"), "Should have data field");
+        assert!(code.contains("variables"), "Should have variables field");
+        assert!(code.contains("Arc"), "Should use Arc for shared ownership");
+        assert!(code.contains("# [derive (Clone)]"), "Should derive Clone");
+    }
+
+    // ==========================================
+    // Tests for emit_main
+    // ==========================================
+
+    #[test]
+    fn test_emit_main_structure() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(code.contains("fn main ()"), "Should define main function");
+        assert!(code.contains("ExitCode"), "Should return ExitCode");
+        assert!(
+            code.contains("async fn async_main"),
+            "Should define async_main function"
+        );
+        assert!(
+            code.contains("RuntaraSdk :: from_env"),
+            "Should initialize SDK from env"
+        );
+        assert!(
+            code.contains("register_sdk"),
+            "Should register SDK globally"
+        );
+        assert!(
+            code.contains("execute_workflow"),
+            "Should call execute_workflow"
+        );
+    }
+
+    #[test]
+    fn test_emit_main_handles_stderr_redirect() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("STDERR_LOG_PATH"),
+            "Should check for stderr log path"
+        );
+        assert!(code.contains("dup2"), "Should use dup2 for redirection");
+    }
+
+    #[test]
+    fn test_emit_main_handles_completion() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("completed"),
+            "Should call sdk.completed on success"
+        );
+        assert!(
+            code.contains("write_completed"),
+            "Should write completed output"
+        );
+    }
+
+    #[test]
+    fn test_emit_main_handles_cancellation() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(code.contains("cancelled"), "Should check for cancellation");
+        assert!(
+            code.contains("write_cancelled"),
+            "Should write cancelled output"
+        );
+        assert!(
+            code.contains("suspended"),
+            "Should call suspended for cancellation"
+        );
+    }
+
+    #[test]
+    fn test_emit_main_handles_pause() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(code.contains("paused"), "Should check for pause");
+        assert!(
+            code.contains("write_suspended"),
+            "Should write suspended output"
+        );
+    }
+
+    #[test]
+    fn test_emit_main_handles_failure() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(code.contains("failed"), "Should call sdk.failed on error");
+        assert!(code.contains("write_failed"), "Should write failed output");
+        assert!(code.contains("FAILURE"), "Should return FAILURE exit code");
+    }
+
+    #[test]
+    fn test_emit_main_processes_input_json() {
+        let graph = create_minimal_finish_graph("finish");
+        let tokens = emit_main(&graph);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("INPUT_JSON"),
+            "Should read INPUT_JSON env var"
+        );
+        assert!(
+            code.contains(". get (\"data\")"),
+            "Should extract data field"
+        );
+        assert!(
+            code.contains(". get (\"variables\")"),
+            "Should extract variables field"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_execute_workflow
+    // ==========================================
+
+    #[test]
+    fn test_emit_execute_workflow_structure() {
+        let graph = create_minimal_finish_graph("finish");
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_execute_workflow(&graph, &mut ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("async fn execute_workflow"),
+            "Should define execute_workflow function"
+        );
+        assert!(
+            code.contains("Arc < ScenarioInputs >"),
+            "Should take Arc<ScenarioInputs> as input"
+        );
+        assert!(code.contains("Result"), "Should return Result");
+        assert!(
+            code.contains("steps_context"),
+            "Should initialize steps_context"
+        );
+        assert!(
+            code.contains("serde_json :: Map :: new ()"),
+            "Should create empty steps context map"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_graph_as_function
+    // ==========================================
+
+    #[test]
+    fn test_emit_graph_as_function() {
+        let graph = create_minimal_finish_graph("finish");
+        let ctx = EmitContext::new(false);
+        let fn_name = Ident::new("execute_child_scenario", Span::call_site());
+        let tokens = emit_graph_as_function(&fn_name, &graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("execute_child_scenario"),
+            "Should use provided function name"
+        );
+        assert!(code.contains("async fn"), "Should be async function");
+        assert!(
+            code.contains("inputs : Arc < ScenarioInputs >"),
+            "Should take inputs parameter"
+        );
+        assert!(code.contains("steps_context"), "Should have steps_context");
+    }
+
+    #[test]
+    fn test_emit_graph_as_function_inherits_connection_config() {
+        let graph = create_minimal_finish_graph("finish");
+        let parent_ctx = EmitContext::with_child_scenarios(
+            false,
+            HashMap::new(),
+            Some("https://parent-url.com".to_string()),
+            Some("parent-tenant".to_string()),
+        );
+        let fn_name = Ident::new("child_fn", Span::call_site());
+
+        // The function creates a fresh context but inherits connection config
+        let tokens = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
+        let code = tokens.to_string();
+
+        // The child function should be defined
+        assert!(
+            code.contains("child_fn"),
+            "Should create function with given name"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_finish_output
+    // ==========================================
+
+    #[test]
+    fn test_emit_finish_output() {
+        let graph = create_minimal_finish_graph("finish");
+        let ctx = EmitContext::new(false);
+        let tokens = emit_finish_output(&graph, &ctx);
+        let code = tokens.to_string();
+
+        assert!(code.contains("Ok"), "Should return Ok");
+        assert!(
+            code.contains("serde_json :: Value :: Null"),
+            "Should return Null as fallback"
+        );
+        assert!(
+            code.contains("# [allow (unreachable_code)]"),
+            "Should allow unreachable code"
+        );
+    }
+
+    // ==========================================
+    // Tests for emit_program
+    // ==========================================
+
+    #[test]
+    fn test_emit_program_includes_all_sections() {
+        let graph = create_minimal_finish_graph("finish");
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_program(&graph, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should include imports
+        assert!(code.contains("extern crate"), "Should have imports");
+
+        // Should include constants
+        assert!(
+            code.contains("CONNECTION_SERVICE_URL"),
+            "Should have constants"
+        );
+
+        // Should include input structs
+        assert!(code.contains("ScenarioInputs"), "Should have input structs");
+
+        // Should include main function
+        assert!(code.contains("fn main"), "Should have main function");
+
+        // Should include execute_workflow
+        assert!(
+            code.contains("execute_workflow"),
+            "Should have execute_workflow"
+        );
+    }
+
+    #[test]
+    fn test_emit_program_with_debug_mode() {
+        let graph = create_minimal_finish_graph("finish");
+        let mut ctx = EmitContext::new(true); // debug_mode = true
+        let tokens = emit_program(&graph, &mut ctx);
+        let code = tokens.to_string();
+
+        // Debug mode should generate debug event code
+        assert!(
+            code.contains("step_debug"),
+            "Debug mode should include debug event code"
+        );
+    }
+
+    // ==========================================
+    // Tests for collect_error_branch_steps
+    // ==========================================
+
+    #[test]
+    fn test_collect_error_branch_steps_stops_at_finish() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "error-handler".to_string(),
+            Step::Log(LogStep {
+                id: "error-handler".to_string(),
+                name: Some("Log Error".to_string()),
+                message: "Error occurred".to_string(),
+                level: LogLevel::Info,
+                context: None,
+            }),
+        );
+        steps.insert(
+            "error-finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "error-finish".to_string(),
+                name: Some("Error Finish".to_string()),
+                input_mapping: None,
+            }),
+        );
+
+        let execution_plan = vec![ExecutionPlanEdge {
+            from_step: "error-handler".to_string(),
+            to_step: "error-finish".to_string(),
+            label: None,
+        }];
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "error-handler".to_string(),
+            steps,
+            execution_plan,
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let branch_steps = collect_error_branch_steps("error-handler", &graph);
+
+        assert_eq!(branch_steps.len(), 2);
+        assert_eq!(branch_steps[0], "error-handler");
+        assert_eq!(branch_steps[1], "error-finish");
+    }
+
+    #[test]
+    fn test_collect_error_branch_stops_at_conditional() {
+        let condition = ConditionExpression::Operation(ConditionOperation {
+            op: ConditionOperator::Eq,
+            arguments: vec![
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+                ConditionArgument::Value(MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!(1),
+                })),
+            ],
+        });
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "error-handler".to_string(),
+            Step::Log(LogStep {
+                id: "error-handler".to_string(),
+                name: None,
+                message: "error".to_string(),
+                level: LogLevel::Info,
+                context: None,
+            }),
+        );
+        steps.insert(
+            "error-cond".to_string(),
+            Step::Conditional(ConditionalStep {
+                id: "error-cond".to_string(),
+                name: None,
+                condition,
+            }),
+        );
+
+        let execution_plan = vec![ExecutionPlanEdge {
+            from_step: "error-handler".to_string(),
+            to_step: "error-cond".to_string(),
+            label: None,
+        }];
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "error-handler".to_string(),
+            steps,
+            execution_plan,
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let branch_steps = collect_error_branch_steps("error-handler", &graph);
+
+        assert_eq!(branch_steps.len(), 2);
+        assert_eq!(branch_steps[0], "error-handler");
+        assert_eq!(branch_steps[1], "error-cond");
+    }
+
+    #[test]
+    fn test_collect_error_branch_avoids_cycles() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "step1".to_string(),
+            Step::Log(LogStep {
+                id: "step1".to_string(),
+                name: None,
+                message: "msg".to_string(),
+                level: LogLevel::Info,
+                context: None,
+            }),
+        );
+
+        // Create a cycle: step1 -> step1
+        let execution_plan = vec![ExecutionPlanEdge {
+            from_step: "step1".to_string(),
+            to_step: "step1".to_string(),
+            label: None,
+        }];
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "step1".to_string(),
+            steps,
+            execution_plan,
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let branch_steps = collect_error_branch_steps("step1", &graph);
+
+        // Should only visit step1 once despite the cycle
+        assert_eq!(branch_steps.len(), 1);
+        assert_eq!(branch_steps[0], "step1");
+    }
+
+    #[test]
+    fn test_collect_error_branch_skips_on_error_edges() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "step1".to_string(),
+            Step::Log(LogStep {
+                id: "step1".to_string(),
+                name: None,
+                message: "msg".to_string(),
+                level: LogLevel::Info,
+                context: None,
+            }),
+        );
+        steps.insert(
+            "step2".to_string(),
+            Step::Finish(FinishStep {
+                id: "step2".to_string(),
+                name: None,
+                input_mapping: None,
+            }),
+        );
+        steps.insert(
+            "error-step".to_string(),
+            Step::Finish(FinishStep {
+                id: "error-step".to_string(),
+                name: None,
+                input_mapping: None,
+            }),
+        );
+
+        // step1 -> step2 (normal flow)
+        // step1 -> error-step (onError)
+        let execution_plan = vec![
+            ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "step2".to_string(),
+                label: None,
+            },
+            ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error-step".to_string(),
+                label: Some("onError".to_string()),
+            },
+        ];
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "step1".to_string(),
+            steps,
+            execution_plan,
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Following from step1, should go to step2 (normal flow), not error-step
+        let branch_steps = collect_error_branch_steps("step1", &graph);
+
+        assert!(branch_steps.contains(&"step2".to_string()));
+        assert!(!branch_steps.contains(&"error-step".to_string()));
+    }
+
+    // ==========================================
+    // Tests for get_stdlib_crate_name
+    // ==========================================
+
+    #[test]
+    fn test_get_stdlib_crate_name_default() {
+        // Without RUNTARA_STDLIB_NAME set, should return default
+        // Note: We can't safely modify env vars in Rust 2024, so we just test default behavior
+        let name = get_stdlib_crate_name();
+        // Either returns default or whatever is set in the env
+        assert!(!name.is_empty());
+    }
+
+    // ==========================================
+    // Tests for emit_step_execution (integration)
+    // ==========================================
+
+    #[test]
+    fn test_emit_step_execution_finish_step() {
+        let graph = create_minimal_finish_graph("finish");
+        let mut ctx = EmitContext::new(false);
+
+        let finish_step = &graph.steps.get("finish").unwrap();
+        let tokens = emit_step_execution(finish_step, &graph, &mut ctx);
+        let code = tokens.to_string();
+
+        // Finish step should generate return statement
+        assert!(code.contains("return Ok"), "Finish step should return");
+    }
+
+    #[test]
+    fn test_emit_step_execution_with_on_error() {
+        let graph = create_agent_graph("agent1", "http", "request");
+
+        // Add an onError edge to a Finish step
+        let mut modified_graph = graph;
+        modified_graph.steps.insert(
+            "error-finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "error-finish".to_string(),
+                name: Some("Error Handler".to_string()),
+                input_mapping: None,
+            }),
+        );
+        modified_graph.execution_plan.push(ExecutionPlanEdge {
+            from_step: "agent1".to_string(),
+            to_step: "error-finish".to_string(),
+            label: Some("onError".to_string()),
+        });
+
+        let mut ctx = EmitContext::new(false);
+        let agent_step = modified_graph.steps.get("agent1").unwrap();
+        let tokens = emit_step_execution(agent_step, &modified_graph, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should have error handling wrapper
+        assert!(
+            code.contains("__step_result"),
+            "Should have step result wrapper for error handling"
+        );
+        assert!(code.contains("__error_msg"), "Should capture error message");
+        assert!(code.contains("error"), "Should set error context");
+    }
+
+    // ==========================================
+    // Tests for emit_error_branch
+    // ==========================================
+
+    #[test]
+    fn test_emit_error_branch() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "error-log".to_string(),
+            Step::Log(LogStep {
+                id: "error-log".to_string(),
+                name: Some("Error Log".to_string()),
+                message: "Error!".to_string(),
+                level: LogLevel::Error,
+                context: None,
+            }),
+        );
+        steps.insert(
+            "error-finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "error-finish".to_string(),
+                name: None,
+                input_mapping: None,
+            }),
+        );
+
+        let execution_plan = vec![ExecutionPlanEdge {
+            from_step: "error-log".to_string(),
+            to_step: "error-finish".to_string(),
+            label: None,
+        }];
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "error-log".to_string(),
+            steps,
+            execution_plan,
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_error_branch("error-log", &graph, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should emit code for both steps in the error branch
+        assert!(
+            code.contains("error-log") || code.contains("workflow_log"),
+            "Should emit log step code"
+        );
+        assert!(code.contains("return Ok"), "Should emit finish step code");
+    }
+}
