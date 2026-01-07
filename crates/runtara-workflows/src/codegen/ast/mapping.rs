@@ -9,7 +9,10 @@ use quote::quote;
 
 use super::context::EmitContext;
 use super::json_to_tokens;
-use runtara_dsl::{ImmediateValue, InputMapping, MappingValue, ReferenceValue, ValueType};
+use runtara_dsl::{
+    CompositeInner, CompositeValue, ImmediateValue, InputMapping, MappingValue, ReferenceValue,
+    ValueType,
+};
 
 /// Emit code for a complete input mapping.
 ///
@@ -165,6 +168,7 @@ pub fn emit_mapping_value(
     match value {
         MappingValue::Reference(ref_val) => emit_reference_value(ref_val, ctx, source_var),
         MappingValue::Immediate(imm_val) => emit_immediate_value(imm_val),
+        MappingValue::Composite(comp_val) => emit_composite_value(comp_val, ctx, source_var),
     }
 }
 
@@ -295,6 +299,50 @@ fn emit_immediate_value(imm_val: &ImmediateValue) -> TokenStream {
     json_to_tokens(&imm_val.value)
 }
 
+/// Emit code for a composite value (nested object or array with MappingValues).
+///
+/// Generates code that builds a JSON object or array at runtime, where each
+/// field/element can be a reference, immediate, or another composite.
+fn emit_composite_value(
+    comp_val: &CompositeValue,
+    ctx: &mut EmitContext,
+    source_var: &proc_macro2::Ident,
+) -> TokenStream {
+    match &comp_val.value {
+        CompositeInner::Object(map) => {
+            if map.is_empty() {
+                return quote! { serde_json::Value::Object(serde_json::Map::new()) };
+            }
+            let field_assignments: Vec<TokenStream> = map
+                .iter()
+                .map(|(key, value)| {
+                    let value_tokens = emit_mapping_value(value, ctx, source_var);
+                    quote! { obj.insert(#key.to_string(), #value_tokens); }
+                })
+                .collect();
+            quote! {
+                {
+                    let mut obj = serde_json::Map::new();
+                    #(#field_assignments)*
+                    serde_json::Value::Object(obj)
+                }
+            }
+        }
+        CompositeInner::Array(arr) => {
+            if arr.is_empty() {
+                return quote! { serde_json::Value::Array(vec![]) };
+            }
+            let element_tokens: Vec<TokenStream> = arr
+                .iter()
+                .map(|value| emit_mapping_value(value, ctx, source_var))
+                .collect();
+            quote! {
+                serde_json::Value::Array(vec![#(#element_tokens),*])
+            }
+        }
+    }
+}
+
 /// Convert a dot-notation path to a JSON pointer.
 ///
 /// Examples:
@@ -302,7 +350,7 @@ fn emit_immediate_value(imm_val: &ImmediateValue) -> TokenStream {
 /// - "steps.step1.outputs.items" -> "/steps/step1/outputs/items"
 /// - "steps['step-1'].outputs" -> "/steps/step-1/outputs"
 /// - "instances[0].properties" -> "/instances/0/properties"
-fn path_to_json_pointer(path: &str) -> String {
+pub fn path_to_json_pointer(path: &str) -> String {
     // Handle bracket notation: steps['step-1'] -> steps/step-1
     let normalized = path
         .replace("['", ".")
@@ -981,5 +1029,218 @@ mod tests {
         // Each call should use different temp variable names
         assert!(code1.contains("mapping_result_1"));
         assert!(code2.contains("mapping_result_2"));
+    }
+
+    // ==========================================
+    // Tests for emit_composite_value
+    // ==========================================
+
+    #[test]
+    fn test_emit_composite_value_empty_object() {
+        let comp_val = CompositeValue {
+            value: CompositeInner::Object(std::collections::HashMap::new()),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("Object"));
+        assert!(code.contains("Map :: new"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_empty_array() {
+        let comp_val = CompositeValue {
+            value: CompositeInner::Array(vec![]),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("Array"));
+        assert!(code.contains("vec !"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_object_with_immediate() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "name".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("John"),
+            }),
+        );
+        let comp_val = CompositeValue {
+            value: CompositeInner::Object(map),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("name"));
+        assert!(code.contains("John"));
+        assert!(code.contains("insert"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_object_with_reference() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "userId".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.user.id".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let comp_val = CompositeValue {
+            value: CompositeInner::Object(map),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("userId"));
+        assert!(code.contains("/data/user/id"));
+        assert!(code.contains("pointer"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_object_mixed() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "name".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("John"),
+            }),
+        );
+        map.insert(
+            "userId".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.user.id".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let comp_val = CompositeValue {
+            value: CompositeInner::Object(map),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Should have both immediate and reference
+        assert!(code.contains("name"));
+        assert!(code.contains("John"));
+        assert!(code.contains("userId"));
+        assert!(code.contains("/data/user/id"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_array_with_references() {
+        let comp_val = CompositeValue {
+            value: CompositeInner::Array(vec![
+                MappingValue::Reference(ReferenceValue {
+                    value: "data.items[0]".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                MappingValue::Reference(ReferenceValue {
+                    value: "data.items[1]".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+            ]),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("Array"));
+        assert!(code.contains("/data/items/0"));
+        assert!(code.contains("/data/items/1"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_array_mixed() {
+        let comp_val = CompositeValue {
+            value: CompositeInner::Array(vec![
+                MappingValue::Reference(ReferenceValue {
+                    value: "data.first".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                MappingValue::Immediate(ImmediateValue {
+                    value: serde_json::json!("static"),
+                }),
+                MappingValue::Reference(ReferenceValue {
+                    value: "data.last".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+            ]),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("Array"));
+        assert!(code.contains("/data/first"));
+        assert!(code.contains("static"));
+        assert!(code.contains("/data/last"));
+    }
+
+    #[test]
+    fn test_emit_composite_value_nested_composite() {
+        // Nested composite: object containing an array
+        let inner_array = CompositeValue {
+            value: CompositeInner::Array(vec![MappingValue::Reference(ReferenceValue {
+                value: "data.items[0]".to_string(),
+                type_hint: None,
+                default: None,
+            })]),
+        };
+        let mut outer_map = std::collections::HashMap::new();
+        outer_map.insert("items".to_string(), MappingValue::Composite(inner_array));
+        let comp_val = CompositeValue {
+            value: CompositeInner::Object(outer_map),
+        };
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("source", Span::call_site());
+        let tokens = emit_composite_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        // Should have nested structure
+        assert!(code.contains("items"));
+        assert!(code.contains("Array"));
+        assert!(code.contains("/data/items/0"));
+    }
+
+    #[test]
+    fn test_emit_mapping_value_composite() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "field".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("value"),
+            }),
+        );
+        let comp_val = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(map),
+        });
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("src", Span::call_site());
+        let tokens = emit_mapping_value(&comp_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(code.contains("field"));
+        assert!(code.contains("value"));
     }
 }

@@ -10,12 +10,12 @@ use quote::quote;
 use std::collections::HashSet;
 
 use super::super::context::EmitContext;
-use super::super::mapping;
+use super::super::mapping::{self, emit_mapping_value};
 use super::super::steps;
 use super::{StepEmitter, emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::{
     ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator, ConditionalStep,
-    ExecutionGraph, MappingValue, Step,
+    ExecutionGraph, Step,
 };
 
 /// Emit code for a Conditional step.
@@ -503,26 +503,6 @@ fn emit_argument_as_value(
     }
 }
 
-/// Emit code for a MappingValue (reference or immediate).
-fn emit_mapping_value(
-    mapping_value: &MappingValue,
-    _ctx: &mut EmitContext,
-    source_var: &proc_macro2::Ident,
-) -> TokenStream {
-    match mapping_value {
-        MappingValue::Reference(r) => {
-            let json_pointer = path_to_json_pointer(&r.value);
-            quote! {
-                #source_var.pointer(#json_pointer).cloned().unwrap_or(serde_json::Value::Null)
-            }
-        }
-        MappingValue::Immediate(i) => {
-            let tokens = super::super::json_to_tokens(&i.value);
-            quote! { #tokens }
-        }
-    }
-}
-
 // ============================================================================
 // Operator Implementations
 // ============================================================================
@@ -686,25 +666,10 @@ fn emit_ends_with(
     }
 }
 
-// ============================================================================
-// Utilities
-// ============================================================================
-
-/// Convert a dot-notation path to a JSON pointer.
-pub fn path_to_json_pointer(path: &str) -> String {
-    let normalized = path
-        .replace("['", ".")
-        .replace("']", "")
-        .replace("[\"", ".")
-        .replace("\"]", "");
-    let parts: Vec<&str> = normalized.split('.').collect();
-    format!("/{}", parts.join("/"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtara_dsl::{ExecutionPlanEdge, FinishStep, LogLevel, LogStep};
+    use runtara_dsl::{ExecutionPlanEdge, FinishStep, LogLevel, LogStep, MappingValue};
     use std::collections::HashMap;
 
     /// Helper to create a simple Log step for testing

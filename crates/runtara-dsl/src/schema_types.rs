@@ -521,9 +521,11 @@ pub type InputMapping = HashMap<String, MappingValue>;
 /// Uses explicit `valueType` discriminator:
 /// - `reference`: Value is a path to data (e.g., "data.name", "steps.step1.outputs.result")
 /// - `immediate`: Value is a literal (string, number, boolean, object, array)
+/// - `composite`: Value is a structured object or array with nested MappingValues
 ///
 /// Example reference: `{ "valueType": "reference", "value": "data.user.name" }`
 /// Example immediate: `{ "valueType": "immediate", "value": "Hello World" }`
+/// Example composite: `{ "valueType": "composite", "value": { "name": {...}, "id": {...} } }`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "valueType", rename_all = "lowercase")]
@@ -533,6 +535,10 @@ pub enum MappingValue {
 
     /// Immediate/literal value (string, number, boolean, object, array)
     Immediate(ImmediateValue),
+
+    /// Composite value - structured object or array with nested MappingValues
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    Composite(CompositeValue),
 }
 
 /// A reference to data at a specific path.
@@ -578,6 +584,55 @@ pub struct ReferenceValue {
 pub struct ImmediateValue {
     /// The literal value (string, number, boolean, object, or array)
     pub value: serde_json::Value,
+}
+
+/// A composite value that builds structured objects or arrays from nested MappingValues.
+///
+/// Two forms are supported:
+/// - Object: `{ "valueType": "composite", "value": { "field": {...} } }`
+/// - Array: `{ "valueType": "composite", "value": [{...}, {...}] }`
+///
+/// Example object composite:
+/// ```json
+/// {
+///   "valueType": "composite",
+///   "value": {
+///     "name": {"valueType": "immediate", "value": "John"},
+///     "userId": {"valueType": "reference", "value": "data.user.id"}
+///   }
+/// }
+/// ```
+///
+/// Example array composite:
+/// ```json
+/// {
+///   "valueType": "composite",
+///   "value": [
+///     {"valueType": "reference", "value": "data.firstItem"},
+///     {"valueType": "immediate", "value": "static-value"}
+///   ]
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CompositeValue {
+    /// Either an object (HashMap) or array (Vec) of nested MappingValues.
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub value: CompositeInner,
+}
+
+/// Inner value for CompositeValue - either an object or array of MappingValues.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(untagged)]
+pub enum CompositeInner {
+    /// Object composite: each field maps to a MappingValue
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    Object(HashMap<String, MappingValue>),
+    /// Array composite: each element is a MappingValue
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    Array(Vec<MappingValue>),
 }
 
 /// Type hints for reference values.

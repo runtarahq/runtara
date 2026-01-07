@@ -180,6 +180,11 @@ impl MappingValue {
         matches!(self, MappingValue::Immediate(_))
     }
 
+    /// Check if this is a composite (structured object/array with nested MappingValues)
+    pub fn is_composite(&self) -> bool {
+        matches!(self, MappingValue::Composite(_))
+    }
+
     /// Get the string value if this is a reference
     pub fn as_reference_str(&self) -> Option<&str> {
         match self {
@@ -193,6 +198,82 @@ impl MappingValue {
         match self {
             MappingValue::Immediate(i) => Some(&i.value),
             _ => None,
+        }
+    }
+
+    /// Get the inner composite value if this is a composite
+    pub fn as_composite(&self) -> Option<&CompositeInner> {
+        match self {
+            MappingValue::Composite(c) => Some(&c.value),
+            _ => None,
+        }
+    }
+
+    /// Recursively collect all reference paths used in this MappingValue
+    pub fn collect_references(&self) -> Vec<&str> {
+        match self {
+            MappingValue::Reference(r) => vec![r.value.as_str()],
+            MappingValue::Immediate(_) => vec![],
+            MappingValue::Composite(c) => c.value.collect_references(),
+        }
+    }
+
+    /// Returns true if this value or any nested value contains references
+    pub fn has_references(&self) -> bool {
+        match self {
+            MappingValue::Reference(_) => true,
+            MappingValue::Immediate(_) => false,
+            MappingValue::Composite(c) => c.value.has_references(),
+        }
+    }
+}
+
+// ============================================================================
+// CompositeInner Helper Methods
+// ============================================================================
+
+impl CompositeInner {
+    /// Check if this is an object composite
+    pub fn is_object(&self) -> bool {
+        matches!(self, CompositeInner::Object(_))
+    }
+
+    /// Check if this is an array composite
+    pub fn is_array(&self) -> bool {
+        matches!(self, CompositeInner::Array(_))
+    }
+
+    /// Get the fields if this is an object composite
+    pub fn as_object(&self) -> Option<&HashMap<String, MappingValue>> {
+        match self {
+            CompositeInner::Object(map) => Some(map),
+            _ => None,
+        }
+    }
+
+    /// Get the elements if this is an array composite
+    pub fn as_array(&self) -> Option<&Vec<MappingValue>> {
+        match self {
+            CompositeInner::Array(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    /// Recursively collect all reference paths in this composite
+    pub fn collect_references(&self) -> Vec<&str> {
+        match self {
+            CompositeInner::Object(map) => {
+                map.values().flat_map(|v| v.collect_references()).collect()
+            }
+            CompositeInner::Array(arr) => arr.iter().flat_map(|v| v.collect_references()).collect(),
+        }
+    }
+
+    /// Returns true if any nested value contains references
+    pub fn has_references(&self) -> bool {
+        match self {
+            CompositeInner::Object(map) => map.values().any(|v| v.has_references()),
+            CompositeInner::Array(arr) => arr.iter().any(|v| v.has_references()),
         }
     }
 }
@@ -903,6 +984,301 @@ mod tests {
             parsed_imm.as_immediate_value(),
             Some(&serde_json::json!(42))
         );
+    }
+
+    // ========================================================================
+    // CompositeValue Tests
+    // ========================================================================
+
+    #[test]
+    fn test_composite_value_object_serialization() {
+        let mut fields = HashMap::new();
+        fields.insert(
+            "name".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.user.name".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        fields.insert(
+            "count".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(42),
+            }),
+        );
+
+        let composite = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(fields),
+        });
+        let json = serde_json::to_value(&composite).unwrap();
+
+        assert_eq!(json.get("valueType").unwrap(), "composite");
+        let value = json.get("value").unwrap();
+        assert!(value.is_object());
+        assert!(value.get("name").is_some());
+        assert!(value.get("count").is_some());
+    }
+
+    #[test]
+    fn test_composite_value_array_serialization() {
+        let elements = vec![
+            MappingValue::Reference(ReferenceValue {
+                value: "data.first".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("static"),
+            }),
+        ];
+
+        let composite = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Array(elements),
+        });
+        let json = serde_json::to_value(&composite).unwrap();
+
+        assert_eq!(json.get("valueType").unwrap(), "composite");
+        let value = json.get("value").unwrap();
+        assert!(value.is_array());
+        assert_eq!(value.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_composite_value_object_deserialization() {
+        let json = r#"{
+            "valueType": "composite",
+            "value": {
+                "userId": {"valueType": "reference", "value": "data.user.id"},
+                "timestamp": {"valueType": "immediate", "value": 1234567890}
+            }
+        }"#;
+
+        let parsed: MappingValue = serde_json::from_str(json).unwrap();
+        assert!(parsed.is_composite());
+
+        let inner = parsed.as_composite().unwrap();
+        assert!(inner.is_object());
+
+        let fields = inner.as_object().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.get("userId").unwrap().is_reference());
+        assert!(fields.get("timestamp").unwrap().is_immediate());
+    }
+
+    #[test]
+    fn test_composite_value_array_deserialization() {
+        let json = r#"{
+            "valueType": "composite",
+            "value": [
+                {"valueType": "reference", "value": "data.items[0]"},
+                {"valueType": "immediate", "value": "fallback"}
+            ]
+        }"#;
+
+        let parsed: MappingValue = serde_json::from_str(json).unwrap();
+        assert!(parsed.is_composite());
+
+        let inner = parsed.as_composite().unwrap();
+        assert!(inner.is_array());
+
+        let elements = inner.as_array().unwrap();
+        assert_eq!(elements.len(), 2);
+        assert!(elements[0].is_reference());
+        assert!(elements[1].is_immediate());
+    }
+
+    #[test]
+    fn test_nested_composite_value() {
+        let json = r#"{
+            "valueType": "composite",
+            "value": {
+                "outer": {
+                    "valueType": "composite",
+                    "value": {
+                        "inner": {"valueType": "immediate", "value": "nested"}
+                    }
+                }
+            }
+        }"#;
+
+        let parsed: MappingValue = serde_json::from_str(json).unwrap();
+        assert!(parsed.is_composite());
+
+        let outer = parsed.as_composite().unwrap().as_object().unwrap();
+        let outer_val = outer.get("outer").unwrap();
+        assert!(outer_val.is_composite());
+
+        let inner = outer_val.as_composite().unwrap().as_object().unwrap();
+        assert!(inner.get("inner").unwrap().is_immediate());
+    }
+
+    #[test]
+    fn test_empty_composite_object() {
+        let composite = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(HashMap::new()),
+        });
+        let json = serde_json::to_value(&composite).unwrap();
+        assert_eq!(json.get("valueType").unwrap(), "composite");
+        assert!(json.get("value").unwrap().as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_empty_composite_array() {
+        let composite = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Array(vec![]),
+        });
+        let json = serde_json::to_value(&composite).unwrap();
+        assert_eq!(json.get("valueType").unwrap(), "composite");
+        assert!(json.get("value").unwrap().as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_mapping_value_collect_references() {
+        // Simple reference
+        let ref_val = MappingValue::Reference(ReferenceValue {
+            value: "data.path".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        assert_eq!(ref_val.collect_references(), vec!["data.path"]);
+
+        // Immediate has no references
+        let imm_val = MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!("test"),
+        });
+        assert!(imm_val.collect_references().is_empty());
+
+        // Nested composite
+        let mut inner = HashMap::new();
+        inner.insert(
+            "nested".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.nested".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+
+        let mut outer = HashMap::new();
+        outer.insert(
+            "top".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.top".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        outer.insert(
+            "inner".to_string(),
+            MappingValue::Composite(CompositeValue {
+                value: CompositeInner::Object(inner),
+            }),
+        );
+
+        let composite = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(outer),
+        });
+        let refs = composite.collect_references();
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.contains(&"data.top"));
+        assert!(refs.contains(&"data.nested"));
+    }
+
+    #[test]
+    fn test_mapping_value_has_references() {
+        let ref_val = MappingValue::Reference(ReferenceValue {
+            value: "data.path".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        assert!(ref_val.has_references());
+
+        let imm_val = MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!("test"),
+        });
+        assert!(!imm_val.has_references());
+
+        // Composite with only immediates
+        let mut fields = HashMap::new();
+        fields.insert(
+            "a".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(1),
+            }),
+        );
+        let comp_no_refs = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(fields),
+        });
+        assert!(!comp_no_refs.has_references());
+
+        // Composite with references
+        let mut fields_with_refs = HashMap::new();
+        fields_with_refs.insert(
+            "a".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.a".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let comp_with_refs = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(fields_with_refs),
+        });
+        assert!(comp_with_refs.has_references());
+    }
+
+    #[test]
+    fn test_mapping_value_is_composite() {
+        let ref_val = MappingValue::Reference(ReferenceValue {
+            value: "data.field".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        let imm_val = MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!("static"),
+        });
+        let comp_val = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(HashMap::new()),
+        });
+
+        assert!(!ref_val.is_composite());
+        assert!(!imm_val.is_composite());
+        assert!(comp_val.is_composite());
+    }
+
+    #[test]
+    fn test_composite_value_round_trip() {
+        // Object composite
+        let mut fields = HashMap::new();
+        fields.insert(
+            "key".to_string(),
+            MappingValue::Reference(ReferenceValue {
+                value: "data.key".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+        );
+        let original = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Object(fields),
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: MappingValue = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_composite());
+        assert!(parsed.as_composite().unwrap().is_object());
+
+        // Array composite
+        let elements = vec![MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!("test"),
+        })];
+        let original_arr = MappingValue::Composite(CompositeValue {
+            value: CompositeInner::Array(elements),
+        });
+        let json_arr = serde_json::to_string(&original_arr).unwrap();
+        let parsed_arr: MappingValue = serde_json::from_str(&json_arr).unwrap();
+        assert!(parsed_arr.is_composite());
+        assert!(parsed_arr.as_composite().unwrap().is_array());
     }
 
     // ========================================================================

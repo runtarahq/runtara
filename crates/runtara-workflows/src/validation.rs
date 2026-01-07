@@ -9,7 +9,7 @@
 //! - Connection data doesn't leak to non-secure agents
 //! - Configuration values are reasonable
 
-use runtara_dsl::{ExecutionGraph, InputMapping, MappingValue, Step};
+use runtara_dsl::{CompositeInner, ExecutionGraph, InputMapping, MappingValue, Step};
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
@@ -796,15 +796,13 @@ fn validate_references_with_inherited(
 
         for mapping in mappings {
             for (_, value) in mapping {
-                if let MappingValue::Reference(ref_value) = value {
-                    validate_reference(
-                        step_id,
-                        &ref_value.value,
-                        &step_ids,
-                        &variable_names,
-                        result,
-                    );
-                }
+                validate_mapping_value_references(
+                    step_id,
+                    value,
+                    &step_ids,
+                    &variable_names,
+                    result,
+                );
             }
         }
     }
@@ -826,6 +824,57 @@ fn validate_references_with_inherited(
                 validate_references_with_inherited(&while_step.subgraph, &HashSet::new(), result);
             }
             _ => {}
+        }
+    }
+}
+
+/// Recursively validate references in a MappingValue, including nested Composites.
+fn validate_mapping_value_references(
+    step_id: &str,
+    value: &MappingValue,
+    valid_step_ids: &HashSet<String>,
+    valid_variable_names: &HashSet<String>,
+    result: &mut ValidationResult,
+) {
+    match value {
+        MappingValue::Reference(ref_value) => {
+            validate_reference(
+                step_id,
+                &ref_value.value,
+                valid_step_ids,
+                valid_variable_names,
+                result,
+            );
+        }
+        MappingValue::Immediate(_) => {
+            // Immediate values have no references to validate
+        }
+        MappingValue::Composite(comp_value) => {
+            // Recursively validate all nested MappingValues
+            match &comp_value.value {
+                CompositeInner::Object(map) => {
+                    for nested_value in map.values() {
+                        validate_mapping_value_references(
+                            step_id,
+                            nested_value,
+                            valid_step_ids,
+                            valid_variable_names,
+                            result,
+                        );
+                    }
+                }
+                CompositeInner::Array(arr) => {
+                    for nested_value in arr {
+                        validate_mapping_value_references(
+                            step_id,
+                            nested_value,
+                            valid_step_ids,
+                            valid_variable_names,
+                            result,
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -950,26 +999,24 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
 
         for mapping in mappings {
             for (_, value) in mapping {
-                if let MappingValue::Reference(ref_value) = value {
-                    if let Some(referenced_step_id) =
-                        extract_step_id_from_reference(&ref_value.value)
-                    {
-                        // Skip self-references - they're handled separately as warnings
-                        if referenced_step_id == *step_id {
-                            continue;
-                        }
-
-                        if let Some(ref_position) = position_map.get(&referenced_step_id) {
-                            if *ref_position >= current_position {
-                                result.errors.push(ValidationError::StepNotYetExecuted {
-                                    step_id: step_id.clone(),
-                                    referenced_step_id: referenced_step_id.clone(),
-                                });
-                            }
-                        }
-                        // If referenced step not in position_map, it doesn't exist
-                        // (already caught by reference validation)
+                // Extract all step references from this mapping value (including nested composites)
+                let referenced_step_ids = extract_step_ids_from_mapping_value(value);
+                for referenced_step_id in referenced_step_ids {
+                    // Skip self-references - they're handled separately as warnings
+                    if referenced_step_id == *step_id {
+                        continue;
                     }
+
+                    if let Some(ref_position) = position_map.get(&referenced_step_id) {
+                        if *ref_position >= current_position {
+                            result.errors.push(ValidationError::StepNotYetExecuted {
+                                step_id: step_id.clone(),
+                                referenced_step_id: referenced_step_id.clone(),
+                            });
+                        }
+                    }
+                    // If referenced step not in position_map, it doesn't exist
+                    // (already caught by reference validation)
                 }
             }
         }
@@ -1409,10 +1456,9 @@ fn collect_referenced_connections(graph: &ExecutionGraph) -> HashSet<String> {
 
         for mapping in mappings {
             for value in mapping.values() {
-                if let MappingValue::Reference(ref_value) = value {
-                    if let Some(step_id) = extract_step_id_from_reference(&ref_value.value) {
-                        referenced.insert(step_id);
-                    }
+                // Extract all step references from this mapping value (including nested composites)
+                for step_id in extract_step_ids_from_mapping_value(value) {
+                    referenced.insert(step_id);
                 }
             }
         }
@@ -1694,6 +1740,34 @@ fn get_json_type_name(value: &serde_json::Value) -> String {
     }
 }
 
+/// Recursively extract all step IDs from a MappingValue, including nested Composites.
+fn extract_step_ids_from_mapping_value(value: &MappingValue) -> Vec<String> {
+    let mut step_ids = Vec::new();
+    match value {
+        MappingValue::Reference(ref_value) => {
+            if let Some(step_id) = extract_step_id_from_reference(&ref_value.value) {
+                step_ids.push(step_id);
+            }
+        }
+        MappingValue::Immediate(_) => {
+            // Immediate values have no step references
+        }
+        MappingValue::Composite(comp_value) => match &comp_value.value {
+            CompositeInner::Object(map) => {
+                for nested_value in map.values() {
+                    step_ids.extend(extract_step_ids_from_mapping_value(nested_value));
+                }
+            }
+            CompositeInner::Array(arr) => {
+                for nested_value in arr {
+                    step_ids.extend(extract_step_ids_from_mapping_value(nested_value));
+                }
+            }
+        },
+    }
+    step_ids
+}
+
 /// Extract step ID from a reference path like "steps.my_step.outputs.foo"
 /// or "steps['my-step'].outputs.foo" (bracket notation for IDs with special chars)
 fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
@@ -1746,11 +1820,10 @@ fn find_connection_references(
     let mut found = Vec::new();
 
     for value in mapping.values() {
-        if let MappingValue::Reference(ref_value) = value {
-            if let Some(step_id) = extract_step_id_from_reference(&ref_value.value) {
-                if connection_step_ids.contains(&step_id) {
-                    found.push(step_id);
-                }
+        // Extract all step references from this mapping value (including nested composites)
+        for step_id in extract_step_ids_from_mapping_value(value) {
+            if connection_step_ids.contains(&step_id) {
+                found.push(step_id);
             }
         }
     }
