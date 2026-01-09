@@ -274,14 +274,18 @@ impl OciRunner {
 
         fs::create_dir_all(&run_dir).await?;
 
+        // Create workspace directory for ephemeral file storage
+        let workspace_dir = run_dir.join("workspace");
+        fs::create_dir_all(&workspace_dir).await?;
+
         // Set run directory permissions to allow container (running as nobody) to write
         // This is needed because the container runs as UID 65534 (nobody)
         let (uid, _gid) = self.config.bundle_config.user;
         if uid != 0 {
             use std::os::unix::fs::PermissionsExt;
             // Make directory world-writable so container can write output.json
-            let permissions = std::fs::Permissions::from_mode(0o777);
-            std::fs::set_permissions(&run_dir, permissions)?;
+            std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o777))?;
+            std::fs::set_permissions(&workspace_dir, std::fs::Permissions::from_mode(0o777))?;
         }
 
         let input_path = run_dir.join("input.json");
@@ -1168,6 +1172,7 @@ impl Runner for OciRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_transform_addr_for_pasta_no_transformation() {
@@ -1191,5 +1196,173 @@ mod tests {
             assert!(host_ip.contains('.'));
             assert!(!host_ip.contains("127.0.0.1")); // Should not be localhost
         }
+    }
+
+    #[tokio::test]
+    async fn test_store_input_creates_workspace_directory() {
+        // Create a temp directory for test data
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create runner with test config
+        let config = OciRunnerConfig {
+            bundles_dir: temp_dir.path().join("bundles"),
+            data_dir: temp_dir.path().to_path_buf(),
+            default_timeout: Duration::from_secs(60),
+            use_systemd_cgroup: false,
+            bundle_config: BundleConfig::default(),
+            skip_cert_verification: false,
+            connection_service_url: None,
+        };
+        let runner = OciRunner::new(config);
+
+        // Call store_input
+        let tenant_id = "test-tenant";
+        let instance_id = "test-instance";
+        let input = serde_json::json!({"key": "value"});
+
+        runner
+            .store_input(tenant_id, instance_id, &input)
+            .await
+            .unwrap();
+
+        // Verify run directory exists
+        let run_dir = temp_dir
+            .path()
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id);
+        assert!(run_dir.exists(), "Run directory should exist");
+
+        // Verify workspace directory exists
+        let workspace_dir = run_dir.join("workspace");
+        assert!(
+            workspace_dir.exists(),
+            "Workspace directory should exist at {:?}",
+            workspace_dir
+        );
+        assert!(workspace_dir.is_dir(), "Workspace should be a directory");
+
+        // Verify input.json exists
+        let input_path = run_dir.join("input.json");
+        assert!(input_path.exists(), "input.json should exist");
+
+        // Verify input.json content
+        let content = std::fs::read_to_string(&input_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed, input);
+    }
+
+    #[tokio::test]
+    async fn test_store_input_workspace_directory_is_writable() {
+        // Create a temp directory for test data
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create runner with non-root user config (simulates container user)
+        let mut bundle_config = BundleConfig::default();
+        bundle_config.user = (65534, 65534); // nobody user
+
+        let config = OciRunnerConfig {
+            bundles_dir: temp_dir.path().join("bundles"),
+            data_dir: temp_dir.path().to_path_buf(),
+            default_timeout: Duration::from_secs(60),
+            use_systemd_cgroup: false,
+            bundle_config,
+            skip_cert_verification: false,
+            connection_service_url: None,
+        };
+        let runner = OciRunner::new(config);
+
+        // Call store_input
+        let tenant_id = "test-tenant";
+        let instance_id = "test-instance-2";
+        let input = serde_json::json!({});
+
+        runner
+            .store_input(tenant_id, instance_id, &input)
+            .await
+            .unwrap();
+
+        // Verify workspace directory has world-writable permissions
+        let workspace_dir = temp_dir
+            .path()
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id)
+            .join("workspace");
+
+        assert!(workspace_dir.exists());
+
+        // Check permissions (0o777 = world-writable)
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&workspace_dir).unwrap();
+        let mode = metadata.permissions().mode();
+        // Check that the directory is world-writable (last 3 bits are rwx for others)
+        assert_eq!(
+            mode & 0o777,
+            0o777,
+            "Workspace directory should be world-writable (0o777), got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_input_preserves_existing_workspace_files() {
+        // Create a temp directory for test data
+        let temp_dir = TempDir::new().unwrap();
+
+        let config = OciRunnerConfig {
+            bundles_dir: temp_dir.path().join("bundles"),
+            data_dir: temp_dir.path().to_path_buf(),
+            default_timeout: Duration::from_secs(60),
+            use_systemd_cgroup: false,
+            bundle_config: BundleConfig::default(),
+            skip_cert_verification: false,
+            connection_service_url: None,
+        };
+        let runner = OciRunner::new(config);
+
+        let tenant_id = "test-tenant";
+        let instance_id = "test-instance-3";
+
+        // First call to store_input
+        runner
+            .store_input(tenant_id, instance_id, &serde_json::json!({"step": 1}))
+            .await
+            .unwrap();
+
+        // Write a file to workspace
+        let workspace_dir = temp_dir
+            .path()
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id)
+            .join("workspace");
+        let test_file = workspace_dir.join("test_data.txt");
+        std::fs::write(&test_file, "important data").unwrap();
+
+        // Second call to store_input (simulates restart)
+        runner
+            .store_input(tenant_id, instance_id, &serde_json::json!({"step": 2}))
+            .await
+            .unwrap();
+
+        // Verify the file still exists
+        assert!(
+            test_file.exists(),
+            "Files in workspace should survive store_input calls"
+        );
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert_eq!(content, "important data");
+
+        // Verify input.json was updated
+        let input_path = temp_dir
+            .path()
+            .join(tenant_id)
+            .join("runs")
+            .join(instance_id)
+            .join("input.json");
+        let input_content = std::fs::read_to_string(&input_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&input_content).unwrap();
+        assert_eq!(parsed["step"], 2);
     }
 }
