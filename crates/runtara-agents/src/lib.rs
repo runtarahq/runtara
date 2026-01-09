@@ -9,6 +9,8 @@
 //! reused across all scenario compilations.
 
 // Re-export all agent modules from agents/ subdirectory
+#[path = "agents/compression.rs"]
+pub mod compression;
 #[path = "agents/csv.rs"]
 pub mod csv;
 #[path = "agents/datetime.rs"]

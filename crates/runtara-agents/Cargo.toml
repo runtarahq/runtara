@@ -43,8 +43,11 @@ ssh2 = "0.9"
 openssl = { workspace = true }
 # Glob pattern matching for file listing
 glob = "0.3"
+# ZIP archive support
+zip = "2.2"
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
 wiremock = "0.6"
+serial_test = "3"

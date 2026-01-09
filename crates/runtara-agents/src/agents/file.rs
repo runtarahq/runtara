@@ -1364,12 +1364,13 @@ pub fn file_append_file(input: AppendFileInput) -> Result<AppendFileResponse, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::env;
     use tempfile::TempDir;
 
     fn setup_test_workspace() -> TempDir {
         let temp_dir = TempDir::new().unwrap();
-        // SAFETY: Tests run serially in a single thread and only access this env var
+        // SAFETY: Tests are marked #[serial] to run sequentially, avoiding env var races
         unsafe {
             env::set_var("RUNTARA_WORKSPACE_DIR", temp_dir.path());
         }
@@ -1377,6 +1378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_path_prevents_traversal() {
         let _temp = setup_test_workspace();
 
@@ -1447,6 +1449,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_write_and_read_file() {
         let temp = setup_test_workspace();
 
@@ -1473,6 +1476,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_list_files() {
         let temp = setup_test_workspace();
 
@@ -1508,6 +1512,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_file_exists() {
         let temp = setup_test_workspace();
 
@@ -1536,6 +1541,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_append_file() {
         let temp = setup_test_workspace();
 
@@ -1568,6 +1574,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_copy_and_move_file() {
         let temp = setup_test_workspace();
 
@@ -1606,6 +1613,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_create_directory() {
         let temp = setup_test_workspace();
 
@@ -1631,6 +1639,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_delete_file() {
         let temp = setup_test_workspace();
 
@@ -1659,6 +1668,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_get_file_info() {
         let temp = setup_test_workspace();
 
