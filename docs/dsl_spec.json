@@ -2878,6 +2878,590 @@
       "integrationIds": [],
       "name": "Compression",
       "supportsConnections": false
+    },
+    {
+      "capabilities": [
+        {
+          "description": "Append data to an existing file or create a new one",
+          "displayName": "Append File",
+          "hasSideEffects": true,
+          "id": "file-append-file",
+          "inputType": "AppendFileInput",
+          "inputs": [
+            {
+              "description": "File path to append to",
+              "displayName": "Path",
+              "example": "logs/output.log",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Content to append: FileData object, base64 string, plain text, or byte array",
+              "displayName": "Data",
+              "name": "data",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "Create the file if it doesn't exist",
+              "displayName": "Create If Missing",
+              "name": "create_if_missing",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": false,
+              "description": "Add a newline before the appended content",
+              "displayName": "Newline",
+              "name": "newline",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "isIdempotent": false,
+          "name": "file_append_file",
+          "output": {
+            "description": "Response from appending to a file",
+            "displayName": "Append File Response",
+            "fields": [
+              {
+                "description": "File path",
+                "displayName": "Path",
+                "example": "logs/output.log",
+                "name": "path",
+                "type": "string"
+              },
+              {
+                "description": "Number of bytes appended",
+                "displayName": "Bytes Appended",
+                "example": "256",
+                "name": "bytes_appended",
+                "type": "integer"
+              },
+              {
+                "description": "Total file size after append",
+                "displayName": "Total Size",
+                "example": "1024",
+                "name": "total_size",
+                "type": "integer"
+              },
+              {
+                "description": "Whether the file was created",
+                "displayName": "Created",
+                "example": "false",
+                "name": "created",
+                "type": "boolean"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Get detailed metadata about a file in the workspace",
+          "displayName": "Get File Info",
+          "hasSideEffects": false,
+          "id": "file-get-file-info",
+          "inputType": "GetFileInfoInput",
+          "inputs": [
+            {
+              "description": "File path to get metadata for",
+              "displayName": "Path",
+              "example": "output/report.csv",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "file_get_file_info",
+          "output": {
+            "description": "Detailed metadata about a file",
+            "displayName": "File Metadata",
+            "fields": [
+              {
+                "description": "Relative path within workspace",
+                "displayName": "Path",
+                "example": "output/report.csv",
+                "name": "path",
+                "type": "string"
+              },
+              {
+                "description": "File name",
+                "displayName": "Name",
+                "example": "report.csv",
+                "name": "name",
+                "type": "string"
+              },
+              {
+                "description": "File extension",
+                "displayName": "Extension",
+                "name": "extension",
+                "nullable": true,
+                "type": "string"
+              },
+              {
+                "description": "File size in bytes",
+                "displayName": "Size",
+                "example": "1024",
+                "name": "size",
+                "type": "integer"
+              },
+              {
+                "description": "Whether this is a directory",
+                "displayName": "Is Directory",
+                "example": "false",
+                "name": "is_directory",
+                "type": "boolean"
+              },
+              {
+                "description": "Creation timestamp (Unix epoch)",
+                "displayName": "Created Time",
+                "name": "created_time",
+                "nullable": true,
+                "type": "string"
+              },
+              {
+                "description": "Last modified timestamp (Unix epoch)",
+                "displayName": "Modified Time",
+                "name": "modified_time",
+                "nullable": true,
+                "type": "string"
+              },
+              {
+                "description": "Inferred MIME type",
+                "displayName": "MIME Type",
+                "name": "mime_type",
+                "nullable": true,
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Create a directory in the workspace",
+          "displayName": "Create Directory",
+          "hasSideEffects": true,
+          "id": "file-create-directory",
+          "inputType": "CreateDirectoryInput",
+          "inputs": [
+            {
+              "description": "Directory path to create",
+              "displayName": "Path",
+              "example": "output/reports",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "Create parent directories if needed",
+              "displayName": "Recursive",
+              "name": "recursive",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "isIdempotent": false,
+          "name": "file_create_directory",
+          "output": {
+            "description": "Response from creating a directory",
+            "displayName": "Create Directory Response",
+            "fields": [
+              {
+                "description": "Directory path",
+                "displayName": "Path",
+                "example": "output/reports",
+                "name": "path",
+                "type": "string"
+              },
+              {
+                "description": "Whether the directory was created (false if existed)",
+                "displayName": "Created",
+                "example": "true",
+                "name": "created",
+                "type": "boolean"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Move or rename a file within the workspace",
+          "displayName": "Move File",
+          "hasSideEffects": true,
+          "id": "file-move-file",
+          "inputType": "MoveFileInput",
+          "inputs": [
+            {
+              "description": "Source file path",
+              "displayName": "Source",
+              "example": "temp/file.txt",
+              "name": "source",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Destination file path",
+              "displayName": "Destination",
+              "example": "output/file.txt",
+              "name": "destination",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "Overwrite if destination exists",
+              "displayName": "Overwrite",
+              "name": "overwrite",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "isIdempotent": false,
+          "name": "file_move_file",
+          "output": {
+            "description": "Response from moving/renaming a file",
+            "displayName": "Move Response",
+            "fields": [
+              {
+                "description": "Original path",
+                "displayName": "Source",
+                "example": "temp/file.txt",
+                "name": "source",
+                "type": "string"
+              },
+              {
+                "description": "New path",
+                "displayName": "Destination",
+                "example": "output/file.txt",
+                "name": "destination",
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Copy a file within the workspace",
+          "displayName": "Copy File",
+          "hasSideEffects": true,
+          "id": "file-copy-file",
+          "inputType": "CopyFileInput",
+          "inputs": [
+            {
+              "description": "Source file path",
+              "displayName": "Source",
+              "example": "input/template.txt",
+              "name": "source",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Destination file path",
+              "displayName": "Destination",
+              "example": "output/copy.txt",
+              "name": "destination",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "Overwrite if destination exists",
+              "displayName": "Overwrite",
+              "name": "overwrite",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "isIdempotent": false,
+          "name": "file_copy_file",
+          "output": {
+            "description": "Response from copying a file",
+            "displayName": "Copy Response",
+            "fields": [
+              {
+                "description": "Source path",
+                "displayName": "Source",
+                "example": "input/data.csv",
+                "name": "source",
+                "type": "string"
+              },
+              {
+                "description": "Destination path",
+                "displayName": "Destination",
+                "example": "output/data.csv",
+                "name": "destination",
+                "type": "string"
+              },
+              {
+                "description": "Number of bytes copied",
+                "displayName": "Bytes Copied",
+                "example": "1024",
+                "name": "bytes_copied",
+                "type": "integer"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Check if a file or directory exists in the workspace",
+          "displayName": "File Exists",
+          "hasSideEffects": false,
+          "id": "file-file-exists",
+          "inputType": "FileExistsInput",
+          "inputs": [
+            {
+              "description": "Relative path to check",
+              "displayName": "Path",
+              "example": "output/result.json",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "file_file_exists",
+          "output": {
+            "description": "Response from checking if a file exists",
+            "displayName": "Exists Response",
+            "fields": [
+              {
+                "description": "Whether the path exists",
+                "displayName": "Exists",
+                "example": "true",
+                "name": "exists",
+                "type": "boolean"
+              },
+              {
+                "description": "Whether the path is a directory",
+                "displayName": "Is Directory",
+                "example": "false",
+                "name": "is_directory",
+                "type": "boolean"
+              },
+              {
+                "description": "File size in bytes if it exists",
+                "displayName": "Size",
+                "name": "size",
+                "nullable": true,
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Delete a file or directory from the workspace",
+          "displayName": "Delete File",
+          "hasSideEffects": true,
+          "id": "file-delete-file",
+          "inputType": "DeleteFileInput",
+          "inputs": [
+            {
+              "description": "Relative path to delete",
+              "displayName": "Path",
+              "example": "temp/old-file.txt",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "For directories, delete all contents",
+              "displayName": "Recursive",
+              "name": "recursive",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "isIdempotent": false,
+          "name": "file_delete_file",
+          "output": {
+            "description": "Response from deleting a file or directory",
+            "displayName": "Delete Response",
+            "fields": [
+              {
+                "description": "Whether deletion was successful",
+                "displayName": "Success",
+                "example": "true",
+                "name": "success",
+                "type": "boolean"
+              },
+              {
+                "description": "Path of deleted item",
+                "displayName": "Path",
+                "example": "temp/old-file.txt",
+                "name": "path",
+                "type": "string"
+              },
+              {
+                "description": "Number of items deleted (1 for file, N for recursive dir)",
+                "displayName": "Items Deleted",
+                "example": "1",
+                "name": "items_deleted",
+                "type": "integer"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "List files and directories in the workspace with optional glob filtering",
+          "displayName": "List Files",
+          "hasSideEffects": false,
+          "id": "file-list-files",
+          "inputType": "ListFilesInput",
+          "inputs": [
+            {
+              "description": "Directory path to list (empty or '/' for root)",
+              "displayName": "Path",
+              "name": "path",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "default": false,
+              "description": "Include files from subdirectories",
+              "displayName": "Recursive",
+              "name": "recursive",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "description": "Glob pattern to filter files (e.g., '*.csv', '*.json')",
+              "displayName": "Pattern",
+              "name": "pattern",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "file_list_files",
+          "output": {
+            "type": "array"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Read a file from the workspace and return as FileData or text",
+          "displayName": "Read File",
+          "hasSideEffects": false,
+          "id": "file-read-file",
+          "inputType": "ReadFileInput",
+          "inputs": [
+            {
+              "description": "Relative path to the file to read",
+              "displayName": "Path",
+              "example": "input/data.csv",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Output format: 'file' for FileData object, 'text' for plain text",
+              "displayName": "Response Format",
+              "name": "response_format",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "file_read_file",
+          "output": {
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Write data to a file in the workspace",
+          "displayName": "Write File",
+          "hasSideEffects": true,
+          "id": "file-write-file",
+          "inputType": "WriteFileInput",
+          "inputs": [
+            {
+              "description": "Relative path within workspace (e.g., 'output/report.csv')",
+              "displayName": "Path",
+              "example": "output/report.csv",
+              "name": "path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "File content: FileData object, base64 string, plain text, or byte array",
+              "displayName": "Data",
+              "example": "SGVsbG8gV29ybGQh",
+              "name": "data",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "default": true,
+              "description": "Auto-create parent directories if they don't exist",
+              "displayName": "Create Directories",
+              "name": "create_dirs",
+              "required": false,
+              "type": "boolean"
+            },
+            {
+              "default": true,
+              "description": "Overwrite if file already exists",
+              "displayName": "Overwrite",
+              "name": "overwrite",
+              "required": false,
+              "type": "boolean"
+            }
+          ],
+          "isIdempotent": false,
+          "name": "file_write_file",
+          "output": {
+            "description": "Response from writing a file to the workspace",
+            "displayName": "Write File Response",
+            "fields": [
+              {
+                "description": "Full path of the written file",
+                "displayName": "Path",
+                "example": "output/report.csv",
+                "name": "path",
+                "type": "string"
+              },
+              {
+                "description": "Number of bytes written",
+                "displayName": "Bytes Written",
+                "example": "1024",
+                "name": "bytes_written",
+                "type": "integer"
+              },
+              {
+                "description": "Whether parent directories were created",
+                "displayName": "Created Directories",
+                "example": "true",
+                "name": "created_dirs",
+                "type": "boolean"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        }
+      ],
+      "description": "File system capabilities for reading, writing, listing, copying, moving, and deleting files within the workflow workspace",
+      "hasSideEffects": true,
+      "id": "file",
+      "integrationIds": [],
+      "name": "File",
+      "supportsConnections": false
     }
   ],
   "connectionTypes": [
