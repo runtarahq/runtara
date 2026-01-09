@@ -41,7 +41,10 @@ urlencoding = "2.1"
 ssh2 = "0.9"
 # Vendored OpenSSL for musl static builds (required by ssh2/libssh2-sys)
 openssl = { workspace = true }
+# Glob pattern matching for file listing
+glob = "0.3"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
 wiremock = "0.6"

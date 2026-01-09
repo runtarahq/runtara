@@ -15,6 +15,8 @@ pub mod csv;
 pub mod datetime;
 #[path = "agents/extractors/mod.rs"]
 pub mod extractors;
+#[path = "agents/file.rs"]
+pub mod file;
 #[path = "agents/http.rs"]
 pub mod http;
 #[path = "agents/sftp.rs"]

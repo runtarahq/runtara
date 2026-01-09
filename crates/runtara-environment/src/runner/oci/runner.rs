@@ -223,6 +223,11 @@ impl OciRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
+        // Workspace directory for ephemeral file storage (inside container)
+        env.insert(
+            "RUNTARA_WORKSPACE_DIR".to_string(),
+            "/data/workspace".to_string(),
+        );
 
         // For pasta networking, transform localhost addresses to gateway address
         // so the container can reach the host via pasta's NAT
