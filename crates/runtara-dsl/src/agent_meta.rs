@@ -424,6 +424,15 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: true,
     },
     AgentModuleConfig {
+        id: "compression",
+        name: "Compression",
+        description: "Archive capabilities for creating and extracting ZIP archives, listing contents, and extracting individual files",
+        has_side_effects: false,
+        supports_connections: false,
+        integration_ids: &[],
+        secure: false,
+    },
+    AgentModuleConfig {
         id: "object_model",
         name: "Object Model",
         description: "Object Model capabilities for database CRUD operations - create, query, and check instances in object model schemas (has side effects)",
@@ -797,11 +806,23 @@ pub fn get_capability_inputs(agent_id: &str, capability_id: &str) -> Option<Vec<
 const PRIMITIVE_OUTPUT_TYPES: &[&str] = &[
     "()",   // Unit type
     "bool", // Boolean
-    "i8", "i16", "i32", "i64", "i128", "isize", // Signed integers
-    "u8", "u16", "u32", "u64", "u128", "usize", // Unsigned integers
-    "f32", "f64",    // Floats
-    "String", // String
-    "Value",  // serde_json::Value - dynamic JSON
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize", // Signed integers
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize", // Unsigned integers
+    "f32",
+    "f64",               // Floats
+    "String",            // String
+    "Value",             // serde_json::Value - dynamic JSON (short form)
+    "serde_json::Value", // serde_json::Value - dynamic JSON (fully qualified)
 ];
 
 /// Check if a type is a primitive that doesn't need CapabilityOutput
@@ -981,8 +1002,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            9,
-            "Expected 9 built-in agent modules"
+            10,
+            "Expected 10 built-in agent modules"
         );
     }
 
@@ -997,6 +1018,7 @@ mod tests {
         assert!(ids.contains(&"xml"), "Missing xml module");
         assert!(ids.contains(&"datetime"), "Missing datetime module");
         assert!(ids.contains(&"http"), "Missing http module");
+        assert!(ids.contains(&"compression"), "Missing compression module");
         assert!(ids.contains(&"sftp"), "Missing sftp module");
         assert!(ids.contains(&"object_model"), "Missing object_model module");
     }

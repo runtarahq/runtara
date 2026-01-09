@@ -2636,37 +2636,251 @@
       ],
       "name": "Sftp",
       "supportsConnections": true
+    },
+    {
+      "capabilities": [
+        {
+          "description": "List all files and directories in an archive without extracting",
+          "displayName": "List Archive",
+          "hasSideEffects": false,
+          "id": "list-archive",
+          "inputType": "ListArchiveInput",
+          "inputs": [
+            {
+              "description": "The archive file to list contents of",
+              "displayName": "Archive",
+              "name": "archive",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Archive format (auto-detected from content if not specified)",
+              "displayName": "Format",
+              "name": "format",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "list_archive",
+          "output": {
+            "description": "Contents of an archive",
+            "displayName": "List Archive Output",
+            "fields": [
+              {
+                "description": "List of files and directories",
+                "displayName": "Entries",
+                "name": "entries",
+                "type": "array"
+              },
+              {
+                "description": "Total number of entries",
+                "displayName": "Total Count",
+                "name": "total_count",
+                "type": "integer"
+              },
+              {
+                "description": "Total uncompressed size in bytes",
+                "displayName": "Total Size",
+                "name": "total_size",
+                "type": "integer"
+              },
+              {
+                "description": "Archive format",
+                "displayName": "Format",
+                "name": "format",
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Extract a single file from an archive by its path",
+          "displayName": "Extract File",
+          "hasSideEffects": false,
+          "id": "extract-file",
+          "inputType": "ExtractFileInput",
+          "inputs": [
+            {
+              "description": "The archive file containing the target file",
+              "displayName": "Archive",
+              "name": "archive",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Path of the file to extract (e.g., 'data/report.csv')",
+              "displayName": "File Path",
+              "name": "file_path",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Archive format (auto-detected from content if not specified)",
+              "displayName": "Format",
+              "name": "format",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "extract_file",
+          "output": {
+            "description": "Base64-encoded file with optional metadata",
+            "displayName": "File Data",
+            "fields": [
+              {
+                "description": "Base64-encoded file content",
+                "displayName": "Content",
+                "name": "content",
+                "type": "string"
+              },
+              {
+                "description": "Original filename (optional)",
+                "displayName": "Filename",
+                "name": "filename",
+                "nullable": true,
+                "type": "string"
+              },
+              {
+                "description": "MIME type (e.g., 'text/plain', 'text/csv', 'application/xml')",
+                "displayName": "MIME Type",
+                "name": "mime_type",
+                "nullable": true,
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Extract all files from an archive",
+          "displayName": "Extract Archive",
+          "hasSideEffects": false,
+          "id": "extract-archive",
+          "inputType": "ExtractArchiveInput",
+          "inputs": [
+            {
+              "description": "The archive file to extract",
+              "displayName": "Archive",
+              "name": "archive",
+              "required": true,
+              "type": "string"
+            },
+            {
+              "description": "Archive format (auto-detected from content if not specified)",
+              "displayName": "Format",
+              "name": "format",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "extract_archive",
+          "output": {
+            "description": "Result of extracting all files from an archive",
+            "displayName": "Extract Archive Output",
+            "fields": [
+              {
+                "description": "List of all extracted files",
+                "displayName": "Files",
+                "name": "files",
+                "type": "array"
+              },
+              {
+                "description": "Total number of files extracted",
+                "displayName": "Count",
+                "name": "count",
+                "type": "integer"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        },
+        {
+          "description": "Create an archive from one or more files",
+          "displayName": "Create Archive",
+          "hasSideEffects": false,
+          "id": "create-archive",
+          "inputType": "CreateArchiveInput",
+          "inputs": [
+            {
+              "description": "List of files to include in the archive",
+              "displayName": "Files",
+              "items": {
+                "type": "string"
+              },
+              "name": "files",
+              "required": true,
+              "type": "array"
+            },
+            {
+              "description": "Archive format: 'zip' (default)",
+              "displayName": "Format",
+              "name": "format",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "description": "Compression level from 0 (none) to 9 (maximum)",
+              "displayName": "Compression Level",
+              "name": "compression_level",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "description": "Filename for the output archive (e.g., 'data.zip')",
+              "displayName": "Archive Name",
+              "name": "archive_name",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "isIdempotent": true,
+          "name": "create_archive",
+          "output": {
+            "description": "Base64-encoded file with optional metadata",
+            "displayName": "File Data",
+            "fields": [
+              {
+                "description": "Base64-encoded file content",
+                "displayName": "Content",
+                "name": "content",
+                "type": "string"
+              },
+              {
+                "description": "Original filename (optional)",
+                "displayName": "Filename",
+                "name": "filename",
+                "nullable": true,
+                "type": "string"
+              },
+              {
+                "description": "MIME type (e.g., 'text/plain', 'text/csv', 'application/xml')",
+                "displayName": "MIME Type",
+                "name": "mime_type",
+                "nullable": true,
+                "type": "string"
+              }
+            ],
+            "type": "string"
+          },
+          "rateLimited": false
+        }
+      ],
+      "description": "Archive capabilities for creating and extracting ZIP archives, listing contents, and extracting individual files",
+      "hasSideEffects": false,
+      "id": "compression",
+      "integrationIds": [],
+      "name": "Compression",
+      "supportsConnections": false
     }
   ],
   "connectionTypes": [
-    {
-      "category": "http",
-      "description": "Authenticate HTTP requests using a Bearer token",
-      "displayName": "HTTP Bearer Token",
-      "fields": [
-        {
-          "default": null,
-          "description": "Bearer token for authentication",
-          "displayName": "Token",
-          "isSecret": true,
-          "name": "token",
-          "placeholder": null,
-          "required": true,
-          "type": "String"
-        },
-        {
-          "default": null,
-          "description": "Optional base URL prefix for all requests",
-          "displayName": "Base URL",
-          "isSecret": false,
-          "name": "base_url",
-          "placeholder": "https://api.example.com",
-          "required": false,
-          "type": "String"
-        }
-      ],
-      "integrationId": "http_bearer"
-    },
     {
       "category": "file_storage",
       "description": "Connect to an SFTP server for file operations",
@@ -2734,6 +2948,34 @@
         }
       ],
       "integrationId": "sftp"
+    },
+    {
+      "category": "http",
+      "description": "Authenticate HTTP requests using a Bearer token",
+      "displayName": "HTTP Bearer Token",
+      "fields": [
+        {
+          "default": null,
+          "description": "Bearer token for authentication",
+          "displayName": "Token",
+          "isSecret": true,
+          "name": "token",
+          "placeholder": null,
+          "required": true,
+          "type": "String"
+        },
+        {
+          "default": null,
+          "description": "Optional base URL prefix for all requests",
+          "displayName": "Base URL",
+          "isSecret": false,
+          "name": "base_url",
+          "placeholder": "https://api.example.com",
+          "required": false,
+          "type": "String"
+        }
+      ],
+      "integrationId": "http_bearer"
     },
     {
       "category": "http",
