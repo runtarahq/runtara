@@ -1980,6 +1980,7 @@ dependencies = [
  "minijinja",
  "openssl",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "roxmltree",
  "runtara-agent-macro",

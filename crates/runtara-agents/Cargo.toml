@@ -31,6 +31,7 @@ base64 = "0.22"
 encoding_rs = "0.8"
 minijinja = "2.5"
 sha2 = "0.10"
+regex = "1"
 strum = { version = "0.26", features = ["derive"] }
 # Runtime support for spawn_blocking in sync capabilities
 tokio = { version = "1", features = ["rt"] }
