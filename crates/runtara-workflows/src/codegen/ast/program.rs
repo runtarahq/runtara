@@ -175,6 +175,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
             let module_ident = Ident::new(module, Span::call_site());
             let alias_ident = Ident::new(alias, Span::call_site());
             Some(quote! {
+                #[allow(unused_imports)]
                 use #stdlib_ident::agents::#module_ident as #alias_ident;
             })
         })
