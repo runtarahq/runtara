@@ -487,13 +487,18 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // Build rustc command for native binary
     let target = get_host_target();
     let mut cmd = Command::new("rustc");
+
+    // Clear RUSTFLAGS to ensure consistent behavior across environments
+    // (some production environments may have -D warnings set globally)
+    cmd.env_remove("RUSTFLAGS");
+
     cmd.arg(format!("--target={}", target))
         .arg("--crate-type=bin")
         .arg("--edition=2024")
         .arg("-C")
         .arg("opt-level=2")
         .arg("-C")
-        .arg("codegen-units=16");
+        .arg("codegen-units=1");
 
     // Use static CRT linking on Linux (musl) for fully static binaries
     #[cfg(target_os = "linux")]

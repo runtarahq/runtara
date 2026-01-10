@@ -94,6 +94,7 @@ fn emit_constants(ctx: &EmitContext) -> TokenStream {
         quote! {
             /// Connection service URL for fetching credentials at runtime.
             /// Prefers CONNECTION_SERVICE_URL env var, falls back to compile-time value.
+            #[allow(dead_code)]
             fn get_connection_service_url() -> Option<&'static str> {
                 // Check env var first (set by OciRunner), then fall back to compile-time default
                 static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -107,12 +108,14 @@ fn emit_constants(ctx: &EmitContext) -> TokenStream {
         quote! {
             /// Connection service URL for fetching credentials at runtime.
             /// Reads from CONNECTION_SERVICE_URL env var (no compile-time default configured).
+            #[allow(dead_code)]
             fn get_connection_service_url() -> Option<&'static str> {
                 static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
                 URL.get_or_init(|| {
                     std::env::var("CONNECTION_SERVICE_URL").ok()
                 }).as_deref()
             }
+            #[allow(dead_code)]
             const CONNECTION_SERVICE_URL: Option<&str> = None;
         }
     };
