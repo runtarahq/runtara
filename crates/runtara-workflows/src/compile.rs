@@ -586,10 +586,13 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // Input
     cmd.arg(&main_rs_path);
 
+    // Log the full command for debugging
+    let cmd_str = format!("{:?}", cmd);
     tracing::info!(
         tenant_id = %tenant_id,
         scenario_id = %scenario_id,
         version = version,
+        command = %cmd_str,
         "Invoking rustc for native compilation"
     );
     let rustc_start = std::time::Instant::now();
