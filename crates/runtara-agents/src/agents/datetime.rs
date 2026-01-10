@@ -658,7 +658,7 @@ fn try_match_token(s: &str) -> Option<(usize, &'static str)> {
 
 /// Common date formats to try when parsing
 const PARSE_FORMATS: &[&str] = &[
-    // ISO 8601 variants
+    // ISO 8601 variants (always 4-digit year, safe to try first)
     "%Y-%m-%dT%H:%M:%S%.fZ",
     "%Y-%m-%dT%H:%M:%SZ",
     "%Y-%m-%dT%H:%M:%S%.f%:z",
@@ -668,10 +668,18 @@ const PARSE_FORMATS: &[&str] = &[
     "%Y-%m-%d %H:%M:%S%.f",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d",
-    // US formats
+    // US formats (2-digit year FIRST - chrono's %Y is lenient and would match 2-digit years as year 25 AD)
+    "%m/%d/%y %H:%M:%S",
+    "%m/%d/%y",
+    // US formats (4-digit year)
     "%m/%d/%Y %H:%M:%S",
     "%m/%d/%Y",
-    // European formats
+    // European formats (2-digit year FIRST)
+    "%d/%m/%y %H:%M:%S",
+    "%d/%m/%y",
+    "%d.%m.%y %H:%M:%S",
+    "%d.%m.%y",
+    // European formats (4-digit year)
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y",
     "%d.%m.%Y %H:%M:%S",
@@ -717,8 +725,13 @@ fn parse_flexible_date(
         }
     }
 
-    // Try date-only formats
-    const DATE_ONLY_FORMATS: &[&str] = &["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d.%m.%Y"];
+    // Try date-only formats (2-digit year FIRST - chrono's %Y is lenient)
+    const DATE_ONLY_FORMATS: &[&str] = &[
+        "%Y-%m-%d", // ISO format is safe (always 4-digit year with dashes)
+        // 2-digit year variants first
+        "%m/%d/%y", "%d/%m/%y", "%d.%m.%y", // 4-digit year variants
+        "%m/%d/%Y", "%d/%m/%Y", "%d.%m.%Y",
+    ];
 
     for fmt in DATE_ONLY_FORMATS {
         if let Ok(naive_date) = chrono::NaiveDate::parse_from_str(trimmed, fmt) {
@@ -1347,6 +1360,35 @@ mod tests {
     fn test_parse_date_only() {
         let result = parse_flexible_date("2024-01-15", None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_two_digit_year() {
+        // US format MM/DD/YY - year 25 should be 2025, not 0025
+        let result = parse_flexible_date("10/22/25", None);
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 2025);
+        assert_eq!(dt.month(), 10);
+        assert_eq!(dt.day(), 22);
+
+        // European format DD.MM.YY
+        let result = parse_flexible_date("22.10.25", None);
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 2025);
+
+        // Year 99 should be 1999 (chrono pivot: 70-99 -> 1970-1999)
+        let result = parse_flexible_date("01/15/99", None);
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 1999);
+
+        // Year 00 should be 2000 (chrono pivot: 00-69 -> 2000-2069)
+        let result = parse_flexible_date("01/15/00", None);
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 2000);
     }
 
     // Timezone tests
