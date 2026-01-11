@@ -370,6 +370,15 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         secure: false,
     },
     AgentModuleConfig {
+        id: "crypto",
+        name: "Crypto",
+        description: "Cryptographic capabilities for hashing data with SHA-256, SHA-512, SHA-1, MD5 and creating HMAC authentication codes",
+        has_side_effects: false,
+        supports_connections: false,
+        integration_ids: &[],
+        secure: false,
+    },
+    AgentModuleConfig {
         id: "csv",
         name: "Csv",
         description: "CSV capabilities for parsing and working with CSV data",
@@ -1011,8 +1020,8 @@ mod tests {
         // Verify we have the expected number of built-in modules
         assert_eq!(
             BUILTIN_AGENT_MODULES.len(),
-            11,
-            "Expected 11 built-in agent modules"
+            12,
+            "Expected 12 built-in agent modules"
         );
     }
 
@@ -1105,10 +1114,10 @@ mod tests {
 
     #[test]
     fn test_side_effects_modules() {
-        // http, sftp, and object_model have side effects
+        // http, sftp, file, and object_model have side effects
         for module in BUILTIN_AGENT_MODULES {
             match module.id {
-                "http" | "sftp" | "object_model" => {
+                "http" | "sftp" | "file" | "object_model" => {
                     assert!(
                         module.has_side_effects,
                         "{} module should have side effects",
