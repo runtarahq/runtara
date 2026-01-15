@@ -213,7 +213,7 @@ async fn test_multiple_heartbeats_stored() {
             .instance_client
             .request(&wrap_instance_event(heartbeat_event))
             .await
-            .expect(&format!("Failed to send heartbeat {}", i));
+            .unwrap_or_else(|_| panic!("Failed to send heartbeat {}", i));
 
         match resp.response {
             Some(instance_proto::rpc_response::Response::InstanceEvent(r)) => {
@@ -475,7 +475,7 @@ async fn test_heartbeat_monitor_stale_detection_scenario() {
             .instance_client
             .request(&wrap_checkpoint(checkpoint_req))
             .await
-            .expect(&format!("Failed to save checkpoint {}", i));
+            .unwrap_or_else(|_| panic!("Failed to save checkpoint {}", i));
 
         println!("Checkpoint {} saved", i);
     }
