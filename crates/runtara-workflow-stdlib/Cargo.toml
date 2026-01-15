@@ -30,3 +30,7 @@ libc = "0.2"
 
 # HTTP client for connection fetching
 ureq = "2.12"
+
+# Tracing for structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

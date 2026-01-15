@@ -80,8 +80,8 @@ use tracing::debug;
 /// sdk.completed(b"result").await?;
 /// ```
 pub struct RuntaraSdk {
-    /// Backend implementation (QUIC or embedded)
-    backend: Box<dyn SdkBackend>,
+    /// Backend implementation (QUIC or embedded) - Arc for sharing with heartbeat task
+    backend: std::sync::Arc<dyn SdkBackend>,
     /// Registration state
     registered: bool,
     /// Last signal poll time (for rate limiting) - only used with QUIC
@@ -112,7 +112,7 @@ impl RuntaraSdk {
         let backend = QuicBackend::new(&config)?;
 
         Ok(Self {
-            backend: Box::new(backend),
+            backend: std::sync::Arc::new(backend),
             registered: false,
             last_signal_poll: Instant::now() - Duration::from_secs(60), // Allow immediate first poll
             pending_signal: None,
@@ -158,7 +158,7 @@ impl RuntaraSdk {
         let backend = EmbeddedBackend::new(persistence, instance_id, tenant_id);
 
         Self {
-            backend: Box::new(backend),
+            backend: std::sync::Arc::new(backend),
             registered: false,
             #[cfg(feature = "quic")]
             last_signal_poll: Instant::now() - Duration::from_secs(60),
@@ -167,6 +167,32 @@ impl RuntaraSdk {
             #[cfg(feature = "quic")]
             signal_poll_interval_ms: 1_000,
             heartbeat_interval_ms: 30_000,
+        }
+    }
+
+    /// Create an embedded SDK instance with configuration.
+    ///
+    /// This variant allows customizing heartbeat interval and other settings
+    /// while using direct database access.
+    #[cfg(feature = "embedded")]
+    pub fn with_embedded_backend(
+        persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+        config: SdkConfig,
+    ) -> Self {
+        use crate::backend::embedded::EmbeddedBackend;
+
+        let backend = EmbeddedBackend::new(persistence, &config.instance_id, &config.tenant_id);
+
+        Self {
+            backend: std::sync::Arc::new(backend),
+            registered: false,
+            #[cfg(feature = "quic")]
+            last_signal_poll: Instant::now() - Duration::from_secs(60),
+            #[cfg(feature = "quic")]
+            pending_signal: None,
+            #[cfg(feature = "quic")]
+            signal_poll_interval_ms: config.signal_poll_interval_ms,
+            heartbeat_interval_ms: config.heartbeat_interval_ms,
         }
     }
 
@@ -619,6 +645,15 @@ impl RuntaraSdk {
     /// Returns 0 if automatic heartbeats are disabled.
     pub fn heartbeat_interval_ms(&self) -> u64 {
         self.heartbeat_interval_ms
+    }
+
+    /// Get a clone of the backend Arc for the heartbeat task.
+    ///
+    /// This allows the background heartbeat task to send heartbeats
+    /// without holding the SDK mutex, preventing mutex contention
+    /// with long-running network operations.
+    pub(crate) fn backend_arc(&self) -> std::sync::Arc<dyn SdkBackend> {
+        self.backend.clone()
     }
 }
 

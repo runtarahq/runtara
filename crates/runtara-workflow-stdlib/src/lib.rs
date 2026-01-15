@@ -46,6 +46,10 @@ pub use tokio;
 // Re-export runtara-sdk for direct use
 pub use runtara_sdk;
 
+// Re-export tracing for structured logging in generated workflows
+pub use tracing;
+pub use tracing_subscriber;
+
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types

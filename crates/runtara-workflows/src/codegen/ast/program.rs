@@ -195,6 +195,8 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
         use #stdlib_ident::prelude::*;
         use #stdlib_ident::libc;
         use #stdlib_ident::tokio;
+        use #stdlib_ident::tracing_subscriber;
+        use #stdlib_ident::tracing_subscriber::prelude::*;
         #hashmap_import
 
         // Import only agents used by this workflow
@@ -277,6 +279,16 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                     std::mem::forget(file);
                 }
             }
+
+            // Initialize tracing subscriber for structured logging.
+            // Respects RUST_LOG env var (default: info level).
+            // Output goes to stderr (which may be redirected to log file above).
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+                .with(filter)
+                .init();
 
             // Run async main with tokio runtime
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -1071,6 +1083,10 @@ mod tests {
         assert!(code.contains("prelude"), "Should import prelude");
         assert!(code.contains("libc"), "Should import libc");
         assert!(code.contains("tokio"), "Should import tokio");
+        assert!(
+            code.contains("tracing_subscriber"),
+            "Should import tracing_subscriber"
+        );
     }
 
     #[test]
@@ -1426,6 +1442,14 @@ mod tests {
         assert!(
             code.contains("execute_workflow"),
             "Should call execute_workflow"
+        );
+        assert!(
+            code.contains("tracing_subscriber"),
+            "Should initialize tracing subscriber"
+        );
+        assert!(
+            code.contains("EnvFilter"),
+            "Should use EnvFilter for RUST_LOG support"
         );
     }
 

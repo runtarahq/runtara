@@ -53,9 +53,13 @@ static HEARTBEAT_CANCEL: OnceCell<CancellationToken> = OnceCell::new();
 pub fn register_sdk(sdk: RuntaraSdk) {
     let heartbeat_interval_ms = sdk.heartbeat_interval_ms();
 
+    // Get backend Arc BEFORE wrapping SDK in mutex - heartbeat task uses this directly
+    // to avoid mutex contention with long-running workflow operations
+    let backend = sdk.backend_arc();
+
     let sdk_arc = Arc::new(Mutex::new(sdk));
 
-    if SDK_INSTANCE.set(sdk_arc.clone()).is_err() {
+    if SDK_INSTANCE.set(sdk_arc).is_err() {
         panic!("SDK already registered. register_sdk() should only be called once.");
     }
 
@@ -82,8 +86,9 @@ pub fn register_sdk(sdk: RuntaraSdk) {
                     }
 
                     _ = tokio::time::sleep(interval) => {
-                        let sdk_guard = sdk_arc.lock().await;
-                        if let Err(e) = sdk_guard.heartbeat().await {
+                        // Use backend directly - no mutex needed!
+                        // Backend methods are already thread-safe (RuntaraClient has internal mutex)
+                        if let Err(e) = backend.heartbeat().await {
                             warn!(error = %e, "Failed to send background heartbeat");
                         } else {
                             debug!("Background heartbeat sent");
