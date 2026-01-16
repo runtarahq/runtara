@@ -27,6 +27,8 @@ pub struct TestContext {
     pub server_addr: SocketAddr,
     pub data_dir: PathBuf,
     _temp_dir: tempfile::TempDir,
+    /// Tenant IDs used by this test context (for isolated cleanup).
+    tenant_ids: std::sync::Mutex<Vec<String>>,
 }
 
 impl TestContext {
@@ -89,9 +91,11 @@ impl TestContext {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Create client
-        let mut config = RuntaraClientConfig::default();
-        config.server_addr = server_addr;
-        config.dangerous_skip_cert_verification = true;
+        let config = RuntaraClientConfig {
+            server_addr,
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
         let client = RuntaraClient::new(config)
             .map_err(|e| format!("Failed to create QUIC client: {}", e))?;
 
@@ -101,11 +105,84 @@ impl TestContext {
             server_addr,
             data_dir,
             _temp_dir: temp_dir,
+            tenant_ids: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Clean up any existing data for a tenant before starting the test.
+    /// Call this at the start of tests to ensure a clean slate.
+    pub async fn cleanup_tenant(&self, tenant_id: &str) {
+        // Track tenant_id for final cleanup
+        {
+            let mut ids = self.tenant_ids.lock().unwrap();
+            if !ids.contains(&tenant_id.to_string()) {
+                ids.push(tenant_id.to_string());
+            }
+        }
+
+        // Delete existing data for this tenant
+        sqlx::query("DELETE FROM container_registry WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .ok();
+
+        sqlx::query(
+            "DELETE FROM container_cancellations WHERE instance_id IN \
+             (SELECT instance_id FROM instances WHERE tenant_id = $1)",
+        )
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "DELETE FROM container_status WHERE instance_id IN \
+             (SELECT instance_id FROM instances WHERE tenant_id = $1)",
+        )
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "DELETE FROM container_heartbeats WHERE instance_id IN \
+             (SELECT instance_id FROM instances WHERE tenant_id = $1)",
+        )
+        .bind(tenant_id)
+        .execute(&self.pool)
+        .await
+        .ok();
+
+        sqlx::query("DELETE FROM instance_images WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .ok();
+
+        sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .ok();
+
+        sqlx::query("DELETE FROM images WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .ok();
     }
 
     /// Create a test image in the database.
     pub async fn create_test_image(&self, tenant_id: &str, name: &str) -> Uuid {
+        // Track tenant_id for cleanup
+        {
+            let mut ids = self.tenant_ids.lock().unwrap();
+            if !ids.contains(&tenant_id.to_string()) {
+                ids.push(tenant_id.to_string());
+            }
+        }
+
         let image_id = Uuid::new_v4();
         let binary_path = self
             .data_dir
@@ -158,36 +235,70 @@ impl TestContext {
         row
     }
 
-    /// Clean up all test data.
+    /// Clean up test data for tenant_ids used by this context only.
+    /// This ensures parallel tests don't interfere with each other.
     pub async fn cleanup(&self) {
-        sqlx::query("DELETE FROM wake_queue")
+        let tenant_ids = self.tenant_ids.lock().unwrap().clone();
+        if tenant_ids.is_empty() {
+            return;
+        }
+
+        for tenant_id in &tenant_ids {
+            // Delete from tables with tenant_id column
+            sqlx::query("DELETE FROM container_registry WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .execute(&self.pool)
+                .await
+                .ok();
+
+            // Delete from tables that reference instance_id (use subquery)
+            sqlx::query(
+                "DELETE FROM container_cancellations WHERE instance_id IN \
+                 (SELECT instance_id FROM instances WHERE tenant_id = $1)",
+            )
+            .bind(tenant_id)
             .execute(&self.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM container_registry")
+
+            sqlx::query(
+                "DELETE FROM container_status WHERE instance_id IN \
+                 (SELECT instance_id FROM instances WHERE tenant_id = $1)",
+            )
+            .bind(tenant_id)
             .execute(&self.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM container_cancellations")
+
+            sqlx::query(
+                "DELETE FROM container_heartbeats WHERE instance_id IN \
+                 (SELECT instance_id FROM instances WHERE tenant_id = $1)",
+            )
+            .bind(tenant_id)
             .execute(&self.pool)
             .await
             .ok();
-        sqlx::query("DELETE FROM container_status")
-            .execute(&self.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM container_heartbeats")
-            .execute(&self.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM instances")
-            .execute(&self.pool)
-            .await
-            .ok();
-        sqlx::query("DELETE FROM images")
-            .execute(&self.pool)
-            .await
-            .ok();
+
+            // Delete instance_images (environment-specific)
+            sqlx::query("DELETE FROM instance_images WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .execute(&self.pool)
+                .await
+                .ok();
+
+            // Delete instances (cascades to checkpoints, signals, etc.)
+            sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .execute(&self.pool)
+                .await
+                .ok();
+
+            sqlx::query("DELETE FROM images WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .execute(&self.pool)
+                .await
+                .ok();
+        }
     }
 }
 

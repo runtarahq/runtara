@@ -1260,8 +1260,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Create runner with non-root user config (simulates container user)
-        let mut bundle_config = BundleConfig::default();
-        bundle_config.user = (65534, 65534); // nobody user
+        let bundle_config = BundleConfig {
+            user: (65534, 65534), // nobody user
+            ..Default::default()
+        };
 
         let config = OciRunnerConfig {
             bundles_dir: temp_dir.path().join("bundles"),

@@ -405,8 +405,10 @@ fn test_bundle_network_modes() {
         ("pasta", NetworkMode::Pasta),
     ] {
         let bundles_dir = temp_dir.path().join(format!("bundles-{}", name));
-        let mut bundle_config = BundleConfig::default();
-        bundle_config.network_mode = network_mode;
+        let bundle_config = BundleConfig {
+            network_mode,
+            ..Default::default()
+        };
 
         let bundle_manager = BundleManager::new(bundles_dir.clone(), bundle_config);
         let instance_id = format!("test-instance-{}", name);
@@ -463,8 +465,10 @@ async fn test_full_container_execution() {
     // 2. Create OCI bundle
     println!("Step 2: Creating OCI bundle...");
     let bundles_dir = data_dir.join("bundles");
-    let mut bundle_config = BundleConfig::default();
-    bundle_config.network_mode = NetworkMode::None; // Isolated, no network needed
+    let bundle_config = BundleConfig {
+        network_mode: NetworkMode::None, // Isolated, no network needed
+        ..Default::default()
+    };
 
     let binary_content =
         std::fs::read(&compilation_result.binary_path).expect("Failed to read binary");

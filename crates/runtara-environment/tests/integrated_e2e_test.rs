@@ -915,6 +915,3 @@ async fn test_integrated_concurrent_workflows() {
 
     println!("\n=== ✓ Concurrent workflows test completed! ===");
 }
-
-// Add futures for join_all
-use futures;

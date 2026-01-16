@@ -18,9 +18,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
-// For wake scheduler tests
-use chrono;
-
 /// Helper macro to skip tests if database URL is not set.
 macro_rules! skip_if_no_db {
     () => {

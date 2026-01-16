@@ -166,6 +166,7 @@ async fn cleanup_image(pool: &PgPool, image_id: &str) {
 /// Mock persistence that tracks instances and allows testing orphaned instance detection.
 struct MockPersistence {
     instances: Mutex<HashMap<String, InstanceRecord>>,
+    #[allow(clippy::type_complexity)]
     completed_instances: Mutex<Vec<(String, Option<Vec<u8>>, Option<String>)>>,
 }
 
@@ -357,7 +358,7 @@ impl Persistence for MockPersistence {
         let instances = self.instances.lock().unwrap();
         let filtered: Vec<InstanceRecord> = instances
             .values()
-            .filter(|inst| status.map_or(true, |s| inst.status == s))
+            .filter(|inst| status.is_none_or(|s| inst.status == s))
             .cloned()
             .collect();
         Ok(filtered)
@@ -548,7 +549,7 @@ async fn test_stale_container_no_heartbeat() {
     let completed = persistence.get_completed_instances();
     assert!(
         completed.iter().any(|(id, _, err)| {
-            id == &instance_id && err.as_ref().map_or(false, |e| e.contains("stale"))
+            id == &instance_id && err.as_ref().is_some_and(|e| e.contains("stale"))
         }),
         "Instance should have been marked as stale due to missing heartbeat"
     );
@@ -599,7 +600,7 @@ async fn test_stale_container_old_heartbeat() {
     let completed = persistence.get_completed_instances();
     assert!(
         completed.iter().any(|(id, _, err)| {
-            id == &instance_id && err.as_ref().map_or(false, |e| e.contains("stale"))
+            id == &instance_id && err.as_ref().is_some_and(|e| e.contains("stale"))
         }),
         "Instance should have been marked as stale due to old activity in instance_events"
     );
@@ -704,7 +705,7 @@ async fn test_orphaned_instance_detected() {
     let completed = persistence.get_completed_instances();
     assert!(
         completed.iter().any(|(id, _, err)| {
-            id == &instance_id && err.as_ref().map_or(false, |e| e.contains("orphaned"))
+            id == &instance_id && err.as_ref().is_some_and(|e| e.contains("orphaned"))
         }),
         "Orphaned instance should have been marked as failed. Completed: {:?}",
         completed

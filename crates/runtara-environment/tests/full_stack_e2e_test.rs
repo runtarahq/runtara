@@ -310,6 +310,7 @@ async fn test_start_instance_via_protocol() {
     ctx.client.connect().await.expect("Connection failed");
 
     let tenant_id = "instance-test";
+    ctx.cleanup_tenant(tenant_id).await; // Clean up any stale data
     let image_id = ctx.create_test_image(tenant_id, "test-workflow").await;
 
     // Start instance
@@ -359,6 +360,7 @@ async fn test_start_instance_with_custom_id() {
     ctx.client.connect().await.expect("Connection failed");
 
     let tenant_id = "custom-id-test";
+    ctx.cleanup_tenant(tenant_id).await; // Clean up any stale data
     let image_id = ctx.create_test_image(tenant_id, "custom-workflow").await;
     let custom_instance_id = format!("my-custom-instance-{}", Uuid::new_v4());
 
@@ -405,15 +407,16 @@ async fn test_list_instances() {
     ctx.client.connect().await.expect("Connection failed");
 
     let tenant_id = "list-instances-test";
+    ctx.cleanup_tenant(tenant_id).await; // Clean up any stale data
     let image_id = ctx.create_test_image(tenant_id, "list-test-workflow").await;
 
-    // Start multiple instances
+    // Start multiple instances with unique IDs
     let mut instance_ids = Vec::new();
     for i in 0..3 {
         let req = StartInstanceRequest {
             image_id: image_id.to_string(),
             tenant_id: tenant_id.to_string(),
-            instance_id: Some(format!("list-test-{}", i)),
+            instance_id: Some(format!("list-test-{}-{}", i, Uuid::new_v4())),
             input: b"{}".to_vec(),
             timeout_seconds: Some(60),
             env: Default::default(),
@@ -425,8 +428,16 @@ async fn test_list_instances() {
             .await
             .expect("Start instance failed");
 
-        if let Some(rpc_response::Response::StartInstance(r)) = resp.response {
-            instance_ids.push(r.instance_id);
+        match resp.response {
+            Some(rpc_response::Response::StartInstance(r)) => {
+                assert!(
+                    r.success,
+                    "Instance {} start should succeed: {}",
+                    i, r.error
+                );
+                instance_ids.push(r.instance_id);
+            }
+            other => panic!("Expected StartInstanceResponse, got: {:?}", other),
         }
     }
 
@@ -479,6 +490,7 @@ async fn test_get_instance_status_via_protocol() {
     ctx.client.connect().await.expect("Connection failed");
 
     let tenant_id = "status-test";
+    ctx.cleanup_tenant(tenant_id).await; // Clean up any stale data
     let image_id = ctx.create_test_image(tenant_id, "status-workflow").await;
 
     // Start instance
