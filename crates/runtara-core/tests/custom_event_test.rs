@@ -15,7 +15,7 @@ use uuid::Uuid;
 async fn test_custom_event_stored_with_subtype() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -89,7 +89,7 @@ async fn test_custom_event_stored_with_subtype() {
 async fn test_multiple_custom_events_with_different_subtypes() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -168,7 +168,7 @@ async fn test_multiple_custom_events_with_different_subtypes() {
 async fn test_custom_event_does_not_change_instance_status() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -226,7 +226,7 @@ async fn test_custom_event_does_not_change_instance_status() {
 async fn test_custom_event_with_json_payload() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -311,7 +311,7 @@ async fn test_custom_event_with_json_payload() {
 async fn test_custom_event_subtype_index() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };

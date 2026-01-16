@@ -12,7 +12,7 @@ use uuid::Uuid;
 async fn test_full_instance_lifecycle() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -124,7 +124,7 @@ async fn test_full_instance_lifecycle() {
 async fn test_register_validates_instance_id_not_empty() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -159,7 +159,7 @@ async fn test_register_validates_instance_id_not_empty() {
 async fn test_register_requires_tenant_id() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };

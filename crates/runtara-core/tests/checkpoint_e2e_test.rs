@@ -17,7 +17,7 @@ use uuid::Uuid;
 async fn test_checkpoint_save_fresh() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -60,7 +60,7 @@ async fn test_checkpoint_save_fresh() {
 async fn test_checkpoint_resume_existing() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -123,7 +123,7 @@ async fn test_checkpoint_resume_existing() {
 async fn test_get_checkpoint_readonly() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -173,7 +173,7 @@ async fn test_get_checkpoint_readonly() {
 async fn test_get_checkpoint_not_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -214,7 +214,7 @@ async fn test_get_checkpoint_not_found() {
 async fn test_checkpoint_append_only() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -291,7 +291,7 @@ async fn test_checkpoint_append_only() {
 async fn test_checkpoint_large_state() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -350,7 +350,7 @@ async fn test_checkpoint_large_state() {
 async fn test_checkpoint_binary_state() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -400,7 +400,7 @@ async fn test_checkpoint_binary_state() {
 async fn test_checkpoint_survives_reconnect() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -458,7 +458,7 @@ async fn test_checkpoint_survives_reconnect() {
 async fn test_checkpoint_multiple_saves() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -518,7 +518,7 @@ async fn test_checkpoint_multiple_saves() {
 async fn test_checkpoint_updates_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -553,7 +553,7 @@ async fn test_checkpoint_updates_instance() {
 async fn test_checkpoint_wrong_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -608,7 +608,7 @@ async fn test_checkpoint_wrong_instance() {
 async fn test_register_with_checkpoint() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -661,7 +661,7 @@ async fn test_register_with_checkpoint() {
 async fn test_register_with_invalid_checkpoint() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };

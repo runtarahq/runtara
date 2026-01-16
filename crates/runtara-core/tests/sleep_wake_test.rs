@@ -16,7 +16,7 @@ use uuid::Uuid;
 async fn test_short_sleep_in_process() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -73,7 +73,7 @@ async fn test_short_sleep_in_process() {
 async fn test_long_sleep_in_process() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -130,7 +130,7 @@ async fn test_long_sleep_in_process() {
 async fn test_multiple_sleeps_in_sequence() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };

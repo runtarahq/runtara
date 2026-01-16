@@ -34,19 +34,28 @@ impl TestContext {
     /// 2. Instance QUIC server on an available port
     /// 3. QUIC client connected to the server
     /// 4. Persistence layer for direct database operations
-    pub async fn new() -> Option<Self> {
+    pub async fn new() -> Result<Self, String> {
         // 1. Get database URL from environment
-        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL").ok()?;
+        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL")
+            .map_err(|_| "TEST_RUNTARA_DATABASE_URL not set")?;
 
         // 2. Connect to test database
-        let pool = PgPool::connect(&database_url).await.ok()?;
+        let pool = PgPool::connect(&database_url)
+            .await
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
         // 2b. Run migrations to ensure schema exists
-        MIGRATOR.run(&pool).await.ok()?;
+        MIGRATOR
+            .run(&pool)
+            .await
+            .map_err(|e| format!("Failed to run migrations: {}", e))?;
 
         // 3. Find available port for server
-        let listener1 = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-        let instance_server_addr = listener1.local_addr().ok()?;
+        let listener1 = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("Failed to bind listener: {}", e))?;
+        let instance_server_addr = listener1
+            .local_addr()
+            .map_err(|e| format!("Failed to get local addr: {}", e))?;
         drop(listener1);
 
         // 4. Create handler state with persistence
@@ -74,9 +83,9 @@ impl TestContext {
             dangerous_skip_cert_verification: true,
             ..Default::default()
         })
-        .ok()?;
+        .map_err(|e| format!("Failed to create QUIC client: {}", e))?;
 
-        Some(Self {
+        Ok(Self {
             pool,
             persistence,
             instance_client,

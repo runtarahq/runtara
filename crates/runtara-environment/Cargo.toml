@@ -62,3 +62,7 @@ async-trait = "0.1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
+runtara-workflows = { path = "../runtara-workflows", version = "1.0" }
+futures = "0.3"
+# Needed for agent capability validation in tests (inventory metadata)
+runtara-agents = { path = "../runtara-agents", version = "1.0" }

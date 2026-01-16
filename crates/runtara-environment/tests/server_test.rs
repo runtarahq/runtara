@@ -32,7 +32,7 @@ macro_rules! skip_if_no_db {
 async fn test_health_check_via_server() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -59,7 +59,7 @@ async fn test_health_check_via_server() {
 async fn test_list_images_empty() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -89,7 +89,7 @@ async fn test_list_images_empty() {
 async fn test_get_image_not_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -118,7 +118,7 @@ async fn test_get_image_not_found() {
 async fn test_get_image_invalid_id() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -155,7 +155,7 @@ async fn test_get_image_invalid_id() {
 async fn test_delete_image_not_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -184,7 +184,7 @@ async fn test_delete_image_not_found() {
 async fn test_start_instance_invalid_image() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -217,7 +217,7 @@ async fn test_start_instance_invalid_image() {
 async fn test_start_instance_invalid_image_id() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -258,7 +258,7 @@ async fn test_start_instance_invalid_image_id() {
 async fn test_stop_instance_not_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -288,7 +288,7 @@ async fn test_stop_instance_not_found() {
 async fn test_get_instance_status_not_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -317,7 +317,7 @@ async fn test_get_instance_status_not_found() {
 async fn test_list_instances_empty() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -355,7 +355,7 @@ async fn test_list_instances_empty() {
 async fn test_list_images_with_data() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -406,7 +406,7 @@ async fn test_list_images_with_data() {
 async fn test_get_image_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -448,7 +448,7 @@ async fn test_get_image_found() {
 async fn test_delete_image_success() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -484,7 +484,7 @@ async fn test_delete_image_success() {
 async fn test_start_instance_success() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -545,7 +545,7 @@ async fn test_start_instance_success() {
 async fn test_start_instance_with_custom_id() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -700,7 +700,7 @@ fn test_instance_status_sleeping_maps_to_suspended() {
 async fn test_get_image_tenant_isolation() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -772,7 +772,7 @@ async fn test_get_image_tenant_isolation() {
 async fn test_delete_image_tenant_isolation() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };
@@ -852,7 +852,7 @@ async fn test_delete_image_tenant_isolation() {
 async fn test_get_image_error_message_consistency() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: could not create test context");
         return;
     };

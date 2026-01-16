@@ -13,7 +13,7 @@ use uuid::Uuid;
 async fn test_signal_send_poll_ack_flow() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -107,7 +107,7 @@ async fn test_signal_send_poll_ack_flow() {
 async fn test_all_signal_types() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -160,7 +160,7 @@ async fn test_all_signal_types() {
 async fn test_signal_to_pending_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -183,7 +183,7 @@ async fn test_signal_to_pending_instance() {
 async fn test_signal_empty_payload() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -226,7 +226,7 @@ async fn test_signal_empty_payload() {
 async fn test_poll_invalid_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -259,7 +259,7 @@ async fn test_poll_invalid_instance() {
 async fn test_signal_not_acknowledged() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };

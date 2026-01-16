@@ -46,8 +46,8 @@ async fn test_debug_context_creation() {
 
             // Try full context creation
             match TestContext::new().await {
-                Some(_ctx) => println!("TestContext creation: OK"),
-                None => println!("TestContext creation: FAILED (returned None)"),
+                Ok(_ctx) => println!("TestContext creation: OK"),
+                Err(e) => println!("TestContext creation: FAILED - {}", e),
             }
         }
         Err(e) => {
@@ -61,7 +61,7 @@ async fn test_debug_context_creation() {
 async fn test_heartbeat_event_stored_in_database() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -172,7 +172,7 @@ async fn test_heartbeat_event_stored_in_database() {
 async fn test_multiple_heartbeats_stored() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -250,7 +250,7 @@ async fn test_multiple_heartbeats_stored() {
 async fn test_heartbeat_updates_last_activity() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -344,7 +344,7 @@ async fn test_heartbeat_updates_last_activity() {
 async fn test_checkpoints_do_not_create_events() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -426,7 +426,7 @@ async fn test_checkpoints_do_not_create_events() {
 async fn test_heartbeat_monitor_stale_detection_scenario() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -530,7 +530,7 @@ async fn test_heartbeat_monitor_stale_detection_scenario() {
 async fn test_heartbeat_monitor_query_pattern() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };

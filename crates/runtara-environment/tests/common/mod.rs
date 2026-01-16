@@ -31,23 +31,32 @@ pub struct TestContext {
 
 impl TestContext {
     /// Create a new test context.
-    pub async fn new() -> Option<Self> {
+    pub async fn new() -> Result<Self, String> {
         // Get database URL from environment
-        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL").ok()?;
+        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL")
+            .map_err(|_| "TEST_RUNTARA_DATABASE_URL not set")?;
 
         // Connect to test database
-        let pool = PgPool::connect(&database_url).await.ok()?;
+        let pool = PgPool::connect(&database_url)
+            .await
+            .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
         // Run migrations (core + environment)
-        runtara_environment::migrations::run(&pool).await.ok()?;
+        runtara_environment::migrations::run(&pool)
+            .await
+            .map_err(|e| format!("Failed to run migrations: {}", e))?;
 
         // Create temp directory for data
-        let temp_dir = tempfile::TempDir::new().ok()?;
+        let temp_dir =
+            tempfile::TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
         let data_dir = temp_dir.path().to_path_buf();
 
         // Find available port
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-        let server_addr = listener.local_addr().ok()?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("Failed to bind listener: {}", e))?;
+        let server_addr = listener
+            .local_addr()
+            .map_err(|e| format!("Failed to get local addr: {}", e))?;
         drop(listener);
 
         // Create mock runner
@@ -83,9 +92,10 @@ impl TestContext {
         let mut config = RuntaraClientConfig::default();
         config.server_addr = server_addr;
         config.dangerous_skip_cert_verification = true;
-        let client = RuntaraClient::new(config).ok()?;
+        let client = RuntaraClient::new(config)
+            .map_err(|e| format!("Failed to create QUIC client: {}", e))?;
 
-        Some(Self {
+        Ok(Self {
             pool,
             client,
             server_addr,

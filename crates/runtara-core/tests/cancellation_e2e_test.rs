@@ -13,7 +13,7 @@ use uuid::Uuid;
 async fn test_cancel_running_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -78,7 +78,7 @@ async fn test_cancel_running_instance() {
 async fn test_cancel_suspended_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -111,7 +111,7 @@ async fn test_cancel_suspended_instance() {
 async fn test_cancel_signal_persists() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -142,7 +142,7 @@ async fn test_cancel_signal_persists() {
 async fn test_cancel_with_reason() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -187,7 +187,7 @@ async fn test_cancel_with_reason() {
 async fn test_cancel_clears_on_ack() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -254,7 +254,7 @@ async fn test_cancel_clears_on_ack() {
 async fn test_cancel_instance_not_found() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -275,7 +275,7 @@ async fn test_cancel_instance_not_found() {
 async fn test_cancel_completed_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -314,7 +314,7 @@ async fn test_cancel_completed_instance() {
 async fn test_cancel_failed_instance() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -341,7 +341,7 @@ async fn test_cancel_failed_instance() {
 async fn test_cancel_already_cancelled() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -374,7 +374,7 @@ async fn test_cancel_already_cancelled() {
 async fn test_cancel_replaces_pending_signal() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -426,7 +426,7 @@ async fn test_cancel_replaces_pending_signal() {
 async fn test_pause_and_resume_flow() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
@@ -517,7 +517,7 @@ async fn test_pause_and_resume_flow() {
 async fn test_cancel_during_checkpoint_save() {
     skip_if_no_db!();
 
-    let Some(ctx) = TestContext::new().await else {
+    let Ok(ctx) = TestContext::new().await else {
         eprintln!("Skipping test: failed to create test context");
         return;
     };
