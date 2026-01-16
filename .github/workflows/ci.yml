@@ -134,7 +134,7 @@ jobs:
 
       - name: Run runtara-core tests
         env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+          TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-core
 
   test-environment:
@@ -176,5 +176,5 @@ jobs:
 
       - name: Run runtara-environment tests
         env:
-          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
+          TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-environment
