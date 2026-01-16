@@ -215,8 +215,9 @@ impl TestContext {
 
     /// Get instance status from database.
     pub async fn get_instance_status(&self, instance_id: &str) -> Option<String> {
+        // Cast enum to text for proper sqlx binding
         let row: Option<(String,)> =
-            sqlx::query_as(r#"SELECT status FROM instances WHERE instance_id = $1"#)
+            sqlx::query_as(r#"SELECT status::text FROM instances WHERE instance_id = $1"#)
                 .bind(instance_id)
                 .fetch_optional(&self.pool)
                 .await
