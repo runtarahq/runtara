@@ -32,14 +32,15 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
     // Check for common errors and provide helpful suggestions
 
     // Missing target
-    if stderr.contains("error[E0463]") && stderr.contains("can't find crate") {
-        if stderr.contains("std") {
-            return format!(
-                "Compilation failed: The Rust standard library for target '{}' is not installed.\n\n\
-                 To fix this, run:\n  rustup target add {}",
-                target, target
-            );
-        }
+    if stderr.contains("error[E0463]")
+        && stderr.contains("can't find crate")
+        && stderr.contains("std")
+    {
+        return format!(
+            "Compilation failed: The Rust standard library for target '{}' is not installed.\n\n\
+             To fix this, run:\n  rustup target add {}",
+            target, target
+        );
     }
 
     // Target not installed
@@ -52,53 +53,50 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
     }
 
     // Linker not found (common on Linux for musl)
-    if stderr.contains("linker") && stderr.contains("not found") {
-        if target.contains("musl") {
-            return format!(
-                "Compilation failed: The musl linker is not installed.\n\n\
+    if stderr.contains("linker") && stderr.contains("not found") && target.contains("musl") {
+        return "Compilation failed: The musl linker is not installed.\n\n\
                  To fix this on Ubuntu/Debian, run:\n  sudo apt install musl-tools\n\n\
                  To fix this on Fedora/RHEL, run:\n  sudo dnf install musl-gcc"
-            );
-        }
+            .to_string();
     }
 
     // Can't find crate (stdlib not compiled)
-    if stderr.contains("can't find crate for") {
-        if let Some(crate_name) = extract_pattern(stderr, "can't find crate for `", "`") {
-            if crate_name == "runtara_workflow_stdlib" {
-                return format!(
-                    "Compilation failed: The workflow stdlib library is not compiled.\n\n\
+    if stderr.contains("can't find crate for")
+        && let Some(crate_name) = extract_pattern(stderr, "can't find crate for `", "`")
+    {
+        if crate_name == "runtara_workflow_stdlib" {
+            return format!(
+                "Compilation failed: The workflow stdlib library is not compiled.\n\n\
                      To fix this, run:\n  cargo build -p runtara-workflow-stdlib --release --target {}\n\n\
                      Or set RUNTARA_NATIVE_LIBRARY_DIR to point to a pre-compiled stdlib.",
-                    target
-                );
-            }
-            return format!(
-                "Compilation failed: Cannot find crate '{}'.\n\n\
-                 This may indicate the workflow stdlib is not properly compiled.\n\
-                 Try rebuilding: cargo build -p runtara-workflow-stdlib --release --target {}",
-                crate_name, target
+                target
             );
         }
+        return format!(
+            "Compilation failed: Cannot find crate '{}'.\n\n\
+                 This may indicate the workflow stdlib is not properly compiled.\n\
+                 Try rebuilding: cargo build -p runtara-workflow-stdlib --release --target {}",
+            crate_name, target
+        );
     }
 
     // Unresolved import
-    if stderr.contains("error[E0432]") && stderr.contains("unresolved import") {
-        if let Some(import) = extract_pattern(stderr, "unresolved import `", "`") {
-            return format!(
-                "Compilation failed: Unresolved import '{}'.\n\n\
+    if stderr.contains("error[E0432]")
+        && stderr.contains("unresolved import")
+        && let Some(import) = extract_pattern(stderr, "unresolved import `", "`")
+    {
+        return format!(
+            "Compilation failed: Unresolved import '{}'.\n\n\
                  This is likely a code generation bug. Please report this issue.",
-                import
-            );
-        }
+            import
+        );
     }
 
     // Type errors (usually code generation bugs)
     if stderr.contains("error[E0308]") && stderr.contains("mismatched types") {
-        return format!(
-            "Compilation failed: Type mismatch in generated code.\n\n\
+        return "Compilation failed: Type mismatch in generated code.\n\n\
              This is likely a code generation bug. Please report this issue."
-        );
+            .to_string();
     }
 
     // Borrow checker errors (usually code generation bugs)
@@ -106,10 +104,9 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
         || stderr.contains("error[E0502]")
         || stderr.contains("error[E0499]")
     {
-        return format!(
-            "Compilation failed: Borrow checker error in generated code.\n\n\
+        return "Compilation failed: Borrow checker error in generated code.\n\n\
              This is likely a code generation bug. Please report this issue."
-        );
+            .to_string();
     }
 
     // Extract first error message for unknown errors
@@ -222,10 +219,10 @@ pub fn workflow_has_side_effects(workflow: &Value) -> bool {
     // Check each step for side effect operations
     for (_step_id, step) in steps {
         // Only check Agent steps (other step types don't execute operators)
-        if let Some(Value::String(step_type)) = step.get("stepType") {
-            if step_type != "Agent" {
-                continue;
-            }
+        if let Some(Value::String(step_type)) = step.get("stepType")
+            && step_type != "Agent"
+        {
+            continue;
         }
 
         // Get operator and operation IDs (case-insensitive comparison)
@@ -554,28 +551,26 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 
     // Add ALL dependency rlibs AND dylibs as extern crates (needed for transitive dependency resolution)
     // Proc-macro crates are compiled as dylibs, not rlibs
-    if deps_dir.exists() {
-        if let Ok(entries) = fs::read_dir(deps_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let ext = path.extension().and_then(|s| s.to_str());
+    if deps_dir.exists()
+        && let Ok(entries) = fs::read_dir(deps_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str());
 
-                // Accept both rlibs and dylibs (proc-macros)
-                if ext != Some("rlib") && ext != Some(dylib_ext) {
-                    continue;
-                }
+            // Accept both rlibs and dylibs (proc-macros)
+            if ext != Some("rlib") && ext != Some(dylib_ext) {
+                continue;
+            }
 
-                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Extract crate name from filename (e.g., "libserde-abc123.rlib" -> "serde")
-                    if let Some(crate_name_part) = filename.strip_prefix("lib") {
-                        if let Some(crate_name) = crate_name_part.split('-').next() {
-                            // Convert hyphens to underscores for crate names
-                            let extern_name = crate_name.replace('-', "_");
-                            cmd.arg("--extern")
-                                .arg(format!("{}={}", extern_name, path.display()));
-                        }
-                    }
-                }
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                && let Some(crate_name_part) = filename.strip_prefix("lib")
+                && let Some(crate_name) = crate_name_part.split('-').next()
+            {
+                // Convert hyphens to underscores for crate names
+                let extern_name = crate_name.replace('-', "_");
+                cmd.arg("--extern")
+                    .arg(format!("{}={}", extern_name, path.display()));
             }
         }
     }

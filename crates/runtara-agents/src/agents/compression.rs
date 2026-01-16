@@ -508,12 +508,12 @@ fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, Stri
 
     let mut found_file = None;
     for path in &paths_to_try {
-        if let Ok(file) = archive.by_name(path) {
-            if !file.is_dir() {
-                // Re-fetch by name since we consumed the file in the check
-                found_file = Some(path.clone());
-                break;
-            }
+        if let Ok(file) = archive.by_name(path)
+            && !file.is_dir()
+        {
+            // Re-fetch by name since we consumed the file in the check
+            found_file = Some(path.clone());
+            break;
         }
     }
 

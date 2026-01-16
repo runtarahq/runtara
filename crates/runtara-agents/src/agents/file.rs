@@ -813,17 +813,15 @@ pub fn file_write_file(input: WriteFileInput) -> Result<WriteFileResponse, Strin
 
     // Create parent directories if needed
     let mut created_dirs = false;
-    if let Some(parent) = resolved_path.parent() {
-        if !parent.exists() {
-            if input.create_dirs {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directories: {}", e))?;
-                created_dirs = true;
-            } else {
-                return Err(format!(
-                    "Parent directory does not exist and create_dirs is false"
-                ));
-            }
+    if let Some(parent) = resolved_path.parent()
+        && !parent.exists()
+    {
+        if input.create_dirs {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directories: {}", e))?;
+            created_dirs = true;
+        } else {
+            return Err("Parent directory does not exist and create_dirs is false".to_string());
         }
     }
 
@@ -963,14 +961,14 @@ fn collect_files(
         let name = entry.file_name().to_string_lossy().to_string();
 
         // Apply pattern filter
-        if let Some(pat) = pattern {
-            if !pat.matches(&name) {
-                // If recursive and is directory, still descend
-                if recursive && metadata.is_dir() {
-                    collect_files(workspace, &path, recursive, pattern, files)?;
-                }
-                continue;
+        if let Some(pat) = pattern
+            && !pat.matches(&name)
+        {
+            // If recursive and is directory, still descend
+            if recursive && metadata.is_dir() {
+                collect_files(workspace, &path, recursive, pattern, files)?;
             }
+            continue;
         }
 
         // Calculate relative path from workspace
@@ -1140,11 +1138,11 @@ pub fn file_copy_file(input: CopyFileInput) -> Result<CopyResponse, String> {
     }
 
     // Create parent directories if needed
-    if let Some(parent) = dest_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create destination directories: {}", e))?;
-        }
+    if let Some(parent) = dest_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create destination directories: {}", e))?;
     }
 
     // Copy the file
@@ -1182,11 +1180,11 @@ pub fn file_move_file(input: MoveFileInput) -> Result<MoveResponse, String> {
     }
 
     // Create parent directories if needed
-    if let Some(parent) = dest_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create destination directories: {}", e))?;
-        }
+    if let Some(parent) = dest_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create destination directories: {}", e))?;
     }
 
     // Move the file
@@ -1325,13 +1323,11 @@ pub fn file_append_file(input: AppendFileInput) -> Result<AppendFileResponse, St
     }
 
     // Create parent directories if needed for new file
-    if !file_existed {
-        if let Some(parent) = resolved_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directories: {}", e))?;
-            }
-        }
+    if !file_existed
+        && let Some(parent) = resolved_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directories: {}", e))?;
     }
 
     // Open file for appending (or create)

@@ -426,14 +426,13 @@ pub async fn handle_start_instance(
     }
 
     // Store input data via Persistence trait
-    if let Some(ref input_data) = input_bytes {
-        if let Err(e) = state
+    if let Some(ref input_data) = input_bytes
+        && let Err(e) = state
             .persistence
             .store_instance_input(&instance_id, input_data)
             .await
-        {
-            warn!(error = %e, "Failed to store instance input (non-fatal)");
-        }
+    {
+        warn!(error = %e, "Failed to store instance input (non-fatal)");
     }
 
     // Associate instance with image in Environment's table (Environment-specific data)
@@ -961,18 +960,18 @@ async fn process_output(
 
     for attempt in 0..MAX_RETRIES {
         // First check if Core has already set a terminal status
-        if let Ok(Some(inst)) = db::get_instance(&state.pool, instance_id).await {
-            if matches!(
+        if let Ok(Some(inst)) = db::get_instance(&state.pool, instance_id).await
+            && matches!(
                 inst.status.as_str(),
                 "completed" | "failed" | "cancelled" | "suspended"
-            ) {
-                debug!(
-                    instance_id = %instance_id,
-                    status = %inst.status,
-                    "Instance already has terminal status from Core, skipping output processing"
-                );
-                return Ok(());
-            }
+            )
+        {
+            debug!(
+                instance_id = %instance_id,
+                status = %inst.status,
+                "Instance already has terminal status from Core, skipping output processing"
+            );
+            return Ok(());
         }
 
         match InstanceOutput::read_from_file(&output_path).await {
@@ -1323,7 +1322,7 @@ pub async fn handle_test_capability(
 /// Get the test harness image, or register it if not present.
 async fn get_or_register_test_harness(
     image_registry: &ImageRegistry,
-    data_dir: &PathBuf,
+    data_dir: &std::path::Path,
 ) -> std::result::Result<crate::image_registry::Image, String> {
     // System tenant for test harness
     const SYSTEM_TENANT: &str = "__system__";

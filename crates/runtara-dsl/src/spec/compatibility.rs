@@ -100,7 +100,7 @@ pub fn check_agent_compatibility(old_spec: &Value, new_spec: &Value) -> Compatib
     let new_agents = extract_agents_from_spec(new_spec);
 
     // Check for removed agents
-    for (agent_id, _old_agent) in &old_agents {
+    for agent_id in old_agents.keys() {
         if !new_agents.contains_key(agent_id) {
             report.breaking_changes.push(BreakingChange {
                 change_type: BreakingChangeType::RemovedAgent,
@@ -112,7 +112,7 @@ pub fn check_agent_compatibility(old_spec: &Value, new_spec: &Value) -> Compatib
     }
 
     // Check for added agents
-    for (agent_id, _new_agent) in &new_agents {
+    for agent_id in new_agents.keys() {
         if !old_agents.contains_key(agent_id) {
             report.compatible_changes.push(CompatibleChange {
                 change_type: CompatibleChangeType::AddedAgent,
@@ -169,19 +169,16 @@ fn check_step_types(old_spec: &Value, new_spec: &Value, report: &mut Compatibili
 fn extract_step_types(spec: &Value) -> HashSet<String> {
     let mut steps = HashSet::new();
 
-    if let Some(definitions) = spec.get("definitions") {
-        if let Some(step_def) = definitions.get("Step") {
-            if let Some(one_of) = step_def.get("oneOf").and_then(|o| o.as_array()) {
-                for step_ref in one_of {
-                    if let Some(ref_str) = step_ref.get("$ref").and_then(|r| r.as_str()) {
-                        // Extract step type from reference like "#/definitions/GroupByStep"
-                        if let Some(step_type) = ref_str.strip_prefix("#/definitions/") {
-                            if let Some(step_name) = step_type.strip_suffix("Step") {
-                                steps.insert(step_name.to_string());
-                            }
-                        }
-                    }
-                }
+    if let Some(definitions) = spec.get("definitions")
+        && let Some(step_def) = definitions.get("Step")
+        && let Some(one_of) = step_def.get("oneOf").and_then(|o| o.as_array())
+    {
+        for step_ref in one_of {
+            if let Some(ref_str) = step_ref.get("$ref").and_then(|r| r.as_str())
+                && let Some(step_type) = ref_str.strip_prefix("#/definitions/")
+                && let Some(step_name) = step_type.strip_suffix("Step")
+            {
+                steps.insert(step_name.to_string());
             }
         }
     }
@@ -218,7 +215,7 @@ fn check_required_fields_in_schema(
         if !old_required.contains(field) {
             // Check if field existed as optional
             let old_props = old_schema.get("properties").and_then(|p| p.as_object());
-            let field_existed = old_props.map_or(false, |p| p.contains_key(field));
+            let field_existed = old_props.is_some_and(|p| p.contains_key(field));
 
             if !field_existed {
                 report.breaking_changes.push(BreakingChange {
@@ -313,13 +310,10 @@ fn check_enum_in_schema(
 
 /// Extract agents from OpenAPI spec
 fn extract_agents_from_spec(_spec: &Value) -> HashMap<String, Value> {
-    let agents = HashMap::new();
-
     // In a real implementation, this would parse the OpenAPI spec
     // and extract agent definitions from the components/schemas section
     // For now, we'll return an empty map as a placeholder
-
-    agents
+    HashMap::new()
 }
 
 /// Check capabilities within an agent

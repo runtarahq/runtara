@@ -156,11 +156,10 @@ impl OciRunnerConfig {
                     .unwrap_or(300),
             ),
             use_systemd_cgroup: parse_env_bool("USE_SYSTEMD_CGROUP", false),
-            bundle_config: {
-                let mut config = BundleConfig::default();
-                config.network_mode = parse_network_mode("RUNTARA_NETWORK_MODE");
-                config.dns_servers = parse_dns_servers("RUNTARA_PASTA_DNS");
-                config
+            bundle_config: BundleConfig {
+                network_mode: parse_network_mode("RUNTARA_NETWORK_MODE"),
+                dns_servers: parse_dns_servers("RUNTARA_PASTA_DNS"),
+                ..Default::default()
             },
             skip_cert_verification: parse_env_bool("RUNTARA_SKIP_CERT_VERIFICATION", false),
             connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL").ok(),
@@ -334,12 +333,11 @@ impl OciRunner {
 
         // Try error.json first
         let error_path = run_dir.join("error.json");
-        if let Ok(json) = fs::read_to_string(&error_path).await {
-            if let Ok(value) = serde_json::from_str::<Value>(&json) {
-                if let Some(error) = value.get("error").and_then(|e| e.as_str()) {
-                    return Some(error.to_string());
-                }
-            }
+        if let Ok(json) = fs::read_to_string(&error_path).await
+            && let Ok(value) = serde_json::from_str::<Value>(&json)
+            && let Some(error) = value.get("error").and_then(|e| e.as_str())
+        {
+            return Some(error.to_string());
         }
 
         // Fallback to stderr.log
@@ -519,12 +517,12 @@ impl OciRunner {
 
         loop {
             // Check cancellation
-            if let Some(ref flag) = cancel_token {
-                if flag.load(Ordering::Relaxed) {
-                    warn!(container_id = %container_id, "Execution cancelled, killing container");
-                    let _ = self.kill_container(container_id).await;
-                    return Err(RunnerError::Cancelled);
-                }
+            if let Some(ref flag) = cancel_token
+                && flag.load(Ordering::Relaxed)
+            {
+                warn!(container_id = %container_id, "Execution cancelled, killing container");
+                let _ = self.kill_container(container_id).await;
+                return Err(RunnerError::Cancelled);
             }
 
             // Check timeout
@@ -676,14 +674,14 @@ impl OciRunner {
                 {
                     for line in content.lines() {
                         let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() == 2 {
-                            if let Ok(value) = parts[1].parse::<u64>() {
-                                match parts[0] {
-                                    "usage_usec" => metrics.cpu_usage_usec = Some(value),
-                                    "user_usec" => metrics.cpu_user_usec = Some(value),
-                                    "system_usec" => metrics.cpu_system_usec = Some(value),
-                                    _ => {}
-                                }
+                        if parts.len() == 2
+                            && let Ok(value) = parts[1].parse::<u64>()
+                        {
+                            match parts[0] {
+                                "usage_usec" => metrics.cpu_usage_usec = Some(value),
+                                "user_usec" => metrics.cpu_user_usec = Some(value),
+                                "system_usec" => metrics.cpu_system_usec = Some(value),
+                                _ => {}
                             }
                         }
                     }
@@ -706,12 +704,11 @@ impl OciRunner {
                     }
                 }
 
-                if let Some(path) = cpu_path {
-                    if let Some(usage_ns) =
+                if let Some(path) = cpu_path
+                    && let Some(usage_ns) =
                         read_cgroup_value(&format!("{}/cpuacct.usage", path)).await
-                    {
-                        metrics.cpu_usage_usec = Some(usage_ns / 1_000);
-                    }
+                {
+                    metrics.cpu_usage_usec = Some(usage_ns / 1_000);
                 }
             }
         }
@@ -738,10 +735,10 @@ impl OciRunner {
                 if !out.status.success() {
                     return false;
                 }
-                if let Ok(state) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                    if let Some(status) = state.get("status").and_then(|v| v.as_str()) {
-                        return status == "running" || status == "created";
-                    }
+                if let Ok(state) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                    && let Some(status) = state.get("status").and_then(|v| v.as_str())
+                {
+                    return status == "running" || status == "created";
                 }
                 false
             }

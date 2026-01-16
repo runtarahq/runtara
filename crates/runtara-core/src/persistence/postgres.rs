@@ -1577,82 +1577,8 @@ mod tests {
         cleanup_test_instance(&pool, instance_id).await;
     }
 
-    #[tokio::test]
-    async fn test_schedule_wake() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
-
-        let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
-
-        let wake_at = Utc::now() + chrono::Duration::hours(1);
-        let result = schedule_wake(&pool, &instance_id.to_string(), "cp-wake", wake_at).await;
-        assert!(result.is_ok());
-
-        let entry = get_wake_entry(&pool, &instance_id.to_string())
-            .await
-            .unwrap();
-        assert!(entry.is_some());
-        assert_eq!(entry.unwrap().checkpoint_id, "cp-wake");
-
-        cleanup_test_instance(&pool, instance_id).await;
-    }
-
-    #[tokio::test]
-    async fn test_schedule_wake_upsert() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
-
-        let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
-
-        let wake_at1 = Utc::now() + chrono::Duration::hours(1);
-        schedule_wake(&pool, &instance_id.to_string(), "cp-1", wake_at1)
-            .await
-            .unwrap();
-
-        let wake_at2 = Utc::now() + chrono::Duration::hours(2);
-        schedule_wake(&pool, &instance_id.to_string(), "cp-2", wake_at2)
-            .await
-            .unwrap();
-
-        let entry = get_wake_entry(&pool, &instance_id.to_string())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(entry.checkpoint_id, "cp-2");
-
-        cleanup_test_instance(&pool, instance_id).await;
-    }
-
-    #[tokio::test]
-    async fn test_clear_wake() {
-        let Some(pool) = test_pool().await else {
-            eprintln!("Skipping test: TEST_DATABASE_URL not set");
-            return;
-        };
-
-        let instance_id = Uuid::new_v4();
-        create_test_instance(&pool, instance_id, "test-tenant").await;
-
-        let wake_at = Utc::now() + chrono::Duration::hours(1);
-        schedule_wake(&pool, &instance_id.to_string(), "cp-wake", wake_at)
-            .await
-            .unwrap();
-
-        clear_wake(&pool, &instance_id.to_string()).await.unwrap();
-
-        let entry = get_wake_entry(&pool, &instance_id.to_string())
-            .await
-            .unwrap();
-        assert!(entry.is_none());
-
-        cleanup_test_instance(&pool, instance_id).await;
-    }
+    // NOTE: Legacy wake_queue tests removed - wake scheduling now uses sleep_until column
+    // on the instances table (see migration 003_drop_wake_queue.sql)
 
     #[tokio::test]
     async fn test_insert_event() {

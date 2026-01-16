@@ -167,10 +167,10 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         .inputs
         .iter()
         .find_map(|arg| {
-            if let syn::FnArg::Typed(pat_type) = arg {
-                if let Type::Path(type_path) = &*pat_type.ty {
-                    return type_path.path.segments.last().map(|s| s.ident.to_string());
-                }
+            if let syn::FnArg::Typed(pat_type) = arg
+                && let Type::Path(type_path) = &*pat_type.ty
+            {
+                return type_path.path.segments.last().map(|s| s.ident.to_string());
             }
             None
         })
@@ -343,18 +343,14 @@ fn option_to_tokens(opt: &Option<String>) -> proc_macro2::TokenStream {
 
 /// Extract the Ok type from Result<T, E>
 fn extract_result_ok_type(output: &syn::ReturnType) -> String {
-    if let syn::ReturnType::Type(_, ty) = output {
-        if let Type::Path(type_path) = &**ty {
-            if let Some(segment) = type_path.path.segments.first() {
-                if segment.ident == "Result" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            return type_to_string(inner_ty);
-                        }
-                    }
-                }
-            }
-        }
+    if let syn::ReturnType::Type(_, ty) = output
+        && let Type::Path(type_path) = &**ty
+        && let Some(segment) = type_path.path.segments.first()
+        && segment.ident == "Result"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+    {
+        return type_to_string(inner_ty);
     }
     "Unknown".to_string()
 }

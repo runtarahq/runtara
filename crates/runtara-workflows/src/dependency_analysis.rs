@@ -118,10 +118,7 @@ impl DependencyGraph {
 
     /// Add a dependency edge from parent to child
     pub fn add_edge(&mut self, parent: ScenarioReference, child: ScenarioReference) {
-        self.edges
-            .entry(parent)
-            .or_insert_with(Vec::new)
-            .push(child);
+        self.edges.entry(parent).or_default().push(child);
     }
 
     /// Detect circular dependencies using depth-first search

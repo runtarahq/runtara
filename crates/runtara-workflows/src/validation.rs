@@ -795,7 +795,7 @@ fn validate_references_with_inherited(
         let mappings = collect_step_mappings(step);
 
         for mapping in mappings {
-            for (_, value) in mapping {
+            for value in mapping.values() {
                 validate_mapping_value_references(
                     step_id,
                     value,
@@ -918,14 +918,14 @@ fn validate_reference(
     }
 
     // Check for variable references
-    if let Some(variable_name) = extract_variable_name_from_reference(ref_path) {
-        if !valid_variable_names.contains(&variable_name) {
-            result.errors.push(ValidationError::UnknownVariable {
-                step_id: step_id.to_string(),
-                variable_name: variable_name.clone(),
-                available_variables: valid_variable_names.iter().cloned().collect(),
-            });
-        }
+    if let Some(variable_name) = extract_variable_name_from_reference(ref_path)
+        && !valid_variable_names.contains(&variable_name)
+    {
+        result.errors.push(ValidationError::UnknownVariable {
+            step_id: step_id.to_string(),
+            variable_name: variable_name.clone(),
+            available_variables: valid_variable_names.iter().cloned().collect(),
+        });
     }
 }
 
@@ -955,10 +955,10 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
             }
         }
         Step::Split(split_step) => {
-            if let Some(config) = &split_step.config {
-                if let Some(m) = &config.variables {
-                    mappings.push(m);
-                }
+            if let Some(config) = &split_step.config
+                && let Some(m) = &config.variables
+            {
+                mappings.push(m);
             }
         }
         Step::Conditional(_) | Step::Switch(_) | Step::While(_) | Step::Connection(_) => {}
@@ -998,7 +998,7 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
         let mappings = collect_step_mappings(step);
 
         for mapping in mappings {
-            for (_, value) in mapping {
+            for value in mapping.values() {
                 // Extract all step references from this mapping value (including nested composites)
                 let referenced_step_ids = extract_step_ids_from_mapping_value(value);
                 for referenced_step_id in referenced_step_ids {
@@ -1007,13 +1007,13 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
                         continue;
                     }
 
-                    if let Some(ref_position) = position_map.get(&referenced_step_id) {
-                        if *ref_position >= current_position {
-                            result.errors.push(ValidationError::StepNotYetExecuted {
-                                step_id: step_id.clone(),
-                                referenced_step_id: referenced_step_id.clone(),
-                            });
-                        }
+                    if let Some(ref_position) = position_map.get(&referenced_step_id)
+                        && *ref_position >= current_position
+                    {
+                        result.errors.push(ValidationError::StepNotYetExecuted {
+                            step_id: step_id.clone(),
+                            referenced_step_id: referenced_step_id.clone(),
+                        });
                     }
                     // If referenced step not in position_map, it doesn't exist
                     // (already caught by reference validation)
@@ -1187,31 +1187,30 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                         inputs.iter().map(|f| (f.name.as_str(), f)).collect();
 
                     for (field_name, value) in mapping {
-                        if let MappingValue::Immediate(imm) = value {
-                            if let Some(field_meta) = field_map.get(field_name.as_str()) {
-                                // Check type compatibility
-                                if let Some(error) = check_type_compatibility(
-                                    step_id,
-                                    field_name,
-                                    &field_meta.type_name,
-                                    &imm.value,
-                                ) {
-                                    result.errors.push(error);
-                                }
+                        if let MappingValue::Immediate(imm) = value
+                            && let Some(field_meta) = field_map.get(field_name.as_str())
+                        {
+                            // Check type compatibility
+                            if let Some(error) = check_type_compatibility(
+                                step_id,
+                                field_name,
+                                &field_meta.type_name,
+                                &imm.value,
+                            ) {
+                                result.errors.push(error);
+                            }
 
-                                // Check enum values
-                                if let Some(enum_values) = &field_meta.enum_values {
-                                    if let Some(value_str) = imm.value.as_str() {
-                                        if !enum_values.contains(&value_str.to_string()) {
-                                            result.errors.push(ValidationError::InvalidEnumValue {
-                                                step_id: step_id.clone(),
-                                                field_name: field_name.clone(),
-                                                value: value_str.to_string(),
-                                                allowed_values: enum_values.clone(),
-                                            });
-                                        }
-                                    }
-                                }
+                            // Check enum values
+                            if let Some(enum_values) = &field_meta.enum_values
+                                && let Some(value_str) = imm.value.as_str()
+                                && !enum_values.contains(&value_str.to_string())
+                            {
+                                result.errors.push(ValidationError::InvalidEnumValue {
+                                    step_id: step_id.clone(),
+                                    field_name: field_name.clone(),
+                                    value: value_str.to_string(),
+                                    allowed_values: enum_values.clone(),
+                                });
                             }
                         }
                     }
@@ -1250,72 +1249,72 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
         match step {
             Step::Agent(agent_step) => {
                 // Check retry count
-                if let Some(max_retries) = agent_step.max_retries {
-                    if max_retries > MAX_RETRY_RECOMMENDED {
-                        result.warnings.push(ValidationWarning::HighRetryCount {
-                            step_id: step_id.clone(),
-                            max_retries,
-                            recommended_max: MAX_RETRY_RECOMMENDED,
-                        });
-                    }
+                if let Some(max_retries) = agent_step.max_retries
+                    && max_retries > MAX_RETRY_RECOMMENDED
+                {
+                    result.warnings.push(ValidationWarning::HighRetryCount {
+                        step_id: step_id.clone(),
+                        max_retries,
+                        recommended_max: MAX_RETRY_RECOMMENDED,
+                    });
                 }
 
                 // Check retry delay
-                if let Some(retry_delay) = agent_step.retry_delay {
-                    if retry_delay > MAX_RETRY_DELAY_MS {
-                        result.warnings.push(ValidationWarning::LongRetryDelay {
-                            step_id: step_id.clone(),
-                            retry_delay_ms: retry_delay,
-                            recommended_max_ms: MAX_RETRY_DELAY_MS,
-                        });
-                    }
+                if let Some(retry_delay) = agent_step.retry_delay
+                    && retry_delay > MAX_RETRY_DELAY_MS
+                {
+                    result.warnings.push(ValidationWarning::LongRetryDelay {
+                        step_id: step_id.clone(),
+                        retry_delay_ms: retry_delay,
+                        recommended_max_ms: MAX_RETRY_DELAY_MS,
+                    });
                 }
 
                 // Check timeout
-                if let Some(timeout) = agent_step.timeout {
-                    if timeout > MAX_TIMEOUT_MS {
-                        result.warnings.push(ValidationWarning::LongTimeout {
-                            step_id: step_id.clone(),
-                            timeout_ms: timeout,
-                            recommended_max_ms: MAX_TIMEOUT_MS,
-                        });
-                    }
+                if let Some(timeout) = agent_step.timeout
+                    && timeout > MAX_TIMEOUT_MS
+                {
+                    result.warnings.push(ValidationWarning::LongTimeout {
+                        step_id: step_id.clone(),
+                        timeout_ms: timeout,
+                        recommended_max_ms: MAX_TIMEOUT_MS,
+                    });
                 }
             }
 
             Step::Split(split_step) => {
                 if let Some(config) = &split_step.config {
                     // Check parallelism
-                    if let Some(parallelism) = config.parallelism {
-                        if parallelism > MAX_PARALLELISM_RECOMMENDED {
-                            result.warnings.push(ValidationWarning::HighParallelism {
-                                step_id: step_id.clone(),
-                                parallelism,
-                                recommended_max: MAX_PARALLELISM_RECOMMENDED,
-                            });
-                        }
+                    if let Some(parallelism) = config.parallelism
+                        && parallelism > MAX_PARALLELISM_RECOMMENDED
+                    {
+                        result.warnings.push(ValidationWarning::HighParallelism {
+                            step_id: step_id.clone(),
+                            parallelism,
+                            recommended_max: MAX_PARALLELISM_RECOMMENDED,
+                        });
                     }
 
                     // Check retry count
-                    if let Some(max_retries) = config.max_retries {
-                        if max_retries > MAX_RETRY_RECOMMENDED {
-                            result.warnings.push(ValidationWarning::HighRetryCount {
-                                step_id: step_id.clone(),
-                                max_retries,
-                                recommended_max: MAX_RETRY_RECOMMENDED,
-                            });
-                        }
+                    if let Some(max_retries) = config.max_retries
+                        && max_retries > MAX_RETRY_RECOMMENDED
+                    {
+                        result.warnings.push(ValidationWarning::HighRetryCount {
+                            step_id: step_id.clone(),
+                            max_retries,
+                            recommended_max: MAX_RETRY_RECOMMENDED,
+                        });
                     }
 
                     // Check timeout
-                    if let Some(timeout) = config.timeout {
-                        if timeout > MAX_TIMEOUT_MS {
-                            result.warnings.push(ValidationWarning::LongTimeout {
-                                step_id: step_id.clone(),
-                                timeout_ms: timeout,
-                                recommended_max_ms: MAX_TIMEOUT_MS,
-                            });
-                        }
+                    if let Some(timeout) = config.timeout
+                        && timeout > MAX_TIMEOUT_MS
+                    {
+                        result.warnings.push(ValidationWarning::LongTimeout {
+                            step_id: step_id.clone(),
+                            timeout_ms: timeout,
+                            recommended_max_ms: MAX_TIMEOUT_MS,
+                        });
                     }
                 }
 
@@ -1326,25 +1325,25 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
             Step::While(while_step) => {
                 if let Some(config) = &while_step.config {
                     // Check max iterations
-                    if let Some(max_iterations) = config.max_iterations {
-                        if max_iterations > MAX_ITERATIONS_RECOMMENDED {
-                            result.warnings.push(ValidationWarning::HighMaxIterations {
-                                step_id: step_id.clone(),
-                                max_iterations,
-                                recommended_max: MAX_ITERATIONS_RECOMMENDED,
-                            });
-                        }
+                    if let Some(max_iterations) = config.max_iterations
+                        && max_iterations > MAX_ITERATIONS_RECOMMENDED
+                    {
+                        result.warnings.push(ValidationWarning::HighMaxIterations {
+                            step_id: step_id.clone(),
+                            max_iterations,
+                            recommended_max: MAX_ITERATIONS_RECOMMENDED,
+                        });
                     }
 
                     // Check timeout
-                    if let Some(timeout) = config.timeout {
-                        if timeout > MAX_TIMEOUT_MS {
-                            result.warnings.push(ValidationWarning::LongTimeout {
-                                step_id: step_id.clone(),
-                                timeout_ms: timeout,
-                                recommended_max_ms: MAX_TIMEOUT_MS,
-                            });
-                        }
+                    if let Some(timeout) = config.timeout
+                        && timeout > MAX_TIMEOUT_MS
+                    {
+                        result.warnings.push(ValidationWarning::LongTimeout {
+                            step_id: step_id.clone(),
+                            timeout_ms: timeout,
+                            recommended_max_ms: MAX_TIMEOUT_MS,
+                        });
                     }
                 }
 
@@ -1354,36 +1353,36 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 
             Step::StartScenario(start_step) => {
                 // Check retry count
-                if let Some(max_retries) = start_step.max_retries {
-                    if max_retries > MAX_RETRY_RECOMMENDED {
-                        result.warnings.push(ValidationWarning::HighRetryCount {
-                            step_id: step_id.clone(),
-                            max_retries,
-                            recommended_max: MAX_RETRY_RECOMMENDED,
-                        });
-                    }
+                if let Some(max_retries) = start_step.max_retries
+                    && max_retries > MAX_RETRY_RECOMMENDED
+                {
+                    result.warnings.push(ValidationWarning::HighRetryCount {
+                        step_id: step_id.clone(),
+                        max_retries,
+                        recommended_max: MAX_RETRY_RECOMMENDED,
+                    });
                 }
 
                 // Check retry delay
-                if let Some(retry_delay) = start_step.retry_delay {
-                    if retry_delay > MAX_RETRY_DELAY_MS {
-                        result.warnings.push(ValidationWarning::LongRetryDelay {
-                            step_id: step_id.clone(),
-                            retry_delay_ms: retry_delay,
-                            recommended_max_ms: MAX_RETRY_DELAY_MS,
-                        });
-                    }
+                if let Some(retry_delay) = start_step.retry_delay
+                    && retry_delay > MAX_RETRY_DELAY_MS
+                {
+                    result.warnings.push(ValidationWarning::LongRetryDelay {
+                        step_id: step_id.clone(),
+                        retry_delay_ms: retry_delay,
+                        recommended_max_ms: MAX_RETRY_DELAY_MS,
+                    });
                 }
 
                 // Check timeout
-                if let Some(timeout) = start_step.timeout {
-                    if timeout > MAX_TIMEOUT_MS {
-                        result.warnings.push(ValidationWarning::LongTimeout {
-                            step_id: step_id.clone(),
-                            timeout_ms: timeout,
-                            recommended_max_ms: MAX_TIMEOUT_MS,
-                        });
-                    }
+                if let Some(timeout) = start_step.timeout
+                    && timeout > MAX_TIMEOUT_MS
+                {
+                    result.warnings.push(ValidationWarning::LongTimeout {
+                        step_id: step_id.clone(),
+                        timeout_ms: timeout,
+                        recommended_max_ms: MAX_TIMEOUT_MS,
+                    });
                 }
             }
 
@@ -1784,9 +1783,7 @@ fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
     }
 
     // Handle dot notation: steps.step_id.outputs
-    if ref_path.starts_with("steps.") {
-        let rest = &ref_path[6..]; // Skip "steps."
-
+    if let Some(rest) = ref_path.strip_prefix("steps.") {
         if let Some(dot_pos) = rest.find('.') {
             return Some(rest[..dot_pos].to_string());
         } else {
@@ -1799,9 +1796,7 @@ fn extract_step_id_from_reference(ref_path: &str) -> Option<String> {
 
 /// Extract variable name from a reference path like "variables.my_var" or "variables.counter.value"
 fn extract_variable_name_from_reference(ref_path: &str) -> Option<String> {
-    if ref_path.starts_with("variables.") {
-        let rest = &ref_path[10..]; // Skip "variables."
-
+    if let Some(rest) = ref_path.strip_prefix("variables.") {
         if let Some(dot_pos) = rest.find('.') {
             return Some(rest[..dot_pos].to_string());
         } else {

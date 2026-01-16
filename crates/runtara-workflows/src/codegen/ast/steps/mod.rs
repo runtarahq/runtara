@@ -323,10 +323,8 @@ pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
             if edge.from_step == step_id {
                 // Only follow "source" edges, skip "true"/"false" labels
                 let label = edge.label.as_deref().unwrap_or("");
-                if label != "true" && label != "false" {
-                    if !visited.contains(&edge.to_step) {
-                        queue.push_back(edge.to_step.clone());
-                    }
+                if label != "true" && label != "false" && !visited.contains(&edge.to_step) {
+                    queue.push_back(edge.to_step.clone());
                 }
             }
         }

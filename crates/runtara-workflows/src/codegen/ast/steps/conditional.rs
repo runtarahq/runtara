@@ -200,10 +200,8 @@ fn collect_reachable_steps(start_step_id: &str, graph: &ExecutionGraph) -> Vec<S
             for edge in &graph.execution_plan {
                 if edge.from_step == current_step_id {
                     let label = edge.label.as_deref().unwrap_or("");
-                    if label == "true" || label == "false" {
-                        if !visited.contains(&edge.to_step) {
-                            queue.push_back(edge.to_step.clone());
-                        }
+                    if (label == "true" || label == "false") && !visited.contains(&edge.to_step) {
+                        queue.push_back(edge.to_step.clone());
                     }
                 }
             }
@@ -245,10 +243,10 @@ fn collect_branch_steps(
         }
 
         // Stop before the merge point (it will be emitted separately after the if/else)
-        if let Some(merge_point) = stop_at {
-            if current_step_id == merge_point {
-                break;
-            }
+        if let Some(merge_point) = stop_at
+            && current_step_id == merge_point
+        {
+            break;
         }
 
         visited.insert(current_step_id.clone());

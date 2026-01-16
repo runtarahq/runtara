@@ -20,19 +20,19 @@ pub fn generate_dsl_schema() -> Value {
     // (they're not referenced directly by types but useful for schema consumers)
     let condition_operator_schema = schema_for!(ConditionOperator);
     let switch_match_type_schema = schema_for!(SwitchMatchType);
-    if let Value::Object(ref mut map) = schema_json {
-        if let Some(Value::Object(definitions)) = map.get_mut("definitions") {
-            definitions.insert(
-                "ConditionOperator".to_string(),
-                serde_json::to_value(&condition_operator_schema.schema)
-                    .expect("Failed to serialize ConditionOperator schema"),
-            );
-            definitions.insert(
-                "SwitchMatchType".to_string(),
-                serde_json::to_value(&switch_match_type_schema.schema)
-                    .expect("Failed to serialize SwitchMatchType schema"),
-            );
-        }
+    if let Value::Object(ref mut map) = schema_json
+        && let Some(Value::Object(definitions)) = map.get_mut("definitions")
+    {
+        definitions.insert(
+            "ConditionOperator".to_string(),
+            serde_json::to_value(&condition_operator_schema.schema)
+                .expect("Failed to serialize ConditionOperator schema"),
+        );
+        definitions.insert(
+            "SwitchMatchType".to_string(),
+            serde_json::to_value(&switch_match_type_schema.schema)
+                .expect("Failed to serialize SwitchMatchType schema"),
+        );
     }
 
     // Add step types metadata

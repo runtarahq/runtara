@@ -977,10 +977,7 @@ pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, String> {
             _ => serde_json::to_string(&key_value).map_err(|e| e.to_string())?,
         };
 
-        grouped
-            .entry(key_str)
-            .or_insert_with(Vec::new)
-            .push(item.clone());
+        grouped.entry(key_str).or_default().push(item.clone());
     }
 
     // Return based on as_map flag

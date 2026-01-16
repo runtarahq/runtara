@@ -495,10 +495,10 @@ fn generate_field_schema(field: &Value) -> Value {
     }
 
     // Handle array items
-    if field_type == Some("array") {
-        if let Some(items) = field.get("items") {
-            schema["items"] = generate_field_schema(items);
-        }
+    if field_type == Some("array")
+        && let Some(items) = field.get("items")
+    {
+        schema["items"] = generate_field_schema(items);
     }
 
     schema

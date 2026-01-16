@@ -97,10 +97,10 @@ impl Runner for MockRunner {
         }
 
         // Check cancellation
-        if let Some(token) = &cancel_token {
-            if token.load(Ordering::SeqCst) {
-                return Err(RunnerError::Cancelled);
-            }
+        if let Some(token) = &cancel_token
+            && token.load(Ordering::SeqCst)
+        {
+            return Err(RunnerError::Cancelled);
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;

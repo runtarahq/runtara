@@ -1361,18 +1361,18 @@ pub fn pad_text(input: PadTextInput) -> Result<String, String> {
 
     let result = match input.direction {
         PadDirection::Left => {
-            let padding: String = std::iter::repeat(pad_char).take(padding_needed).collect();
+            let padding: String = std::iter::repeat_n(pad_char, padding_needed).collect();
             format!("{}{}", padding, text)
         }
         PadDirection::Right => {
-            let padding: String = std::iter::repeat(pad_char).take(padding_needed).collect();
+            let padding: String = std::iter::repeat_n(pad_char, padding_needed).collect();
             format!("{}{}", text, padding)
         }
         PadDirection::Both => {
             let left_pad = padding_needed / 2;
             let right_pad = padding_needed - left_pad;
-            let left: String = std::iter::repeat(pad_char).take(left_pad).collect();
-            let right: String = std::iter::repeat(pad_char).take(right_pad).collect();
+            let left: String = std::iter::repeat_n(pad_char, left_pad).collect();
+            let right: String = std::iter::repeat_n(pad_char, right_pad).collect();
             format!("{}{}{}", left, text, right)
         }
     };

@@ -502,10 +502,10 @@ async fn handle_register_image_stream(
         builder = builder.bundle_path(bp);
     }
 
-    if let Some(meta) = &req.metadata {
-        if let Ok(json) = serde_json::from_slice(meta) {
-            builder = builder.metadata(json);
-        }
+    if let Some(meta) = &req.metadata
+        && let Ok(json) = serde_json::from_slice(meta)
+    {
+        builder = builder.metadata(json);
     }
 
     let mut image = builder.build();
@@ -559,7 +559,7 @@ async fn handle_list_images(
             tenant_id: img.tenant_id,
             name: img.name,
             description: img.description,
-            runner_type: convert_runner_type_to_proto(img.runner_type).into(),
+            runner_type: convert_runner_type_to_proto(img.runner_type),
             created_at_ms: img.created_at.timestamp_millis(),
         })
         .collect();
@@ -606,7 +606,7 @@ async fn handle_get_image(
                     tenant_id: img.tenant_id,
                     name: img.name,
                     description: img.description,
-                    runner_type: convert_runner_type_to_proto(img.runner_type).into(),
+                    runner_type: convert_runner_type_to_proto(img.runner_type),
                     created_at_ms: img.created_at.timestamp_millis(),
                 }),
             })

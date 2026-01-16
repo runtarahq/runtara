@@ -462,9 +462,7 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
             | Step::Connection(_)
     );
 
-    if can_have_on_error && on_error_step.is_some() {
-        let error_step_id = on_error_step.unwrap();
-
+    if can_have_on_error && let Some(error_step_id) = on_error_step {
         // Get the error handler step and emit its branch
         let error_branch_code = if graph.steps.contains_key(error_step_id) {
             emit_error_branch(error_step_id, graph, ctx)

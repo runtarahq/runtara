@@ -1286,11 +1286,9 @@ pub fn unix_to_date(input: UnixToDateInput) -> Result<String, String> {
     let ts = input.timestamp.ok_or("Timestamp is required")?;
 
     // Auto-detect if milliseconds based on magnitude, or use explicit flag
-    let is_ms = input.is_milliseconds.unwrap_or_else(|| {
-        // If timestamp is larger than year 2001 in seconds (~1 billion),
-        // and looks like milliseconds (> 10 billion), assume milliseconds
-        ts > 1_000_000_000_000
-    });
+    // If timestamp is larger than year 2001 in seconds (~1 billion),
+    // and looks like milliseconds (> 10 billion), assume milliseconds
+    let is_ms = input.is_milliseconds.unwrap_or(ts > 1_000_000_000_000);
 
     let (secs, nanos) = if is_ms {
         (ts / 1000, ((ts % 1000) * 1_000_000) as u32)

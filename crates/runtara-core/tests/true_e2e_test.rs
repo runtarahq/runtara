@@ -978,6 +978,3 @@ async fn test_true_e2e_concurrent_containers() {
 
     println!("\n✓ Concurrent containers test completed!");
 }
-
-// Add futures crate for join_all
-use futures;

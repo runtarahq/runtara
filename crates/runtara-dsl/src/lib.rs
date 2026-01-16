@@ -99,7 +99,7 @@ impl MemoryTier {
     /// Stack size in bytes
     pub fn stack_size_bytes(&self) -> usize {
         match self {
-            MemoryTier::S => 1 * 1024 * 1024,  // 1MB
+            MemoryTier::S => 1024 * 1024,      // 1MB
             MemoryTier::M => 4 * 1024 * 1024,  // 4MB
             MemoryTier::L => 8 * 1024 * 1024,  // 8MB
             MemoryTier::XL => 8 * 1024 * 1024, // 8MB
@@ -117,7 +117,7 @@ impl MemoryTier {
     }
 
     /// Parse from string (case-insensitive)
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "S" => Some(MemoryTier::S),
             "M" => Some(MemoryTier::M),
@@ -720,28 +720,28 @@ mod tests {
 
     #[test]
     fn test_memory_tier_from_str() {
-        assert_eq!(MemoryTier::from_str("S"), Some(MemoryTier::S));
-        assert_eq!(MemoryTier::from_str("M"), Some(MemoryTier::M));
-        assert_eq!(MemoryTier::from_str("L"), Some(MemoryTier::L));
-        assert_eq!(MemoryTier::from_str("XL"), Some(MemoryTier::XL));
+        assert_eq!(MemoryTier::parse("S"), Some(MemoryTier::S));
+        assert_eq!(MemoryTier::parse("M"), Some(MemoryTier::M));
+        assert_eq!(MemoryTier::parse("L"), Some(MemoryTier::L));
+        assert_eq!(MemoryTier::parse("XL"), Some(MemoryTier::XL));
     }
 
     #[test]
     fn test_memory_tier_from_str_case_insensitive() {
-        assert_eq!(MemoryTier::from_str("s"), Some(MemoryTier::S));
-        assert_eq!(MemoryTier::from_str("m"), Some(MemoryTier::M));
-        assert_eq!(MemoryTier::from_str("l"), Some(MemoryTier::L));
-        assert_eq!(MemoryTier::from_str("xl"), Some(MemoryTier::XL));
-        assert_eq!(MemoryTier::from_str("Xl"), Some(MemoryTier::XL));
-        assert_eq!(MemoryTier::from_str("xL"), Some(MemoryTier::XL));
+        assert_eq!(MemoryTier::parse("s"), Some(MemoryTier::S));
+        assert_eq!(MemoryTier::parse("m"), Some(MemoryTier::M));
+        assert_eq!(MemoryTier::parse("l"), Some(MemoryTier::L));
+        assert_eq!(MemoryTier::parse("xl"), Some(MemoryTier::XL));
+        assert_eq!(MemoryTier::parse("Xl"), Some(MemoryTier::XL));
+        assert_eq!(MemoryTier::parse("xL"), Some(MemoryTier::XL));
     }
 
     #[test]
     fn test_memory_tier_from_str_invalid() {
-        assert_eq!(MemoryTier::from_str("XXL"), None);
-        assert_eq!(MemoryTier::from_str(""), None);
-        assert_eq!(MemoryTier::from_str("invalid"), None);
-        assert_eq!(MemoryTier::from_str("SM"), None);
+        assert_eq!(MemoryTier::parse("XXL"), None);
+        assert_eq!(MemoryTier::parse(""), None);
+        assert_eq!(MemoryTier::parse("invalid"), None);
+        assert_eq!(MemoryTier::parse("SM"), None);
     }
 
     #[test]
