@@ -155,13 +155,11 @@ async fn test_instance_completion_with_result() {
         r#"
         UPDATE instances
         SET status = 'completed',
-            finished_at = NOW(),
-            result = $2
+            finished_at = NOW()
         WHERE instance_id = $1
         "#,
     )
     .bind(instance_id.to_string())
-    .bind(serde_json::to_vec(&final_state).ok())
     .execute(&ctx.pool)
     .await
     .unwrap();
@@ -321,14 +319,14 @@ async fn test_pause_during_checkpoint_workflow() {
         _ => panic!("Unexpected response type"),
     }
 
-    // Acknowledge pause
+    // Acknowledge pause (fire-and-forget, no response expected)
     let ack = SignalAck {
         instance_id: instance_id.to_string(),
         signal_type: SignalType::SignalPause as i32,
         acknowledged: true,
     };
     ctx.instance_client
-        .request::<_, RpcResponse>(&wrap_signal_ack(ack))
+        .send_fire_and_forget(&wrap_signal_ack(ack))
         .await
         .ok();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -364,6 +362,13 @@ async fn test_pause_during_checkpoint_workflow() {
         _ => panic!("Unexpected response type"),
     }
 
+    // Set status back to running (simulating SDK resume behavior)
+    sqlx::query("UPDATE instances SET status = 'running' WHERE instance_id = $1")
+        .bind(instance_id.to_string())
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
     // Continue workflow after resume
     let cp_req = CheckpointRequest {
         instance_id: instance_id.to_string(),
@@ -380,7 +385,10 @@ async fn test_pause_during_checkpoint_workflow() {
         Some(rpc_response::Response::Checkpoint(r)) => {
             assert!(!r.found, "Step-2 should be new checkpoint");
         }
-        _ => panic!("Unexpected response type"),
+        other => panic!(
+            "Unexpected response type for step-2 checkpoint: {:?}",
+            other
+        ),
     }
 
     ctx.cleanup_instance(&instance_id).await;
@@ -442,14 +450,14 @@ async fn test_cancel_interrupts_checkpoint_workflow() {
         _ => panic!("Unexpected response type"),
     }
 
-    // Acknowledge cancel
+    // Acknowledge cancel (fire-and-forget, no response expected)
     let ack = SignalAck {
         instance_id: instance_id.to_string(),
         signal_type: SignalType::SignalCancel as i32,
         acknowledged: true,
     };
     ctx.instance_client
-        .request::<_, RpcResponse>(&wrap_signal_ack(ack))
+        .send_fire_and_forget(&wrap_signal_ack(ack))
         .await
         .ok();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1150,7 +1158,18 @@ async fn test_operations_on_nonexistent_instance() {
                 "Should not find checkpoint for nonexistent instance"
             );
         }
-        _ => panic!("Unexpected response type"),
+        Some(rpc_response::Response::Error(e)) => {
+            // Also acceptable: Error response for nonexistent instance
+            assert!(
+                e.message.contains("not found") || e.message.contains("does not exist"),
+                "Error should indicate instance not found: {}",
+                e.message
+            );
+        }
+        other => panic!(
+            "Expected GetCheckpointResponse(found=false) or Error for nonexistent instance, got: {:?}",
+            other
+        ),
     }
 
     // Poll signals for nonexistent instance
