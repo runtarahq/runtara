@@ -272,9 +272,9 @@ async fn test_complete_instance_lifecycle() {
         eprintln!("Skipping test: could not create test context");
         return;
     };
-    ctx.cleanup().await;
 
     let tenant_id = "instance-lifecycle-tenant";
+    ctx.cleanup_tenant(tenant_id).await;
     let image_id = ctx
         .create_test_image(tenant_id, "instance-lifecycle-image")
         .await;
@@ -413,9 +413,9 @@ async fn test_start_instance_custom_id() {
         eprintln!("Skipping test: could not create test context");
         return;
     };
-    ctx.cleanup().await;
 
     let tenant_id = "custom-id-tenant";
+    ctx.cleanup_tenant(tenant_id).await;
     let image_id = ctx.create_test_image(tenant_id, "custom-id-image").await;
     let custom_instance_id = format!("my-custom-instance-{}", Uuid::new_v4());
 
@@ -468,9 +468,9 @@ async fn test_start_instance_with_input() {
         eprintln!("Skipping test: could not create test context");
         return;
     };
-    ctx.cleanup().await;
 
     let tenant_id = "input-tenant";
+    ctx.cleanup_tenant(tenant_id).await;
     let image_id = ctx.create_test_image(tenant_id, "input-image").await;
 
     ctx.client.connect().await.expect("Failed to connect");
@@ -531,9 +531,9 @@ async fn test_start_instance_with_env() {
         eprintln!("Skipping test: could not create test context");
         return;
     };
-    ctx.cleanup().await;
 
     let tenant_id = "env-tenant";
+    ctx.cleanup_tenant(tenant_id).await;
     let image_id = ctx.create_test_image(tenant_id, "env-image").await;
 
     ctx.client.connect().await.expect("Failed to connect");
@@ -838,9 +838,9 @@ async fn test_signal_proxy() {
         eprintln!("Skipping test: could not create test context");
         return;
     };
-    ctx.cleanup().await;
 
     let tenant_id = "signal-proxy-tenant";
+    ctx.cleanup_tenant(tenant_id).await;
     let image_id = ctx.create_test_image(tenant_id, "signal-proxy-image").await;
 
     ctx.client.connect().await.expect("Failed to connect");
@@ -933,9 +933,9 @@ async fn test_all_signal_types_via_proxy() {
         eprintln!("Skipping test: could not create test context");
         return;
     };
-    ctx.cleanup().await;
 
     let tenant_id = "signal-types-tenant";
+    ctx.cleanup_tenant(tenant_id).await;
     let image_id = ctx.create_test_image(tenant_id, "signal-types-image").await;
 
     ctx.client.connect().await.expect("Failed to connect");

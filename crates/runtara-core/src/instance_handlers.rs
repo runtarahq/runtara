@@ -350,11 +350,12 @@ pub async fn handle_get_checkpoint(
 
 /// Handle durable sleep request.
 ///
-/// Sleeps are always handled in-process. Managed environments may hibernate
-/// the container separately based on idleness.
-#[instrument(skip(_state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+/// Saves the checkpoint state before sleeping, then sleeps in-process.
+/// This ensures the state is durable and can be restored if the process
+/// is killed during the sleep.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_sleep(
-    _state: &InstanceHandlerState,
+    state: &InstanceHandlerState,
     request: SleepRequest,
 ) -> Result<SleepResponse> {
     debug!(
@@ -363,7 +364,23 @@ pub async fn handle_sleep(
         "Processing sleep request"
     );
 
-    // Always sleep in-process; environment may hibernate managed instances separately.
+    // 1. Save checkpoint before sleeping (for durability)
+    if !request.checkpoint_id.is_empty() {
+        state
+            .persistence
+            .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
+            .await?;
+
+        // Update instance's current checkpoint_id
+        state
+            .persistence
+            .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
+            .await?;
+
+        debug!(checkpoint_id = %request.checkpoint_id, "Sleep checkpoint saved");
+    }
+
+    // 2. Sleep in-process; environment may hibernate managed instances separately.
     tokio::time::sleep(Duration::from_millis(request.duration_ms)).await;
     Ok(SleepResponse {})
 }

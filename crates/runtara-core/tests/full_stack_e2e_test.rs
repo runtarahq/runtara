@@ -441,14 +441,14 @@ async fn test_pause_signal_delivery_and_ack() {
         other => panic!("Expected PollSignalsResponse, got: {:?}", other),
     }
 
-    // Acknowledge signal
+    // Acknowledge signal (fire-and-forget, no response)
     let ack = SignalAck {
         instance_id: instance_id.to_string(),
         signal_type: SignalType::SignalPause as i32,
         acknowledged: true,
     };
     ctx.instance_client
-        .request::<_, RpcResponse>(&wrap_signal_ack(ack))
+        .send_fire_and_forget(&wrap_signal_ack(ack))
         .await
         .expect("Ack failed");
 
@@ -505,14 +505,14 @@ async fn test_cancel_signal_terminates_instance() {
         other => panic!("Expected PollSignalsResponse, got: {:?}", other),
     }
 
-    // Acknowledge cancel
+    // Acknowledge cancel (fire-and-forget, no response)
     let ack = SignalAck {
         instance_id: instance_id.to_string(),
         signal_type: SignalType::SignalCancel as i32,
         acknowledged: true,
     };
     ctx.instance_client
-        .request::<_, RpcResponse>(&wrap_signal_ack(ack))
+        .send_fire_and_forget(&wrap_signal_ack(ack))
         .await
         .expect("Ack failed");
 
@@ -872,7 +872,7 @@ async fn test_operations_on_nonexistent_instance() {
         .await
         .expect("Connection failed");
 
-    // Get checkpoint for non-existent instance
+    // Get checkpoint for non-existent instance - should return error
     let get_req = GetCheckpointRequest {
         instance_id: fake_id.to_string(),
         checkpoint_id: "doesnt-exist".to_string(),
@@ -885,13 +885,17 @@ async fn test_operations_on_nonexistent_instance() {
         .expect("Request failed");
 
     match resp.response {
-        Some(rpc_response::Response::GetCheckpoint(r)) => {
+        Some(rpc_response::Response::Error(e)) => {
             assert!(
-                !r.found,
-                "Should not find checkpoint for non-existent instance"
+                e.message.contains("not found"),
+                "Error should mention instance not found: {}",
+                e.message
             );
         }
-        other => panic!("Expected GetCheckpointResponse, got: {:?}", other),
+        other => panic!(
+            "Expected Error response for non-existent instance, got: {:?}",
+            other
+        ),
     }
 
     // Poll signals for non-existent instance
