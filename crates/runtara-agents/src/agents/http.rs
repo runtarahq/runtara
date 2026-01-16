@@ -23,11 +23,12 @@ use strum::VariantNames;
 // ============================================================================
 
 /// HTTP method for the request
-#[derive(Debug, Clone, Serialize, Deserialize, VariantNames)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, VariantNames)]
 #[serde(rename_all = "UPPERCASE")]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum HttpMethod {
     /// GET request - retrieve data
+    #[default]
     Get,
     /// POST request - create or submit data
     Post,
@@ -49,12 +50,6 @@ impl EnumVariants for HttpMethod {
     }
 }
 
-impl Default for HttpMethod {
-    fn default() -> Self {
-        Self::Get
-    }
-}
-
 impl HttpMethod {
     pub fn as_str(&self) -> &str {
         match self {
@@ -70,11 +65,12 @@ impl HttpMethod {
 }
 
 /// Expected format of the HTTP response body
-#[derive(Debug, Clone, Serialize, Deserialize, VariantNames)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, VariantNames)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ResponseType {
     /// Parse response as JSON
+    #[default]
     Json,
     /// Return response as plain text
     Text,
@@ -85,12 +81,6 @@ pub enum ResponseType {
 impl EnumVariants for ResponseType {
     fn variant_names() -> &'static [&'static str] {
         Self::VARIANTS
-    }
-}
-
-impl Default for ResponseType {
-    fn default() -> Self {
-        Self::Json
     }
 }
 
@@ -147,11 +137,12 @@ pub enum HttpResponseBody {
 }
 
 /// Body type for HTTP requests
-#[derive(Debug, Clone, Serialize, Deserialize, VariantNames)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, VariantNames)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum BodyType {
     /// JSON body (default)
+    #[default]
     Json,
     /// Plain text body
     Text,
@@ -164,12 +155,6 @@ pub enum BodyType {
 impl EnumVariants for BodyType {
     fn variant_names() -> &'static [&'static str] {
         Self::VARIANTS
-    }
-}
-
-impl Default for BodyType {
-    fn default() -> Self {
-        Self::Json
     }
 }
 

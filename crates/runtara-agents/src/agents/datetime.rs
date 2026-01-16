@@ -30,7 +30,7 @@ use strum::VariantNames;
 // ============================================================================
 
 /// Time unit for date arithmetic and rounding operations
-#[derive(Debug, Deserialize, Clone, Copy, VariantNames)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum TimeUnit {
@@ -41,6 +41,7 @@ pub enum TimeUnit {
     /// Weeks
     Weeks,
     /// Days
+    #[default]
     Days,
     /// Hours
     Hours,
@@ -53,12 +54,6 @@ pub enum TimeUnit {
 impl EnumVariants for TimeUnit {
     fn variant_names() -> &'static [&'static str] {
         Self::VARIANTS
-    }
-}
-
-impl Default for TimeUnit {
-    fn default() -> Self {
-        Self::Days
     }
 }
 
@@ -77,7 +72,7 @@ impl std::fmt::Display for TimeUnit {
 }
 
 /// Date component to extract
-#[derive(Debug, Deserialize, Clone, Copy, VariantNames)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum DatePart {
@@ -88,6 +83,7 @@ pub enum DatePart {
     /// ISO week number (1-53)
     Week,
     /// Day of month (1-31)
+    #[default]
     Day,
     /// Day of week (1=Monday, 7=Sunday)
     DayOfWeek,
@@ -111,14 +107,8 @@ impl EnumVariants for DatePart {
     }
 }
 
-impl Default for DatePart {
-    fn default() -> Self {
-        Self::Day
-    }
-}
-
 /// Rounding mode for round-date operation
-#[derive(Debug, Deserialize, Clone, Copy, VariantNames)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum RoundMode {
@@ -127,6 +117,7 @@ pub enum RoundMode {
     /// Round up (ceil)
     Ceil,
     /// Round to nearest
+    #[default]
     Round,
 }
 
@@ -136,18 +127,13 @@ impl EnumVariants for RoundMode {
     }
 }
 
-impl Default for RoundMode {
-    fn default() -> Self {
-        Self::Round
-    }
-}
-
 /// Preset date formats
-#[derive(Debug, Deserialize, Clone, Copy, VariantNames)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum DateFormat {
     /// ISO 8601: 2024-01-15T14:30:00Z
+    #[default]
     Iso8601,
     /// RFC 2822: Mon, 15 Jan 2024 14:30:00 +0000
     Rfc2822,
@@ -174,12 +160,6 @@ pub enum DateFormat {
 impl EnumVariants for DateFormat {
     fn variant_names() -> &'static [&'static str] {
         Self::VARIANTS
-    }
-}
-
-impl Default for DateFormat {
-    fn default() -> Self {
-        Self::Iso8601
     }
 }
 

@@ -53,11 +53,12 @@ fn default_wrap_width() -> usize {
 // ============================================================================
 
 /// Case format for text conversion
-#[derive(Debug, Deserialize, Clone, Copy, VariantNames)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum CaseFormat {
     /// Convert text to lowercase
+    #[default]
     Lowercase,
     /// Convert text to UPPERCASE
     Uppercase,
@@ -71,18 +72,13 @@ impl EnumVariants for CaseFormat {
     }
 }
 
-impl Default for CaseFormat {
-    fn default() -> Self {
-        Self::Lowercase
-    }
-}
-
 /// Text encoding format
-#[derive(Debug, Deserialize, Clone, Copy, VariantNames)]
+#[derive(Debug, Default, Deserialize, Clone, Copy, VariantNames)]
 #[serde(rename_all = "UPPERCASE")]
 #[strum(serialize_all = "UPPERCASE")]
 pub enum TextEncoding {
     /// UTF-8 encoding (Unicode)
+    #[default]
     #[serde(rename = "UTF-8")]
     #[strum(serialize = "UTF-8")]
     Utf8,
@@ -91,12 +87,6 @@ pub enum TextEncoding {
 impl EnumVariants for TextEncoding {
     fn variant_names() -> &'static [&'static str] {
         Self::VARIANTS
-    }
-}
-
-impl Default for TextEncoding {
-    fn default() -> Self {
-        Self::Utf8
     }
 }
 

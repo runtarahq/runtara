@@ -12,22 +12,17 @@ use sqlx::PgPool;
 use crate::error::Result;
 
 /// Type of runner that should be used for an image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum RunnerType {
     /// OCI container runner (crun)
+    #[default]
     Oci,
     /// Native process runner (direct execution)
     Native,
     /// WebAssembly runner
     Wasm,
-}
-
-impl Default for RunnerType {
-    fn default() -> Self {
-        Self::Oci
-    }
 }
 
 impl std::fmt::Display for RunnerType {
