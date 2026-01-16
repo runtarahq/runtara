@@ -1348,12 +1348,13 @@ async fn test_instance_image_association() {
     });
     sqlx::query(
         r#"
-        INSERT INTO instance_images (instance_id, image_id, env)
-        VALUES ($1, $2, $3)
+        INSERT INTO instance_images (instance_id, image_id, tenant_id, env)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(&instance_id)
     .bind(image_id.to_string())
+    .bind(&tenant_id)
     .bind(&env_json)
     .execute(&ctx.pool)
     .await
@@ -1495,12 +1496,13 @@ async fn test_suspended_instance_wake_readiness() {
     // Create instance_images association
     sqlx::query(
         r#"
-        INSERT INTO instance_images (instance_id, image_id)
-        VALUES ($1, $2)
+        INSERT INTO instance_images (instance_id, image_id, tenant_id)
+        VALUES ($1, $2, $3)
         "#,
     )
     .bind(&instance_id)
     .bind(image_id.to_string())
+    .bind(&tenant_id)
     .execute(&ctx.pool)
     .await
     .expect("Failed to create instance_images");
