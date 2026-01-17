@@ -1,0 +1,92 @@
+{
+  "name": "Error In Loop",
+  "description": "Workflow demonstrating error step inside a while loop",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize",
+      "agentId": "transform",
+      "capabilityId": "passthrough",
+      "inputMapping": {
+        "counter": { "valueType": "immediate", "value": 0 },
+        "maxRetries": { "valueType": "reference", "value": "data.maxRetries" }
+      }
+    },
+    "loop": {
+      "stepType": "While",
+      "id": "loop",
+      "name": "Retry Loop",
+      "condition": {
+        "type": "operation",
+        "op": "LT",
+        "arguments": [
+          { "valueType": "reference", "value": "_previousOutputs.counter" },
+          { "valueType": "reference", "value": "steps.init.outputs.maxRetries" }
+        ]
+      },
+      "config": {
+        "maxIterations": 10
+      },
+      "subgraph": {
+        "entryPoint": "check_success",
+        "steps": {
+          "check_success": {
+            "stepType": "Conditional",
+            "id": "check_success",
+            "name": "Check Success",
+            "condition": {
+              "type": "operation",
+              "op": "EQ",
+              "arguments": [
+                { "valueType": "reference", "value": "_previousOutputs.counter" },
+                { "valueType": "immediate", "value": -1 }
+              ]
+            }
+          },
+          "error_retry_exhausted": {
+            "stepType": "Error",
+            "id": "error_retry_exhausted",
+            "name": "Retries Exhausted",
+            "category": "transient",
+            "code": "RETRY_EXHAUSTED",
+            "message": "Maximum retry attempts reached",
+            "severity": "error",
+            "context": {
+              "attempt": { "valueType": "reference", "value": "_previousOutputs.counter" }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "counter": { "valueType": "reference", "value": "_previousOutputs.counter" },
+              "success": { "valueType": "immediate", "value": true }
+            }
+          }
+        },
+        "executionPlan": [
+          { "fromStep": "check_success", "toStep": "finish", "label": "true" },
+          { "fromStep": "check_success", "toStep": "error_retry_exhausted", "label": "false" }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "steps.loop.outputs" }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "loop" },
+    { "fromStep": "loop", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "maxRetries": { "type": "number", "required": true }
+  },
+  "outputSchema": {}
+}

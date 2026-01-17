@@ -1,0 +1,72 @@
+{
+  "name": "Error All Categories",
+  "description": "Workflow demonstrating all three error categories: transient, permanent, business",
+  "steps": {
+    "check_condition": {
+      "stepType": "Conditional",
+      "id": "check_condition",
+      "name": "Check Error Type",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.errorType" },
+          { "valueType": "immediate", "value": "transient" }
+        ]
+      }
+    },
+    "error_transient": {
+      "stepType": "Error",
+      "id": "error_transient",
+      "name": "Transient Error",
+      "category": "transient",
+      "code": "NETWORK_TIMEOUT",
+      "message": "Network request timed out",
+      "severity": "warning"
+    },
+    "error_permanent": {
+      "stepType": "Error",
+      "id": "error_permanent",
+      "name": "Permanent Error",
+      "category": "permanent",
+      "code": "RESOURCE_NOT_FOUND",
+      "message": "Requested resource does not exist",
+      "severity": "error"
+    },
+    "error_business": {
+      "stepType": "Error",
+      "id": "error_business",
+      "name": "Business Error",
+      "category": "business",
+      "code": "CREDIT_LIMIT_EXCEEDED",
+      "message": "Order amount exceeds credit limit",
+      "severity": "warning"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "immediate",
+          "value": "success"
+        }
+      }
+    }
+  },
+  "entryPoint": "check_condition",
+  "executionPlan": [
+    { "fromStep": "check_condition", "toStep": "error_transient", "label": "true" },
+    { "fromStep": "check_condition", "toStep": "error_permanent", "label": "false" },
+    { "fromStep": "error_transient", "toStep": "finish" },
+    { "fromStep": "error_permanent", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "errorType": {
+      "type": "string",
+      "description": "Type of error to trigger",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

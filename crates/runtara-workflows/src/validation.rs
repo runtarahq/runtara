@@ -1021,6 +1021,11 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(m);
             }
         }
+        Step::Error(error_step) => {
+            if let Some(m) = &error_step.context {
+                mappings.push(m);
+            }
+        }
         Step::Conditional(_) | Step::Switch(_) | Step::While(_) | Step::Connection(_) => {}
     }
 
@@ -1614,6 +1619,17 @@ fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 // Recursively validate subgraph
                 validate_security(&while_step.subgraph, result);
             }
+            Step::Error(error_step) => {
+                // Connection data cannot be in error context
+                if let Some(mapping) = &error_step.context {
+                    for conn_id in find_connection_references(mapping, &connection_step_ids) {
+                        result.errors.push(ValidationError::ConnectionLeakToLog {
+                            connection_step_id: conn_id,
+                            log_step_id: step_id.clone(),
+                        });
+                    }
+                }
+            }
             Step::Conditional(_)
             | Step::Switch(_)
             | Step::StartScenario(_)
@@ -1706,6 +1722,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::While(s) => s.name.as_ref(),
             Step::Log(s) => s.name.as_ref(),
             Step::Connection(s) => s.name.as_ref(),
+            Step::Error(s) => s.name.as_ref(),
         };
 
         if let Some(name) = name {
@@ -1963,6 +1980,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::While(_) => "While",
         Step::Log(_) => "Log",
         Step::Connection(_) => "Connection",
+        Step::Error(_) => "Error",
     }
 }
 

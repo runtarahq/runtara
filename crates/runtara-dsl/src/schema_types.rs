@@ -220,6 +220,9 @@ pub enum Step {
 
     /// Acquire a connection for use with secure agents
     Connection(ConnectionStep),
+
+    /// Emit a structured error and terminate the workflow
+    Error(ErrorStep),
 }
 
 /// Common fields shared by all step types
@@ -558,6 +561,93 @@ pub struct ConnectionStep {
 
     /// Type of connection (bearer, api_key, basic_auth, sftp, etc.)
     pub integration_id: String,
+}
+
+/// Emit a structured error and terminate the workflow.
+///
+/// The Error step allows workflows to explicitly emit categorized errors
+/// with structured metadata. This is the primary mechanism for business
+/// logic errors that should be distinguishable from technical errors.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "Error",
+///   "id": "credit_limit_error",
+///   "category": "business",
+///   "code": "CREDIT_LIMIT_EXCEEDED",
+///   "message": "Order total ${data.total} exceeds credit limit ${data.limit}"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "ErrorStep")]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Error category determines retry behavior:
+    /// - "transient": Retry is likely to succeed (network, timeout, rate limit)
+    /// - "permanent": Don't retry (validation, not found, authorization)
+    /// - "business": Business rule violation - may need human intervention
+    #[serde(default)]
+    pub category: ErrorCategory,
+
+    /// Machine-readable error code (e.g., "CREDIT_LIMIT_EXCEEDED", "INVALID_ACCOUNT")
+    pub code: String,
+
+    /// Human-readable error message. Supports ${path} interpolation
+    /// (e.g., "Order ${data.orderId} exceeds limit")
+    pub message: String,
+
+    /// Error severity for logging/alerting:
+    /// - "info": Informational (expected errors)
+    /// - "warning": Warning (degraded but functional)
+    /// - "error": Error (operation failed) - default
+    /// - "critical": Critical (system-level failure)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<ErrorSeverity>,
+
+    /// Additional context data to include with the error.
+    /// Keys are field names, values specify how to obtain the data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<InputMapping>,
+}
+
+/// Error category for structured errors.
+/// Determines retry behavior and routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ErrorCategory {
+    /// Transient error - retry is likely to succeed (network, timeout, rate limit)
+    Transient,
+    /// Permanent error - don't retry (validation, not found, authorization)
+    Permanent,
+    /// Business rule violation - may need human intervention
+    #[default]
+    Business,
+}
+
+/// Error severity for logging and alerting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ErrorSeverity {
+    /// Informational - expected errors
+    Info,
+    /// Warning - degraded but functional
+    Warning,
+    /// Error - operation failed (default)
+    #[default]
+    Error,
+    /// Critical - system-level failure
+    Critical,
 }
 
 // ============================================================================

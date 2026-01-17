@@ -1,0 +1,64 @@
+{
+  "name": "Error With Context",
+  "description": "Workflow demonstrating error step with context mapping",
+  "steps": {
+    "init": {
+      "stepType": "Agent",
+      "id": "init",
+      "name": "Initialize Order",
+      "agentId": "transform",
+      "capabilityId": "passthrough",
+      "inputMapping": {
+        "orderId": { "valueType": "reference", "value": "data.orderId" },
+        "amount": { "valueType": "reference", "value": "data.amount" },
+        "limit": { "valueType": "immediate", "value": 1000 }
+      }
+    },
+    "check_limit": {
+      "stepType": "Conditional",
+      "id": "check_limit",
+      "name": "Check Credit Limit",
+      "condition": {
+        "type": "operation",
+        "op": "LTE",
+        "arguments": [
+          { "valueType": "reference", "value": "steps.init.outputs.amount" },
+          { "valueType": "reference", "value": "steps.init.outputs.limit" }
+        ]
+      }
+    },
+    "error_over_limit": {
+      "stepType": "Error",
+      "id": "error_over_limit",
+      "name": "Credit Limit Exceeded",
+      "category": "business",
+      "code": "CREDIT_LIMIT_EXCEEDED",
+      "message": "Order amount exceeds credit limit",
+      "severity": "warning",
+      "context": {
+        "orderId": { "valueType": "reference", "value": "steps.init.outputs.orderId" },
+        "requestedAmount": { "valueType": "reference", "value": "steps.init.outputs.amount" },
+        "creditLimit": { "valueType": "reference", "value": "steps.init.outputs.limit" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "immediate", "value": "approved" }
+      }
+    }
+  },
+  "entryPoint": "init",
+  "executionPlan": [
+    { "fromStep": "init", "toStep": "check_limit" },
+    { "fromStep": "check_limit", "toStep": "finish", "label": "true" },
+    { "fromStep": "check_limit", "toStep": "error_over_limit", "label": "false" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "orderId": { "type": "string", "required": true },
+    "amount": { "type": "number", "required": true }
+  },
+  "outputSchema": {}
+}

@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod conditional;
 pub mod connection;
+pub mod error;
 pub mod finish;
 pub mod log;
 pub mod split;
@@ -39,6 +40,7 @@ impl StepEmitter for Step {
             Step::While(s) => while_loop::emit(s, ctx),
             Step::Log(s) => log::emit(s, ctx),
             Step::Connection(s) => connection::emit(s, ctx),
+            Step::Error(s) => error::emit(s, ctx),
         }
     }
 }
@@ -55,6 +57,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::While(_) => "While",
         Step::Log(_) => "Log",
         Step::Connection(_) => "Connection",
+        Step::Error(_) => "Error",
     }
 }
 
@@ -70,6 +73,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::While(s) => &s.id,
         Step::Log(s) => &s.id,
         Step::Connection(s) => &s.id,
+        Step::Error(s) => &s.id,
     }
 }
 
@@ -85,6 +89,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::While(s) => s.name.as_deref(),
         Step::Log(s) => s.name.as_deref(),
         Step::Connection(s) => s.name.as_deref(),
+        Step::Error(s) => s.name.as_deref(),
     }
 }
 

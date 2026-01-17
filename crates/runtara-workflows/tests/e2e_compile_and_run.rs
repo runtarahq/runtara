@@ -1206,6 +1206,191 @@ fn test_compile_log_in_subgraph() {
 }
 
 // ============================================================================
+// Error Step Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_error_all_categories() {
+    let workflow_json = include_str!("fixtures/error_all_categories.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse error_all_categories.json");
+
+    assert!(graph.steps.contains_key("error_transient"));
+    assert!(graph.steps.contains_key("error_permanent"));
+    assert!(graph.steps.contains_key("error_business"));
+
+    use runtara_dsl::{ErrorCategory, ErrorSeverity, Step};
+
+    // Verify transient error
+    if let Some(Step::Error(err)) = graph.steps.get("error_transient") {
+        assert_eq!(err.category, ErrorCategory::Transient);
+        assert_eq!(err.code, "NETWORK_TIMEOUT");
+        assert_eq!(err.message, "Network request timed out");
+        assert_eq!(err.severity, Some(ErrorSeverity::Warning));
+    } else {
+        panic!("Expected Error step for error_transient");
+    }
+
+    // Verify permanent error
+    if let Some(Step::Error(err)) = graph.steps.get("error_permanent") {
+        assert_eq!(err.category, ErrorCategory::Permanent);
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND");
+        assert_eq!(err.message, "Requested resource does not exist");
+        assert_eq!(err.severity, Some(ErrorSeverity::Error));
+    } else {
+        panic!("Expected Error step for error_permanent");
+    }
+
+    // Verify business error
+    if let Some(Step::Error(err)) = graph.steps.get("error_business") {
+        assert_eq!(err.category, ErrorCategory::Business);
+        assert_eq!(err.code, "CREDIT_LIMIT_EXCEEDED");
+        assert_eq!(err.message, "Order amount exceeds credit limit");
+        assert_eq!(err.severity, Some(ErrorSeverity::Warning));
+    } else {
+        panic!("Expected Error step for error_business");
+    }
+}
+
+#[test]
+fn test_parse_error_with_context() {
+    let workflow_json = include_str!("fixtures/error_with_context.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse error_with_context.json");
+
+    assert!(graph.steps.contains_key("error_over_limit"));
+
+    use runtara_dsl::{ErrorCategory, Step};
+
+    if let Some(Step::Error(err)) = graph.steps.get("error_over_limit") {
+        assert_eq!(err.category, ErrorCategory::Business);
+        assert_eq!(err.code, "CREDIT_LIMIT_EXCEEDED");
+        // Verify context mapping exists
+        assert!(err.context.is_some());
+        let context = err.context.as_ref().unwrap();
+        assert!(context.contains_key("orderId"));
+        assert!(context.contains_key("requestedAmount"));
+        assert!(context.contains_key("creditLimit"));
+    } else {
+        panic!("Expected Error step for error_over_limit");
+    }
+}
+
+#[test]
+fn test_parse_error_transient() {
+    let workflow_json = include_str!("fixtures/error_transient.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse error_transient.json");
+
+    assert!(graph.steps.contains_key("error_timeout"));
+
+    use runtara_dsl::{ErrorCategory, ErrorSeverity, Step};
+
+    if let Some(Step::Error(err)) = graph.steps.get("error_timeout") {
+        assert_eq!(err.category, ErrorCategory::Transient);
+        assert_eq!(err.code, "NETWORK_TIMEOUT");
+        assert_eq!(err.severity, Some(ErrorSeverity::Warning));
+        // No context for this simple error
+        assert!(err.context.is_none());
+    } else {
+        panic!("Expected Error step for error_timeout");
+    }
+}
+
+#[test]
+fn test_parse_error_permanent() {
+    let workflow_json = include_str!("fixtures/error_permanent.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse error_permanent.json");
+
+    assert!(graph.steps.contains_key("error_not_found"));
+
+    use runtara_dsl::{ErrorCategory, ErrorSeverity, Step};
+
+    if let Some(Step::Error(err)) = graph.steps.get("error_not_found") {
+        assert_eq!(err.category, ErrorCategory::Permanent);
+        assert_eq!(err.code, "RESOURCE_NOT_FOUND");
+        assert_eq!(err.severity, Some(ErrorSeverity::Error));
+        // Has context with resourceId
+        assert!(err.context.is_some());
+        let context = err.context.as_ref().unwrap();
+        assert!(context.contains_key("resourceId"));
+    } else {
+        panic!("Expected Error step for error_not_found");
+    }
+}
+
+#[test]
+fn test_parse_error_in_loop() {
+    let workflow_json = include_str!("fixtures/error_in_loop.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse error_in_loop.json");
+
+    assert!(graph.steps.contains_key("loop"));
+
+    use runtara_dsl::{ErrorCategory, Step};
+
+    if let Some(Step::While(while_step)) = graph.steps.get("loop") {
+        // Verify error step exists in subgraph
+        assert!(
+            while_step
+                .subgraph
+                .steps
+                .contains_key("error_retry_exhausted")
+        );
+        if let Some(Step::Error(err)) = while_step.subgraph.steps.get("error_retry_exhausted") {
+            assert_eq!(err.category, ErrorCategory::Transient);
+            assert_eq!(err.code, "RETRY_EXHAUSTED");
+            assert!(err.context.is_some());
+        } else {
+            panic!("Expected Error step in subgraph");
+        }
+    } else {
+        panic!("Expected While step");
+    }
+}
+
+#[test]
+fn test_parse_error_default_values() {
+    // Test that default values work correctly
+    let error_json = r#"{
+        "name": "Error Defaults",
+        "steps": {
+            "simple_error": {
+                "stepType": "Error",
+                "id": "simple_error",
+                "code": "SIMPLE_ERROR",
+                "message": "A simple error"
+            },
+            "finish": {
+                "stepType": "Finish",
+                "id": "finish"
+            }
+        },
+        "entryPoint": "simple_error",
+        "executionPlan": []
+    }"#;
+
+    let graph: ExecutionGraph =
+        serde_json::from_str(error_json).expect("Failed to parse error with defaults");
+
+    use runtara_dsl::{ErrorCategory, Step};
+
+    if let Some(Step::Error(err)) = graph.steps.get("simple_error") {
+        // Default category should be Business
+        assert_eq!(err.category, ErrorCategory::Business);
+        // Severity should be None (will default to Error at runtime)
+        assert!(err.severity.is_none());
+        // Name should be None
+        assert!(err.name.is_none());
+        // Context should be None
+        assert!(err.context.is_none());
+    } else {
+        panic!("Expected Error step");
+    }
+}
+
+// ============================================================================
 // Connection Step Compilation Tests
 // ============================================================================
 
@@ -1268,6 +1453,143 @@ fn test_compile_connection_multiple() {
         debug_mode: false,
         child_scenarios: vec![],
         connection_service_url: Some("http://localhost:8080/connections".to_string()),
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+// ============================================================================
+// Error Step Compilation Tests
+// ============================================================================
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_error_all_categories() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/error_all_categories.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "error_all_categories".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+    // Error steps don't have external side effects (SDK custom_event is internal)
+    assert!(
+        !result.has_side_effects,
+        "Error workflow should not have side effects"
+    );
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_error_with_context() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/error_with_context.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "error_with_context".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_error_transient() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/error_transient.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "error_transient".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_error_in_loop() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/error_in_loop.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "error_in_loop".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
     };
 
     let result = compile_scenario(input).expect("Compilation failed");

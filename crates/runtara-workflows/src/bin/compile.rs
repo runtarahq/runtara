@@ -333,6 +333,7 @@ fn count_steps(
                 *connection_count += 1;
                 "Connection"
             }
+            Step::Error(_) => "Error",
         };
         *step_counts.entry(step_type).or_insert(0) += 1;
     }
