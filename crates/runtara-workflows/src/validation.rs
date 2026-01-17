@@ -659,10 +659,7 @@ impl std::fmt::Display for ValidationWarning {
                     write!(
                         f,
                         "{}\n       Suggested: use '{}:{}' as compensation{}",
-                        base_msg,
-                        agent_id,
-                        suggestion.compensation_capability_id,
-                        desc_str
+                        base_msg, agent_id, suggestion.compensation_capability_id, desc_str
                     )
                 } else {
                     write!(
