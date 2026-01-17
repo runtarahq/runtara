@@ -44,6 +44,15 @@ struct CapabilityArgs {
     #[darling(default)]
     rate_limited: bool,
 
+    // === Compensation hint attributes ===
+    /// Capability ID that compensates (undoes) this capability's effects.
+    /// Example: compensates_with = "release" for a "reserve" capability.
+    #[darling(default)]
+    compensates_with: Option<String>,
+    /// Description of what the compensation does.
+    #[darling(default)]
+    compensates_description: Option<String>,
+
     // === Module registration attributes ===
     // When module_display_name is provided, automatically registers an AgentModuleConfig
     /// Display name for auto-registered module (e.g., "SMO Test")
@@ -291,6 +300,23 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate compensation hint if compensates_with is provided
+    let compensation_hint_token = if let Some(ref comp_cap_id) = args.compensates_with {
+        let description_token = match &args.compensates_description {
+            Some(d) => quote! { Some(#d) },
+            None => quote! { None },
+        };
+
+        quote! {
+            Some(runtara_dsl::agent_meta::CompensationHint {
+                capability_id: #comp_cap_id,
+                description: #description_token,
+            })
+        }
+    } else {
+        quote! { None }
+    };
+
     let expanded = quote! {
         #input_fn
 
@@ -307,6 +333,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             has_side_effects: #side_effects,
             is_idempotent: #idempotent,
             rate_limited: #rate_limited,
+            compensation_hint: #compensation_hint_token,
         };
 
         inventory::submit! {

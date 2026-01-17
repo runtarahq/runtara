@@ -496,6 +496,34 @@ pub enum ValidationWarning {
     },
     /// A non-Finish step has no outgoing edges (terminal step without explicit Finish).
     DanglingStep { step_id: String, step_type: String },
+    /// A step with side effects has no compensation defined in its transaction.
+    MissingCompensation {
+        step_id: String,
+        agent_id: String,
+        capability_id: String,
+        /// If the agent provides a compensation hint, this suggests what to use.
+        suggested_compensation: Option<CompensationSuggestion>,
+    },
+}
+
+// ============================================================================
+// Compensation Suggestions
+// ============================================================================
+
+/// Suggestion for how to compensate a step with side effects.
+///
+/// These suggestions come from agent capability metadata and are never
+/// auto-applied - they're only provided to help workflow authors.
+///
+/// Note: The actual compensation data mapping is defined by the workflow author
+/// in the workflow definition, not here. This hint only suggests which capability
+/// can reverse the effects - the author decides how to wire up the inputs.
+#[derive(Debug, Clone)]
+pub struct CompensationSuggestion {
+    /// The capability ID that can undo the effects (e.g., "release" for "reserve").
+    pub compensation_capability_id: String,
+    /// Human-readable description of what the compensation does.
+    pub description: Option<String>,
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -612,6 +640,38 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, step_type
                 )
             }
+            ValidationWarning::MissingCompensation {
+                step_id,
+                agent_id,
+                capability_id,
+                suggested_compensation,
+            } => {
+                let base_msg = format!(
+                    "[W060] Step '{}' calls '{}:{}' which has side effects but no compensation is defined",
+                    step_id, agent_id, capability_id
+                );
+                if let Some(suggestion) = suggested_compensation {
+                    let desc_str = suggestion
+                        .description
+                        .as_ref()
+                        .map(|d| format!(" ({})", d))
+                        .unwrap_or_default();
+                    write!(
+                        f,
+                        "{}\n       Suggested: use '{}:{}' as compensation{}",
+                        base_msg,
+                        agent_id,
+                        suggestion.compensation_capability_id,
+                        desc_str
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{}\n       Note: Agent does not provide a compensation hint. Consider defining manual compensation.",
+                        base_msg
+                    )
+                }
+            }
         }
     }
 }
@@ -653,6 +713,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
+
+    // Phase 9: Compensation validation (warnings for missing compensation)
+    validate_compensation(graph, &mut result);
 
     result
 }
@@ -1671,6 +1734,71 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
 }
 
 // ============================================================================
+// Phase 9: Compensation Validation
+// ============================================================================
+
+/// Validate that steps with side effects have proper compensation when needed.
+///
+/// This generates warnings (not errors) for steps that:
+/// - Have side effects (according to agent capability metadata)
+/// - Don't have compensation defined
+///
+/// The warning includes a suggestion if the agent provides compensation hints.
+fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_compensation_recursive(graph, result);
+}
+
+fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        if let Step::Agent(agent_step) = step {
+            // Find the capability metadata
+            let capability = runtara_dsl::agent_meta::get_all_capabilities().find(|c| {
+                c.module
+                    .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
+                    .unwrap_or(false)
+                    && c.capability_id
+                        .eq_ignore_ascii_case(&agent_step.capability_id)
+            });
+
+            // Check if capability has side effects and no compensation is defined
+            if let Some(cap) = capability
+                && cap.has_side_effects
+                && agent_step.compensation.is_none()
+            {
+                // Build suggestion from capability's compensation hint
+                let suggested_compensation =
+                    cap.compensation_hint
+                        .as_ref()
+                        .map(|hint| CompensationSuggestion {
+                            compensation_capability_id: hint.capability_id.to_string(),
+                            description: hint.description.map(|s| s.to_string()),
+                        });
+
+                result
+                    .warnings
+                    .push(ValidationWarning::MissingCompensation {
+                        step_id: step_id.clone(),
+                        agent_id: agent_step.agent_id.clone(),
+                        capability_id: agent_step.capability_id.clone(),
+                        suggested_compensation,
+                    });
+            }
+        }
+
+        // Recursively validate subgraphs
+        match step {
+            Step::Split(split_step) => {
+                validate_compensation_recursive(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_compensation_recursive(&while_step.subgraph, result);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -1916,6 +2044,10 @@ mod tests {
     use runtara_dsl::{
         AgentStep, ConnectionStep, FinishStep, LogLevel, LogStep, ReferenceValue, StartScenarioStep,
     };
+
+    // Link runtara-agents so that the inventory crate can find registered capabilities
+    #[allow(unused_imports)]
+    use runtara_agents as _;
 
     fn create_connection_step(id: &str) -> Step {
         Step::Connection(ConnectionStep {
@@ -4972,6 +5104,274 @@ mod tests {
             unknown_var_errors.is_empty(),
             "Both config.variables and subgraph.variables should be available; got errors: {:?}",
             unknown_var_errors
+        );
+    }
+
+    // === Compensation Validation Tests ===
+
+    #[test]
+    fn test_side_effects_without_compensation_generates_warning() {
+        // http:request has side_effects = true
+        let mut steps = HashMap::new();
+        steps.insert(
+            "http_call".to_string(),
+            Step::Agent(AgentStep {
+                id: "http_call".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "url".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("https://example.com"),
+                        }),
+                    );
+                    m.insert(
+                        "method".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("POST"),
+                        }),
+                    );
+                    m
+                }),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None, // No compensation defined
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "http_call");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "http_call".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            error_condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should have MissingCompensation warning
+        let missing_comp_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
+            .collect();
+        assert!(
+            !missing_comp_warnings.is_empty(),
+            "Should have MissingCompensation warning for http:request step"
+        );
+
+        // Check warning contents
+        if let Some(ValidationWarning::MissingCompensation {
+            step_id,
+            agent_id,
+            capability_id,
+            ..
+        }) = missing_comp_warnings.first()
+        {
+            assert_eq!(step_id, "http_call");
+            assert_eq!(agent_id, "http");
+            assert_eq!(capability_id, "http-request");
+        }
+    }
+
+    #[test]
+    fn test_no_side_effects_no_compensation_warning() {
+        // transform:map has no side effects
+        let mut steps = HashMap::new();
+        steps.insert(
+            "transform_step".to_string(),
+            create_agent_step(
+                "transform_step",
+                "transform",
+                Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "data".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!({"key": "value"}),
+                        }),
+                    );
+                    m.insert(
+                        "expression".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("data"),
+                        }),
+                    );
+                    m
+                }),
+            ),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "transform_step");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "transform_step".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            error_condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have MissingCompensation warning
+        let missing_comp_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
+            .collect();
+        assert!(
+            missing_comp_warnings.is_empty(),
+            "Should NOT have MissingCompensation warning for transform:map (no side effects)"
+        );
+    }
+
+    #[test]
+    fn test_side_effects_with_compensation_no_warning() {
+        // http:request with compensation defined should NOT warn
+        let mut steps = HashMap::new();
+        steps.insert(
+            "http_call".to_string(),
+            Step::Agent(AgentStep {
+                id: "http_call".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "url".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("https://example.com"),
+                        }),
+                    );
+                    m.insert(
+                        "method".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("POST"),
+                        }),
+                    );
+                    m
+                }),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: Some(runtara_dsl::CompensationConfig {
+                    compensation_step: "rollback_step".to_string(),
+                    compensation_data: None,
+                    trigger: None,
+                    order: None,
+                }),
+            }),
+        );
+        // Add a rollback step (even though we won't actually execute it in this test)
+        steps.insert(
+            "rollback_step".to_string(),
+            Step::Agent(AgentStep {
+                id: "rollback_step".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "url".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("https://example.com/rollback"),
+                        }),
+                    );
+                    m.insert(
+                        "method".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("DELETE"),
+                        }),
+                    );
+                    m
+                }),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "http_call");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "http_call".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            error_condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have MissingCompensation warning for http_call (has compensation)
+        let missing_comp_for_http_call: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { step_id, .. } if step_id == "http_call"))
+            .collect();
+        assert!(
+            missing_comp_for_http_call.is_empty(),
+            "Should NOT have MissingCompensation warning for http_call (has compensation defined)"
+        );
+    }
+
+    #[test]
+    fn test_compensation_warning_display_format() {
+        let warning = ValidationWarning::MissingCompensation {
+            step_id: "test_step".to_string(),
+            agent_id: "inventory".to_string(),
+            capability_id: "reserve".to_string(),
+            suggested_compensation: Some(CompensationSuggestion {
+                compensation_capability_id: "release".to_string(),
+                description: Some("Releases the reserved inventory".to_string()),
+            }),
+        };
+
+        let display = format!("{}", warning);
+        assert!(display.contains("[W060]"), "Should have warning code W060");
+        assert!(display.contains("test_step"), "Should include step ID");
+        assert!(
+            display.contains("inventory:reserve"),
+            "Should include capability"
+        );
+        assert!(
+            display.contains("inventory:release"),
+            "Should suggest compensation"
+        );
+        assert!(
+            display.contains("Releases the reserved inventory"),
+            "Should include description"
+        );
+    }
+
+    #[test]
+    fn test_compensation_warning_display_no_hint() {
+        let warning = ValidationWarning::MissingCompensation {
+            step_id: "test_step".to_string(),
+            agent_id: "http".to_string(),
+            capability_id: "http-request".to_string(),
+            suggested_compensation: None,
+        };
+
+        let display = format!("{}", warning);
+        assert!(display.contains("[W060]"), "Should have warning code W060");
+        assert!(display.contains("test_step"), "Should include step ID");
+        assert!(
+            display.contains("manual compensation"),
+            "Should mention manual compensation when no hint"
         );
     }
 }

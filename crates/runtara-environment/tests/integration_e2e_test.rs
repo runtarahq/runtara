@@ -1300,7 +1300,11 @@ async fn test_sleeping_instances_due_query() {
     .expect("Query failed");
 
     // Should only return the due instance (filtered by tenant for test isolation)
-    assert_eq!(due_rows.len(), 1, "Should have exactly one due instance for this tenant");
+    assert_eq!(
+        due_rows.len(),
+        1,
+        "Should have exactly one due instance for this tenant"
+    );
     assert_eq!(due_rows[0].0, instance_due);
 
     // Cleanup

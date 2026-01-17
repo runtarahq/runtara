@@ -275,10 +275,7 @@ mod tests {
 
     #[test]
     fn test_compensation_state_unknown_defaults_to_none() {
-        assert_eq!(
-            CompensationState::parse("invalid"),
-            CompensationState::None
-        );
+        assert_eq!(CompensationState::parse("invalid"), CompensationState::None);
         assert_eq!(CompensationState::parse(""), CompensationState::None);
     }
 }
