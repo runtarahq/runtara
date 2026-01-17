@@ -1601,6 +1601,159 @@ fn test_compile_error_in_loop() {
 }
 
 // ============================================================================
+// Structured Error E2E Tests
+// ============================================================================
+//
+// Test plan for structured error handling:
+//
+// 1. **HTTP Agent Error Classification** (test_parse_http_structured_errors)
+//    - Verify workflow can define error routing based on category
+//    - Verify transient errors route to retry handlers
+//    - Verify permanent errors route to error handlers
+//
+// 2. **Retry Exhausted Flow** (test_parse_error_retry_exhausted)
+//    - Verify transient error + exhausted retries → permanent error
+//    - Verify original error context is preserved
+//
+// 3. **Error Condition Routing** (runtime tests - require full infrastructure)
+//    - Test 5xx responses → transient → retry loop
+//    - Test 4xx responses → permanent → error handler
+//    - Test 408/429 → transient (rate limit handling)
+//
+// Future tests (require runtime infrastructure):
+// - Business error workflow-level scheduling (hours/days)
+// - Human-in-the-loop permanent error recovery
+// - Compensation saga rollback on error
+
+#[test]
+fn test_parse_http_structured_errors() {
+    let workflow_json = include_str!("fixtures/http_structured_errors.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse http_structured_errors.json");
+
+    // Verify step structure
+    assert!(graph.steps.contains_key("call_api"));
+    assert!(graph.steps.contains_key("handle_transient_error"));
+    assert!(graph.steps.contains_key("handle_permanent_error"));
+
+    // Verify error routing edges with conditions
+    let error_edges: Vec<_> = graph
+        .execution_plan
+        .iter()
+        .filter(|e| e.label.as_deref() == Some("onError"))
+        .collect();
+
+    assert_eq!(error_edges.len(), 2, "Should have 2 onError edges");
+
+    // Verify transient error edge has higher priority
+    let transient_edge = error_edges
+        .iter()
+        .find(|e| e.to_step == "handle_transient_error")
+        .expect("Should have transient error edge");
+    assert_eq!(transient_edge.priority, Some(10));
+
+    // Verify permanent error edge has lower priority
+    let permanent_edge = error_edges
+        .iter()
+        .find(|e| e.to_step == "handle_permanent_error")
+        .expect("Should have permanent error edge");
+    assert_eq!(permanent_edge.priority, Some(5));
+}
+
+#[test]
+fn test_parse_error_retry_exhausted() {
+    let workflow_json = include_str!("fixtures/error_retry_exhausted.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse error_retry_exhausted.json");
+
+    assert!(graph.steps.contains_key("unreliable_call"));
+    assert!(graph.steps.contains_key("handle_retries_exhausted"));
+
+    use runtara_dsl::{ErrorCategory, Step};
+
+    // Verify the error step captures retry exhaustion scenario
+    if let Some(Step::Error(err)) = graph.steps.get("handle_retries_exhausted") {
+        assert_eq!(err.code, "RETRIES_EXHAUSTED");
+        assert_eq!(err.category, ErrorCategory::Permanent);
+        // Should have context mapping for original error
+        assert!(err.context.is_some());
+        let context = err.context.as_ref().unwrap();
+        assert!(context.contains_key("originalError"));
+        assert!(context.contains_key("originalCategory"));
+    } else {
+        panic!("Expected Error step for handle_retries_exhausted");
+    }
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_http_structured_errors() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/http_structured_errors.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "http_structured_errors".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+    assert!(
+        result.has_side_effects,
+        "HTTP agent workflow should have side effects"
+    );
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_error_retry_exhausted() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/error_retry_exhausted.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "error_retry_exhausted".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+
+    drop(temp_dir);
+}
+
+// ============================================================================
 // OCI Container Tests (require native library + crun + runtara-core)
 // ============================================================================
 

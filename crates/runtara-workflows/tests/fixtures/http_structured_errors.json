@@ -1,0 +1,67 @@
+{
+  "name": "HTTP Structured Errors",
+  "description": "Workflow demonstrating HTTP agent error classification and routing",
+  "steps": {
+    "call_api": {
+      "stepType": "Agent",
+      "id": "call_api",
+      "name": "Make HTTP Request",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "method": { "valueType": "immediate", "value": "GET" },
+        "url": { "valueType": "reference", "value": "data.apiUrl" },
+        "failOnError": { "valueType": "immediate", "value": true }
+      }
+    },
+    "handle_success": {
+      "stepType": "Log",
+      "id": "handle_success",
+      "message": "API call succeeded",
+      "data": { "valueType": "reference", "value": "call_api.output" }
+    },
+    "handle_transient_error": {
+      "stepType": "Log",
+      "id": "handle_transient_error",
+      "message": "Transient error - will be retried by #[durable]",
+      "data": { "valueType": "reference", "value": "__error" }
+    },
+    "handle_permanent_error": {
+      "stepType": "Error",
+      "id": "handle_permanent_error",
+      "name": "Permanent API Error",
+      "category": "permanent",
+      "code": "API_ERROR",
+      "message": "API returned permanent error",
+      "severity": "error",
+      "context": {
+        "originalError": { "valueType": "reference", "value": "__error.message" },
+        "statusCode": { "valueType": "reference", "value": "__error.attributes.status_code" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "call_api.output.body" }
+      }
+    }
+  },
+  "entryPoint": "call_api",
+  "executionPlan": [
+    { "fromStep": "call_api", "toStep": "handle_success" },
+    { "fromStep": "handle_success", "toStep": "finish" },
+    { "fromStep": "call_api", "toStep": "handle_transient_error", "label": "onError", "errorCondition": { "category": "transient" }, "priority": 10 },
+    { "fromStep": "call_api", "toStep": "handle_permanent_error", "label": "onError", "errorCondition": { "category": "permanent" }, "priority": 5 },
+    { "fromStep": "handle_transient_error", "toStep": "call_api" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "apiUrl": {
+      "type": "string",
+      "description": "URL to call",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}
