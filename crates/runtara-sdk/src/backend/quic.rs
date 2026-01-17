@@ -268,6 +268,7 @@ impl SdkBackend for QuicBackend {
             attempt_number,
             timestamp_ms,
             error_message: error_message.map(|s| s.to_string()),
+            error_metadata: None, // TODO: Add structured error metadata support
         };
 
         let rpc_request = RpcRequest {

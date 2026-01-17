@@ -95,6 +95,9 @@ pub mod environment_proto {
     include!(concat!(env!("OUT_DIR"), "/runtara.environment.rs"));
 }
 
+// Re-export prost for downstream crates that need to encode/decode
+pub use prost;
+
 // Re-export main types
 pub use client::{ClientError, RuntaraClient, RuntaraClientConfig};
 pub use frame::{Frame, FrameError, FramedStream, MessageType};

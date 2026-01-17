@@ -709,6 +709,8 @@ mod tests {
             from_step: from.to_string(),
             to_step: to.to_string(),
             label: label.map(|s| s.to_string()),
+            error_condition: None,
+            priority: None,
         }
     }
 

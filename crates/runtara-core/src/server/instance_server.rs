@@ -184,6 +184,39 @@ async fn handle_stream(mut stream: StreamHandler, state: Arc<InstanceServerState
             stream.finish()?;
             return Ok(());
         }
+
+        // Compensation (saga pattern) - not yet implemented
+        Request::RegisterCompensatable(_req) => {
+            // TODO: Implement in compensation.rs
+            Response::Error(RpcError {
+                code: "NOT_IMPLEMENTED".to_string(),
+                message: "Compensation registration not yet implemented".to_string(),
+            })
+        }
+
+        Request::TriggerCompensation(_req) => {
+            // TODO: Implement in compensation.rs
+            Response::Error(RpcError {
+                code: "NOT_IMPLEMENTED".to_string(),
+                message: "Compensation triggering not yet implemented".to_string(),
+            })
+        }
+
+        Request::GetCompensationStatus(_req) => {
+            // TODO: Implement in compensation.rs
+            Response::Error(RpcError {
+                code: "NOT_IMPLEMENTED".to_string(),
+                message: "Compensation status not yet implemented".to_string(),
+            })
+        }
+
+        Request::CompleteCompensation(_req) => {
+            // TODO: Implement in compensation.rs
+            Response::Error(RpcError {
+                code: "NOT_IMPLEMENTED".to_string(),
+                message: "Compensation completion not yet implemented".to_string(),
+            })
+        }
     };
 
     // Send response

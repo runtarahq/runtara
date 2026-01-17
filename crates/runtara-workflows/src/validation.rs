@@ -1945,6 +1945,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            compensation: None,
         })
     }
 
@@ -2047,6 +2048,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2072,6 +2075,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2100,6 +2105,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2136,11 +2143,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -2173,11 +2184,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "transform".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "transform".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -2205,6 +2220,8 @@ mod tests {
             from_step: "conn".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2235,11 +2252,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "log".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -2269,6 +2290,7 @@ mod tests {
                 max_retries: Some(100),
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -2278,6 +2300,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2316,6 +2340,8 @@ mod tests {
             from_step: "start_child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2351,6 +2377,8 @@ mod tests {
             from_step: "start_child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2671,6 +2699,8 @@ mod tests {
             from_step: "my_step".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2696,6 +2726,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: Some(5_000_000), // 5000 seconds
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -2705,6 +2736,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2732,6 +2765,7 @@ mod tests {
                 max_retries: Some(3),    // Normal
                 retry_delay: Some(1000), // 1 second - normal
                 timeout: Some(30_000),   // 30 seconds - normal
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -2741,6 +2775,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2781,6 +2817,8 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2815,6 +2853,8 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2849,6 +2889,8 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2980,11 +3022,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3026,6 +3072,8 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -3054,11 +3102,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3103,11 +3155,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3169,11 +3225,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3220,6 +3280,8 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -3242,11 +3304,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3295,6 +3361,8 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3332,21 +3400,29 @@ mod tests {
                 from_step: "log_debug".to_string(),
                 to_step: "log_info".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_info".to_string(),
                 to_step: "log_warn".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_warn".to_string(),
                 to_step: "log_error".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_error".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3385,11 +3461,15 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "log".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3424,6 +3504,8 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3451,6 +3533,8 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3500,11 +3584,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3542,11 +3630,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3583,11 +3675,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3624,11 +3720,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "sftp_call".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "sftp_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3663,11 +3763,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "agent".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "agent".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3715,21 +3819,29 @@ mod tests {
                 from_step: "conn1".to_string(),
                 to_step: "conn2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "conn2".to_string(),
                 to_step: "call1".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "call1".to_string(),
                 to_step: "call2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "call2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3794,11 +3906,15 @@ mod tests {
                     from_step: "conn".to_string(),
                     to_step: "call".to_string(),
                     label: None,
+                    error_condition: None,
+                    priority: None,
                 },
                 runtara_dsl::ExecutionPlanEdge {
                     from_step: "call".to_string(),
                     to_step: "finish".to_string(),
                     label: None,
+                    error_condition: None,
+                    priority: None,
                 },
             ],
             variables: HashMap::new(),
@@ -3826,11 +3942,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3878,11 +3998,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3922,11 +4046,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -3961,6 +4089,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3993,6 +4123,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
         // Add the variable to the graph
         graph.variables.insert(
@@ -4038,6 +4170,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
         // Add the variable to the graph
         graph.variables.insert(
@@ -4079,6 +4213,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert(
@@ -4093,6 +4228,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -4103,11 +4239,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -4140,6 +4280,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
 
@@ -4157,6 +4298,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         subgraph_steps.insert(
@@ -4173,6 +4315,8 @@ mod tests {
                 from_step: "sub_step".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -4203,11 +4347,15 @@ mod tests {
                 from_step: "main_step".to_string(),
                 to_step: "split".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "split".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -4237,6 +4385,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert(
@@ -4251,6 +4400,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -4261,11 +4411,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -4544,6 +4698,8 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             }],
             variables: HashMap::new(), // No variables declared here
             input_schema: HashMap::new(),
@@ -4594,6 +4750,8 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -4637,6 +4795,8 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -4687,6 +4847,8 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -4742,6 +4904,8 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             }],
             variables: subgraph_variables,
             input_schema: HashMap::new(),
@@ -4792,6 +4956,8 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);

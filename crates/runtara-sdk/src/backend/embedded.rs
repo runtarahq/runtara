@@ -578,6 +578,11 @@ mod tests {
                     checkpoint_id: checkpoint_id.to_string(),
                     state: state.clone(),
                     created_at: chrono::Utc::now(),
+                    is_compensatable: false,
+                    compensation_step_id: None,
+                    compensation_data: None,
+                    compensation_state: None,
+                    compensation_order: 0,
                 }))
         }
 

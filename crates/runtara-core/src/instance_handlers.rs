@@ -237,6 +237,7 @@ pub async fn handle_checkpoint(
                 checkpoint_id: request.checkpoint_id.clone(),
                 payload: sig.payload,
             }),
+            last_error: None, // TODO: Fetch last error from error_history when available
         });
     }
 
@@ -278,6 +279,7 @@ pub async fn handle_checkpoint(
         state: Vec::new(),
         pending_signal,
         custom_signal,
+        last_error: None,
     })
 }
 
@@ -840,6 +842,11 @@ mod tests {
             checkpoint_id: checkpoint_id.to_string(),
             state: state.to_vec(),
             created_at: Utc::now(),
+            is_compensatable: false,
+            compensation_step_id: None,
+            compensation_data: None,
+            compensation_state: None,
+            compensation_order: 0,
         }
     }
 

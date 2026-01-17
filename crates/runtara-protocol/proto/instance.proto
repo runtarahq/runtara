@@ -41,6 +41,7 @@ message CheckpointResponse {
   bytes state = 2;              // Existing state if found, empty if saved
   optional Signal pending_signal = 3;      // Instance-wide signal (cancel/pause/resume) if pending
   optional CustomSignal custom_signal = 4; // Checkpoint-scoped custom signal (if matching checkpoint_id)
+  optional StructuredError last_error = 5; // Last error if resuming after failure
 }
 
 // Get checkpoint without saving - read-only lookup
@@ -116,7 +117,8 @@ message RetryAttemptEvent {
   string checkpoint_id = 2;       // The durable function's cache key
   uint32 attempt_number = 3;      // 1-indexed retry attempt number
   int64 timestamp_ms = 4;         // When the attempt started
-  optional string error_message = 5;  // Error from previous attempt (if retrying)
+  optional string error_message = 5;       // Error from previous attempt (if retrying)
+  optional ErrorMetadata error_metadata = 6; // Structured error info for retry decisions
 }
 
 // ============================================================================
@@ -206,6 +208,11 @@ message RpcRequest {
     PollSignalsRequest poll_signals = 10;
     SignalAck signal_ack = 11;
     RetryAttemptEvent retry_attempt = 12;
+    // Compensation (saga pattern)
+    RegisterCompensatableRequest register_compensatable = 13;
+    TriggerCompensationRequest trigger_compensation = 14;
+    GetCompensationStatusRequest get_compensation_status = 16;
+    CompleteCompensationRequest complete_compensation = 17;
   }
 }
 
@@ -221,6 +228,11 @@ message RpcResponse {
     GetCheckpointResponse get_checkpoint = 9;
     PollSignalsResponse poll_signals = 10;
     RpcError error = 15;
+    // Compensation (saga pattern)
+    RegisterCompensatableResponse register_compensatable = 13;
+    TriggerCompensationResponse trigger_compensation = 14;
+    GetCompensationStatusResponse get_compensation_status = 16;
+    CompleteCompensationResponse complete_compensation = 17;
   }
 }
 
@@ -228,4 +240,130 @@ message RpcResponse {
 message RpcError {
   string code = 1;
   string message = 2;
+}
+
+// ============================================================================
+// Structured Error Types
+// ============================================================================
+
+// Error category determines retry behavior
+enum ErrorCategory {
+  ERROR_CATEGORY_UNKNOWN = 0;    // Unknown - use default retry policy
+  ERROR_CATEGORY_TRANSIENT = 1;  // Transient - retry recommended (network, timeout, rate limit)
+  ERROR_CATEGORY_PERMANENT = 2;  // Permanent - don't retry (validation, not found, auth)
+  ERROR_CATEGORY_BUSINESS = 3;   // Business rule violation - may need escalation
+}
+
+// Error severity for alerting/logging
+enum ErrorSeverity {
+  ERROR_SEVERITY_INFO = 0;      // Informational (expected errors)
+  ERROR_SEVERITY_WARNING = 1;   // Warning (degraded but functional)
+  ERROR_SEVERITY_ERROR = 2;     // Error (operation failed)
+  ERROR_SEVERITY_CRITICAL = 3;  // Critical (system-level failure)
+}
+
+// Retry hint from error source
+enum RetryHint {
+  RETRY_HINT_UNKNOWN = 0;            // No hint - use default policy
+  RETRY_HINT_RETRY_IMMEDIATELY = 1;  // Retry now (transient glitch)
+  RETRY_HINT_RETRY_WITH_BACKOFF = 2; // Retry with exponential backoff
+  RETRY_HINT_RETRY_AFTER = 3;        // Retry after specific duration (rate limit)
+  RETRY_HINT_DO_NOT_RETRY = 4;       // Don't retry (permanent error)
+}
+
+// Extended error metadata
+message ErrorMetadata {
+  ErrorCategory category = 1;
+  ErrorSeverity severity = 2;
+  RetryHint retry_hint = 3;
+  optional uint64 retry_after_ms = 4;  // For RETRY_AFTER hint
+  optional string error_code = 5;      // Machine-readable code (e.g., "RATE_LIMITED")
+  map<string, string> attributes = 6;  // Additional context (step_id, agent_id, etc.)
+}
+
+// Enhanced error with structured metadata
+message StructuredError {
+  string code = 1;                     // Error code (e.g., "VALIDATION_ERROR")
+  string message = 2;                  // Human-readable message
+  optional ErrorMetadata metadata = 3; // Structured metadata
+  optional string source_step_id = 4;  // Which step produced the error
+  optional bytes cause = 5;            // Serialized cause error (for chaining)
+}
+
+// ============================================================================
+// Compensation (Saga Pattern)
+// ============================================================================
+
+// Compensation state for a checkpoint
+enum CompensationState {
+  COMPENSATION_NONE = 0;        // No compensation defined
+  COMPENSATION_PENDING = 1;     // Compensation may be needed
+  COMPENSATION_TRIGGERED = 2;   // Compensation in progress
+  COMPENSATION_COMPLETED = 3;   // Compensation finished successfully
+  COMPENSATION_FAILED = 4;      // Compensation failed
+}
+
+// Checkpoint with compensation metadata
+message CompensatableCheckpoint {
+  string checkpoint_id = 1;
+  bytes state = 2;
+  string compensation_step_id = 3;  // Step to execute for rollback
+  bytes compensation_data = 4;      // Data for compensation step
+  CompensationState compensation_state = 5;
+  int32 compensation_order = 6;     // Execution order during rollback
+}
+
+// Register a checkpoint as compensatable
+message RegisterCompensatableRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;
+  string step_id = 3;                 // Current step that may need compensation
+  string compensation_step_id = 4;    // Step to execute for rollback
+  bytes compensation_data = 5;        // Data needed for compensation
+  int32 compensation_order = 6;       // Order in rollback sequence
+}
+
+message RegisterCompensatableResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// Request to trigger compensation for an instance
+message TriggerCompensationRequest {
+  string instance_id = 1;
+  optional string from_checkpoint_id = 2;  // Start compensation from this checkpoint
+  optional string reason = 3;              // Why compensation was triggered
+}
+
+message TriggerCompensationResponse {
+  bool success = 1;
+  optional string error = 2;
+  int32 steps_to_compensate = 3;  // Number of steps that will be rolled back
+}
+
+// Get compensation status
+message GetCompensationStatusRequest {
+  string instance_id = 1;
+}
+
+message GetCompensationStatusResponse {
+  CompensationState state = 1;
+  int32 total_steps = 2;
+  int32 completed_steps = 3;
+  repeated CompensatableCheckpoint pending_compensations = 4;
+  optional StructuredError last_error = 5;
+}
+
+// Mark a compensation step as completed
+message CompleteCompensationRequest {
+  string instance_id = 1;
+  string checkpoint_id = 2;
+  bool success = 3;
+  optional StructuredError error = 4;
+}
+
+message CompleteCompensationResponse {
+  bool all_completed = 1;        // True if all compensations are done
+  bool all_succeeded = 2;        // True if all completed successfully
+  optional string error = 3;
 }

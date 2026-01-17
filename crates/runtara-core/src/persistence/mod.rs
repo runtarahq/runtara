@@ -54,6 +54,21 @@ pub struct CheckpointRecord {
     pub state: Vec<u8>,
     /// When the checkpoint was created.
     pub created_at: DateTime<Utc>,
+    /// Whether this checkpoint is marked for compensation (saga pattern).
+    #[sqlx(default)]
+    pub is_compensatable: bool,
+    /// Step ID to execute for compensation/rollback.
+    #[sqlx(default)]
+    pub compensation_step_id: Option<String>,
+    /// Serialized data for the compensation step.
+    #[sqlx(default)]
+    pub compensation_data: Option<Vec<u8>>,
+    /// Current state of compensation (none, pending, triggered, completed, failed).
+    #[sqlx(default)]
+    pub compensation_state: Option<String>,
+    /// Order in which to execute compensation (higher = compensate first).
+    #[sqlx(default)]
+    pub compensation_order: i32,
 }
 
 /// Event record from the persistence layer.
@@ -117,6 +132,62 @@ pub struct ListEventsFilter {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
+}
+
+/// Error history record for structured error tracking.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ErrorHistoryRecord {
+    /// Database primary key.
+    pub id: i64,
+    /// Instance this error belongs to.
+    pub instance_id: String,
+    /// Checkpoint ID where error occurred (if applicable).
+    pub checkpoint_id: Option<String>,
+    /// Step ID where error occurred (if applicable).
+    pub step_id: Option<String>,
+    /// Machine-readable error code (e.g., "RATE_LIMITED").
+    pub error_code: String,
+    /// Human-readable error message.
+    pub error_message: String,
+    /// Error category (unknown, transient, permanent, business).
+    pub category: String,
+    /// Error severity (info, warning, error, critical).
+    pub severity: String,
+    /// Retry hint (unknown, retry_immediately, retry_with_backoff, retry_after, do_not_retry).
+    pub retry_hint: Option<String>,
+    /// Milliseconds for retry_after hint.
+    pub retry_after_ms: Option<i64>,
+    /// Additional context as JSON.
+    pub attributes: Option<serde_json::Value>,
+    /// Cause error ID for error chains.
+    pub cause_error_id: Option<i64>,
+    /// When the error was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Compensation log record for audit trail.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CompensationLogRecord {
+    /// Database primary key.
+    pub id: i64,
+    /// Instance this compensation is for.
+    pub instance_id: String,
+    /// Checkpoint being compensated.
+    pub checkpoint_id: String,
+    /// Step executed for compensation.
+    pub compensation_step_id: String,
+    /// Attempt number (for retries).
+    pub attempt_number: i32,
+    /// When compensation started.
+    pub started_at: DateTime<Utc>,
+    /// When compensation finished (None if still running).
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Whether compensation succeeded.
+    pub success: Option<bool>,
+    /// Error message if compensation failed.
+    pub error_message: Option<String>,
+    /// Reference to error_history entry.
+    pub error_id: Option<i64>,
 }
 
 /// Wake queue entry from the persistence layer.
@@ -362,4 +433,123 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError>;
+
+    // ========================================================================
+    // Structured Error Tracking (optional - default implementations no-op)
+    // ========================================================================
+
+    /// Record a structured error in the error history table.
+    ///
+    /// Returns the error ID for chaining or reference.
+    async fn record_error(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: Option<&str>,
+        _step_id: Option<&str>,
+        _error_code: &str,
+        _error_message: &str,
+        _category: &str,
+        _severity: &str,
+        _retry_hint: Option<&str>,
+        _retry_after_ms: Option<i64>,
+        _attributes: Option<&serde_json::Value>,
+        _cause_error_id: Option<i64>,
+    ) -> Result<i64, CoreError> {
+        // Default: no-op, return 0
+        Ok(0)
+    }
+
+    /// Get the most recent error for an instance.
+    async fn get_last_error(
+        &self,
+        _instance_id: &str,
+    ) -> Result<Option<ErrorHistoryRecord>, CoreError> {
+        // Default: no-op
+        Ok(None)
+    }
+
+    /// List errors for an instance.
+    async fn list_errors(
+        &self,
+        _instance_id: &str,
+        _limit: i64,
+        _offset: i64,
+    ) -> Result<Vec<ErrorHistoryRecord>, CoreError> {
+        // Default: empty list
+        Ok(vec![])
+    }
+
+    // ========================================================================
+    // Compensation Framework (optional - default implementations no-op)
+    // ========================================================================
+
+    /// Mark a checkpoint as compensatable (for saga pattern).
+    async fn register_compensatable_checkpoint(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: &str,
+        _compensation_step_id: &str,
+        _compensation_data: Option<&[u8]>,
+        _compensation_order: i32,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Get all compensatable checkpoints for an instance (in reverse order).
+    async fn get_compensatable_checkpoints(
+        &self,
+        _instance_id: &str,
+    ) -> Result<Vec<CheckpointRecord>, CoreError> {
+        // Default: empty list
+        Ok(vec![])
+    }
+
+    /// Update the compensation state of a checkpoint.
+    async fn set_checkpoint_compensation_state(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: &str,
+        _state: &str,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Update the instance-level compensation state.
+    async fn set_instance_compensation_state(
+        &self,
+        _instance_id: &str,
+        _state: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Log a compensation attempt.
+    async fn log_compensation_attempt(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: &str,
+        _compensation_step_id: &str,
+        _success: bool,
+        _error_message: Option<&str>,
+        _error_id: Option<i64>,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Count pending compensations for an instance.
+    async fn count_pending_compensations(&self, _instance_id: &str) -> Result<i64, CoreError> {
+        // Default: 0
+        Ok(0)
+    }
+
+    /// Check if all compensations for an instance succeeded.
+    async fn all_compensations_succeeded(&self, _instance_id: &str) -> Result<bool, CoreError> {
+        // Default: true (no compensations = all succeeded)
+        Ok(true)
+    }
 }

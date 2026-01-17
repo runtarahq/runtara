@@ -786,6 +786,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             connection_id: None,
+            compensation: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx);
@@ -1023,6 +1024,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             connection_id: None,
+            compensation: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx);

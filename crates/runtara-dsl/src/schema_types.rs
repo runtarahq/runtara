@@ -127,8 +127,40 @@ pub struct ExecutionPlanEdge {
     /// - `"true"`/`"false"` for Conditional step branches
     /// - `"onError"` for error handling transition (step failed after retries)
     /// - `None` or empty for normal sequential flow
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+
+    /// Condition for error routing (only applies when label = "onError").
+    /// Allows routing to different handlers based on error characteristics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_condition: Option<ErrorCondition>,
+
+    /// Priority for error routing (higher = checked first, default = 0).
+    /// When multiple onError edges match, the highest priority wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+/// Error routing condition for conditional onError handling.
+///
+/// When an error occurs in a step, multiple onError edges can be defined
+/// with different conditions. The first edge (by priority) whose condition
+/// matches the error will be taken.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorCondition {
+    /// Match error category: "transient", "permanent", "business"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+
+    /// Match error code pattern (supports wildcards: "RATE_*", "*_TIMEOUT")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_pattern: Option<String>,
+
+    /// Match minimum severity: "info", "warning", "error", "critical"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_severity: Option<String>,
 }
 
 /// Visual annotation for scenario editor UI
@@ -220,6 +252,30 @@ pub struct FinishStep {
     pub input_mapping: Option<InputMapping>,
 }
 
+/// Compensation configuration for saga pattern support.
+///
+/// Defines what compensation step to execute if a downstream step fails,
+/// enabling distributed transaction rollback.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CompensationConfig {
+    /// Step ID to execute for compensation (rollback)
+    pub compensation_step: String,
+
+    /// Data to pass to compensation step (maps from current step's context)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compensation_data: Option<InputMapping>,
+
+    /// When to trigger compensation: "on_downstream_error" (default), "on_any_error", "manual"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+
+    /// Compensation order (higher = compensate first, default = step execution order reversed)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
 /// Executes an agent capability
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -257,6 +313,11 @@ pub struct AgentStep {
     /// Step timeout in milliseconds. If exceeded, step fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+
+    /// Compensation configuration for saga pattern support.
+    /// Defines what step to execute to rollback this step's effects on failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation: Option<CompensationConfig>,
 }
 
 /// Evaluates conditions and branches execution

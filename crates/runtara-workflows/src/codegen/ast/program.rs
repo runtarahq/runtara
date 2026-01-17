@@ -721,6 +721,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 connection_id: None,
+                compensation: None,
             }),
         );
 
@@ -775,6 +776,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 connection_id: None,
+                compensation: None,
             }),
         );
         steps.insert(
@@ -789,6 +791,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 connection_id: None,
+                compensation: None,
             }),
         );
 
@@ -1716,6 +1719,8 @@ mod tests {
             from_step: "error-handler".to_string(),
             to_step: "error-finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let graph = ExecutionGraph {
@@ -1777,6 +1782,8 @@ mod tests {
             from_step: "error-handler".to_string(),
             to_step: "error-cond".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let graph = ExecutionGraph {
@@ -1819,6 +1826,8 @@ mod tests {
             from_step: "step1".to_string(),
             to_step: "step1".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let graph = ExecutionGraph {
@@ -1879,11 +1888,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                error_condition: None,
+                priority: None,
             },
             ExecutionPlanEdge {
                 from_step: "step1".to_string(),
                 to_step: "error-step".to_string(),
                 label: Some("onError".to_string()),
+                error_condition: None,
+                priority: None,
             },
         ];
 
@@ -1956,6 +1969,8 @@ mod tests {
             from_step: "agent1".to_string(),
             to_step: "error-finish".to_string(),
             label: Some("onError".to_string()),
+            error_condition: None,
+            priority: None,
         });
 
         let mut ctx = EmitContext::new(false);
@@ -2002,6 +2017,8 @@ mod tests {
             from_step: "error-log".to_string(),
             to_step: "error-finish".to_string(),
             label: None,
+            error_condition: None,
+            priority: None,
         }];
 
         let graph = ExecutionGraph {
