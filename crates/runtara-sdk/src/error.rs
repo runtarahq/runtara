@@ -307,7 +307,7 @@ pub enum SdkError {
 
     /// Server returned a structured error with full metadata
     #[error("structured error: {0}")]
-    StructuredError(ErrorInfo),
+    StructuredError(Box<ErrorInfo>),
 
     /// Instance was cancelled
     #[error("instance cancelled")]

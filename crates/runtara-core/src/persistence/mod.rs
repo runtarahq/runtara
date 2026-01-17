@@ -441,6 +441,7 @@ pub trait Persistence: Send + Sync {
     /// Record a structured error in the error history table.
     ///
     /// Returns the error ID for chaining or reference.
+    #[allow(clippy::too_many_arguments)]
     async fn record_error(
         &self,
         _instance_id: &str,

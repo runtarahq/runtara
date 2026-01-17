@@ -49,7 +49,7 @@ impl ErrorCategory {
     }
 
     /// Parse a category from a string.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "transient" => Self::Transient,
             "permanent" => Self::Permanent,
@@ -108,7 +108,7 @@ impl ErrorSeverity {
     }
 
     /// Parse a severity from a string.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "info" => Self::Info,
             "warning" => Self::Warning,

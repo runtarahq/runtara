@@ -41,7 +41,7 @@ impl CompensationState {
     }
 
     /// Parse a state from a string.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "pending" => Self::Pending,
             "triggered" => Self::Triggered,
@@ -208,7 +208,7 @@ impl<P: Persistence + ?Sized> CompensationManager<P> {
         for cp in &pending {
             if let Some(state) = &cp.compensation_state {
                 total += 1;
-                match CompensationState::from_str(state) {
+                match CompensationState::parse(state) {
                     CompensationState::Triggered => triggered += 1,
                     CompensationState::Completed => completed += 1,
                     CompensationState::Failed => failed += 1,
@@ -268,7 +268,7 @@ mod tests {
             CompensationState::Failed,
         ] {
             let s = state.as_str();
-            let parsed = CompensationState::from_str(s);
+            let parsed = CompensationState::parse(s);
             assert_eq!(state, parsed);
         }
     }
@@ -276,9 +276,9 @@ mod tests {
     #[test]
     fn test_compensation_state_unknown_defaults_to_none() {
         assert_eq!(
-            CompensationState::from_str("invalid"),
+            CompensationState::parse("invalid"),
             CompensationState::None
         );
-        assert_eq!(CompensationState::from_str(""), CompensationState::None);
+        assert_eq!(CompensationState::parse(""), CompensationState::None);
     }
 }
