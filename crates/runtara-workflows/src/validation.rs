@@ -173,6 +173,21 @@ pub enum ValidationError {
     // === Naming Errors ===
     /// Multiple steps have the same name.
     DuplicateStepName { name: String, step_ids: Vec<String> },
+
+    // === Edge Condition Errors ===
+    /// Multiple conditional edges from the same step have the same priority.
+    DuplicateEdgePriority {
+        from_step: String,
+        label: Option<String>,
+        priority: i32,
+        duplicate_targets: Vec<String>,
+    },
+    /// More than one edge without a condition from the same step (for same label).
+    MultipleDefaultEdges {
+        from_step: String,
+        label: Option<String>,
+        targets: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -433,6 +448,40 @@ impl std::fmt::Display for ValidationError {
                     "[E060] Multiple steps have the same name '{}': {}",
                     name,
                     step_ids.join(", ")
+                )
+            }
+
+            // Edge Condition Errors
+            ValidationError::DuplicateEdgePriority {
+                from_step,
+                label,
+                priority,
+                duplicate_targets,
+            } => {
+                let label_str = label.as_deref().unwrap_or("(default)");
+                write!(
+                    f,
+                    "[E070] Step '{}' has multiple '{}' edges with the same priority {}. \
+                     Conditional edges must have unique priorities. Targets: {}",
+                    from_step,
+                    label_str,
+                    priority,
+                    duplicate_targets.join(", ")
+                )
+            }
+            ValidationError::MultipleDefaultEdges {
+                from_step,
+                label,
+                targets,
+            } => {
+                let label_str = label.as_deref().unwrap_or("(default)");
+                write!(
+                    f,
+                    "[E071] Step '{}' has multiple '{}' edges without conditions. \
+                     At most one default (condition-less) edge is allowed. Targets: {}",
+                    from_step,
+                    label_str,
+                    targets.join(", ")
                 )
             }
         }
@@ -713,6 +762,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
     // Phase 9: Compensation validation (warnings for missing compensation)
     validate_compensation(graph, &mut result);
+
+    // Phase 10: Edge condition validation (unique priorities, at most one default)
+    validate_edge_conditions(graph, &mut result);
 
     result
 }
@@ -1813,6 +1865,103 @@ fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut Validati
 }
 
 // ============================================================================
+// Phase 10: Edge Condition Validation
+// ============================================================================
+
+/// Validate edge conditions for proper priority uniqueness and default edge rules.
+///
+/// Rules:
+/// - Conditional edges from the same step (with the same label) must have unique priorities
+/// - At most one edge without a condition is allowed per (from_step, label) pair
+/// - Edges without conditions and without labels work in parallel (no validation needed)
+/// - Exception: Conditional step uses true/false labels which are mutually exclusive
+fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_edge_conditions_recursive(graph, result);
+}
+
+fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    // Group edges by (from_step, label)
+    let mut edges_by_from_label: HashMap<
+        (String, Option<String>),
+        Vec<&runtara_dsl::ExecutionPlanEdge>,
+    > = HashMap::new();
+
+    for edge in &graph.execution_plan {
+        let key = (edge.from_step.clone(), edge.label.clone());
+        edges_by_from_label.entry(key).or_default().push(edge);
+    }
+
+    // Validate each group
+    for ((from_step, label), edges) in edges_by_from_label {
+        // Skip groups with only one edge - no conflicts possible
+        if edges.len() <= 1 {
+            continue;
+        }
+
+        // Special case: Conditional step uses true/false labels which are mutually exclusive
+        // Check if this is a Conditional step
+        if let Some(step) = graph.steps.get(&from_step) {
+            if matches!(step, Step::Conditional(_)) {
+                // For Conditional steps, true/false edges are expected to be exclusive
+                // Skip validation for these
+                continue;
+            }
+        }
+
+        // Separate edges with conditions from those without
+        let (conditional_edges, default_edges): (Vec<_>, Vec<_>) =
+            edges.into_iter().partition(|e| e.condition.is_some());
+
+        // Check for multiple default edges (edges without conditions)
+        // Only applies when there are conditional edges OR when edges have a label (like onError)
+        if default_edges.len() > 1 && (label.is_some() || !conditional_edges.is_empty()) {
+            result.errors.push(ValidationError::MultipleDefaultEdges {
+                from_step: from_step.clone(),
+                label: label.clone(),
+                targets: default_edges.iter().map(|e| e.to_step.clone()).collect(),
+            });
+        }
+
+        // Check for duplicate priorities among conditional edges
+        if conditional_edges.len() > 1 {
+            let mut priorities_to_targets: HashMap<i32, Vec<String>> = HashMap::new();
+
+            for edge in conditional_edges {
+                let priority = edge.priority.unwrap_or(0);
+                priorities_to_targets
+                    .entry(priority)
+                    .or_default()
+                    .push(edge.to_step.clone());
+            }
+
+            for (priority, targets) in priorities_to_targets {
+                if targets.len() > 1 {
+                    result.errors.push(ValidationError::DuplicateEdgePriority {
+                        from_step: from_step.clone(),
+                        label: label.clone(),
+                        priority,
+                        duplicate_targets: targets,
+                    });
+                }
+            }
+        }
+    }
+
+    // Recursively validate subgraphs
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_edge_conditions_recursive(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_edge_conditions_recursive(&while_step.subgraph, result);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -2074,13 +2223,13 @@ mod tests {
     }
 
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
-        // Use a real capability for the transform agent
+        // Use a real capability for the agent
         let capability_id = if agent_id == "transform" {
-            "map".to_string()
+            "extract".to_string() // extract has no required inputs
         } else if agent_id == "http" {
-            "request".to_string()
+            "http-request".to_string()
         } else {
-            "map".to_string() // Default to map for transform
+            "extract".to_string() // Default to transform/extract
         };
         Step::Agent(AgentStep {
             id: id.to_string(),
@@ -2195,7 +2344,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2222,7 +2371,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2252,7 +2401,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2290,14 +2439,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -2331,14 +2480,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "transform".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "transform".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -2367,7 +2516,7 @@ mod tests {
             from_step: "conn".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2399,14 +2548,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "log".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -2447,7 +2596,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2487,7 +2636,7 @@ mod tests {
             from_step: "start_child".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2524,7 +2673,7 @@ mod tests {
             from_step: "start_child".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2846,7 +2995,7 @@ mod tests {
             from_step: "my_step".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2883,7 +3032,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2922,7 +3071,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -2964,7 +3113,7 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -3000,7 +3149,7 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -3036,7 +3185,7 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -3169,14 +3318,14 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3219,7 +3368,7 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             }],
             variables: HashMap::new(),
@@ -3249,14 +3398,14 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3302,14 +3451,14 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3372,14 +3521,14 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3427,7 +3576,7 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             }],
             variables: HashMap::new(),
@@ -3451,14 +3600,14 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3508,7 +3657,7 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -3547,28 +3696,28 @@ mod tests {
                 from_step: "log_debug".to_string(),
                 to_step: "log_info".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_info".to_string(),
                 to_step: "log_warn".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_warn".to_string(),
                 to_step: "log_error".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_error".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3608,14 +3757,14 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "log".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3651,7 +3800,7 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -3680,7 +3829,7 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -3731,14 +3880,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3777,14 +3926,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3822,14 +3971,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3867,14 +4016,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "sftp_call".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "sftp_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3910,14 +4059,14 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "agent".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "agent".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -3966,28 +4115,28 @@ mod tests {
                 from_step: "conn1".to_string(),
                 to_step: "conn2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "conn2".to_string(),
                 to_step: "call1".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "call1".to_string(),
                 to_step: "call2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "call2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4053,14 +4202,14 @@ mod tests {
                     from_step: "conn".to_string(),
                     to_step: "call".to_string(),
                     label: None,
-                    error_condition: None,
+                    condition: None,
                     priority: None,
                 },
                 runtara_dsl::ExecutionPlanEdge {
                     from_step: "call".to_string(),
                     to_step: "finish".to_string(),
                     label: None,
-                    error_condition: None,
+                    condition: None,
                     priority: None,
                 },
             ],
@@ -4089,14 +4238,14 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4145,14 +4294,14 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4193,14 +4342,14 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4236,7 +4385,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -4270,7 +4419,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
         // Add the variable to the graph
@@ -4317,7 +4466,7 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
         // Add the variable to the graph
@@ -4386,14 +4535,14 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4462,7 +4611,7 @@ mod tests {
                 from_step: "sub_step".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             }],
             variables: HashMap::new(),
@@ -4494,14 +4643,14 @@ mod tests {
                 from_step: "main_step".to_string(),
                 to_step: "split".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "split".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4558,14 +4707,14 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -4845,7 +4994,7 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             }],
             variables: HashMap::new(), // No variables declared here
@@ -4897,7 +5046,7 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -4942,7 +5091,7 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             }],
             variables: HashMap::new(),
@@ -4994,7 +5143,7 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -5051,7 +5200,7 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             }],
             variables: subgraph_variables,
@@ -5103,7 +5252,7 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -5165,7 +5314,7 @@ mod tests {
             from_step: "http_call".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -5230,7 +5379,7 @@ mod tests {
             from_step: "transform_step".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -5325,7 +5474,7 @@ mod tests {
             from_step: "http_call".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -5387,6 +5536,272 @@ mod tests {
         assert!(
             display.contains("manual compensation"),
             "Should mention manual compensation when no hint"
+        );
+    }
+
+    // === Edge Condition Tests ===
+
+    fn create_condition_eq(left_ref: &str, right_val: &str) -> runtara_dsl::ConditionExpression {
+        runtara_dsl::ConditionExpression::Operation(runtara_dsl::ConditionOperation {
+            op: runtara_dsl::ConditionOperator::Eq,
+            arguments: vec![
+                runtara_dsl::ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                    value: left_ref.to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                runtara_dsl::ConditionArgument::Value(MappingValue::Immediate(
+                    runtara_dsl::ImmediateValue {
+                        value: serde_json::json!(right_val),
+                    },
+                )),
+            ],
+        })
+    }
+
+    #[test]
+    fn test_edge_condition_unique_priorities_pass() {
+        // Two onError edges with different priorities should pass
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert("error2".to_string(), create_finish_step("error2", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "transient")),
+                priority: Some(10),
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error2".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "permanent")),
+                priority: Some(5),
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: unique priorities on onError edges. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_duplicate_priorities_fail() {
+        // Two onError edges with the same priority should fail
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert("error2".to_string(), create_finish_step("error2", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "transient")),
+                priority: Some(5), // Same priority as error2
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error2".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "permanent")),
+                priority: Some(5), // Same priority as error1
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(result.has_errors(), "Should fail: duplicate priorities");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DuplicateEdgePriority { .. })),
+            "Should have DuplicateEdgePriority error"
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_multiple_default_edges_fail() {
+        // Two onError edges without conditions should fail
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert("error2".to_string(), create_finish_step("error2", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: None, // No condition
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error2".to_string(),
+                label: Some("onError".to_string()),
+                condition: None, // No condition - duplicate default
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.has_errors(),
+            "Should fail: multiple default onError edges"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MultipleDefaultEdges { .. })),
+            "Should have MultipleDefaultEdges error"
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_single_default_with_conditional_pass() {
+        // One default edge + one conditional edge should pass
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert(
+            "error_default".to_string(),
+            create_finish_step("error_default", None),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "transient")),
+                priority: Some(10),
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error_default".to_string(),
+                label: Some("onError".to_string()),
+                condition: None, // Default fallback
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: one conditional + one default onError edge. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_unlabeled_parallel_edges_pass() {
+        // Multiple unlabeled edges without conditions should pass (parallel execution)
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("start".to_string(), create_log_step("start", None));
+        steps.insert("branch1".to_string(), create_finish_step("branch1", None));
+        steps.insert("branch2".to_string(), create_finish_step("branch2", None));
+
+        let mut graph = create_basic_graph(steps, "start");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "branch1".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "branch2".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: multiple unlabeled edges can run in parallel. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_error_display() {
+        let err = ValidationError::DuplicateEdgePriority {
+            from_step: "agent1".to_string(),
+            label: Some("onError".to_string()),
+            priority: 5,
+            duplicate_targets: vec!["error1".to_string(), "error2".to_string()],
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("[E070]"), "Should have error code E070");
+        assert!(display.contains("agent1"), "Should include from_step");
+        assert!(display.contains("onError"), "Should include label");
+        assert!(display.contains("priority 5"), "Should include priority");
+
+        let err2 = ValidationError::MultipleDefaultEdges {
+            from_step: "agent1".to_string(),
+            label: Some("onError".to_string()),
+            targets: vec!["error1".to_string(), "error2".to_string()],
+        };
+        let display2 = format!("{}", err2);
+        assert!(display2.contains("[E071]"), "Should have error code E071");
+        assert!(
+            display2.contains("At most one"),
+            "Should mention single default"
         );
     }
 }

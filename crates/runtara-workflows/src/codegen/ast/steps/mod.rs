@@ -356,11 +356,48 @@ pub fn find_next_step_for_label<'a>(
 }
 
 /// Find the onError handler step for a given step.
+///
+/// For backward compatibility, returns the first onError edge found.
+/// Use `find_on_error_edges` for full conditional edge support.
 pub fn find_on_error_step<'a>(
     step_id: &str,
     execution_plan: &'a [ExecutionPlanEdge],
 ) -> Option<&'a str> {
     find_next_step_for_label(step_id, "onError", execution_plan)
+}
+
+/// Find all onError edges for a given step, sorted by priority (highest first).
+///
+/// Returns edges in evaluation order: highest priority first, then edges without
+/// conditions (default fallback) last.
+pub fn find_on_error_edges<'a>(
+    step_id: &str,
+    execution_plan: &'a [ExecutionPlanEdge],
+) -> Vec<&'a ExecutionPlanEdge> {
+    let mut edges: Vec<_> = execution_plan
+        .iter()
+        .filter(|e| e.from_step == step_id && e.label.as_deref() == Some("onError"))
+        .collect();
+
+    // Sort by priority: higher priority first, condition-less edges last
+    edges.sort_by(|a, b| {
+        let a_has_condition = a.condition.is_some();
+        let b_has_condition = b.condition.is_some();
+
+        // Edges with conditions come before edges without
+        match (a_has_condition, b_has_condition) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                // Both have or both lack conditions: sort by priority (higher first)
+                let a_priority = a.priority.unwrap_or(0);
+                let b_priority = b.priority.unwrap_or(0);
+                b_priority.cmp(&a_priority)
+            }
+        }
+    });
+
+    edges
 }
 
 #[cfg(test)]

@@ -118,8 +118,19 @@ pub struct LlmUsage {
 ///
 /// Provides error classification for proper handling:
 /// - **Transient**: Temporary failures (network, timeout, rate limit) - `#[durable]` retries
-/// - **Permanent**: Non-recoverable failures (404, validation) - human intervention may help
-/// - **Business**: Business rule violations - may need workflow-level retry scheduling
+/// - **Permanent**: Non-recoverable failures (404, validation, business rules) - human intervention may help
+///
+/// To distinguish technical vs business errors within Permanent category, use:
+/// - `code`: e.g., `VALIDATION_*` for technical, `BUSINESS_*` or domain-specific codes for business
+/// - `severity`: `Error` for technical failures, `Warning` for expected business outcomes
+///
+/// Example business error:
+/// ```rust,ignore
+/// AgentError::permanent("CREDIT_LIMIT_EXCEEDED", "Order exceeds credit limit")
+///     .with_severity(ErrorSeverity::Warning)
+///     .with_attr("order_amount", "5000")
+///     .with_attr("credit_limit", "3000")
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentError {
@@ -161,28 +172,16 @@ impl AgentError {
 
     /// Create a permanent error (don't auto-retry, human fix may help).
     ///
-    /// Use for: 404 not found, validation errors, authentication failures.
+    /// Use for: 404 not found, validation errors, authentication failures, business rule violations.
+    ///
+    /// For business errors (expected outcomes like "credit limit exceeded"), use
+    /// `.with_severity(ErrorSeverity::Warning)` to distinguish from technical failures.
     pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
             category: ErrorCategory::Permanent,
             severity: ErrorSeverity::Error,
-            retry_after_ms: None,
-            attributes: HashMap::new(),
-        }
-    }
-
-    /// Create a business error (workflow-level decision needed).
-    ///
-    /// Use for: business rule violations, policy rejections, capacity limits.
-    /// These may need workflow-level retry scheduling (hours/days, not seconds).
-    pub fn business(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            category: ErrorCategory::Business,
-            severity: ErrorSeverity::Warning,
             retry_after_ms: None,
             attributes: HashMap::new(),
         }
@@ -367,12 +366,22 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_error_business() {
-        let err = AgentError::business("CREDIT_LIMIT", "Credit limit exceeded");
-        assert_eq!(err.code, "CREDIT_LIMIT");
-        assert_eq!(err.category, ErrorCategory::Business);
-        assert_eq!(err.severity, ErrorSeverity::Warning);
+    fn test_agent_error_business_pattern() {
+        // Business errors are permanent errors with Warning severity
+        // This pattern allows distinguishing technical failures from expected business outcomes
+        let err = AgentError::permanent("CREDIT_LIMIT_EXCEEDED", "Credit limit exceeded")
+            .with_severity(ErrorSeverity::Warning)
+            .with_attr("order_amount", "5000")
+            .with_attr("credit_limit", "3000");
+
+        assert_eq!(err.code, "CREDIT_LIMIT_EXCEEDED");
+        assert_eq!(err.category, ErrorCategory::Permanent);
+        assert_eq!(err.severity, ErrorSeverity::Warning); // Warning = expected business outcome
         assert!(!err.should_retry());
+        assert_eq!(
+            err.attributes.get("order_amount"),
+            Some(&"5000".to_string())
+        );
     }
 
     #[test]

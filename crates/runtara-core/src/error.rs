@@ -19,10 +19,13 @@ use std::fmt;
 
 /// Error category for retry/routing decisions.
 ///
-/// Used to determine how an error should be handled:
-/// - `Transient`: Retry is likely to succeed (network issues, rate limits)
-/// - `Permanent`: Don't retry (validation errors, not found)
-/// - `Business`: Business rule violation - may need human intervention
+/// Two categories:
+/// - **Transient**: Auto-retry likely to succeed (network, timeout, rate limit)
+/// - **Permanent**: Don't auto-retry (validation, not found, auth, business rules)
+///
+/// To distinguish technical vs business errors within Permanent, use:
+/// - `code`: e.g., `VALIDATION_*` for technical, `BUSINESS_*` or domain-specific codes
+/// - `severity`: `Error` for technical failures, `Warning` for expected business outcomes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
@@ -31,10 +34,8 @@ pub enum ErrorCategory {
     Unknown,
     /// Transient error - retry is likely to succeed (network, timeout, rate limit).
     Transient,
-    /// Permanent error - don't retry (validation, not found, authorization).
+    /// Permanent error - don't retry (validation, not found, authorization, business rules).
     Permanent,
-    /// Business rule violation - may need human intervention.
-    Business,
 }
 
 impl ErrorCategory {
@@ -44,7 +45,6 @@ impl ErrorCategory {
             Self::Unknown => "unknown",
             Self::Transient => "transient",
             Self::Permanent => "permanent",
-            Self::Business => "business",
         }
     }
 
@@ -53,7 +53,8 @@ impl ErrorCategory {
         match s {
             "transient" => Self::Transient,
             "permanent" => Self::Permanent,
-            "business" => Self::Business,
+            // Legacy: map "business" to "permanent" for backwards compatibility
+            "business" => Self::Permanent,
             _ => Self::Unknown,
         }
     }
@@ -65,7 +66,6 @@ impl ErrorCategory {
             Self::Unknown => proto::ErrorCategory::Unknown as i32,
             Self::Transient => proto::ErrorCategory::Transient as i32,
             Self::Permanent => proto::ErrorCategory::Permanent as i32,
-            Self::Business => proto::ErrorCategory::Business as i32,
         }
     }
 
@@ -75,7 +75,8 @@ impl ErrorCategory {
         match value {
             x if x == proto::ErrorCategory::Transient as i32 => Self::Transient,
             x if x == proto::ErrorCategory::Permanent as i32 => Self::Permanent,
-            x if x == proto::ErrorCategory::Business as i32 => Self::Business,
+            // Legacy: map Business to Permanent for backwards compatibility
+            x if x == proto::ErrorCategory::Business as i32 => Self::Permanent,
             _ => Self::Unknown,
         }
     }
@@ -216,7 +217,7 @@ impl RetryHint {
 /// Structured error with metadata for intelligent error handling.
 ///
 /// This extends the basic error information with:
-/// - Category: transient vs permanent vs business rule violation
+/// - Category: transient vs permanent (business errors are a subset of permanent)
 /// - Severity: info/warning/error/critical for alerting
 /// - Retry hint: whether and how to retry
 /// - Attributes: additional context key-value pairs
@@ -277,26 +278,17 @@ impl StructuredError {
     }
 
     /// Create a permanent error (don't retry).
+    ///
+    /// Use for: validation errors, not found, authorization failures, business rule violations.
+    ///
+    /// For business errors (expected outcomes like "credit limit exceeded"), use
+    /// `.with_severity(ErrorSeverity::Warning)` to distinguish from technical failures.
     pub fn permanent(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
             category: ErrorCategory::Permanent,
             severity: ErrorSeverity::Error,
-            retry_hint: RetryHint::DoNotRetry,
-            source_step_id: None,
-            attributes: HashMap::new(),
-            cause: None,
-        }
-    }
-
-    /// Create a business rule violation error.
-    pub fn business(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            category: ErrorCategory::Business,
-            severity: ErrorSeverity::Warning,
             retry_hint: RetryHint::DoNotRetry,
             source_step_id: None,
             attributes: HashMap::new(),
@@ -342,11 +334,6 @@ impl StructuredError {
     /// Returns true if this is a permanent error.
     pub fn is_permanent(&self) -> bool {
         self.category == ErrorCategory::Permanent
-    }
-
-    /// Returns true if this is a business rule violation.
-    pub fn is_business(&self) -> bool {
-        self.category == ErrorCategory::Business
     }
 
     /// Returns true if this error should be retried.

@@ -25,7 +25,6 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> TokenStream {
     let category_str = match step.category {
         ErrorCategory::Transient => "transient",
         ErrorCategory::Permanent => "permanent",
-        ErrorCategory::Business => "business",
     };
 
     // Map severity to string (default to "error" if not specified)
@@ -147,7 +146,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-basic",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "INVALID_ORDER",
             "Order is invalid",
         );
@@ -213,21 +212,29 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_error_category_business() {
+    fn test_emit_error_permanent_business_pattern() {
+        // Business errors are now permanent errors with Warning severity
         let mut ctx = EmitContext::new(false);
-        let step = create_error_step(
-            "error-business",
-            ErrorCategory::Business,
-            "CREDIT_LIMIT",
-            "Credit limit exceeded",
-        );
+        let step = ErrorStep {
+            id: "error-business".to_string(),
+            name: Some("Credit Limit Error".to_string()),
+            category: ErrorCategory::Permanent,
+            code: "CREDIT_LIMIT_EXCEEDED".to_string(),
+            message: "Credit limit exceeded".to_string(),
+            severity: Some(ErrorSeverity::Warning), // Warning = expected business outcome
+            context: None,
+        };
 
         let tokens = emit(&step, &mut ctx);
         let code = tokens.to_string();
 
         assert!(
-            code.contains("\"business\""),
-            "Should have category = business"
+            code.contains("\"permanent\""),
+            "Should have category = permanent"
+        );
+        assert!(
+            code.contains("\"warning\""),
+            "Should have severity = warning for business errors"
         );
     }
 
@@ -237,7 +244,7 @@ mod tests {
         let step = ErrorStep {
             id: "error-severity".to_string(),
             name: Some("Severity Test".to_string()),
-            category: ErrorCategory::Business,
+            category: ErrorCategory::Permanent,
             code: "INFO_ERROR".to_string(),
             message: "Info level error".to_string(),
             severity: Some(ErrorSeverity::Info),
@@ -256,7 +263,7 @@ mod tests {
         let step = ErrorStep {
             id: "error-warning".to_string(),
             name: Some("Warning Test".to_string()),
-            category: ErrorCategory::Business,
+            category: ErrorCategory::Permanent,
             code: "WARN_ERROR".to_string(),
             message: "Warning level error".to_string(),
             severity: Some(ErrorSeverity::Warning),
@@ -278,7 +285,7 @@ mod tests {
         let step = ErrorStep {
             id: "error-critical".to_string(),
             name: Some("Critical Test".to_string()),
-            category: ErrorCategory::Business,
+            category: ErrorCategory::Permanent,
             code: "CRIT_ERROR".to_string(),
             message: "Critical error".to_string(),
             severity: Some(ErrorSeverity::Critical),
@@ -299,7 +306,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-default-severity",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "DEFAULT",
             "Default severity",
         );
@@ -319,7 +326,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-code-msg",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "MY_ERROR_CODE",
             "This is my error message",
         );
@@ -348,7 +355,7 @@ mod tests {
         let step = ErrorStep {
             id: "error-ctx".to_string(),
             name: Some("With Context".to_string()),
-            category: ErrorCategory::Business,
+            category: ErrorCategory::Permanent,
             code: "ORDER_ERROR".to_string(),
             message: "Order failed".to_string(),
             severity: None,
@@ -371,7 +378,7 @@ mod tests {
         let step = ErrorStep {
             id: "error-empty-ctx".to_string(),
             name: Some("Empty Context".to_string()),
-            category: ErrorCategory::Business,
+            category: ErrorCategory::Permanent,
             code: "EMPTY_CTX".to_string(),
             message: "message".to_string(),
             severity: None,
@@ -393,7 +400,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-return",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "RETURN_ERROR",
             "Return test",
         );
@@ -416,7 +423,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-store",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "STORE_ERROR",
             "Store test",
         );
@@ -437,7 +444,7 @@ mod tests {
         let step = ErrorStep {
             id: "error-unnamed".to_string(),
             name: None, // No name
-            category: ErrorCategory::Business,
+            category: ErrorCategory::Permanent,
             code: "UNNAMED".to_string(),
             message: "unnamed error".to_string(),
             severity: None,
@@ -459,7 +466,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-sdk",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "SDK_ERROR",
             "SDK test",
         );
@@ -484,7 +491,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_error_step(
             "error-ts",
-            ErrorCategory::Business,
+            ErrorCategory::Permanent,
             "TIMESTAMP",
             "Timestamp test",
         );

@@ -1,6 +1,6 @@
 {
-  "name": "Error All Categories",
-  "description": "Workflow demonstrating all three error categories: transient, permanent, business",
+  "name": "Error Categories",
+  "description": "Workflow demonstrating error categories: transient, permanent (technical), permanent (business)",
   "steps": {
     "check_condition": {
       "stepType": "Conditional",
@@ -24,20 +24,20 @@
       "message": "Network request timed out",
       "severity": "warning"
     },
-    "error_permanent": {
+    "error_permanent_technical": {
       "stepType": "Error",
-      "id": "error_permanent",
-      "name": "Permanent Error",
+      "id": "error_permanent_technical",
+      "name": "Permanent Technical Error",
       "category": "permanent",
       "code": "RESOURCE_NOT_FOUND",
       "message": "Requested resource does not exist",
       "severity": "error"
     },
-    "error_business": {
+    "error_permanent_business": {
       "stepType": "Error",
-      "id": "error_business",
-      "name": "Business Error",
-      "category": "business",
+      "id": "error_permanent_business",
+      "name": "Permanent Business Error",
+      "category": "permanent",
       "code": "CREDIT_LIMIT_EXCEEDED",
       "message": "Order amount exceeds credit limit",
       "severity": "warning"
@@ -56,9 +56,9 @@
   "entryPoint": "check_condition",
   "executionPlan": [
     { "fromStep": "check_condition", "toStep": "error_transient", "label": "true" },
-    { "fromStep": "check_condition", "toStep": "error_permanent", "label": "false" },
+    { "fromStep": "check_condition", "toStep": "error_permanent_technical", "label": "false" },
     { "fromStep": "error_transient", "toStep": "finish" },
-    { "fromStep": "error_permanent", "toStep": "finish" }
+    { "fromStep": "error_permanent_technical", "toStep": "finish" }
   ],
   "variables": {},
   "inputSchema": {

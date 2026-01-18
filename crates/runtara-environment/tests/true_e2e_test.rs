@@ -198,7 +198,7 @@ fn create_transform_graph() -> ExecutionGraph {
             from_step: "transform".to_string(),
             to_step: "finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }],
         variables: HashMap::new(),

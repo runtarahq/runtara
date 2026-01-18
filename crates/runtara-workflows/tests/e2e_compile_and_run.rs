@@ -1216,8 +1216,8 @@ fn test_parse_error_all_categories() {
         serde_json::from_str(workflow_json).expect("Failed to parse error_all_categories.json");
 
     assert!(graph.steps.contains_key("error_transient"));
-    assert!(graph.steps.contains_key("error_permanent"));
-    assert!(graph.steps.contains_key("error_business"));
+    assert!(graph.steps.contains_key("error_permanent_technical"));
+    assert!(graph.steps.contains_key("error_permanent_business"));
 
     use runtara_dsl::{ErrorCategory, ErrorSeverity, Step};
 
@@ -1232,23 +1232,24 @@ fn test_parse_error_all_categories() {
     }
 
     // Verify permanent error
-    if let Some(Step::Error(err)) = graph.steps.get("error_permanent") {
+    if let Some(Step::Error(err)) = graph.steps.get("error_permanent_technical") {
         assert_eq!(err.category, ErrorCategory::Permanent);
         assert_eq!(err.code, "RESOURCE_NOT_FOUND");
         assert_eq!(err.message, "Requested resource does not exist");
         assert_eq!(err.severity, Some(ErrorSeverity::Error));
     } else {
-        panic!("Expected Error step for error_permanent");
+        panic!("Expected Error step for error_permanent_technical");
     }
 
-    // Verify business error
-    if let Some(Step::Error(err)) = graph.steps.get("error_business") {
-        assert_eq!(err.category, ErrorCategory::Business);
+    // Verify permanent business error (business errors are now a subset of permanent)
+    if let Some(Step::Error(err)) = graph.steps.get("error_permanent_business") {
+        assert_eq!(err.category, ErrorCategory::Permanent);
         assert_eq!(err.code, "CREDIT_LIMIT_EXCEEDED");
         assert_eq!(err.message, "Order amount exceeds credit limit");
+        // Warning severity distinguishes business from technical errors
         assert_eq!(err.severity, Some(ErrorSeverity::Warning));
     } else {
-        panic!("Expected Error step for error_business");
+        panic!("Expected Error step for error_permanent_business");
     }
 }
 
@@ -1263,7 +1264,8 @@ fn test_parse_error_with_context() {
     use runtara_dsl::{ErrorCategory, Step};
 
     if let Some(Step::Error(err)) = graph.steps.get("error_over_limit") {
-        assert_eq!(err.category, ErrorCategory::Business);
+        // Business errors are permanent with Warning severity
+        assert_eq!(err.category, ErrorCategory::Permanent);
         assert_eq!(err.code, "CREDIT_LIMIT_EXCEEDED");
         // Verify context mapping exists
         assert!(err.context.is_some());
@@ -1377,8 +1379,8 @@ fn test_parse_error_default_values() {
     use runtara_dsl::{ErrorCategory, Step};
 
     if let Some(Step::Error(err)) = graph.steps.get("simple_error") {
-        // Default category should be Business
-        assert_eq!(err.category, ErrorCategory::Business);
+        // Default category should be Permanent
+        assert_eq!(err.category, ErrorCategory::Permanent);
         // Severity should be None (will default to Error at runtime)
         assert!(err.severity.is_none());
         // Name should be None

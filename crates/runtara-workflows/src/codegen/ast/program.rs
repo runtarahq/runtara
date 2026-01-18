@@ -14,6 +14,8 @@ use quote::quote;
 use std::collections::HashSet;
 
 use super::context::EmitContext;
+use super::mapping;
+use super::steps::conditional::emit_condition_expression;
 use super::steps::{self, StepEmitter, step_id, step_name, step_type_str};
 use runtara_dsl::{ExecutionGraph, Step};
 
@@ -447,8 +449,8 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
     // Debug logging via RuntimeContext (if debug mode enabled)
     let debug_log = emit_step_debug_start(ctx, sid, sname, stype);
 
-    // Check if this step has an onError edge
-    let on_error_step = steps::find_on_error_step(sid, &graph.execution_plan);
+    // Check if this step has onError edges
+    let on_error_edges = steps::find_on_error_edges(sid, &graph.execution_plan);
 
     // Emit the step-specific code
     let step_code = step.emit(ctx, graph);
@@ -463,13 +465,9 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
             | Step::Connection(_)
     );
 
-    if can_have_on_error && let Some(error_step_id) = on_error_step {
-        // Get the error handler step and emit its branch
-        let error_branch_code = if graph.steps.contains_key(error_step_id) {
-            emit_error_branch(error_step_id, graph, ctx)
-        } else {
-            quote! {}
-        };
+    if can_have_on_error && !on_error_edges.is_empty() {
+        // Generate the error routing code
+        let error_routing_code = emit_error_routing(&on_error_edges, graph, ctx);
 
         // Clone context vars we need in the quote
         let steps_context = ctx.steps_context_var.clone();
@@ -484,16 +482,23 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
                 }.await;
 
                 if let Err(__error_msg) = __step_result {
-                    // Set error context for the error handler
-                    let __error_context = serde_json::json!({
-                        "message": __error_msg,
-                        "stepId": #sid,
-                        "code": null::<String>
-                    });
-                    #steps_context.insert("error".to_string(), __error_context);
+                    // Parse structured error context from JSON if possible
+                    let __error: serde_json::Value = serde_json::from_str(&__error_msg)
+                        .unwrap_or_else(|_| serde_json::json!({
+                            "message": __error_msg,
+                            "stepId": #sid,
+                            "code": null::<String>,
+                            "category": "unknown",
+                            "severity": "error"
+                        }));
 
-                    // Execute error handler branch
-                    #error_branch_code
+                    // Add __error to steps context for condition evaluation
+                    #steps_context.insert("__error".to_string(), __error.clone());
+                    // Also add as "error" for backward compatibility
+                    #steps_context.insert("error".to_string(), __error.clone());
+
+                    // Execute error handler branch based on conditions
+                    #error_routing_code
                 }
             }
         }
@@ -528,6 +533,115 @@ fn emit_error_branch(
 
     quote! {
         #(#step_codes)*
+    }
+}
+
+/// Emit code for routing errors to appropriate handlers based on conditions.
+///
+/// This generates an if-else chain that evaluates each onError edge's condition
+/// in priority order. The first matching condition's branch is executed.
+/// If no condition matches but there's a default (condition-less) edge, that's used.
+/// If nothing matches, the original error is re-thrown.
+fn emit_error_routing(
+    edges: &[&runtara_dsl::ExecutionPlanEdge],
+    graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> TokenStream {
+    if edges.is_empty() {
+        return quote! {
+            return Err(__error.to_string());
+        };
+    }
+
+    // Separate conditional edges from the default edge
+    let mut conditional_edges: Vec<&runtara_dsl::ExecutionPlanEdge> = Vec::new();
+    let mut default_edge: Option<&runtara_dsl::ExecutionPlanEdge> = None;
+
+    for edge in edges {
+        if edge.condition.is_some() {
+            conditional_edges.push(*edge);
+        } else if default_edge.is_none() {
+            default_edge = Some(*edge);
+        }
+    }
+
+    // Create a temp variable for building the source
+    let source_var = ctx.temp_var("error_source");
+    let build_source = mapping::emit_build_source(ctx);
+
+    // If there's only one edge and it has no condition, emit simple branch
+    if conditional_edges.is_empty() {
+        if let Some(edge) = default_edge {
+            if graph.steps.contains_key(&edge.to_step) {
+                let branch_code = emit_error_branch(&edge.to_step, graph, ctx);
+                return quote! {
+                    #branch_code
+                };
+            }
+        }
+        return quote! {
+            return Err(__error.to_string());
+        };
+    }
+
+    // Generate if-else chain for conditional edges
+    let mut branches: Vec<TokenStream> = Vec::new();
+
+    for (i, edge) in conditional_edges.iter().enumerate() {
+        let condition = edge.condition.as_ref().unwrap();
+        let condition_code = emit_condition_expression(condition, ctx, &source_var);
+
+        let branch_code = if graph.steps.contains_key(&edge.to_step) {
+            emit_error_branch(&edge.to_step, graph, ctx)
+        } else {
+            quote! {}
+        };
+
+        if i == 0 {
+            branches.push(quote! {
+                if #condition_code {
+                    #branch_code
+                }
+            });
+        } else {
+            branches.push(quote! {
+                else if #condition_code {
+                    #branch_code
+                }
+            });
+        }
+    }
+
+    // Add default branch (else) or re-throw
+    let default_branch = if let Some(edge) = default_edge {
+        if graph.steps.contains_key(&edge.to_step) {
+            let branch_code = emit_error_branch(&edge.to_step, graph, ctx);
+            quote! {
+                else {
+                    #branch_code
+                }
+            }
+        } else {
+            quote! {
+                else {
+                    return Err(__error.to_string());
+                }
+            }
+        }
+    } else {
+        quote! {
+            else {
+                // No matching condition and no default handler - propagate error
+                return Err(__error.to_string());
+            }
+        }
+    };
+
+    quote! {
+        let #source_var = #build_source;
+
+        #(#branches)*
+        #default_branch
     }
 }
 
@@ -1720,7 +1834,7 @@ mod tests {
             from_step: "error-handler".to_string(),
             to_step: "error-finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -1783,7 +1897,7 @@ mod tests {
             from_step: "error-handler".to_string(),
             to_step: "error-cond".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -1827,7 +1941,7 @@ mod tests {
             from_step: "step1".to_string(),
             to_step: "step1".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 
@@ -1889,14 +2003,14 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
             ExecutionPlanEdge {
                 from_step: "step1".to_string(),
                 to_step: "error-step".to_string(),
                 label: Some("onError".to_string()),
-                error_condition: None,
+                condition: None,
                 priority: None,
             },
         ];
@@ -1970,7 +2084,7 @@ mod tests {
             from_step: "agent1".to_string(),
             to_step: "error-finish".to_string(),
             label: Some("onError".to_string()),
-            error_condition: None,
+            condition: None,
             priority: None,
         });
 
@@ -2018,7 +2132,7 @@ mod tests {
             from_step: "error-log".to_string(),
             to_step: "error-finish".to_string(),
             label: None,
-            error_condition: None,
+            condition: None,
             priority: None,
         }];
 

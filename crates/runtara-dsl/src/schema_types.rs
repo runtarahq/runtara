@@ -112,7 +112,29 @@ pub struct ExecutionGraph {
     pub edges: Option<serde_json::Value>,
 }
 
-/// An edge in the execution plan defining control flow
+/// An edge in the execution plan defining control flow between steps.
+///
+/// # Edge Selection Semantics
+///
+/// When multiple edges originate from the same step with the same label:
+///
+/// 1. **Conditional edges** (with `condition`): Evaluated in priority order (highest first).
+///    The first condition that evaluates to true wins.
+///
+/// 2. **Default edge** (without `condition`): At most one is allowed per (from_step, label) pair.
+///    Only taken if no conditional edge matches.
+///
+/// 3. **Parallel edges** (without conditions OR labels): Multiple unlabeled, condition-less
+///    edges can exist - they execute in parallel (e.g., fan-out patterns).
+///
+/// 4. **Conditional step exception**: `true`/`false` labeled edges from a Conditional step
+///    are mutually exclusive based on the condition result, not evaluated via edge conditions.
+///
+/// # Validation Rules
+///
+/// - Multiple conditional edges from the same step with the same label must have unique priorities
+/// - At most one default (condition-less) edge per (from_step, label) pair
+/// - If no condition matches and no default exists, the workflow fails (for onError) or continues normally
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -130,37 +152,43 @@ pub struct ExecutionPlanEdge {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 
-    /// Condition for error routing (only applies when label = "onError").
-    /// Allows routing to different handlers based on error characteristics.
+    /// Optional condition expression for conditional transitions.
+    ///
+    /// Uses the same format as `Conditional` step conditions, supporting
+    /// operators like EQ, AND, OR, STARTS_WITH, CONTAINS, etc.
+    ///
+    /// Available context for conditions:
+    /// - `data.*` - Input data
+    /// - `steps.<stepId>.outputs.*` - Previous step outputs
+    /// - `variables.*` - Workflow variables
+    /// - `__error.*` - Error details (for `onError` edges): code, message, category, severity, attributes
+    ///
+    /// Example for onError routing:
+    /// ```json
+    /// {
+    ///   "condition": {
+    ///     "type": "operation",
+    ///     "op": "EQ",
+    ///     "arguments": [
+    ///       { "valueType": "reference", "value": "__error.category" },
+    ///       { "valueType": "immediate", "value": "transient" }
+    ///     ]
+    ///   }
+    /// }
+    /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_condition: Option<ErrorCondition>,
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub condition: Option<ConditionExpression>,
 
-    /// Priority for error routing (higher = checked first, default = 0).
-    /// When multiple onError edges match, the highest priority wins.
+    /// Priority for conditional edge selection (higher = checked first, default = 0).
+    ///
+    /// When multiple edges with conditions exist for the same (from_step, label) pair:
+    /// - Edges are evaluated in descending priority order
+    /// - The first condition that evaluates to true wins
+    /// - Priorities must be unique among conditional edges from the same step/label
+    /// - Edges without conditions (default fallback) are always checked last
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
-}
-
-/// Error routing condition for conditional onError handling.
-///
-/// When an error occurs in a step, multiple onError edges can be defined
-/// with different conditions. The first edge (by priority) whose condition
-/// matches the error will be taken.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorCondition {
-    /// Match error category: "transient", "permanent", "business"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-
-    /// Match error code pattern (supports wildcards: "RATE_*", "*_TIMEOUT")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code_pattern: Option<String>,
-
-    /// Match minimum severity: "info", "warning", "error", "critical"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_severity: Option<String>,
 }
 
 /// Visual annotation for scenario editor UI
@@ -593,8 +621,9 @@ pub struct ErrorStep {
 
     /// Error category determines retry behavior:
     /// - "transient": Retry is likely to succeed (network, timeout, rate limit)
-    /// - "permanent": Don't retry (validation, not found, authorization)
-    /// - "business": Business rule violation - may need human intervention
+    /// - "permanent": Don't retry (validation, not found, authorization, business rules)
+    ///
+    /// Use `code` and `severity` to distinguish technical vs business errors.
     #[serde(default)]
     pub category: ErrorCategory,
 
@@ -620,18 +649,24 @@ pub struct ErrorStep {
 }
 
 /// Error category for structured errors.
-/// Determines retry behavior and routing.
+/// Determines retry behavior.
+///
+/// Two categories:
+/// - **Transient**: Auto-retry likely to succeed (network, timeout, rate limit)
+/// - **Permanent**: Don't auto-retry (validation, not found, auth, business rules)
+///
+/// To distinguish technical vs business errors within Permanent, use:
+/// - `code`: e.g., `VALIDATION_*` vs `BUSINESS_*` or `CREDIT_LIMIT_EXCEEDED`
+/// - `severity`: `error` for technical, `warning` for expected business outcomes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ErrorCategory {
     /// Transient error - retry is likely to succeed (network, timeout, rate limit)
     Transient,
-    /// Permanent error - don't retry (validation, not found, authorization)
-    Permanent,
-    /// Business rule violation - may need human intervention
+    /// Permanent error - don't retry (validation, not found, authorization, business rules)
     #[default]
-    Business,
+    Permanent,
 }
 
 /// Error severity for logging and alerting.

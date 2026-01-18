@@ -51,8 +51,34 @@
   "executionPlan": [
     { "fromStep": "call_api", "toStep": "handle_success" },
     { "fromStep": "handle_success", "toStep": "finish" },
-    { "fromStep": "call_api", "toStep": "handle_transient_error", "label": "onError", "errorCondition": { "category": "transient" }, "priority": 10 },
-    { "fromStep": "call_api", "toStep": "handle_permanent_error", "label": "onError", "errorCondition": { "category": "permanent" }, "priority": 5 },
+    {
+      "fromStep": "call_api",
+      "toStep": "handle_transient_error",
+      "label": "onError",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "__error.category" },
+          { "valueType": "immediate", "value": "transient" }
+        ]
+      },
+      "priority": 10
+    },
+    {
+      "fromStep": "call_api",
+      "toStep": "handle_permanent_error",
+      "label": "onError",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "__error.category" },
+          { "valueType": "immediate", "value": "permanent" }
+        ]
+      },
+      "priority": 5
+    },
     { "fromStep": "handle_transient_error", "toStep": "call_api" }
   ],
   "variables": {},

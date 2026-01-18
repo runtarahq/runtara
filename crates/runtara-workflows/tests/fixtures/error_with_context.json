@@ -31,7 +31,7 @@
       "stepType": "Error",
       "id": "error_over_limit",
       "name": "Credit Limit Exceeded",
-      "category": "business",
+      "category": "permanent",
       "code": "CREDIT_LIMIT_EXCEEDED",
       "message": "Order amount exceeds credit limit",
       "severity": "warning",
