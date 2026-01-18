@@ -793,7 +793,13 @@ pub struct CountOccurrencesInput {
 #[capability(
     module = "text",
     display_name = "Render Template",
-    description = "Render a Jinja2-style template with provided variables"
+    description = "Render a Jinja2-style template with provided variables",
+    errors(
+        permanent("TEXT_TEMPLATE_MISSING", "Template text is required"),
+        permanent("TEXT_TEMPLATE_PARSE_ERROR", "Failed to parse template syntax"),
+        permanent("TEXT_TEMPLATE_LOAD_ERROR", "Failed to load template"),
+        permanent("TEXT_TEMPLATE_RENDER_ERROR", "Failed to render template with context"),
+    )
 )]
 pub fn render_template(input: TemplateInput) -> Result<String, AgentError> {
     let template_str = input.text.ok_or_else(|| {
@@ -1164,7 +1170,8 @@ pub fn as_byte_array(input: ByteArrayInput) -> Result<Vec<u8>, String> {
 #[capability(
     module = "text",
     display_name = "From Base64",
-    description = "Decode base64 content to a string"
+    description = "Decode base64 content to a string",
+    errors(permanent("TEXT_UNSUPPORTED_ENCODING", "Unsupported text encoding"),)
 )]
 pub fn from_base64(input: FromBase64Input) -> Result<String, AgentError> {
     let file_data = FileData::from_value(&input.data)?;
@@ -1176,7 +1183,16 @@ pub fn from_base64(input: FromBase64Input) -> Result<String, AgentError> {
 #[capability(
     module = "text",
     display_name = "To Base64",
-    description = "Encode text or bytes to base64 as a FileData structure"
+    description = "Encode text or bytes to base64 as a FileData structure",
+    errors(
+        permanent("TEXT_INVALID_FILE_DATA", "Invalid file data structure"),
+        permanent("TEXT_INVALID_BYTE_ARRAY", "Byte array must contain only numbers"),
+        permanent("TEXT_BYTE_OUT_OF_RANGE", "Byte value must be in range 0-255"),
+        permanent(
+            "TEXT_INVALID_INPUT_TYPE",
+            "Input must be string, byte array, or file object"
+        ),
+    )
 )]
 pub fn to_base64(input: ToBase64Input) -> Result<FileData, AgentError> {
     if input.data.is_object() {

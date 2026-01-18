@@ -124,7 +124,12 @@ fn default_true() -> bool {
 #[capability(
     module = "xml",
     display_name = "Parse XML",
-    description = "Parse XML bytes into a JSON structure"
+    description = "Parse XML bytes into a JSON structure",
+    errors(
+        permanent("XML_DECODE_ERROR", "Failed to decode base64 or file data"),
+        permanent("XML_ENCODING_ERROR", "Failed to decode with specified encoding"),
+        permanent("XML_PARSE_ERROR", "Failed to parse XML document"),
+    )
 )]
 pub fn from_xml(input: FromXmlInput) -> Result<Value, AgentError> {
     // Convert bytes to string using specified encoding

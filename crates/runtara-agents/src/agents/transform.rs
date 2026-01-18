@@ -764,7 +764,8 @@ pub fn select_first(input: SelectFirstInput) -> Result<Value, String> {
 #[capability(
     module = "transform",
     display_name = "From JSON String",
-    description = "Parse a JSON string into a structured value"
+    description = "Parse a JSON string into a structured value",
+    errors(permanent("TRANSFORM_JSON_PARSE_ERROR", "Failed to parse JSON string"),)
 )]
 pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, AgentError> {
     match input.value {
@@ -783,7 +784,8 @@ pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, AgentError>
 #[capability(
     module = "transform",
     display_name = "To JSON String",
-    description = "Convert a value to a JSON string"
+    description = "Convert a value to a JSON string",
+    errors(permanent("TRANSFORM_JSON_SERIALIZE_ERROR", "Failed to serialize value to JSON"),)
 )]
 pub fn to_json_string(input: ToJsonStringInput) -> Result<ToJsonStringOutput, AgentError> {
     let json = serde_json::to_string(&input.value).map_err(|e| {
@@ -933,7 +935,14 @@ pub fn map_fields(input: MapFieldsInput) -> Result<MapFieldsOutput, String> {
 #[capability(
     module = "transform",
     display_name = "Group By",
-    description = "Group array items by a property key, returning either a map or array of groups"
+    description = "Group array items by a property key, returning either a map or array of groups",
+    errors(
+        permanent("TRANSFORM_INVALID_INPUT", "Expected array or collection input"),
+        permanent(
+            "TRANSFORM_KEY_SERIALIZE_ERROR",
+            "Failed to serialize group key to string"
+        ),
+    )
 )]
 pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, AgentError> {
     // Validate input - only arrays are supported

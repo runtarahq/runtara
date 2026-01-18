@@ -346,7 +346,15 @@ fn filename_from_path(path: &str) -> String {
 #[capability(
     module = "compression",
     display_name = "Create Archive",
-    description = "Create an archive from one or more files"
+    description = "Create an archive from one or more files",
+    errors(
+        permanent(
+            "ARCHIVE_NO_FILES",
+            "At least one file is required to create an archive"
+        ),
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode file data"),
+        permanent("ARCHIVE_WRITE_ERROR", "Failed to write or finalize archive"),
+    )
 )]
 pub fn create_archive(input: CreateArchiveInput) -> Result<FileData, AgentError> {
     if input.files.is_empty() {
@@ -435,7 +443,11 @@ fn create_zip_archive(
 #[capability(
     module = "compression",
     display_name = "Extract Archive",
-    description = "Extract all files from an archive"
+    description = "Extract all files from an archive",
+    errors(
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
+        permanent("ARCHIVE_READ_ERROR", "Failed to read archive or archive entry"),
+    )
 )]
 pub fn extract_archive(input: ExtractArchiveInput) -> Result<ExtractArchiveOutput, AgentError> {
     let file_data = input.archive.into_file_data();
@@ -516,7 +528,13 @@ fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, AgentError>
 #[capability(
     module = "compression",
     display_name = "Extract File",
-    description = "Extract a single file from an archive by its path"
+    description = "Extract a single file from an archive by its path",
+    errors(
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
+        permanent("ARCHIVE_READ_ERROR", "Failed to read archive"),
+        permanent("ARCHIVE_FILE_NOT_FOUND", "Specified file not found in archive"),
+        permanent("ARCHIVE_IS_DIRECTORY", "Specified path is a directory, not a file"),
+    )
 )]
 pub fn extract_file(input: ExtractFileInput) -> Result<FileData, AgentError> {
     let file_data = input.archive.into_file_data();
@@ -609,7 +627,11 @@ fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, Agen
 #[capability(
     module = "compression",
     display_name = "List Archive",
-    description = "List all files and directories in an archive without extracting"
+    description = "List all files and directories in an archive without extracting",
+    errors(
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
+        permanent("ARCHIVE_READ_ERROR", "Failed to read archive or archive entry"),
+    )
 )]
 pub fn list_archive(input: ListArchiveInput) -> Result<ListArchiveOutput, AgentError> {
     let file_data = input.archive.into_file_data();

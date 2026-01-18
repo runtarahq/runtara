@@ -308,7 +308,12 @@ fn default_true() -> bool {
 #[capability(
     module = "csv",
     display_name = "Parse CSV",
-    description = "Parse CSV bytes into a JSON array of objects or arrays"
+    description = "Parse CSV bytes into a JSON array of objects or arrays",
+    errors(
+        permanent("CSV_DECODE_ERROR", "Failed to decode base64 or file data"),
+        permanent("CSV_ENCODING_ERROR", "Failed to decode with specified encoding"),
+        permanent("CSV_PARSE_ERROR", "Failed to parse CSV data or read records"),
+    )
 )]
 pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, AgentError> {
     // Convert bytes to string using specified encoding
@@ -404,7 +409,8 @@ pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, AgentError> {
 #[capability(
     module = "csv",
     display_name = "Generate CSV",
-    description = "Convert JSON data to CSV bytes"
+    description = "Convert JSON data to CSV bytes",
+    errors(permanent("CSV_WRITE_ERROR", "Failed to write CSV header or data row"),)
 )]
 pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, AgentError> {
     let mut writer_builder = csv::WriterBuilder::new();
@@ -485,7 +491,13 @@ pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, AgentError> {
 #[capability(
     module = "csv",
     display_name = "Get CSV Header",
-    description = "Extract CSV headers with type inference from the first data row"
+    description = "Extract CSV headers with type inference from the first data row",
+    errors(
+        permanent("CSV_DECODE_ERROR", "Failed to decode base64 or file data"),
+        permanent("CSV_ENCODING_ERROR", "Failed to decode with specified encoding"),
+        permanent("CSV_PARSE_ERROR", "Failed to parse CSV headers or records"),
+        permanent("CSV_EMPTY_FILE", "CSV file is empty"),
+    )
 )]
 pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, AgentError> {
     // Convert bytes to string using specified encoding
