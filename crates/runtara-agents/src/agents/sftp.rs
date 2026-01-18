@@ -395,7 +395,16 @@ pub struct DeleteFileResponse {
 #[capability(
     module = "sftp",
     display_name = "List Files",
-    description = "List files and directories in an SFTP directory"
+    description = "List files and directories in an SFTP directory",
+    errors(
+        transient("SFTP_CONNECTION_ERROR", "Failed to connect to SFTP server", ["host", "port"]),
+        transient("SFTP_HANDSHAKE_ERROR", "SSH handshake failed", ["host"]),
+        transient("SFTP_SESSION_ERROR", "Failed to create SSH/SFTP session"),
+        permanent("SFTP_AUTH_FAILED", "Authentication failed (invalid credentials)", ["username", "auth_method"]),
+        permanent("SFTP_NO_AUTH_METHOD", "No authentication method provided"),
+        permanent("SFTP_NO_CONNECTION", "No connection data provided"),
+        permanent("SFTP_LIST_FAILED", "Failed to list directory (path not found or permission denied)", ["path"]),
+    )
 )]
 pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, AgentError> {
     // Get credentials from connection data
@@ -444,7 +453,17 @@ pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, Agent
 #[capability(
     module = "sftp",
     display_name = "Download File",
-    description = "Download a file from SFTP and return its content"
+    description = "Download a file from SFTP and return its content",
+    errors(
+        transient("SFTP_CONNECTION_ERROR", "Failed to connect to SFTP server", ["host", "port"]),
+        transient("SFTP_HANDSHAKE_ERROR", "SSH handshake failed", ["host"]),
+        transient("SFTP_SESSION_ERROR", "Failed to create SSH/SFTP session"),
+        transient("SFTP_READ_ERROR", "Failed to read file data (network interruption)", ["path"]),
+        permanent("SFTP_AUTH_FAILED", "Authentication failed (invalid credentials)", ["username", "auth_method"]),
+        permanent("SFTP_NO_AUTH_METHOD", "No authentication method provided"),
+        permanent("SFTP_NO_CONNECTION", "No connection data provided"),
+        permanent("SFTP_FILE_NOT_FOUND", "File not found or permission denied", ["path"]),
+    )
 )]
 pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, AgentError> {
     // Get credentials from connection data
@@ -494,7 +513,18 @@ pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, AgentE
     module = "sftp",
     display_name = "Upload File",
     description = "Upload a file to SFTP",
-    side_effects = true
+    side_effects = true,
+    errors(
+        transient("SFTP_CONNECTION_ERROR", "Failed to connect to SFTP server", ["host", "port"]),
+        transient("SFTP_HANDSHAKE_ERROR", "SSH handshake failed", ["host"]),
+        transient("SFTP_SESSION_ERROR", "Failed to create SSH/SFTP session"),
+        transient("SFTP_WRITE_ERROR", "Failed to write file data (network interruption)", ["path"]),
+        permanent("SFTP_AUTH_FAILED", "Authentication failed (invalid credentials)", ["username", "auth_method"]),
+        permanent("SFTP_NO_AUTH_METHOD", "No authentication method provided"),
+        permanent("SFTP_NO_CONNECTION", "No connection data provided"),
+        permanent("SFTP_INVALID_CONTENT", "Invalid content format (e.g., malformed base64)"),
+        permanent("SFTP_CREATE_FAILED", "Failed to create file (permission denied or invalid path)", ["path"]),
+    )
 )]
 pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, AgentError> {
     // Get credentials from connection data
@@ -552,7 +582,16 @@ pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, AgentError>
     module = "sftp",
     display_name = "Delete File",
     description = "Delete a file from SFTP",
-    side_effects = true
+    side_effects = true,
+    errors(
+        transient("SFTP_CONNECTION_ERROR", "Failed to connect to SFTP server", ["host", "port"]),
+        transient("SFTP_HANDSHAKE_ERROR", "SSH handshake failed", ["host"]),
+        transient("SFTP_SESSION_ERROR", "Failed to create SSH/SFTP session"),
+        permanent("SFTP_AUTH_FAILED", "Authentication failed (invalid credentials)", ["username", "auth_method"]),
+        permanent("SFTP_NO_AUTH_METHOD", "No authentication method provided"),
+        permanent("SFTP_NO_CONNECTION", "No connection data provided"),
+        permanent("SFTP_DELETE_FAILED", "Failed to delete file (not found or permission denied)", ["path"]),
+    )
 )]
 pub fn sftp_delete_file(input: SftpDeleteFileInput) -> Result<DeleteFileResponse, AgentError> {
     // Get credentials from connection data

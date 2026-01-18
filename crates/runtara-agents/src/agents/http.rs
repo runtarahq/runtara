@@ -403,7 +403,13 @@ pub fn extract_connection_config(
     module = "http",
     display_name = "HTTP Request",
     description = "Execute an HTTP request with the specified method, URL, headers, and body",
-    side_effects = true
+    side_effects = true,
+    errors(
+        transient("NETWORK_ERROR", "Network request failed (connection, DNS, timeout)", ["url"]),
+        transient("HTTP_5XX", "Server error response (5xx status code)", ["url", "status_code"]),
+        transient("HTTP_429", "Rate limited (429 Too Many Requests)", ["url", "status_code"]),
+        permanent("HTTP_4XX", "Client error response (4xx status code except 429)", ["url", "status_code"]),
+    )
 )]
 pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     // Start with input values

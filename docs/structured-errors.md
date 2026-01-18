@@ -404,7 +404,29 @@ Built-in workflow steps also emit structured errors.
 
 ### StartScenario Step
 
-The StartScenario step emits structured errors when child scenarios fail or when cancelled:
+The StartScenario step handles child scenario errors in two ways:
+
+#### Error Step Propagation
+
+When a child scenario terminates via an **Error step**, the error propagates directly to the parent scenario unchanged. This allows explicit business errors to bubble up through nested scenarios as if the parent had directly raised that error.
+
+**Example:** If a child scenario has:
+```json
+{
+  "stepType": "Error",
+  "id": "credit_error",
+  "code": "CREDIT_LIMIT_EXCEEDED",
+  "message": "Order exceeds credit limit",
+  "category": "permanent",
+  "severity": "warning"
+}
+```
+
+The parent scenario receives exactly this error (with `stepType: "Error"`), preserving the original code, category, severity, and context. The parent can then route it using `onError` edges just as if it had raised the error itself.
+
+#### Other Child Errors
+
+For errors that are **not** from an Error step (agent failures, runtime errors, etc.), the StartScenario step wraps them:
 
 | Error | Category | Error Code | Context Attributes |
 |-------|----------|------------|-------------------|
@@ -413,7 +435,7 @@ The StartScenario step emits structured errors when child scenarios fail or when
 
 *The category and severity of `CHILD_SCENARIO_FAILED` are propagated from the child error. If the child error cannot be parsed, defaults to `transient` category and `error` severity.
 
-**Example child scenario failure error:**
+**Example wrapped error (non-Error step failure):**
 
 ```json
 {
@@ -426,13 +448,19 @@ The StartScenario step emits structured errors when child scenarios fail or when
   "severity": "error",
   "childScenarioId": "order-processing",
   "childError": {
-    "code": "VALIDATION_ERROR",
-    "message": "Invalid order format",
-    "category": "permanent",
+    "code": "HTTP_INTERNAL_ERROR",
+    "message": "Server returned 500",
+    "category": "transient",
     "severity": "error"
   }
 }
 ```
+
+#### Detecting Error Source
+
+You can distinguish propagated Error step errors from wrapped errors by checking `stepType`:
+- `stepType: "Error"` → Propagated from child's Error step
+- `stepType: "StartScenario"` → Wrapped agent/runtime error
 
 ### Error Step
 

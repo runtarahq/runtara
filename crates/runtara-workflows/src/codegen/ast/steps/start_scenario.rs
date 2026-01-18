@@ -185,7 +185,15 @@ fn emit_with_embedded_child(
                             "severity": "error"
                         }));
 
-                    // Build structured error for StartScenario step
+                    // Check if this is an Error step - if so, propagate it directly
+                    // Error steps have stepType: "Error" and represent explicit business errors
+                    // that should bubble up unchanged to the parent scenario
+                    if child_error.get("stepType").and_then(|v| v.as_str()) == Some("Error") {
+                        // Propagate the error as-is (it's already a valid JSON string)
+                        return e;
+                    }
+
+                    // For other errors (agent failures, etc.), wrap with CHILD_SCENARIO_FAILED
                     let structured_error = serde_json::json!({
                         "stepId": step_id,
                         "stepName": step_name,
@@ -890,6 +898,33 @@ mod tests {
         assert!(
             code.contains("child_error . get (\"severity\")"),
             "Should extract child error severity"
+        );
+    }
+
+    #[test]
+    fn test_emit_error_step_propagation() {
+        // Test that Error step errors from child scenarios propagate directly
+        // without being wrapped in CHILD_SCENARIO_FAILED
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Should check for stepType: "Error" to identify Error step errors
+        assert!(
+            code.contains("child_error . get (\"stepType\")"),
+            "Should check stepType field"
+        );
+        assert!(
+            code.contains("Some (\"Error\")"),
+            "Should compare stepType to 'Error'"
+        );
+        // Should return the error as-is when it's an Error step
+        assert!(
+            code.contains("return e"),
+            "Should propagate Error step errors directly"
         );
     }
 }
