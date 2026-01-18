@@ -1900,12 +1900,12 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
 
         // Special case: Conditional step uses true/false labels which are mutually exclusive
         // Check if this is a Conditional step
-        if let Some(step) = graph.steps.get(&from_step) {
-            if matches!(step, Step::Conditional(_)) {
-                // For Conditional steps, true/false edges are expected to be exclusive
-                // Skip validation for these
-                continue;
-            }
+        if let Some(step) = graph.steps.get(&from_step)
+            && matches!(step, Step::Conditional(_))
+        {
+            // For Conditional steps, true/false edges are expected to be exclusive
+            // Skip validation for these
+            continue;
         }
 
         // Separate edges with conditions from those without

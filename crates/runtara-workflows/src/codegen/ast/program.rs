@@ -571,13 +571,13 @@ fn emit_error_routing(
 
     // If there's only one edge and it has no condition, emit simple branch
     if conditional_edges.is_empty() {
-        if let Some(edge) = default_edge {
-            if graph.steps.contains_key(&edge.to_step) {
-                let branch_code = emit_error_branch(&edge.to_step, graph, ctx);
-                return quote! {
-                    #branch_code
-                };
-            }
+        if let Some(edge) = default_edge
+            && graph.steps.contains_key(&edge.to_step)
+        {
+            let branch_code = emit_error_branch(&edge.to_step, graph, ctx);
+            return quote! {
+                #branch_code
+            };
         }
         return quote! {
             return Err(__error.to_string());
