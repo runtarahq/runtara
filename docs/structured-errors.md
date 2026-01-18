@@ -271,7 +271,11 @@ In error handlers, access the error context via the `__error` variable:
 }
 ```
 
-## HTTP Agent Error Classification
+## Agent Error Classification
+
+All built-in agents return structured errors with appropriate categories, codes, and context attributes.
+
+### HTTP Agent
 
 The HTTP agent automatically classifies errors based on status codes:
 
@@ -291,6 +295,148 @@ The HTTP agent automatically classifies errors based on status codes:
 | Other 5xx | Transient | `HTTP_ERROR` |
 
 Network failures (connection refused, DNS errors) are classified as **Transient** with code `NETWORK_ERROR`.
+
+### SFTP Agent
+
+The SFTP agent classifies connection errors as transient and data errors as permanent:
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| Connection failed | Transient | `SFTP_CONNECTION_ERROR` | `host`, `port` |
+| SSH handshake failed | Transient | `SFTP_HANDSHAKE_ERROR` | `host`, `port` |
+| Authentication failed | Permanent | `SFTP_AUTH_ERROR` | `host`, `username`, `auth_method` |
+| File not found | Permanent | `SFTP_FILE_NOT_FOUND` | `path` |
+| Permission denied | Permanent | `SFTP_PERMISSION_DENIED` | `path`, `operation` |
+| Directory not empty | Permanent | `SFTP_DIRECTORY_NOT_EMPTY` | `path` |
+| Path is directory | Permanent | `SFTP_IS_DIRECTORY` | `path` |
+| Path is file | Permanent | `SFTP_IS_FILE` | `path` |
+| Read/Write error | Transient | `SFTP_READ_ERROR` / `SFTP_WRITE_ERROR` | `path` |
+
+### CSV Agent
+
+The CSV agent classifies all errors as permanent (data format issues):
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| Base64 decode failed | Permanent | `CSV_DECODE_ERROR` | `decode_error` |
+| Invalid delimiter | Permanent | `CSV_INVALID_DELIMITER` | `delimiter` |
+| Empty file | Permanent | `CSV_EMPTY_FILE` | - |
+| Header read failed | Permanent | `CSV_READ_ERROR` | - |
+| Parse error | Permanent | `CSV_PARSE_ERROR` | `row`, `column` |
+| Field count mismatch | Permanent | `CSV_FIELD_COUNT_MISMATCH` | `expected`, `actual`, `row` |
+| Field not found | Permanent | `CSV_FIELD_NOT_FOUND` | `field_name` |
+| Invalid integer | Permanent | `CSV_INVALID_INTEGER` | `field`, `value` |
+| Invalid number | Permanent | `CSV_INVALID_NUMBER` | `field`, `value` |
+
+### XML Agent
+
+The XML agent classifies all errors as permanent (data format issues):
+
+| Error | Category | Error Code |
+|-------|----------|------------|
+| Base64 decode failed | Permanent | `XML_DECODE_ERROR` |
+| XML parse error | Permanent | `XML_PARSE_ERROR` |
+| Encoding error | Permanent | `XML_ENCODING_ERROR` |
+
+### Compression Agent
+
+The compression agent classifies all errors as permanent (data corruption):
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| No files to archive | Permanent | `ARCHIVE_NO_FILES` | - |
+| Decode error | Permanent | `ARCHIVE_DECODE_ERROR` | - |
+| Archive read error | Permanent | `ARCHIVE_READ_ERROR` | `entry_index` |
+| File not found | Permanent | `ARCHIVE_FILE_NOT_FOUND` | `file_path` |
+| Path is directory | Permanent | `ARCHIVE_IS_DIRECTORY` | `file_path` |
+| Write error | Permanent | `ARCHIVE_WRITE_ERROR` | - |
+
+### Transform Agent
+
+The transform agent classifies all errors as permanent (data transformation issues):
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| JSON parse error | Permanent | `TRANSFORM_JSON_PARSE_ERROR` | `parse_error` |
+| JSON serialize error | Permanent | `TRANSFORM_JSON_SERIALIZE_ERROR` | `serialize_error` |
+| Invalid input type | Permanent | `TRANSFORM_INVALID_INPUT` | `received_type` |
+| Key serialize error | Permanent | `TRANSFORM_KEY_SERIALIZE_ERROR` | - |
+
+### Text Agent
+
+The text agent classifies all errors as permanent (text processing issues):
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| Template missing | Permanent | `TEXT_TEMPLATE_MISSING` | - |
+| Invalid regex | Permanent | `TEXT_INVALID_REGEX` | `pattern`, `error` |
+| Invalid replacement | Permanent | `TEXT_INVALID_REPLACEMENT` | `replacement`, `error` |
+| Invalid format | Permanent | `TEXT_INVALID_FORMAT` | `format`, `error` |
+| Encode error | Permanent | `TEXT_ENCODE_ERROR` | `encoding` |
+| Decode error | Permanent | `TEXT_DECODE_ERROR` | `encoding`, `error` |
+| Invalid input type | Permanent | `TEXT_INVALID_INPUT` | `received_type` |
+| Invalid byte array | Permanent | `TEXT_INVALID_BYTE_ARRAY` | `index` |
+| Byte out of range | Permanent | `TEXT_BYTE_OUT_OF_RANGE` | `index`, `value` |
+
+### Crypto Agent
+
+The crypto agent uses the standard `AgentError` type (errors from HMAC key validation):
+
+| Error | Category | Error Code |
+|-------|----------|------------|
+| Invalid HMAC key | Permanent | (standard error message) |
+
+### FileData Type
+
+The shared `FileData` type used across agents provides structured errors:
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| Base64 decode failed | Permanent | `FILE_BASE64_DECODE_ERROR` | `decode_error` |
+| Invalid structure | Permanent | `FILE_INVALID_STRUCTURE` | `parse_error` |
+| Invalid byte array | Permanent | `FILE_INVALID_BYTE_ARRAY` | `index` |
+| Byte out of range | Permanent | `FILE_BYTE_OUT_OF_RANGE` | `index`, `value` |
+| Invalid input type | Permanent | `FILE_INVALID_INPUT_TYPE` | `received_type` |
+
+## Step Error Classification
+
+Built-in workflow steps also emit structured errors.
+
+### StartScenario Step
+
+The StartScenario step emits structured errors when child scenarios fail or when cancelled:
+
+| Error | Category | Error Code | Context Attributes |
+|-------|----------|------------|-------------------|
+| Child scenario failed | Inherited* | `CHILD_SCENARIO_FAILED` | `childScenarioId`, `childError` |
+| Step cancelled | Transient | `STEP_CANCELLED` | `childScenarioId`, `cancellationReason` |
+
+*The category and severity of `CHILD_SCENARIO_FAILED` are propagated from the child error. If the child error cannot be parsed, defaults to `transient` category and `error` severity.
+
+**Example child scenario failure error:**
+
+```json
+{
+  "stepId": "execute_child",
+  "stepName": "Execute Child Workflow",
+  "stepType": "StartScenario",
+  "code": "CHILD_SCENARIO_FAILED",
+  "message": "Child scenario order-processing failed",
+  "category": "permanent",
+  "severity": "error",
+  "childScenarioId": "order-processing",
+  "childError": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid order format",
+    "category": "permanent",
+    "severity": "error"
+  }
+}
+```
+
+### Error Step
+
+The Error step is used to explicitly raise structured errors from workflows. See [Using the Error Step](#using-the-error-step) for details.
 
 ## Example Workflows
 
@@ -538,10 +684,12 @@ For backwards compatibility, legacy `"category": "business"` values in JSON are 
 
 ### Wrong Error Category
 
-If HTTP errors are being classified incorrectly:
-1. Check the actual HTTP status code in `__error.attributes.status_code`
-2. Review the [HTTP Agent Error Classification](#http-agent-error-classification) table
-3. For custom agents, ensure they return properly structured errors with `category` and `severity`
+If errors are being classified incorrectly:
+1. Check the actual error code in `__error.code`
+2. Review the [Agent Error Classification](#agent-error-classification) tables for the specific agent
+3. For HTTP errors, check the status code in `__error.attributes.status_code`
+4. For custom agents, ensure they return properly structured errors with `category` and `severity`
+5. For StartScenario steps, remember that child error categories are propagated
 
 ### Missing Error Context
 
