@@ -385,10 +385,10 @@ mod tests {
     fn test_get_step_types_from_inventory() {
         let step_types = get_step_types();
 
-        // Should have at least 7 step types (Start + 6 registered)
+        // Should have at least 11 step types (Start + 10 registered)
         assert!(
-            step_types.len() >= 7,
-            "Expected at least 7 step types, got {}",
+            step_types.len() >= 11,
+            "Expected at least 11 step types, got {}",
             step_types.len()
         );
 
@@ -408,6 +408,13 @@ mod tests {
             step_ids.contains(&"StartScenario"),
             "Missing StartScenario step type"
         );
+        assert!(step_ids.contains(&"While"), "Missing While step type");
+        assert!(step_ids.contains(&"Log"), "Missing Log step type");
+        assert!(
+            step_ids.contains(&"Connection"),
+            "Missing Connection step type"
+        );
+        assert!(step_ids.contains(&"Error"), "Missing Error step type");
     }
 
     #[test]
@@ -423,10 +430,17 @@ mod tests {
                         step.step_type
                     );
                 }
-                "Start" | "Finish" | "Conditional" | "Split" | "Switch" => {
+                "Start" | "Finish" | "Conditional" | "Split" | "Switch" | "While" | "Error" => {
                     assert_eq!(
                         step.category, "control",
                         "{} should be control category",
+                        step.step_type
+                    );
+                }
+                "Log" | "Connection" => {
+                    assert_eq!(
+                        step.category, "utility",
+                        "{} should be utility category",
                         step.step_type
                     );
                 }

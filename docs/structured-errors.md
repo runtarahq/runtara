@@ -700,6 +700,111 @@ For business errors (permanent category with warning severity) that may resolve 
 
 For backwards compatibility, legacy `"category": "business"` values in JSON are automatically mapped to `"permanent"` when parsed. New workflows should use `"category": "permanent"` with `"severity": "warning"` for business errors.
 
+## Error Introspection
+
+Runtara provides compile-time error declaration and runtime introspection for both agent capabilities and workflow scenarios.
+
+### Agent Capability Errors
+
+Agent capabilities can declare their known errors using the `errors(...)` attribute in the `#[capability]` macro:
+
+```rust
+#[capability(
+    module = "http",
+    display_name = "HTTP Request",
+    description = "Execute an HTTP request",
+    side_effects = true,
+    errors(
+        transient("NETWORK_ERROR", "Network request failed", ["url"]),
+        transient("HTTP_5XX", "Server error response", ["url", "status_code"]),
+        transient("HTTP_429", "Rate limited", ["url", "status_code"]),
+        permanent("HTTP_4XX", "Client error response", ["url", "status_code"]),
+    )
+)]
+pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
+    // ...
+}
+```
+
+Each error declaration specifies:
+- **Kind**: `transient` or `permanent`
+- **Code**: Machine-readable error code (e.g., `"NETWORK_ERROR"`)
+- **Description**: Human-readable explanation of when this error occurs
+- **Attributes** (optional): Context attributes included with this error (e.g., `["url", "status_code"]`)
+
+### API Response Format
+
+The agent API includes known errors in the capability response:
+
+```json
+{
+  "id": "http-request",
+  "displayName": "HTTP Request",
+  "description": "Execute an HTTP request",
+  "hasSideEffects": true,
+  "knownErrors": [
+    {
+      "code": "NETWORK_ERROR",
+      "description": "Network request failed",
+      "kind": "transient",
+      "attributes": ["url"]
+    },
+    {
+      "code": "HTTP_5XX",
+      "description": "Server error response",
+      "kind": "transient",
+      "attributes": ["url", "status_code"]
+    },
+    {
+      "code": "HTTP_4XX",
+      "description": "Client error response",
+      "kind": "permanent",
+      "attributes": ["url", "status_code"]
+    }
+  ]
+}
+```
+
+Note: `knownErrors` is omitted from the JSON when empty (no errors declared).
+
+### Scenario Terminal Errors
+
+Workflows can introspect their terminal errors - Error steps that terminate the workflow without recovery. Use the `get_terminal_errors()` method on `ExecutionGraph`:
+
+```rust
+use runtara_dsl::ExecutionGraph;
+
+let graph: ExecutionGraph = serde_json::from_str(scenario_json)?;
+let terminal_errors = graph.get_terminal_errors();
+
+for error in terminal_errors {
+    println!("Error step: {} ({})", error.step_id, error.code);
+    println!("  Category: {}, Severity: {}", error.category, error.severity);
+    if error.from_subgraph {
+        println!("  (from nested subgraph)");
+    }
+}
+```
+
+Terminal errors include:
+- `step_id`: The Error step's ID
+- `step_name`: Human-readable name (if provided)
+- `code`: Machine-readable error code
+- `message`: Error message template
+- `category`: `"transient"` or `"permanent"`
+- `severity`: `"info"`, `"warning"`, `"error"`, or `"critical"`
+- `from_subgraph`: Whether the error is from a nested Split/While subgraph
+
+### Use Cases
+
+Error introspection enables:
+
+1. **API Documentation**: Automatically generate error documentation for agents and workflows
+2. **Client Code Generation**: Generate typed error handlers from known error declarations
+3. **Workflow Validation**: Verify that workflows handle all possible errors from called agents
+4. **Monitoring Dashboards**: Build dashboards that understand expected vs unexpected errors
+5. **Error Routing Suggestions**: IDE tooling can suggest `onError` conditions based on declared errors
+
 ## Troubleshooting
 
 ### Error Not Being Caught by onError Edge
