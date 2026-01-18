@@ -11,6 +11,7 @@
 //! Uses native ssh2 library for SFTP operations.
 //! Connection credentials should be passed as part of the input.
 
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Deserializer, Serialize};
 use ssh2::Session;
@@ -99,22 +100,38 @@ where
 // ============================================================================
 
 /// Create an SFTP session from credentials
-fn create_sftp_session(credentials: &SftpCredentials) -> Result<ssh2::Sftp, String> {
-    // Connect to SSH server
+fn create_sftp_session(credentials: &SftpCredentials) -> Result<ssh2::Sftp, AgentError> {
+    // Connect to SSH server - this is a transient error (network issue)
     let tcp =
         TcpStream::connect(format!("{}:{}", credentials.host, credentials.port)).map_err(|e| {
-            format!(
-                "Failed to connect to {}:{}: {}",
-                credentials.host, credentials.port, e
+            AgentError::transient(
+                "SFTP_CONNECTION_ERROR",
+                format!(
+                    "Failed to connect to {}:{}: {}",
+                    credentials.host, credentials.port, e
+                ),
             )
+            .with_attr("host", &credentials.host)
+            .with_attr("port", credentials.port.to_string())
         })?;
 
-    let mut session = Session::new().map_err(|e| format!("Failed to create SSH session: {}", e))?;
+    let mut session = Session::new().map_err(|e| {
+        AgentError::transient(
+            "SFTP_SESSION_ERROR",
+            format!("Failed to create SSH session: {}", e),
+        )
+    })?;
 
     session.set_tcp_stream(tcp);
-    session
-        .handshake()
-        .map_err(|e| format!("SSH handshake failed: {}", e))?;
+
+    // SSH handshake - transient (could be network issues)
+    session.handshake().map_err(|e| {
+        AgentError::transient(
+            "SFTP_HANDSHAKE_ERROR",
+            format!("SSH handshake failed: {}", e),
+        )
+        .with_attr("host", &credentials.host)
+    })?;
 
     // Authenticate - prefer private key if provided and non-empty, otherwise use password
     let has_private_key = credentials
@@ -129,7 +146,7 @@ fn create_sftp_session(credentials: &SftpCredentials) -> Result<ssh2::Sftp, Stri
         .unwrap_or(false);
 
     if has_private_key {
-        // Authenticate with private key
+        // Authenticate with private key - permanent error (wrong credentials)
         let private_key = credentials.private_key.as_ref().unwrap();
         session
             .userauth_pubkey_memory(
@@ -138,33 +155,60 @@ fn create_sftp_session(credentials: &SftpCredentials) -> Result<ssh2::Sftp, Stri
                 private_key,
                 credentials.passphrase.as_deref(),
             )
-            .map_err(|e| format!("Private key authentication failed: {}", e))?;
+            .map_err(|e| {
+                AgentError::permanent(
+                    "SFTP_AUTH_FAILED",
+                    format!("Private key authentication failed: {}", e),
+                )
+                .with_attr("username", &credentials.username)
+                .with_attr("auth_method", "private_key")
+            })?;
     } else if has_password {
-        // Authenticate with password
+        // Authenticate with password - permanent error (wrong credentials)
         let password = credentials.password.as_ref().unwrap();
         session
             .userauth_password(&credentials.username, password)
-            .map_err(|e| format!("Password authentication failed: {}", e))?;
+            .map_err(|e| {
+                AgentError::permanent(
+                    "SFTP_AUTH_FAILED",
+                    format!("Password authentication failed: {}", e),
+                )
+                .with_attr("username", &credentials.username)
+                .with_attr("auth_method", "password")
+            })?;
     } else {
-        return Err("No authentication method provided (need password or private_key)".to_string());
+        return Err(AgentError::permanent(
+            "SFTP_NO_AUTH_METHOD",
+            "No authentication method provided (need password or private_key)",
+        ));
     }
 
     if !session.authenticated() {
-        return Err("SSH authentication failed".to_string());
+        return Err(AgentError::permanent(
+            "SFTP_AUTH_FAILED",
+            "SSH authentication failed",
+        ));
     }
 
-    // Create SFTP session
-    session
-        .sftp()
-        .map_err(|e| format!("Failed to create SFTP session: {}", e))
+    // Create SFTP session - transient (session negotiation could fail due to network)
+    session.sftp().map_err(|e| {
+        AgentError::transient(
+            "SFTP_SESSION_ERROR",
+            format!("Failed to create SFTP session: {}", e),
+        )
+    })
 }
 
 /// Parse credentials from connection data
 fn get_credentials_from_connection(
     connection: &crate::connections::RawConnection,
-) -> Result<SftpCredentials, String> {
-    serde_json::from_value(connection.parameters.clone())
-        .map_err(|e| format!("Failed to parse SFTP credentials: {}", e))
+) -> Result<SftpCredentials, AgentError> {
+    serde_json::from_value(connection.parameters.clone()).map_err(|e| {
+        AgentError::permanent(
+            "SFTP_INVALID_CREDENTIALS",
+            format!("Failed to parse SFTP credentials: {}", e),
+        )
+    })
 }
 
 // ============================================================================
@@ -353,22 +397,28 @@ pub struct DeleteFileResponse {
     display_name = "List Files",
     description = "List files and directories in an SFTP directory"
 )]
-pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, String> {
+pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, AgentError> {
     // Get credentials from connection data
-    let connection = input
-        ._connection
-        .as_ref()
-        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SFTP_NO_CONNECTION",
+            "No connection data provided. SFTP requires a connection.",
+        )
+    })?;
     let credentials = get_credentials_from_connection(connection)?;
 
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;
 
-    // List directory
+    // List directory - permanent error (path doesn't exist or permission denied)
     let path = Path::new(&input.path);
-    let entries = sftp
-        .readdir(path)
-        .map_err(|e| format!("Failed to list files in path '{}': {}", input.path, e))?;
+    let entries = sftp.readdir(path).map_err(|e| {
+        AgentError::permanent(
+            "SFTP_LIST_FAILED",
+            format!("Failed to list files in path '{}': {}", input.path, e),
+        )
+        .with_attr("path", &input.path)
+    })?;
 
     let files: Vec<FileInfo> = entries
         .into_iter()
@@ -396,26 +446,38 @@ pub fn sftp_list_files(input: SftpListFilesInput) -> Result<Vec<FileInfo>, Strin
     display_name = "Download File",
     description = "Download a file from SFTP and return its content"
 )]
-pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, String> {
+pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, AgentError> {
     // Get credentials from connection data
-    let connection = input
-        ._connection
-        .as_ref()
-        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SFTP_NO_CONNECTION",
+            "No connection data provided. SFTP requires a connection.",
+        )
+    })?;
     let credentials = get_credentials_from_connection(connection)?;
 
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;
 
-    // Open and read file
+    // Open file - permanent error (file doesn't exist or permission denied)
     let path = Path::new(&input.path);
-    let mut file = sftp
-        .open(path)
-        .map_err(|e| format!("Failed to open file '{}': {}", input.path, e))?;
+    let mut file = sftp.open(path).map_err(|e| {
+        AgentError::permanent(
+            "SFTP_FILE_NOT_FOUND",
+            format!("Failed to open file '{}': {}", input.path, e),
+        )
+        .with_attr("path", &input.path)
+    })?;
 
+    // Read file - transient error (could be network interruption during transfer)
     let mut file_bytes = Vec::new();
-    file.read_to_end(&mut file_bytes)
-        .map_err(|e| format!("Failed to read file '{}': {}", input.path, e))?;
+    file.read_to_end(&mut file_bytes).map_err(|e| {
+        AgentError::transient(
+            "SFTP_READ_ERROR",
+            format!("Failed to read file '{}': {}", input.path, e),
+        )
+        .with_attr("path", &input.path)
+    })?;
 
     // Return based on format
     match input.response_format.as_str() {
@@ -434,21 +496,28 @@ pub fn sftp_download_file(input: SftpDownloadFileInput) -> Result<String, String
     description = "Upload a file to SFTP",
     side_effects = true
 )]
-pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, String> {
+pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, AgentError> {
     // Get credentials from connection data
-    let connection = input
-        ._connection
-        .as_ref()
-        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SFTP_NO_CONNECTION",
+            "No connection data provided. SFTP requires a connection.",
+        )
+    })?;
     let credentials = get_credentials_from_connection(connection)?;
 
-    // Decode content based on format
+    // Decode content based on format - permanent error (malformed input)
     let content_bytes = match input.content_format.as_str() {
         "base64" => {
             use base64::{Engine as _, engine::general_purpose};
             general_purpose::STANDARD
                 .decode(&input.content)
-                .map_err(|e| format!("Failed to decode base64 content: {}", e))?
+                .map_err(|e| {
+                    AgentError::permanent(
+                        "SFTP_INVALID_CONTENT",
+                        format!("Failed to decode base64 content: {}", e),
+                    )
+                })?
         }
         _ => input.content.into_bytes(),
     };
@@ -456,15 +525,24 @@ pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, String> {
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;
 
-    // Create and write file
+    // Create file - permanent error (permission denied or invalid path)
     let path = Path::new(&input.path);
-    let mut file = sftp
-        .create(path)
-        .map_err(|e| format!("Failed to create file '{}': {}", input.path, e))?;
+    let mut file = sftp.create(path).map_err(|e| {
+        AgentError::permanent(
+            "SFTP_CREATE_FAILED",
+            format!("Failed to create file '{}': {}", input.path, e),
+        )
+        .with_attr("path", &input.path)
+    })?;
 
-    let bytes_written = file
-        .write(&content_bytes)
-        .map_err(|e| format!("Failed to write to file '{}': {}", input.path, e))?;
+    // Write file - transient error (could be network interruption during transfer)
+    let bytes_written = file.write(&content_bytes).map_err(|e| {
+        AgentError::transient(
+            "SFTP_WRITE_ERROR",
+            format!("Failed to write to file '{}': {}", input.path, e),
+        )
+        .with_attr("path", &input.path)
+    })?;
 
     Ok(bytes_written)
 }
@@ -476,21 +554,28 @@ pub fn sftp_upload_file(input: SftpUploadFileInput) -> Result<usize, String> {
     description = "Delete a file from SFTP",
     side_effects = true
 )]
-pub fn sftp_delete_file(input: SftpDeleteFileInput) -> Result<DeleteFileResponse, String> {
+pub fn sftp_delete_file(input: SftpDeleteFileInput) -> Result<DeleteFileResponse, AgentError> {
     // Get credentials from connection data
-    let connection = input
-        ._connection
-        .as_ref()
-        .ok_or("No connection data provided. SFTP requires a connection.")?;
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            "SFTP_NO_CONNECTION",
+            "No connection data provided. SFTP requires a connection.",
+        )
+    })?;
     let credentials = get_credentials_from_connection(connection)?;
 
     // Create SFTP session
     let sftp = create_sftp_session(&credentials)?;
 
-    // Delete file
+    // Delete file - permanent error (file doesn't exist or permission denied)
     let path = Path::new(&input.path);
-    sftp.unlink(path)
-        .map_err(|e| format!("Failed to delete file '{}': {}", input.path, e))?;
+    sftp.unlink(path).map_err(|e| {
+        AgentError::permanent(
+            "SFTP_DELETE_FAILED",
+            format!("Failed to delete file '{}': {}", input.path, e),
+        )
+        .with_attr("path", &input.path)
+    })?;
 
     Ok(DeleteFileResponse {
         success: true,

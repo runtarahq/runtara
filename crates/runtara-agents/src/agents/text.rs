@@ -28,6 +28,7 @@ use runtara_dsl::agent_meta::EnumVariants;
 use serde::Deserialize;
 use strum::VariantNames;
 
+use crate::types::AgentError;
 pub use crate::types::FileData;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -794,10 +795,10 @@ pub struct CountOccurrencesInput {
     display_name = "Render Template",
     description = "Render a Jinja2-style template with provided variables"
 )]
-pub fn render_template(input: TemplateInput) -> Result<String, String> {
-    let template_str = input
-        .text
-        .ok_or_else(|| "Template text is required".to_string())?;
+pub fn render_template(input: TemplateInput) -> Result<String, AgentError> {
+    let template_str = input.text.ok_or_else(|| {
+        AgentError::permanent("TEXT_TEMPLATE_MISSING", "Template text is required")
+    })?;
 
     if template_str.is_empty() {
         return Ok(String::new());
@@ -805,17 +806,29 @@ pub fn render_template(input: TemplateInput) -> Result<String, String> {
 
     // Create template environment
     let mut env = Environment::new();
-    env.add_template("tmpl", &template_str)
-        .map_err(|e| format!("Template parse error: {}", e))?;
+    env.add_template("tmpl", &template_str).map_err(|e| {
+        AgentError::permanent(
+            "TEXT_TEMPLATE_PARSE_ERROR",
+            format!("Template parse error: {}", e),
+        )
+        .with_attr("parse_error", e.to_string())
+    })?;
 
-    let tmpl = env
-        .get_template("tmpl")
-        .map_err(|e| format!("Failed to get template: {}", e))?;
+    let tmpl = env.get_template("tmpl").map_err(|e| {
+        AgentError::permanent(
+            "TEXT_TEMPLATE_LOAD_ERROR",
+            format!("Failed to get template: {}", e),
+        )
+    })?;
 
     // Render with context
-    let result = tmpl
-        .render(input.context)
-        .map_err(|e| format!("Template render error: {}", e))?;
+    let result = tmpl.render(input.context).map_err(|e| {
+        AgentError::permanent(
+            "TEXT_TEMPLATE_RENDER_ERROR",
+            format!("Template render error: {}", e),
+        )
+        .with_attr("render_error", e.to_string())
+    })?;
 
     Ok(result)
 }
@@ -1153,7 +1166,7 @@ pub fn as_byte_array(input: ByteArrayInput) -> Result<Vec<u8>, String> {
     display_name = "From Base64",
     description = "Decode base64 content to a string"
 )]
-pub fn from_base64(input: FromBase64Input) -> Result<String, String> {
+pub fn from_base64(input: FromBase64Input) -> Result<String, AgentError> {
     let file_data = FileData::from_value(&input.data)?;
     let bytes = file_data.decode()?;
     decode_text_bytes(bytes, &input.encoding)
@@ -1165,11 +1178,16 @@ pub fn from_base64(input: FromBase64Input) -> Result<String, String> {
     display_name = "To Base64",
     description = "Encode text or bytes to base64 as a FileData structure"
 )]
-pub fn to_base64(input: ToBase64Input) -> Result<FileData, String> {
+pub fn to_base64(input: ToBase64Input) -> Result<FileData, AgentError> {
     if input.data.is_object() {
         // Already looks like file data, just ensure it deserializes and override hints if provided
-        let mut file: FileData = serde_json::from_value(input.data.clone())
-            .map_err(|e| format!("Invalid file data structure: {}", e))?;
+        let mut file: FileData = serde_json::from_value(input.data.clone()).map_err(|e| {
+            AgentError::permanent(
+                "TEXT_INVALID_FILE_DATA",
+                format!("Invalid file data structure: {}", e),
+            )
+            .with_attr("parse_error", e.to_string())
+        })?;
         if input.filename.is_some() {
             file.filename = input.filename;
         }
@@ -1183,18 +1201,42 @@ pub fn to_base64(input: ToBase64Input) -> Result<FileData, String> {
         Value::String(s) => s.as_bytes().to_vec(),
         Value::Array(arr) => {
             let mut buf = Vec::with_capacity(arr.len());
-            for v in arr {
-                let num = v
-                    .as_u64()
-                    .ok_or_else(|| "Byte array must contain only numbers".to_string())?;
+            for (idx, v) in arr.iter().enumerate() {
+                let num = v.as_u64().ok_or_else(|| {
+                    AgentError::permanent(
+                        "TEXT_INVALID_BYTE_ARRAY",
+                        "Byte array must contain only numbers",
+                    )
+                    .with_attr("index", idx.to_string())
+                })?;
                 if num > 255 {
-                    return Err("Byte values must be in the range 0-255".to_string());
+                    return Err(AgentError::permanent(
+                        "TEXT_BYTE_OUT_OF_RANGE",
+                        format!(
+                            "Byte value {} at index {} must be in the range 0-255",
+                            num, idx
+                        ),
+                    )
+                    .with_attr("index", idx.to_string())
+                    .with_attr("value", num.to_string()));
                 }
                 buf.push(num as u8);
             }
             buf
         }
-        _ => return Err("Input must be string, byte array, or file object".to_string()),
+        other => {
+            let type_name = match other {
+                Value::Null => "null",
+                Value::Bool(_) => "boolean",
+                Value::Number(_) => "number",
+                _ => "unknown",
+            };
+            return Err(AgentError::permanent(
+                "TEXT_INVALID_INPUT_TYPE",
+                "Input must be string, byte array, or file object",
+            )
+            .with_attr("received_type", type_name));
+        }
     };
 
     Ok(FileData::from_bytes(bytes, input.filename, input.mime_type))
@@ -1636,13 +1678,20 @@ fn default_encoding() -> String {
 }
 
 /// Build a regex with safety limits to prevent ReDoS attacks
-fn build_safe_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, String> {
+fn build_safe_regex(pattern: &str, case_insensitive: bool) -> Result<regex::Regex, AgentError> {
     RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
         .size_limit(10 * (1 << 20)) // 10MB compiled size limit
         .dfa_size_limit(10 * (1 << 20)) // 10MB DFA size limit
         .build()
-        .map_err(|e| format!("Invalid regex pattern: {}", e))
+        .map_err(|e| {
+            AgentError::permanent(
+                "TEXT_INVALID_REGEX",
+                format!("Invalid regex pattern: {}", e),
+            )
+            .with_attr("pattern", pattern.to_string())
+            .with_attr("regex_error", e.to_string())
+        })
 }
 
 /// Calculate Levenshtein distance between two strings
@@ -1678,11 +1727,20 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 }
 
 /// Decode bytes into text using provided encoding (currently UTF-8 only)
-fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> Result<String, String> {
+fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> Result<String, AgentError> {
     match encoding.to_uppercase().as_str() {
-        "UTF-8" | "UTF8" => String::from_utf8(bytes)
-            .map_err(|e| format!("Decoded bytes are not valid UTF-8: {}", e)),
-        other => Err(format!("Unsupported encoding: {}", other)),
+        "UTF-8" | "UTF8" => String::from_utf8(bytes).map_err(|e| {
+            AgentError::permanent(
+                "TEXT_UTF8_DECODE_ERROR",
+                format!("Decoded bytes are not valid UTF-8: {}", e),
+            )
+            .with_attr("decode_error", e.to_string())
+        }),
+        other => Err(AgentError::permanent(
+            "TEXT_UNSUPPORTED_ENCODING",
+            format!("Unsupported encoding: {}", other),
+        )
+        .with_attr("encoding", other.to_string())),
     }
 }
 
@@ -1783,7 +1841,9 @@ mod tests {
         };
         let result = render_template(input);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Template text is required");
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "TEXT_TEMPLATE_MISSING");
+        assert!(err.message.contains("Template text is required"));
     }
 
     #[test]
@@ -1853,7 +1913,9 @@ mod tests {
         };
         let result = render_template(input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Template parse error"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "TEXT_TEMPLATE_PARSE_ERROR");
+        assert!(err.message.contains("Template parse error"));
     }
 
     #[test]

@@ -11,6 +11,7 @@
 //!
 //! All operations accept Rust data structures directly (no CloudEvents wrapper)
 
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -765,11 +766,15 @@ pub fn select_first(input: SelectFirstInput) -> Result<Value, String> {
     display_name = "From JSON String",
     description = "Parse a JSON string into a structured value"
 )]
-pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, String> {
+pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, AgentError> {
     match input.value {
-        Some(json_str) if !json_str.is_empty() => {
-            serde_json::from_str(&json_str).map_err(|e| format!("Failed to parse JSON: {}", e))
-        }
+        Some(json_str) if !json_str.is_empty() => serde_json::from_str(&json_str).map_err(|e| {
+            AgentError::permanent(
+                "TRANSFORM_JSON_PARSE_ERROR",
+                format!("Failed to parse JSON: {}", e),
+            )
+            .with_attr("parse_error", e.to_string())
+        }),
         _ => Ok(Value::Null),
     }
 }
@@ -780,9 +785,14 @@ pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, String> {
     display_name = "To JSON String",
     description = "Convert a value to a JSON string"
 )]
-pub fn to_json_string(input: ToJsonStringInput) -> Result<ToJsonStringOutput, String> {
-    let json = serde_json::to_string(&input.value)
-        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+pub fn to_json_string(input: ToJsonStringInput) -> Result<ToJsonStringOutput, AgentError> {
+    let json = serde_json::to_string(&input.value).map_err(|e| {
+        AgentError::permanent(
+            "TRANSFORM_JSON_SERIALIZE_ERROR",
+            format!("Failed to serialize JSON: {}", e),
+        )
+        .with_attr("serialize_error", e.to_string())
+    })?;
     let length = json.len();
     Ok(ToJsonStringOutput { json, length })
 }
@@ -925,15 +935,30 @@ pub fn map_fields(input: MapFieldsInput) -> Result<MapFieldsOutput, String> {
     display_name = "Group By",
     description = "Group array items by a property key, returning either a map or array of groups"
 )]
-pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, String> {
+pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, AgentError> {
     // Validate input - only arrays are supported
     let collection = match &input.value {
         Value::Array(arr) => arr,
         Value::Null => {
-            return Err("Unsupported value. Expected array or collection.".to_string());
+            return Err(AgentError::permanent(
+                "TRANSFORM_INVALID_INPUT",
+                "Unsupported value. Expected array or collection.",
+            )
+            .with_attr("received_type", "null"));
         }
-        _ => {
-            return Err("Unsupported value. Expected array or collection.".to_string());
+        other => {
+            let type_name = match other {
+                Value::Object(_) => "object",
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Bool(_) => "boolean",
+                _ => "unknown",
+            };
+            return Err(AgentError::permanent(
+                "TRANSFORM_INVALID_INPUT",
+                "Unsupported value. Expected array or collection.",
+            )
+            .with_attr("received_type", type_name));
         }
     };
 
@@ -974,7 +999,12 @@ pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, String> {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
-            _ => serde_json::to_string(&key_value).map_err(|e| e.to_string())?,
+            _ => serde_json::to_string(&key_value).map_err(|e| {
+                AgentError::permanent(
+                    "TRANSFORM_KEY_SERIALIZE_ERROR",
+                    format!("Failed to serialize group key to string: {}", e),
+                )
+            })?,
         };
 
         grouped.entry(key_str).or_default().push(item.clone());
@@ -1621,7 +1651,13 @@ mod tests {
 
         let result = group_by(input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Expected array"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "TRANSFORM_INVALID_INPUT");
+        assert!(err.message.contains("Expected array"));
+        assert_eq!(
+            err.attributes.get("received_type"),
+            Some(&"object".to_string())
+        );
     }
 
     #[test]

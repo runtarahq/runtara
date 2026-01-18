@@ -12,6 +12,7 @@
 #[allow(unused_imports)]
 use base64::{Engine as _, engine::general_purpose};
 
+use crate::types::AgentError;
 pub use crate::types::FileData;
 use runtara_agent_macro::{CapabilityInput, capability};
 #[allow(unused_imports)]
@@ -39,13 +40,18 @@ pub enum CsvDataInput {
 
 impl CsvDataInput {
     /// Convert any supported input into raw bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, AgentError> {
         match self {
             CsvDataInput::Bytes(b) => Ok(b.clone()),
-            CsvDataInput::File(f) => f.decode(),
-            CsvDataInput::Base64String(s) => general_purpose::STANDARD
-                .decode(s)
-                .map_err(|e| format!("Failed to decode base64 CSV content: {}", e)),
+            CsvDataInput::File(f) => f
+                .decode()
+                .map_err(|e| AgentError::permanent("CSV_DECODE_ERROR", e)),
+            CsvDataInput::Base64String(s) => general_purpose::STANDARD.decode(s).map_err(|e| {
+                AgentError::permanent(
+                    "CSV_DECODE_ERROR",
+                    format!("Failed to decode base64 CSV content: {}", e),
+                )
+            }),
         }
     }
 }
@@ -304,7 +310,7 @@ fn default_true() -> bool {
     display_name = "Parse CSV",
     description = "Parse CSV bytes into a JSON array of objects or arrays"
 )]
-pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, String> {
+pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, AgentError> {
     // Convert bytes to string using specified encoding
     let data = input.data.to_bytes()?;
     let csv_string = decode_bytes(&data, &input.encoding)?;
@@ -332,11 +338,21 @@ pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, String> {
         // Parse with headers - return array of objects
         let headers = reader
             .headers()
-            .map_err(|e| format!("Failed to read CSV headers: {}", e))?
+            .map_err(|e| {
+                AgentError::permanent(
+                    "CSV_PARSE_ERROR",
+                    format!("Failed to read CSV headers: {}", e),
+                )
+            })?
             .clone();
 
         for record_result in reader.records() {
-            let record = record_result.map_err(|e| format!("Failed to read CSV record: {}", e))?;
+            let record = record_result.map_err(|e| {
+                AgentError::permanent(
+                    "CSV_PARSE_ERROR",
+                    format!("Failed to read CSV record: {}", e),
+                )
+            })?;
 
             // Skip empty lines if configured
             if input.skip_empty_lines && is_empty_record(&record) {
@@ -360,7 +376,12 @@ pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, String> {
     } else {
         // Parse without headers - return array of arrays
         for record_result in reader.records() {
-            let record = record_result.map_err(|e| format!("Failed to read CSV record: {}", e))?;
+            let record = record_result.map_err(|e| {
+                AgentError::permanent(
+                    "CSV_PARSE_ERROR",
+                    format!("Failed to read CSV record: {}", e),
+                )
+            })?;
 
             // Skip empty lines if configured
             if input.skip_empty_lines && is_empty_record(&record) {
@@ -385,7 +406,7 @@ pub fn from_csv(input: FromCsvInput) -> Result<Vec<Value>, String> {
     display_name = "Generate CSV",
     description = "Convert JSON data to CSV bytes"
 )]
-pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, String> {
+pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, AgentError> {
     let mut writer_builder = csv::WriterBuilder::new();
     writer_builder
         .delimiter(input.delimiter as u8)
@@ -406,17 +427,23 @@ pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, String> {
                     // Write header if requested
                     if input.use_header {
                         let headers = get_header_names(&arr[0]);
-                        writer
-                            .write_record(&headers)
-                            .map_err(|e| format!("Failed to write CSV header: {}", e))?;
+                        writer.write_record(&headers).map_err(|e| {
+                            AgentError::permanent(
+                                "CSV_WRITE_ERROR",
+                                format!("Failed to write CSV header: {}", e),
+                            )
+                        })?;
                     }
 
                     // Write rows
                     for item in arr {
                         let row = value_to_csv_row(item);
-                        writer
-                            .write_record(&row)
-                            .map_err(|e| format!("Failed to write CSV row: {}", e))?;
+                        writer.write_record(&row).map_err(|e| {
+                            AgentError::permanent(
+                                "CSV_WRITE_ERROR",
+                                format!("Failed to write CSV row: {}", e),
+                            )
+                        })?;
                     }
                 }
             }
@@ -424,21 +451,30 @@ pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, String> {
                 // Single object - write as one row
                 if input.use_header {
                     let headers = get_header_names(single_value);
-                    writer
-                        .write_record(&headers)
-                        .map_err(|e| format!("Failed to write CSV header: {}", e))?;
+                    writer.write_record(&headers).map_err(|e| {
+                        AgentError::permanent(
+                            "CSV_WRITE_ERROR",
+                            format!("Failed to write CSV header: {}", e),
+                        )
+                    })?;
                 }
 
                 let row = value_to_csv_row(single_value);
-                writer
-                    .write_record(&row)
-                    .map_err(|e| format!("Failed to write CSV row: {}", e))?;
+                writer.write_record(&row).map_err(|e| {
+                    AgentError::permanent(
+                        "CSV_WRITE_ERROR",
+                        format!("Failed to write CSV row: {}", e),
+                    )
+                })?;
             }
         }
 
-        writer
-            .flush()
-            .map_err(|e| format!("Failed to flush CSV writer: {}", e))?;
+        writer.flush().map_err(|e| {
+            AgentError::permanent(
+                "CSV_WRITE_ERROR",
+                format!("Failed to flush CSV writer: {}", e),
+            )
+        })?;
     }
     // Writer is dropped here, releasing the borrow on output
 
@@ -451,7 +487,7 @@ pub fn to_csv(input: ToCsvInput) -> Result<Vec<u8>, String> {
     display_name = "Get CSV Header",
     description = "Extract CSV headers with type inference from the first data row"
 )]
-pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, String> {
+pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, AgentError> {
     // Convert bytes to string using specified encoding
     let data = input.data.to_bytes()?;
     let csv_string = decode_bytes(&data, &input.encoding)?;
@@ -479,7 +515,12 @@ pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, Stri
     let headers: Vec<String> = if input.use_header {
         reader
             .headers()
-            .map_err(|e| format!("Failed to read CSV headers: {}", e))?
+            .map_err(|e| {
+                AgentError::permanent(
+                    "CSV_PARSE_ERROR",
+                    format!("Failed to read CSV headers: {}", e),
+                )
+            })?
             .iter()
             .enumerate()
             .map(|(i, h)| {
@@ -495,8 +536,13 @@ pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, Stri
         let first_record = reader
             .records()
             .next()
-            .ok_or("CSV file is empty")?
-            .map_err(|e| format!("Failed to read first record: {}", e))?;
+            .ok_or_else(|| AgentError::permanent("CSV_EMPTY_FILE", "CSV file is empty"))?
+            .map_err(|e| {
+                AgentError::permanent(
+                    "CSV_PARSE_ERROR",
+                    format!("Failed to read first record: {}", e),
+                )
+            })?;
 
         (0..first_record.len())
             .map(|i| format!("Column {}", i + 1))
@@ -507,7 +553,9 @@ pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, Stri
     let first_data_row = reader.records().next();
 
     if let Some(record_result) = first_data_row {
-        let record = record_result.map_err(|e| format!("Failed to read data row: {}", e))?;
+        let record = record_result.map_err(|e| {
+            AgentError::permanent("CSV_PARSE_ERROR", format!("Failed to read data row: {}", e))
+        })?;
 
         for (i, header) in headers.iter().enumerate() {
             let inferred_type = if let Some(value) = record.get(i) {
@@ -533,11 +581,14 @@ pub fn get_header(input: GetHeaderInput) -> Result<HashMap<String, String>, Stri
 // ============================================================================
 
 /// Decodes bytes to string using specified encoding
-fn decode_bytes(data: &[u8], encoding: &str) -> Result<String, String> {
+fn decode_bytes(data: &[u8], encoding: &str) -> Result<String, AgentError> {
     match encoding.to_uppercase().as_str() {
-        "UTF-8" | "UTF8" => {
-            String::from_utf8(data.to_vec()).map_err(|e| format!("Failed to decode UTF-8: {}", e))
-        }
+        "UTF-8" | "UTF8" => String::from_utf8(data.to_vec()).map_err(|e| {
+            AgentError::permanent(
+                "CSV_ENCODING_ERROR",
+                format!("Failed to decode UTF-8: {}", e),
+            )
+        }),
         "LATIN-1" | "LATIN1" | "ISO-8859-1" | "ISO88591" | "WINDOWS-1252" | "CP1252" => {
             // Use encoding_rs for Latin-1/Windows-1252 encoding
             let (decoded, _, had_errors) = encoding_rs::WINDOWS_1252.decode(data);

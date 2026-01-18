@@ -92,7 +92,7 @@ pub enum HashDataInput {
 
 impl HashDataInput {
     /// Convert input to bytes for hashing
-    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, crate::types::AgentError> {
         match self {
             HashDataInput::Text(s) => Ok(s.as_bytes().to_vec()),
             HashDataInput::File(f) => f.decode(),

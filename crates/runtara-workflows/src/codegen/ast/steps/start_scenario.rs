@@ -175,7 +175,32 @@ fn emit_with_embedded_child(
 
             // Execute child scenario
             let child_result = #child_fn_name(Arc::new(child_scenario_inputs)).await
-                .map_err(|e| format!("Child scenario {} failed: {}", child_scenario_id, e))?;
+                .map_err(|e| {
+                    // Try to parse the child error as structured JSON
+                    let child_error: serde_json::Value = serde_json::from_str(&e)
+                        .unwrap_or_else(|_| serde_json::json!({
+                            "message": e,
+                            "code": null::<String>,
+                            "category": "unknown",
+                            "severity": "error"
+                        }));
+
+                    // Build structured error for StartScenario step
+                    let structured_error = serde_json::json!({
+                        "stepId": step_id,
+                        "stepName": step_name,
+                        "stepType": "StartScenario",
+                        "code": "CHILD_SCENARIO_FAILED",
+                        "message": format!("Child scenario {} failed", child_scenario_id),
+                        "category": child_error.get("category").and_then(|v| v.as_str()).unwrap_or("transient"),
+                        "severity": child_error.get("severity").and_then(|v| v.as_str()).unwrap_or("error"),
+                        "childScenarioId": child_scenario_id,
+                        "childError": child_error
+                    });
+                    serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                        format!("Child scenario {} failed: {}", child_scenario_id, e)
+                    })
+                })?;
 
             let result = serde_json::json!({
                 "stepId": step_id,
@@ -205,7 +230,20 @@ fn emit_with_embedded_child(
         {
             let mut __sdk = sdk().lock().await;
             if let Err(e) = __sdk.check_cancelled().await {
-                return Err(format!("StartScenario step {} cancelled: {}", #step_id, e));
+                let structured_error = serde_json::json!({
+                    "stepId": #step_id,
+                    "stepName": #step_name_display,
+                    "stepType": "StartScenario",
+                    "code": "STEP_CANCELLED",
+                    "message": format!("StartScenario step {} cancelled", #step_id),
+                    "category": "transient",
+                    "severity": "info",
+                    "childScenarioId": #child_scenario_id,
+                    "cancellationReason": e.to_string()
+                });
+                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                    format!("StartScenario step {} cancelled: {}", #step_id, e)
+                }));
             }
         }
     }
@@ -282,7 +320,20 @@ fn emit_placeholder(
         {
             let mut __sdk = sdk().lock().await;
             if let Err(e) = __sdk.check_cancelled().await {
-                return Err(format!("StartScenario step {} cancelled: {}", #step_id, e));
+                let structured_error = serde_json::json!({
+                    "stepId": #step_id,
+                    "stepName": #step_name_display,
+                    "stepType": "StartScenario",
+                    "code": "STEP_CANCELLED",
+                    "message": format!("StartScenario step {} cancelled", #step_id),
+                    "category": "transient",
+                    "severity": "info",
+                    "childScenarioId": #child_scenario_id,
+                    "cancellationReason": e.to_string()
+                });
+                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                    format!("StartScenario step {} cancelled: {}", #step_id, e)
+                }));
             }
         }
     }
@@ -729,5 +780,116 @@ mod tests {
         assert!(code.contains("indices_suffix"));
         // The format! macro becomes code using std::format! or similar in TokenStream
         assert!(code.contains("base") && code.contains("indices_suffix"));
+    }
+
+    // =============================================================================
+    // Structured error tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_with_embedded_child_structured_error() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Should emit structured error for child scenario failures
+        assert!(
+            code.contains("CHILD_SCENARIO_FAILED"),
+            "Should include CHILD_SCENARIO_FAILED error code"
+        );
+        assert!(
+            code.contains("structured_error"),
+            "Should build structured error"
+        );
+        assert!(
+            code.contains("childError"),
+            "Should include child error details"
+        );
+        assert!(code.contains("category"), "Should include error category");
+        assert!(code.contains("severity"), "Should include error severity");
+    }
+
+    #[test]
+    fn test_emit_with_embedded_child_structured_cancellation() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Should emit structured error for cancellation
+        assert!(
+            code.contains("STEP_CANCELLED"),
+            "Should include STEP_CANCELLED error code"
+        );
+        assert!(
+            code.contains("cancellationReason"),
+            "Should include cancellation reason"
+        );
+        assert!(
+            code.contains("\"transient\""),
+            "Cancellation should be transient category"
+        );
+        assert!(
+            code.contains("\"info\""),
+            "Cancellation should be info severity"
+        );
+    }
+
+    #[test]
+    fn test_emit_placeholder_structured_cancellation() {
+        let mut ctx = EmitContext::new(false);
+        let tokens = emit_placeholder(
+            "step-1",
+            Some("Test Step"),
+            "Test Step",
+            "child-scenario",
+            &mut ctx,
+        );
+
+        let code = tokens.to_string();
+
+        // Placeholder should also emit structured error for cancellation
+        assert!(
+            code.contains("STEP_CANCELLED"),
+            "Should include STEP_CANCELLED error code"
+        );
+        assert!(
+            code.contains("serde_json :: to_string"),
+            "Should serialize structured error to JSON"
+        );
+    }
+
+    #[test]
+    fn test_emit_child_error_propagation() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+
+        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Should parse child error as structured JSON
+        assert!(
+            code.contains("serde_json :: from_str"),
+            "Should parse child error as JSON"
+        );
+        // Should propagate child error category
+        assert!(
+            code.contains("child_error . get (\"category\")"),
+            "Should extract child error category"
+        );
+        // Should propagate child error severity
+        assert!(
+            code.contains("child_error . get (\"severity\")"),
+            "Should extract child error severity"
+        );
     }
 }

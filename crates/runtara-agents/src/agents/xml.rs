@@ -10,6 +10,7 @@
 #[allow(unused_imports)]
 use base64::{Engine as _, engine::general_purpose};
 
+use crate::types::AgentError;
 pub use crate::types::FileData;
 use runtara_agent_macro::{CapabilityInput, capability};
 #[allow(unused_imports)]
@@ -37,13 +38,18 @@ pub enum XmlDataInput {
 
 impl XmlDataInput {
     /// Convert any supported input into raw bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, AgentError> {
         match self {
             XmlDataInput::Bytes(b) => Ok(b.clone()),
-            XmlDataInput::File(f) => f.decode(),
-            XmlDataInput::Base64String(s) => general_purpose::STANDARD
-                .decode(s)
-                .map_err(|e| format!("Failed to decode base64 XML content: {}", e)),
+            XmlDataInput::File(f) => f
+                .decode()
+                .map_err(|e| AgentError::permanent("XML_DECODE_ERROR", e)),
+            XmlDataInput::Base64String(s) => general_purpose::STANDARD.decode(s).map_err(|e| {
+                AgentError::permanent(
+                    "XML_DECODE_ERROR",
+                    format!("Failed to decode base64 XML content: {}", e),
+                )
+            }),
         }
     }
 }
@@ -120,14 +126,15 @@ fn default_true() -> bool {
     display_name = "Parse XML",
     description = "Parse XML bytes into a JSON structure"
 )]
-pub fn from_xml(input: FromXmlInput) -> Result<Value, String> {
+pub fn from_xml(input: FromXmlInput) -> Result<Value, AgentError> {
     // Convert bytes to string using specified encoding
     let data = input.data.to_bytes()?;
     let xml_string = decode_bytes(&data, &input.encoding)?;
 
     // Parse the XML document
-    let doc = roxmltree::Document::parse(&xml_string)
-        .map_err(|e| format!("Failed to parse XML: {}", e))?;
+    let doc = roxmltree::Document::parse(&xml_string).map_err(|e| {
+        AgentError::permanent("XML_PARSE_ERROR", format!("Failed to parse XML: {}", e))
+    })?;
 
     // Convert the root element to JSON
     let root = doc.root_element();
@@ -146,16 +153,23 @@ pub fn from_xml(input: FromXmlInput) -> Result<Value, String> {
 // ============================================================================
 
 /// Decodes bytes to string using specified encoding
-fn decode_bytes(data: &[u8], encoding: &str) -> Result<String, String> {
+fn decode_bytes(data: &[u8], encoding: &str) -> Result<String, AgentError> {
     match encoding.to_uppercase().as_str() {
-        "UTF-8" | "UTF8" => {
-            String::from_utf8(data.to_vec()).map_err(|e| format!("Failed to decode UTF-8: {}", e))
-        }
+        "UTF-8" | "UTF8" => String::from_utf8(data.to_vec()).map_err(|e| {
+            AgentError::permanent(
+                "XML_ENCODING_ERROR",
+                format!("Failed to decode UTF-8: {}", e),
+            )
+        }),
         _ => {
             // For other encodings, we'd need encoding_rs or similar
             // For now, just try UTF-8
-            String::from_utf8(data.to_vec())
-                .map_err(|e| format!("Encoding '{}' not supported, tried UTF-8: {}", encoding, e))
+            String::from_utf8(data.to_vec()).map_err(|e| {
+                AgentError::permanent(
+                    "XML_ENCODING_ERROR",
+                    format!("Encoding '{}' not supported, tried UTF-8: {}", encoding, e),
+                )
+            })
         }
     }
 }
@@ -448,7 +462,9 @@ mod tests {
 
         let result = from_xml(input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse XML"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "XML_PARSE_ERROR");
+        assert!(err.message.contains("Failed to parse XML"));
     }
 
     #[test]

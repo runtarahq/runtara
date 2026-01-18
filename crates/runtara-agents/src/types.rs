@@ -38,10 +38,16 @@ pub struct FileData {
 
 impl FileData {
     /// Decode the base64 content to raw bytes
-    pub fn decode(&self) -> Result<Vec<u8>, String> {
+    pub fn decode(&self) -> Result<Vec<u8>, AgentError> {
         general_purpose::STANDARD
             .decode(&self.content)
-            .map_err(|e| format!("Failed to decode base64 file content: {}", e))
+            .map_err(|e| {
+                AgentError::permanent(
+                    "FILE_BASE64_DECODE_ERROR",
+                    format!("Failed to decode base64 file content: {}", e),
+                )
+                .with_attr("decode_error", e.to_string())
+            })
     }
 
     /// Create FileData from raw bytes
@@ -54,32 +60,58 @@ impl FileData {
     }
 
     /// Try to parse a Value as FileData
-    pub fn from_value(value: &Value) -> Result<Self, String> {
+    pub fn from_value(value: &Value) -> Result<Self, AgentError> {
         match value {
             Value::String(s) => Ok(FileData {
                 content: s.clone(),
                 filename: None,
                 mime_type: None,
             }),
-            Value::Object(_) => serde_json::from_value(value.clone())
-                .map_err(|e| format!("Invalid file data structure: {}", e)),
+            Value::Object(_) => serde_json::from_value(value.clone()).map_err(|e| {
+                AgentError::permanent(
+                    "FILE_INVALID_STRUCTURE",
+                    format!("Invalid file data structure: {}", e),
+                )
+                .with_attr("parse_error", e.to_string())
+            }),
             Value::Array(arr) => {
                 let mut bytes = Vec::with_capacity(arr.len());
-                for v in arr {
-                    let num = v
-                        .as_u64()
-                        .ok_or_else(|| "Byte array must contain only numbers".to_string())?;
+                for (idx, v) in arr.iter().enumerate() {
+                    let num = v.as_u64().ok_or_else(|| {
+                        AgentError::permanent(
+                            "FILE_INVALID_BYTE_ARRAY",
+                            "Byte array must contain only numbers",
+                        )
+                        .with_attr("index", idx.to_string())
+                    })?;
                     if num > 255 {
-                        return Err("Byte values must be in the range 0-255".to_string());
+                        return Err(AgentError::permanent(
+                            "FILE_BYTE_OUT_OF_RANGE",
+                            format!(
+                                "Byte value {} at index {} must be in the range 0-255",
+                                num, idx
+                            ),
+                        )
+                        .with_attr("index", idx.to_string())
+                        .with_attr("value", num.to_string()));
                     }
                     bytes.push(num as u8);
                 }
                 Ok(FileData::from_bytes(bytes, None, None))
             }
-            _ => Err(
-                "File data must be a string (base64), byte array, or object with content field"
-                    .to_string(),
-            ),
+            other => {
+                let type_name = match other {
+                    Value::Null => "null",
+                    Value::Bool(_) => "boolean",
+                    Value::Number(_) => "number",
+                    _ => "unknown",
+                };
+                Err(AgentError::permanent(
+                    "FILE_INVALID_INPUT_TYPE",
+                    "File data must be a string (base64), byte array, or object with content field",
+                )
+                .with_attr("received_type", type_name))
+            }
         }
     }
 }
@@ -218,6 +250,16 @@ impl fmt::Display for AgentError {
 }
 
 impl std::error::Error for AgentError {}
+
+/// Convert AgentError to String for compatibility with the `#[capability]` macro.
+/// The macro-generated executor wraps function results in `Result<Value, String>`,
+/// so we need this conversion to use `?` with `Result<T, AgentError>` functions.
+impl From<AgentError> for String {
+    fn from(err: AgentError) -> Self {
+        // Serialize the full AgentError to JSON for rich error information
+        serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
+    }
+}
 
 /// Classify an HTTP status code into an error category.
 ///
