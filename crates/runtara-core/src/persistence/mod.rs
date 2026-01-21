@@ -156,6 +156,67 @@ pub struct ListEventsFilter {
     pub sort_order: EventSortOrder,
 }
 
+// ============================================================================
+// Step Summary Types (for paired step_debug_start/end events)
+// ============================================================================
+
+/// Status of a step execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    /// Step is currently running (has start event, no end event yet).
+    Running,
+    /// Step completed successfully.
+    Completed,
+    /// Step failed with an error.
+    Failed,
+}
+
+/// Summary of a step execution, pairing step_debug_start and step_debug_end events.
+#[derive(Debug, Clone)]
+pub struct StepSummaryRecord {
+    /// Unique step identifier within the instance.
+    pub step_id: String,
+    /// Human-readable step name.
+    pub step_name: Option<String>,
+    /// Step type (e.g., "Agent", "Conditional", "Split").
+    pub step_type: String,
+    /// Current status of the step.
+    pub status: StepStatus,
+    /// When the step started executing.
+    pub started_at: DateTime<Utc>,
+    /// When the step completed (None if still running).
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Duration in milliseconds (None if still running).
+    pub duration_ms: Option<i64>,
+    /// Step inputs from step_debug_start payload.
+    pub inputs: Option<serde_json::Value>,
+    /// Step outputs from step_debug_end payload.
+    pub outputs: Option<serde_json::Value>,
+    /// Error details from step_debug_end payload (if failed).
+    pub error: Option<serde_json::Value>,
+    /// Scope ID for nested execution contexts (Split/While/StartScenario).
+    pub scope_id: Option<String>,
+    /// Parent scope ID for hierarchy.
+    pub parent_scope_id: Option<String>,
+}
+
+/// Filter options for listing step summaries.
+#[derive(Debug, Clone, Default)]
+pub struct ListStepSummariesFilter {
+    /// Sort order for steps by started_at.
+    pub sort_order: EventSortOrder,
+    /// Filter by step status.
+    pub status: Option<StepStatus>,
+    /// Filter by step type (e.g., "Agent", "Conditional").
+    pub step_type: Option<String>,
+    /// Filter by scope_id (for steps within a specific scope).
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id (for direct children of a scope).
+    pub parent_scope_id: Option<String>,
+    /// When true, only return steps with no parent_scope_id (root-level steps).
+    pub root_scopes_only: bool,
+}
+
 /// Error history record for structured error tracking.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ErrorHistoryRecord {
@@ -454,6 +515,29 @@ pub trait Persistence: Send + Sync {
         &self,
         instance_id: &str,
         filter: &ListEventsFilter,
+    ) -> Result<i64, CoreError>;
+
+    // ========================================================================
+    // Step Summaries (paired step_debug_start/end events)
+    // ========================================================================
+
+    /// List step summaries for an instance, pairing step_debug_start and step_debug_end events.
+    ///
+    /// Returns unified step execution records with status, timing, inputs/outputs.
+    /// Steps are matched by step_id within the same scope context.
+    async fn list_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StepSummaryRecord>, CoreError>;
+
+    /// Count step summaries for an instance with filtering.
+    async fn count_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
     ) -> Result<i64, CoreError>;
 
     // ========================================================================

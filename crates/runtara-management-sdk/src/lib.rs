@@ -56,8 +56,9 @@ pub use types::{
     EventSummary, GetTenantMetricsOptions, HealthStatus, ImageSummary, InstanceInfo,
     InstanceStatus, InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult,
     ListEventsOptions, ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
-    ListInstancesOrder, ListInstancesResult, MetricsBucket, MetricsGranularity,
-    RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions, RunnerType, ScopeInfo,
-    SignalType, StartInstanceOptions, StartInstanceResult, StopInstanceOptions,
+    ListInstancesOrder, ListInstancesResult, ListStepSummariesOptions, ListStepSummariesResult,
+    MetricsBucket, MetricsGranularity, RegisterImageOptions, RegisterImageResult,
+    RegisterImageStreamOptions, RunnerType, ScopeInfo, SignalType, StartInstanceOptions,
+    StartInstanceResult, StepSortOrder, StepStatus, StepSummary, StopInstanceOptions,
     TenantMetricsResult, TestCapabilityOptions, TestCapabilityResult,
 };

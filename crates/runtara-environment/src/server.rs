@@ -349,6 +349,13 @@ async fn handle_stream(
                 message: e.to_string(),
             }),
         },
+        Request::ListStepSummaries(req) => match handle_list_step_summaries(&state, req).await {
+            Ok(resp) => Response::ListStepSummaries(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_STEP_SUMMARIES_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
     };
 
     // Send response
@@ -1324,4 +1331,108 @@ async fn handle_get_scope_ancestors(
     }
 
     Ok(environment_proto::GetScopeAncestorsResponse { ancestors })
+}
+
+/// Handle list step summaries request.
+/// Returns paired step events as unified records with status, duration, and I/O.
+async fn handle_list_step_summaries(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::ListStepSummariesRequest,
+) -> Result<environment_proto::ListStepSummariesResponse, crate::error::Error> {
+    use runtara_core::persistence::{EventSortOrder, ListStepSummariesFilter, StepStatus};
+
+    debug!(
+        instance_id = %req.instance_id,
+        status = ?req.status,
+        step_type = ?req.step_type,
+        scope_id = ?req.scope_id,
+        limit = ?req.limit,
+        offset = ?req.offset,
+        "Listing step summaries via shared persistence"
+    );
+
+    // Validate inputs
+    if req.instance_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "instance_id is required".to_string(),
+        ));
+    }
+
+    let limit = req.limit.unwrap_or(100) as i64;
+    let offset = req.offset.unwrap_or(0) as i64;
+
+    // Parse sort order from proto string
+    let sort_order = match req.sort_order.as_deref() {
+        Some("asc") => EventSortOrder::Asc,
+        _ => EventSortOrder::Desc, // Default to DESC (newest first)
+    };
+
+    // Parse status filter
+    let status = match req.status.as_deref() {
+        Some("running") => Some(StepStatus::Running),
+        Some("completed") => Some(StepStatus::Completed),
+        Some("failed") => Some(StepStatus::Failed),
+        _ => None,
+    };
+
+    // Build filter
+    let filter = ListStepSummariesFilter {
+        sort_order,
+        status,
+        step_type: req.step_type,
+        scope_id: req.scope_id,
+        parent_scope_id: req.parent_scope_id,
+        root_scopes_only: req.root_scopes_only,
+    };
+
+    // Get step summaries from persistence
+    let steps = state
+        .persistence
+        .list_step_summaries(&req.instance_id, &filter, limit, offset)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to list step summaries: {}", e)))?;
+
+    // Get total count for pagination
+    let total_count = state
+        .persistence
+        .count_step_summaries(&req.instance_id, &filter)
+        .await
+        .map_err(|e| {
+            crate::error::Error::Other(format!("Failed to count step summaries: {}", e))
+        })?;
+
+    // Convert to proto summaries
+    let summaries: Vec<environment_proto::StepSummary> = steps
+        .into_iter()
+        .map(|step| {
+            // Convert status to proto enum
+            let status = match step.status {
+                StepStatus::Running => environment_proto::StepStatus::Running,
+                StepStatus::Completed => environment_proto::StepStatus::Completed,
+                StepStatus::Failed => environment_proto::StepStatus::Failed,
+            };
+
+            environment_proto::StepSummary {
+                step_id: step.step_id,
+                step_name: step.step_name,
+                step_type: step.step_type,
+                status: status.into(),
+                started_at_ms: step.started_at.timestamp_millis(),
+                completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
+                duration_ms: step.duration_ms,
+                inputs: step.inputs.map(|v| v.to_string().into_bytes()),
+                outputs: step.outputs.map(|v| v.to_string().into_bytes()),
+                error: step.error.map(|v| v.to_string().into_bytes()),
+                scope_id: step.scope_id,
+                parent_scope_id: step.parent_scope_id,
+            }
+        })
+        .collect();
+
+    Ok(environment_proto::ListStepSummariesResponse {
+        steps: summaries,
+        total_count: total_count as u32,
+        limit: limit as u32,
+        offset: offset as u32,
+    })
 }

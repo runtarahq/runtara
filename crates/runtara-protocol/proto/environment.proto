@@ -423,6 +423,51 @@ message EventSummary {
 }
 
 // ============================================================================
+// Step Summaries (paired step events)
+// ============================================================================
+
+enum StepStatus {
+  STEP_STATUS_RUNNING = 0;
+  STEP_STATUS_COMPLETED = 1;
+  STEP_STATUS_FAILED = 2;
+}
+
+// List step summaries for an instance (pairs step_debug_start and step_debug_end events)
+message ListStepSummariesRequest {
+  string instance_id = 1;
+  optional string status = 2; // Filter by status: "running", "completed", "failed"
+  optional string step_type = 3; // Filter by step type (e.g., "Http", "Transform")
+  optional string scope_id = 4; // Filter by scope_id
+  optional string parent_scope_id = 5; // Filter by parent_scope_id
+  bool root_scopes_only = 6; // When true, only return steps with no parent_scope_id
+  optional string sort_order = 7; // Sort order: "asc" (oldest first) or "desc" (newest first, default)
+  optional uint32 limit = 8; // Max results (default: 100)
+  optional uint32 offset = 9; // Pagination offset
+}
+
+message ListStepSummariesResponse {
+  repeated StepSummary steps = 1;
+  uint32 total_count = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message StepSummary {
+  string step_id = 1;
+  optional string step_name = 2;
+  string step_type = 3;
+  StepStatus status = 4;
+  int64 started_at_ms = 5;
+  optional int64 completed_at_ms = 6;
+  optional int64 duration_ms = 7;
+  optional bytes inputs = 8; // JSON inputs
+  optional bytes outputs = 9; // JSON outputs (if completed)
+  optional bytes error = 10; // JSON error (if failed)
+  optional string scope_id = 11;
+  optional string parent_scope_id = 12;
+}
+
+// ============================================================================
 // Scope Hierarchy (for call stack reconstruction)
 // ============================================================================
 
@@ -483,6 +528,8 @@ message RpcRequest {
     GetTenantMetricsRequest get_tenant_metrics = 21;
     // Scope hierarchy
     GetScopeAncestorsRequest get_scope_ancestors = 22;
+    // Step summaries (paired events)
+    ListStepSummariesRequest list_step_summaries = 23;
   }
 }
 
@@ -519,6 +566,8 @@ message RpcResponse {
     GetTenantMetricsResponse get_tenant_metrics = 21;
     // Scope hierarchy
     GetScopeAncestorsResponse get_scope_ancestors = 22;
+    // Step summaries
+    ListStepSummariesResponse list_step_summaries = 23;
   }
 }
 

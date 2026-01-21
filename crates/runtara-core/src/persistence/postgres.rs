@@ -31,7 +31,8 @@ impl PostgresPersistence {
 
 use super::{
     CheckpointRecord, CustomSignalRecord, EventRecord, EventSortOrder, InstanceRecord,
-    ListEventsFilter, Persistence, SignalRecord, WakeEntry,
+    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepStatus,
+    StepSummaryRecord, WakeEntry,
 };
 
 // ============================================================================
@@ -782,6 +783,214 @@ pub async fn count_events(
 }
 
 // ============================================================================
+// Step Summary Operations (paired step_debug_start/end events)
+// ============================================================================
+
+/// List step summaries for an instance, pairing step_debug_start and step_debug_end events.
+///
+/// Uses a CTE to join start and end events by step_id, computing status and duration.
+/// Supports filtering by status, step_type, scope hierarchy, and sorting.
+pub async fn list_step_summaries(
+    pool: &PgPool,
+    instance_id: &str,
+    filter: &ListStepSummariesFilter,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<StepSummaryRecord>, CoreError> {
+    // Determine sort order
+    let order_direction = match filter.sort_order {
+        EventSortOrder::Asc => "ASC",
+        EventSortOrder::Desc => "DESC",
+    };
+
+    // Convert status filter to string for SQL CASE matching
+    let status_filter: Option<&str> = filter.status.map(|s| match s {
+        StepStatus::Running => "running",
+        StepStatus::Completed => "completed",
+        StepStatus::Failed => "failed",
+    });
+
+    // Build query with dynamic ORDER BY
+    let query = format!(
+        r#"
+        WITH start_events AS (
+            SELECT
+                id,
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
+                convert_from(payload, 'UTF8')::jsonb->>'step_name' as step_name,
+                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type,
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
+                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id,
+                convert_from(payload, 'UTF8')::jsonb->'inputs' as inputs,
+                created_at
+            FROM instance_events
+            WHERE instance_id = $1 AND subtype = 'step_debug_start'
+        ),
+        end_events AS (
+            SELECT
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
+                convert_from(payload, 'UTF8')::jsonb->'outputs' as outputs,
+                convert_from(payload, 'UTF8')::jsonb->'error' as error,
+                created_at
+            FROM instance_events
+            WHERE instance_id = $1 AND subtype = 'step_debug_end'
+        ),
+        paired AS (
+            SELECT
+                s.step_id,
+                s.step_name,
+                s.step_type,
+                s.scope_id,
+                s.parent_scope_id,
+                s.inputs,
+                s.created_at as started_at,
+                e.created_at as completed_at,
+                e.outputs,
+                e.error,
+                CASE
+                    WHEN e.step_id IS NULL THEN 'running'
+                    WHEN e.error IS NOT NULL AND e.error::text != 'null' THEN 'failed'
+                    ELSE 'completed'
+                END as status,
+                CASE
+                    WHEN e.created_at IS NOT NULL
+                    THEN EXTRACT(MILLISECONDS FROM (e.created_at - s.created_at))::bigint
+                    ELSE NULL
+                END as duration_ms,
+                s.id as sort_id
+            FROM start_events s
+            LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
+        )
+        SELECT
+            step_id, step_name, step_type, scope_id, parent_scope_id,
+            inputs, started_at, completed_at, outputs, error, status, duration_ms
+        FROM paired
+        WHERE ($2::TEXT IS NULL OR status = $2)
+          AND ($3::TEXT IS NULL OR step_type = $3)
+          AND ($4::TEXT IS NULL OR scope_id = $4)
+          AND ($5::TEXT IS NULL OR parent_scope_id = $5)
+          AND (NOT $6 OR parent_scope_id IS NULL)
+        ORDER BY sort_id {}
+        LIMIT $7 OFFSET $8
+        "#,
+        order_direction
+    );
+
+    // Execute query and map results
+    let rows = sqlx::query(&query)
+        .bind(instance_id)
+        .bind(status_filter)
+        .bind(&filter.step_type)
+        .bind(&filter.scope_id)
+        .bind(&filter.parent_scope_id)
+        .bind(filter.root_scopes_only)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+    // Map rows to StepSummaryRecord
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        use sqlx::Row;
+
+        let status_str: &str = row.get("status");
+        let status = match status_str {
+            "running" => StepStatus::Running,
+            "failed" => StepStatus::Failed,
+            _ => StepStatus::Completed,
+        };
+
+        records.push(StepSummaryRecord {
+            step_id: row.get("step_id"),
+            step_name: row.get("step_name"),
+            step_type: row
+                .get::<Option<String>, _>("step_type")
+                .unwrap_or_default(),
+            status,
+            started_at: row.get("started_at"),
+            completed_at: row.get("completed_at"),
+            duration_ms: row.get("duration_ms"),
+            inputs: row.get("inputs"),
+            outputs: row.get("outputs"),
+            error: row.get("error"),
+            scope_id: row.get("scope_id"),
+            parent_scope_id: row.get("parent_scope_id"),
+        });
+    }
+
+    Ok(records)
+}
+
+/// Count step summaries for an instance with filtering.
+pub async fn count_step_summaries(
+    pool: &PgPool,
+    instance_id: &str,
+    filter: &ListStepSummariesFilter,
+) -> Result<i64, CoreError> {
+    // Convert status filter to string for SQL CASE matching
+    let status_filter: Option<&str> = filter.status.map(|s| match s {
+        StepStatus::Running => "running",
+        StepStatus::Completed => "completed",
+        StepStatus::Failed => "failed",
+    });
+
+    let count: (i64,) = sqlx::query_as(
+        r#"
+        WITH start_events AS (
+            SELECT
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
+                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type,
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
+                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id
+            FROM instance_events
+            WHERE instance_id = $1 AND subtype = 'step_debug_start'
+        ),
+        end_events AS (
+            SELECT
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
+                convert_from(payload, 'UTF8')::jsonb->'error' as error
+            FROM instance_events
+            WHERE instance_id = $1 AND subtype = 'step_debug_end'
+        ),
+        paired AS (
+            SELECT
+                s.step_id,
+                s.step_type,
+                s.scope_id,
+                s.parent_scope_id,
+                CASE
+                    WHEN e.step_id IS NULL THEN 'running'
+                    WHEN e.error IS NOT NULL AND e.error::text != 'null' THEN 'failed'
+                    ELSE 'completed'
+                END as status
+            FROM start_events s
+            LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
+        )
+        SELECT COUNT(*)
+        FROM paired
+        WHERE ($2::TEXT IS NULL OR status = $2)
+          AND ($3::TEXT IS NULL OR step_type = $3)
+          AND ($4::TEXT IS NULL OR scope_id = $4)
+          AND ($5::TEXT IS NULL OR parent_scope_id = $5)
+          AND (NOT $6 OR parent_scope_id IS NULL)
+        "#,
+    )
+    .bind(instance_id)
+    .bind(status_filter)
+    .bind(&filter.step_type)
+    .bind(&filter.scope_id)
+    .bind(&filter.parent_scope_id)
+    .bind(filter.root_scopes_only)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0)
+}
+
+// ============================================================================
 // Signal Operations
 // ============================================================================
 
@@ -1205,6 +1414,24 @@ impl Persistence for PostgresPersistence {
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
         count_events(&self.pool, instance_id, filter).await
+    }
+
+    async fn list_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+        list_step_summaries(&self.pool, instance_id, filter, limit, offset).await
+    }
+
+    async fn count_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+    ) -> Result<i64, CoreError> {
+        count_step_summaries(&self.pool, instance_id, filter).await
     }
 
     async fn complete_instance_extended(

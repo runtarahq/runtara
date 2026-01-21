@@ -274,7 +274,7 @@ mod tests {
     use crate::error::CoreError;
     use crate::persistence::{
         CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-        Persistence, SignalRecord,
+        ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
     };
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
@@ -466,6 +466,24 @@ mod tests {
             &self,
             _instance_id: &str,
             _filter: &ListEventsFilter,
+        ) -> Result<i64, CoreError> {
+            Ok(0)
+        }
+
+        async fn list_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &ListStepSummariesFilter,
+            _limit: i64,
+            _offset: i64,
+        ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn count_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &ListStepSummariesFilter,
         ) -> Result<i64, CoreError> {
             Ok(0)
         }

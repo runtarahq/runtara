@@ -737,7 +737,8 @@ pub fn map_signal_type(signal_type: SignalType) -> &'static str {
 mod tests {
     use super::*;
     use crate::persistence::{
-        CheckpointRecord, CustomSignalRecord, InstanceRecord, ListEventsFilter, SignalRecord,
+        CheckpointRecord, CustomSignalRecord, InstanceRecord, ListEventsFilter,
+        ListStepSummariesFilter, SignalRecord, StepSummaryRecord,
     };
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -1105,6 +1106,24 @@ mod tests {
             &self,
             _instance_id: &str,
             _filter: &ListEventsFilter,
+        ) -> std::result::Result<i64, CoreError> {
+            Ok(0)
+        }
+
+        async fn list_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &ListStepSummariesFilter,
+            _limit: i64,
+            _offset: i64,
+        ) -> std::result::Result<Vec<StepSummaryRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn count_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &ListStepSummariesFilter,
         ) -> std::result::Result<i64, CoreError> {
             Ok(0)
         }
