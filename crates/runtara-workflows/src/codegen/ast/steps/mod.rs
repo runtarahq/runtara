@@ -281,8 +281,8 @@ pub fn emit_step_debug_start(
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
-    // Extract loop_indices and scope_id from scenario inputs if available
-    let (loop_indices_expr, scope_id_expr) = scenario_inputs_var
+    // Extract loop_indices, scope_id, and parent_scope_id from scenario inputs if available
+    let (loop_indices_expr, scope_id_expr, parent_scope_id_expr) = scenario_inputs_var
         .map(|v| {
             (
                 quote! {
@@ -299,10 +299,15 @@ pub fn emit_step_debug_start(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 },
+                // Extract parent_scope_id from ScenarioInputs struct field
+                quote! {
+                    #v.parent_scope_id.clone()
+                },
             )
         })
         .unwrap_or((
             quote! { serde_json::Value::Array(vec![]) },
+            quote! { None::<String> },
             quote! { None::<String> },
         ));
 
@@ -326,12 +331,14 @@ pub fn emit_step_debug_start(
 
             let __loop_indices = #loop_indices_expr;
             let __scope_id: Option<String> = #scope_id_expr;
+            let __parent_scope_id: Option<String> = #parent_scope_id_expr;
 
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
                 "scope_id": __scope_id,
+                "parent_scope_id": __parent_scope_id,
                 "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -386,8 +393,8 @@ pub fn emit_step_debug_end(
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
-    // Extract loop_indices and scope_id from scenario inputs if available
-    let (loop_indices_expr, scope_id_expr) = scenario_inputs_var
+    // Extract loop_indices, scope_id, and parent_scope_id from scenario inputs if available
+    let (loop_indices_expr, scope_id_expr, parent_scope_id_expr) = scenario_inputs_var
         .map(|v| {
             (
                 quote! {
@@ -404,10 +411,15 @@ pub fn emit_step_debug_end(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                 },
+                // Extract parent_scope_id from ScenarioInputs struct field
+                quote! {
+                    #v.parent_scope_id.clone()
+                },
             )
         })
         .unwrap_or((
             quote! { serde_json::Value::Array(vec![]) },
+            quote! { None::<String> },
             quote! { None::<String> },
         ));
 
@@ -432,12 +444,14 @@ pub fn emit_step_debug_end(
 
             let __loop_indices = #loop_indices_expr;
             let __scope_id: Option<String> = #scope_id_expr;
+            let __parent_scope_id: Option<String> = #parent_scope_id_expr;
 
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
                 "scope_id": __scope_id,
+                "parent_scope_id": __parent_scope_id,
                 "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
