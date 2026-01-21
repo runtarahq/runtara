@@ -23,6 +23,9 @@ pub mod paths;
 // Agent capability metadata types for runtime introspection
 pub mod agent_meta;
 
+// Type coercion utilities for agent inputs
+pub mod coercion;
+
 // Specification generation (DSL schema, OpenAPI, compatibility)
 pub mod spec;
 
