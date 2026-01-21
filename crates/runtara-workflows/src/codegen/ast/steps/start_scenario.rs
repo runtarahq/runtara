@@ -180,10 +180,13 @@ fn emit_with_embedded_child(
             let mut __child_vars = serde_json::Map::new();
             __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
 
+            // Inner steps use the child scenario scope as their parent.
+            // This ensures `root_scopes_only` filter correctly excludes them
+            // (they have non-null parent_scope_id = the child scenario scope).
             let child_scenario_inputs = ScenarioInputs {
                 data: Arc::new(child_inputs),
                 variables: Arc::new(serde_json::Value::Object(__child_vars)),
-                parent_scope_id,
+                parent_scope_id: Some(__child_scope_id.clone()),
             };
 
             // Execute child scenario
