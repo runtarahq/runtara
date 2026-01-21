@@ -214,6 +214,9 @@ fn emit_input_structs() -> TokenStream {
         struct ScenarioInputs {
             data: Arc<serde_json::Value>,
             variables: Arc<serde_json::Value>,
+            /// Parent scope ID for hierarchy tracking. Set when entering Split/While/StartScenario scopes.
+            /// This is separate from variables to preserve variable isolation in StartScenario.
+            parent_scope_id: Option<String>,
         }
     }
 }
@@ -355,6 +358,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             let scenario_inputs = ScenarioInputs {
                 data: Arc::new(data),
                 variables: Arc::new(variables),
+                parent_scope_id: None, // Top-level has no parent scope
             };
 
             // Execute the workflow

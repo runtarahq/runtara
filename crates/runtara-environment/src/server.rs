@@ -342,6 +342,13 @@ async fn handle_stream(
                 message: e.to_string(),
             }),
         },
+        Request::GetScopeAncestors(req) => match handle_get_scope_ancestors(&state, req).await {
+            Ok(resp) => Response::GetScopeAncestors(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "GET_SCOPE_ANCESTORS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
     };
 
     // Send response
@@ -1061,6 +1068,8 @@ async fn handle_list_events(
         created_after,
         created_before,
         payload_contains: req.payload_contains,
+        scope_id: req.scope_id,
+        parent_scope_id: req.parent_scope_id,
     };
 
     // Get events from persistence
@@ -1192,4 +1201,116 @@ async fn handle_get_tenant_metrics(
         granularity: proto_granularity,
         buckets,
     })
+}
+
+/// Handle get scope ancestors request.
+/// Walks up the scope hierarchy by querying scope_enter events and following parent_scope_id.
+async fn handle_get_scope_ancestors(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::GetScopeAncestorsRequest,
+) -> Result<environment_proto::GetScopeAncestorsResponse, crate::error::Error> {
+    use runtara_core::persistence::ListEventsFilter;
+
+    debug!(
+        instance_id = %req.instance_id,
+        scope_id = %req.scope_id,
+        "Getting scope ancestors"
+    );
+
+    // Validate inputs
+    if req.instance_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "instance_id is required".to_string(),
+        ));
+    }
+    if req.scope_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "scope_id is required".to_string(),
+        ));
+    }
+
+    // Fetch all scope_enter events for this instance
+    let filter = ListEventsFilter {
+        event_type: Some("scope_enter".to_string()),
+        subtype: None,
+        created_after: None,
+        created_before: None,
+        payload_contains: None,
+        scope_id: None,
+        parent_scope_id: None,
+    };
+
+    let events = state
+        .persistence
+        .list_events(&req.instance_id, &filter, 10000, 0) // Large limit to get all scope events
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to list scope events: {}", e)))?;
+
+    // Build a map of scope_id -> ScopeInfo from scope_enter events
+    let mut scope_map: std::collections::HashMap<String, environment_proto::ScopeInfo> =
+        std::collections::HashMap::new();
+
+    for event in events {
+        let Some(payload) = &event.payload else {
+            continue;
+        };
+        let Ok(payload_json) = serde_json::from_slice::<serde_json::Value>(payload) else {
+            continue;
+        };
+        let Some(scope_id) = payload_json.get("scope_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let parent_scope_id = payload_json
+            .get("parent_scope_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let step_id = payload_json
+            .get("step_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let step_name = payload_json
+            .get("step_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let step_type = payload_json
+            .get("step_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let index = payload_json
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .map(|i| i as u32);
+
+        scope_map.insert(
+            scope_id.to_string(),
+            environment_proto::ScopeInfo {
+                scope_id: scope_id.to_string(),
+                parent_scope_id,
+                step_id,
+                step_name,
+                step_type,
+                index,
+                created_at_ms: event.created_at.timestamp_millis(),
+            },
+        );
+    }
+
+    // Walk up the hierarchy from the requested scope_id
+    let mut ancestors = Vec::new();
+    let mut current_scope_id = Some(req.scope_id.clone());
+
+    while let Some(scope_id) = current_scope_id {
+        if let Some(scope_info) = scope_map.get(&scope_id) {
+            ancestors.push(scope_info.clone());
+            current_scope_id = scope_info.parent_scope_id.clone();
+        } else {
+            // Scope not found - this is the end of the chain (or scope doesn't exist)
+            break;
+        }
+    }
+
+    Ok(environment_proto::GetScopeAncestorsResponse { ancestors })
 }

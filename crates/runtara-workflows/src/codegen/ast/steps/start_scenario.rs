@@ -164,13 +164,26 @@ fn emit_with_embedded_child(
             child_scenario_id: &str,
             step_id: &str,
             step_name: &str,
+            parent_scope_id: Option<String>,
         ) -> std::result::Result<serde_json::Value, String> {
+            // Generate scope ID for this child scenario execution
+            let __child_scope_id = if let Some(ref parent) = parent_scope_id {
+                format!("{}_{}", parent, step_id)
+            } else {
+                format!("sc_{}", step_id)
+            };
+
             // Prepare child scenario inputs
             // All mapped inputs become child's data (myParam1 -> data.myParam1)
             // Child variables are always isolated - never inherited from parent
+            // BUT we inject _scope_id so scope tracking works within child
+            let mut __child_vars = serde_json::Map::new();
+            __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
+
             let child_scenario_inputs = ScenarioInputs {
                 data: Arc::new(child_inputs),
-                variables: Arc::new(serde_json::Value::Object(serde_json::Map::new())),
+                variables: Arc::new(serde_json::Value::Object(__child_vars)),
+                parent_scope_id,
             };
 
             // Execute child scenario
@@ -221,6 +234,13 @@ fn emit_with_embedded_child(
             Ok(result)
         }
 
+        // Get parent_scope_id from parent scenario's variables
+        let __parent_scope_id = (*#scenario_inputs_var.variables)
+            .as_object()
+            .and_then(|vars| vars.get("_scope_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Execute the durable child scenario function
         let #step_var = #durable_fn_name(
             &__durable_cache_key,
@@ -228,6 +248,7 @@ fn emit_with_embedded_child(
             #child_scenario_id,
             #step_id,
             #step_name_display,
+            __parent_scope_id,
         ).await?;
 
         #debug_end

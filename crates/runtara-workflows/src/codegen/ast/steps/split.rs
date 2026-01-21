@@ -205,9 +205,36 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                 // Inject iteration index as _index (0-based) for backward compatibility
                 merged_vars.insert("_index".to_string(), serde_json::json!(idx));
 
+                // Generate scope ID for this iteration
+                let __iteration_scope_id = {
+                    let parent_scope = merged_vars.get("_scope_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if let Some(parent) = parent_scope {
+                        format!("{}_{}_{}", parent, step_id, idx)
+                    } else {
+                        format!("sc_{}_{}", step_id, idx)
+                    }
+                };
+
+                // Inject _scope_id into subgraph variables
+                merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
+
+                // Get parent_scope_id from the current scope (before this iteration)
+                let __parent_scope_id = merged_vars.get("_scope_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| *s != __iteration_scope_id)
+                    .map(|s| s.to_string())
+                    .or_else(|| variables_base.as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()));
+
                 let subgraph_inputs = ScenarioInputs {
                     data: Arc::new(item.clone()),
                     variables: Arc::new(serde_json::Value::Object(merged_vars)),
+                    parent_scope_id: __parent_scope_id,
                 };
 
                 match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {

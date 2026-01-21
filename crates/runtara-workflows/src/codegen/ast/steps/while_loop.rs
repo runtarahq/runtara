@@ -139,9 +139,36 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
                     __loop_vars.insert("_previousOutputs".to_string(), __loop_outputs.clone());
                 }
 
+                // Generate scope ID for this iteration
+                let __iteration_scope_id = {
+                    let parent_scope = __loop_vars.get("_scope_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if let Some(parent) = parent_scope {
+                        format!("{}_{}_{}", parent, #step_id, __loop_index)
+                    } else {
+                        format!("sc_{}_{}", #step_id, __loop_index)
+                    }
+                };
+
+                // Get parent_scope_id before updating _scope_id
+                let __parent_scope_id = __loop_vars.get("_scope_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| (*#inputs_var.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()));
+
+                // Inject _scope_id into subgraph variables
+                __loop_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
+
                 let __subgraph_inputs = ScenarioInputs {
                     data: #inputs_var.data.clone(),
                     variables: Arc::new(serde_json::Value::Object(__loop_vars)),
+                    parent_scope_id: __parent_scope_id,
                 };
 
                 // Execute subgraph

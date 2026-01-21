@@ -630,8 +630,8 @@ pub struct ErrorStep {
     /// Machine-readable error code (e.g., "CREDIT_LIMIT_EXCEEDED", "INVALID_ACCOUNT")
     pub code: String,
 
-    /// Human-readable error message. Supports ${path} interpolation
-    /// (e.g., "Order ${data.orderId} exceeds limit")
+    /// Human-readable error message (static string).
+    /// For dynamic data, use the `context` field with mappings.
     pub message: String,
 
     /// Error severity for logging/alerting:

@@ -857,6 +857,10 @@ pub struct ListEventsOptions {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
+    /// Filter by scope_id in event payload (for hierarchy filtering).
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id in event payload (for hierarchy filtering).
+    pub parent_scope_id: Option<String>,
 }
 
 impl ListEventsOptions {
@@ -906,6 +910,18 @@ impl ListEventsOptions {
         self.payload_contains = Some(search.into());
         self
     }
+
+    /// Filter by scope_id in event payload.
+    pub fn with_scope_id(mut self, scope_id: impl Into<String>) -> Self {
+        self.scope_id = Some(scope_id.into());
+        self
+    }
+
+    /// Filter by parent_scope_id in event payload.
+    pub fn with_parent_scope_id(mut self, parent_scope_id: impl Into<String>) -> Self {
+        self.parent_scope_id = Some(parent_scope_id.into());
+        self
+    }
 }
 
 /// Summary of an event (for list results).
@@ -938,6 +954,25 @@ pub struct ListEventsResult {
     pub limit: u32,
     /// Offset used in query.
     pub offset: u32,
+}
+
+/// Information about a scope in the execution hierarchy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeInfo {
+    /// Unique scope identifier.
+    pub scope_id: String,
+    /// Parent scope ID (None for root scopes).
+    pub parent_scope_id: Option<String>,
+    /// Step ID that created this scope.
+    pub step_id: String,
+    /// Human-readable step name.
+    pub step_name: Option<String>,
+    /// Step type (e.g., "Split", "While", "StartScenario").
+    pub step_type: String,
+    /// Iteration index (for Split/While loops).
+    pub index: Option<u32>,
+    /// When this scope was entered.
+    pub created_at: DateTime<Utc>,
 }
 
 // ============================================================================

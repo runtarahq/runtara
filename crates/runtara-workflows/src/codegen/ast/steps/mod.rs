@@ -96,8 +96,147 @@ pub fn step_name(step: &Step) -> Option<&str> {
 /// Maximum size in bytes for inputs/outputs in debug events before truncation.
 const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
 
+// ==========================================
+// Scope tracking for hierarchy support
+// ==========================================
+
+/// Emit code to generate a deterministic scope ID at runtime.
+///
+/// The scope ID is constructed from step_id and the current loop indices,
+/// producing a unique identifier for each scope instance.
+///
+/// Format: "sc_{step_id}[_{index}]*"
+/// Examples:
+///   - "sc_split-orders_0" (first Split iteration)
+///   - "sc_split-orders_0_while-retry_2" (nested While iteration)
+///
+/// # Arguments
+/// * `step_id` - The step ID creating this scope
+/// * `scenario_inputs_var` - Variable holding ScenarioInputs (for extracting _loop_indices)
+/// * `iteration_index_var` - Optional variable holding the current iteration index
+pub fn emit_generate_scope_id(
+    step_id: &str,
+    scenario_inputs_var: &proc_macro2::Ident,
+    iteration_index_var: Option<&str>,
+) -> TokenStream {
+    let index_part = if let Some(idx_var) = iteration_index_var {
+        let idx_ident = proc_macro2::Ident::new(idx_var, proc_macro2::Span::call_site());
+        quote! {
+            format!("_{}", #idx_ident)
+        }
+    } else {
+        quote! { String::new() }
+    };
+
+    quote! {
+        {
+            let parent_scope = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let base_scope_id = format!("sc_{}", #step_id);
+            let index_suffix = #index_part;
+
+            if let Some(parent) = parent_scope {
+                format!("{}_{}{}", parent, #step_id, index_suffix)
+            } else {
+                format!("{}{}", base_scope_id, index_suffix)
+            }
+        }
+    }
+}
+
+/// Emit scope_enter event for entering a hierarchical step (Split, While, StartScenario).
+///
+/// The generated code builds a scope_enter event payload and sends it via `sdk.custom_event()`.
+///
+/// # Arguments
+/// * `ctx` - Emit context (checks debug_mode)
+/// * `step_id` - Unique step identifier
+/// * `step_name` - Optional human-readable step name
+/// * `step_type` - Step type string ("Split", "While", "StartScenario")
+/// * `scope_id_var` - Variable name holding the generated scope_id
+/// * `scenario_inputs_var` - Variable holding ScenarioInputs (for extracting parent_scope_id)
+/// * `iteration_index_var` - Optional variable name holding iteration index (omit for StartScenario)
+pub fn emit_scope_enter_event(
+    ctx: &EmitContext,
+    step_id: &str,
+    step_name: Option<&str>,
+    step_type: &str,
+    scope_id_var: &str,
+    scenario_inputs_var: &proc_macro2::Ident,
+    iteration_index_var: Option<&str>,
+) -> TokenStream {
+    if !ctx.debug_mode {
+        return quote! {};
+    }
+
+    let scope_id_ident = proc_macro2::Ident::new(scope_id_var, proc_macro2::Span::call_site());
+
+    let name_expr = step_name
+        .map(|n| quote! { Some(#n.to_string()) })
+        .unwrap_or(quote! { None::<String> });
+
+    let index_expr = if let Some(idx_var) = iteration_index_var {
+        let idx_ident = proc_macro2::Ident::new(idx_var, proc_macro2::Span::call_site());
+        quote! { Some(#idx_ident as u32) }
+    } else {
+        quote! { None::<u32> }
+    };
+
+    quote! {
+        {
+            let __parent_scope_id = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let __payload = serde_json::json!({
+                "scope_id": #scope_id_ident,
+                "parent_scope_id": __parent_scope_id,
+                "step_id": #step_id,
+                "step_name": #name_expr,
+                "step_type": #step_type,
+                "index": #index_expr,
+            });
+
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
+            let __sdk_guard = sdk().lock().await;
+            let _ = __sdk_guard.custom_event("scope_enter", __payload_bytes).await;
+        }
+    }
+}
+
+/// Emit scope_exit event for exiting a hierarchical step scope.
+///
+/// # Arguments
+/// * `ctx` - Emit context (checks debug_mode)
+/// * `scope_id_var` - Variable name holding the scope_id
+pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStream {
+    if !ctx.debug_mode {
+        return quote! {};
+    }
+
+    let scope_id_ident = proc_macro2::Ident::new(scope_id_var, proc_macro2::Span::call_site());
+
+    quote! {
+        {
+            let __payload = serde_json::json!({
+                "scope_id": #scope_id_ident,
+            });
+
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
+            let __sdk_guard = sdk().lock().await;
+            let _ = __sdk_guard.custom_event("scope_exit", __payload_bytes).await;
+        }
+    }
+}
+
 /// Emit debug event for step execution start.
-/// Captures step metadata, inputs, input mapping, and loop indices for iteration tracking.
+/// Captures step metadata, inputs, input mapping, loop indices, and scope_id for hierarchy tracking.
 ///
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
@@ -108,7 +247,7 @@ const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `inputs_var` - Optional Ident of variable holding step inputs (as serde_json::Value)
 /// * `input_mapping_json` - Optional static JSON string of input mapping DSL
-/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices)
+/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices and _scope_id)
 pub fn emit_step_debug_start(
     ctx: &EmitContext,
     step_id: &str,
@@ -142,18 +281,30 @@ pub fn emit_step_debug_start(
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
-    // Extract loop_indices from scenario inputs if available
-    let loop_indices_expr = scenario_inputs_var
+    // Extract loop_indices and scope_id from scenario inputs if available
+    let (loop_indices_expr, scope_id_expr) = scenario_inputs_var
         .map(|v| {
-            quote! {
-                (*#v.variables)
-                    .as_object()
-                    .and_then(|vars| vars.get("_loop_indices"))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Array(vec![]))
-            }
+            (
+                quote! {
+                    (*#v.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![]))
+                },
+                quote! {
+                    (*#v.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                },
+            )
         })
-        .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
+        .unwrap_or((
+            quote! { serde_json::Value::Array(vec![]) },
+            quote! { None::<String> },
+        ));
 
     quote! {
         let __step_start_time = std::time::Instant::now();
@@ -174,11 +325,13 @@ pub fn emit_step_debug_start(
             }
 
             let __loop_indices = #loop_indices_expr;
+            let __scope_id: Option<String> = #scope_id_expr;
 
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
+                "scope_id": __scope_id,
                 "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -196,7 +349,7 @@ pub fn emit_step_debug_start(
 }
 
 /// Emit debug event for step execution end.
-/// Captures step metadata, outputs, duration, and loop indices for iteration tracking.
+/// Captures step metadata, outputs, duration, loop indices, and scope_id for hierarchy tracking.
 ///
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
@@ -206,7 +359,7 @@ pub fn emit_step_debug_start(
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `outputs_var` - Optional Ident of variable holding step outputs (as serde_json::Value)
-/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices)
+/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices and _scope_id)
 pub fn emit_step_debug_end(
     ctx: &EmitContext,
     step_id: &str,
@@ -233,18 +386,30 @@ pub fn emit_step_debug_end(
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
-    // Extract loop_indices from scenario inputs if available
-    let loop_indices_expr = scenario_inputs_var
+    // Extract loop_indices and scope_id from scenario inputs if available
+    let (loop_indices_expr, scope_id_expr) = scenario_inputs_var
         .map(|v| {
-            quote! {
-                (*#v.variables)
-                    .as_object()
-                    .and_then(|vars| vars.get("_loop_indices"))
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Array(vec![]))
-            }
+            (
+                quote! {
+                    (*#v.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![]))
+                },
+                quote! {
+                    (*#v.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                },
+            )
         })
-        .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
+        .unwrap_or((
+            quote! { serde_json::Value::Array(vec![]) },
+            quote! { None::<String> },
+        ));
 
     quote! {
         {
@@ -266,11 +431,13 @@ pub fn emit_step_debug_end(
             }
 
             let __loop_indices = #loop_indices_expr;
+            let __scope_id: Option<String> = #scope_id_expr;
 
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
+                "scope_id": __scope_id,
                 "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

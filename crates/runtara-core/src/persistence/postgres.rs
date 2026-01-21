@@ -661,8 +661,9 @@ pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), Core
 
 /// List events for an instance with filtering and pagination.
 ///
-/// Supports filtering by event_type, subtype, time range, and full-text search
-/// in the JSON payload. Events are returned in reverse chronological order.
+/// Supports filtering by event_type, subtype, time range, full-text search
+/// in the JSON payload, and scope hierarchy filtering. Events are returned
+/// in reverse chronological order.
 pub async fn list_events(
     pool: &PgPool,
     instance_id: &str,
@@ -672,6 +673,7 @@ pub async fn list_events(
 ) -> Result<Vec<EventRecord>, CoreError> {
     // For PostgreSQL, we use convert_from to search text within BYTEA payload
     // The payload is expected to be valid UTF-8 JSON when subtype is set
+    // Scope filtering uses JSONB operators on the payload for efficient querying
     let records = sqlx::query_as::<_, EventRecord>(
         r#"
         SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, created_at, subtype
@@ -685,8 +687,16 @@ pub async fn list_events(
               payload IS NOT NULL
               AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%'
           ))
+          AND ($7::TEXT IS NULL OR (
+              payload IS NOT NULL
+              AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7
+          ))
+          AND ($8::TEXT IS NULL OR (
+              payload IS NOT NULL
+              AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8
+          ))
         ORDER BY created_at DESC, id DESC
-        LIMIT $7 OFFSET $8
+        LIMIT $9 OFFSET $10
         "#,
     )
     .bind(instance_id)
@@ -695,6 +705,8 @@ pub async fn list_events(
     .bind(filter.created_after)
     .bind(filter.created_before)
     .bind(&filter.payload_contains)
+    .bind(&filter.scope_id)
+    .bind(&filter.parent_scope_id)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
@@ -703,7 +715,7 @@ pub async fn list_events(
     Ok(records)
 }
 
-/// Count events for an instance with filtering.
+/// Count events for an instance with filtering (including scope hierarchy filtering).
 pub async fn count_events(
     pool: &PgPool,
     instance_id: &str,
@@ -722,6 +734,14 @@ pub async fn count_events(
               payload IS NOT NULL
               AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%'
           ))
+          AND ($7::TEXT IS NULL OR (
+              payload IS NOT NULL
+              AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7
+          ))
+          AND ($8::TEXT IS NULL OR (
+              payload IS NOT NULL
+              AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8
+          ))
         "#,
     )
     .bind(instance_id)
@@ -730,6 +750,8 @@ pub async fn count_events(
     .bind(filter.created_after)
     .bind(filter.created_before)
     .bind(&filter.payload_contains)
+    .bind(&filter.scope_id)
+    .bind(&filter.parent_scope_id)
     .fetch_one(pool)
     .await?;
 

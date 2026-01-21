@@ -8,11 +8,11 @@ use tracing::{debug, info, instrument};
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 use runtara_protocol::environment_proto::{
     DeleteImageRequest, GetCapabilityRequest, GetCheckpointRequest, GetImageRequest,
-    GetInstanceStatusRequest, GetTenantMetricsRequest, HealthCheckRequest, ListAgentsRequest,
-    ListCheckpointsRequest, ListEventsRequest, ListImagesRequest, ListInstancesRequest,
-    RegisterImageRequest, RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse,
-    SendSignalRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
-    rpc_request::Request, rpc_response::Response,
+    GetInstanceStatusRequest, GetScopeAncestorsRequest, GetTenantMetricsRequest,
+    HealthCheckRequest, ListAgentsRequest, ListCheckpointsRequest, ListEventsRequest,
+    ListImagesRequest, ListInstancesRequest, RegisterImageRequest, RegisterImageStreamStart,
+    ResumeInstanceRequest, RpcRequest, RpcResponse, SendSignalRequest, StartInstanceRequest,
+    StopInstanceRequest, TestCapabilityRequest, rpc_request::Request, rpc_response::Response,
 };
 use runtara_protocol::frame::{Frame, write_frame};
 use tokio::io::AsyncRead;
@@ -25,9 +25,9 @@ use crate::types::{
     InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult, ListEventsOptions,
     ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
     ListInstancesResult, MetricsBucket, MetricsGranularity, RegisterImageOptions,
-    RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType, StartInstanceOptions,
-    StartInstanceResult, StopInstanceOptions, TenantMetricsResult, TestCapabilityOptions,
-    TestCapabilityResult,
+    RegisterImageResult, RegisterImageStreamOptions, RunnerType, ScopeInfo, SignalType,
+    StartInstanceOptions, StartInstanceResult, StopInstanceOptions, TenantMetricsResult,
+    TestCapabilityOptions, TestCapabilityResult,
 };
 
 /// High-level SDK for managing runtara-environment instances and images.
@@ -867,6 +867,8 @@ impl ManagementSdk {
                 created_after_ms: options.created_after.map(|t| t.timestamp_millis()),
                 created_before_ms: options.created_before.map(|t| t.timestamp_millis()),
                 payload_contains: options.payload_contains,
+                scope_id: options.scope_id,
+                parent_scope_id: options.parent_scope_id,
             }))
             .await?;
 
@@ -909,6 +911,65 @@ impl ManagementSdk {
             }
             _ => Err(SdkError::UnexpectedResponse(
                 "expected ListEventsResponse".to_string(),
+            )),
+        }
+    }
+
+    /// Get the ancestors of a scope in the execution hierarchy.
+    ///
+    /// Returns a list of `ScopeInfo` starting from the requested scope and walking
+    /// up through parent scopes to the root. This is useful for reconstructing
+    /// the call stack at any point in a workflow execution.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let ancestors = sdk.get_scope_ancestors("instance-123", "sc_split-orders_0_while-retry_2").await?;
+    /// for scope in &ancestors {
+    ///     println!("{}:{} (index {:?})", scope.step_type, scope.step_id, scope.index);
+    /// }
+    /// // Output:
+    /// // While:while-retry (index Some(2))
+    /// // Split:split-orders (index Some(0))
+    /// ```
+    #[instrument(skip(self), fields(instance_id = %instance_id, scope_id = %scope_id))]
+    pub async fn get_scope_ancestors(
+        &self,
+        instance_id: &str,
+        scope_id: &str,
+    ) -> Result<Vec<ScopeInfo>> {
+        debug!("Getting scope ancestors");
+
+        let response = self
+            .send_request(Request::GetScopeAncestors(GetScopeAncestorsRequest {
+                instance_id: instance_id.to_string(),
+                scope_id: scope_id.to_string(),
+            }))
+            .await?;
+
+        match response {
+            Response::GetScopeAncestors(resp) => {
+                let ancestors = resp
+                    .ancestors
+                    .into_iter()
+                    .map(|info| ScopeInfo {
+                        scope_id: info.scope_id,
+                        parent_scope_id: info.parent_scope_id,
+                        step_id: info.step_id,
+                        step_name: info.step_name,
+                        step_type: info.step_type,
+                        index: info.index,
+                        created_at: Utc
+                            .timestamp_millis_opt(info.created_at_ms)
+                            .single()
+                            .unwrap_or_else(Utc::now),
+                    })
+                    .collect();
+
+                Ok(ancestors)
+            }
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected GetScopeAncestorsResponse".to_string(),
             )),
         }
     }

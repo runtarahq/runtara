@@ -132,6 +132,13 @@ pub struct ListEventsFilter {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
+    /// Filter by scope_id in the event payload (for hierarchy filtering).
+    /// When set, only events with matching scope_id in their payload are returned.
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id in the event payload (for hierarchy filtering).
+    /// When set, only events with matching parent_scope_id in their payload are returned.
+    /// Use this to get direct children of a scope.
+    pub parent_scope_id: Option<String>,
 }
 
 /// Error history record for structured error tracking.

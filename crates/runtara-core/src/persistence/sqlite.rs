@@ -718,6 +718,7 @@ impl Persistence for SqlitePersistence {
     ) -> Result<Vec<EventRecord>, CoreError> {
         // For SQLite, we use CAST and LIKE for text search within BLOB payload
         // The payload is expected to be valid UTF-8 JSON when subtype is set
+        // Scope filtering uses json_extract for efficient querying
         let records = sqlx::query_as::<_, EventRecord>(
             r#"
             SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype
@@ -731,8 +732,16 @@ impl Persistence for SqlitePersistence {
                   payload IS NOT NULL
                   AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
               ))
+              AND (?7 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7
+              ))
+              AND (?8 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
+              ))
             ORDER BY created_at DESC, id DESC
-            LIMIT ?7 OFFSET ?8
+            LIMIT ?9 OFFSET ?10
             "#,
         )
         .bind(instance_id)
@@ -741,6 +750,8 @@ impl Persistence for SqlitePersistence {
         .bind(filter.created_after)
         .bind(filter.created_before)
         .bind(&filter.payload_contains)
+        .bind(&filter.scope_id)
+        .bind(&filter.parent_scope_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -767,6 +778,14 @@ impl Persistence for SqlitePersistence {
                   payload IS NOT NULL
                   AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
               ))
+              AND (?7 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7
+              ))
+              AND (?8 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
+              ))
             "#,
         )
         .bind(instance_id)
@@ -775,6 +794,8 @@ impl Persistence for SqlitePersistence {
         .bind(filter.created_after)
         .bind(filter.created_before)
         .bind(&filter.payload_contains)
+        .bind(&filter.scope_id)
+        .bind(&filter.parent_scope_id)
         .fetch_one(&self.pool)
         .await?;
 
