@@ -139,6 +139,9 @@ pub struct ListEventsFilter {
     /// When set, only events with matching parent_scope_id in their payload are returned.
     /// Use this to get direct children of a scope.
     pub parent_scope_id: Option<String>,
+    /// When true, only return events that have no parent_scope_id (root-level scopes).
+    /// This is useful for getting top-level execution scopes.
+    pub root_scopes_only: bool,
 }
 
 /// Error history record for structured error tracking.

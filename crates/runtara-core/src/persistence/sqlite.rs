@@ -740,8 +740,12 @@ impl Persistence for SqlitePersistence {
                   payload IS NOT NULL
                   AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
               ))
+              AND (NOT ?9 OR (
+                  payload IS NULL
+                  OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
+              ))
             ORDER BY created_at DESC, id DESC
-            LIMIT ?9 OFFSET ?10
+            LIMIT ?10 OFFSET ?11
             "#,
         )
         .bind(instance_id)
@@ -752,6 +756,7 @@ impl Persistence for SqlitePersistence {
         .bind(&filter.payload_contains)
         .bind(&filter.scope_id)
         .bind(&filter.parent_scope_id)
+        .bind(filter.root_scopes_only)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -786,6 +791,10 @@ impl Persistence for SqlitePersistence {
                   payload IS NOT NULL
                   AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
               ))
+              AND (NOT ?9 OR (
+                  payload IS NULL
+                  OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
+              ))
             "#,
         )
         .bind(instance_id)
@@ -796,6 +805,7 @@ impl Persistence for SqlitePersistence {
         .bind(&filter.payload_contains)
         .bind(&filter.scope_id)
         .bind(&filter.parent_scope_id)
+        .bind(filter.root_scopes_only)
         .fetch_one(&self.pool)
         .await?;
 

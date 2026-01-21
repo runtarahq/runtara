@@ -861,6 +861,9 @@ pub struct ListEventsOptions {
     pub scope_id: Option<String>,
     /// Filter by parent_scope_id in event payload (for hierarchy filtering).
     pub parent_scope_id: Option<String>,
+    /// When true, only return events with no parent_scope_id (root-level scopes).
+    /// This is useful for getting top-level execution scopes without nested children.
+    pub root_scopes_only: bool,
 }
 
 impl ListEventsOptions {
@@ -920,6 +923,13 @@ impl ListEventsOptions {
     /// Filter by parent_scope_id in event payload.
     pub fn with_parent_scope_id(mut self, parent_scope_id: impl Into<String>) -> Self {
         self.parent_scope_id = Some(parent_scope_id.into());
+        self
+    }
+
+    /// Only return events with no parent_scope_id (root-level scopes).
+    /// This is useful for getting top-level execution scopes without nested children.
+    pub fn with_root_scopes_only(mut self) -> Self {
+        self.root_scopes_only = true;
         self
     }
 }

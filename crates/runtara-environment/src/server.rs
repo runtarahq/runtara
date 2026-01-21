@@ -1070,6 +1070,7 @@ async fn handle_list_events(
         payload_contains: req.payload_contains,
         scope_id: req.scope_id,
         parent_scope_id: req.parent_scope_id,
+        root_scopes_only: req.root_scopes_only,
     };
 
     // Get events from persistence
@@ -1238,6 +1239,7 @@ async fn handle_get_scope_ancestors(
         payload_contains: None,
         scope_id: None,
         parent_scope_id: None,
+        root_scopes_only: false,
     };
 
     let events = state

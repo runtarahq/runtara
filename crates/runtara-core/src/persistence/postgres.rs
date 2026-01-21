@@ -695,8 +695,12 @@ pub async fn list_events(
               payload IS NOT NULL
               AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8
           ))
+          AND (NOT $9 OR (
+              payload IS NULL
+              OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL
+          ))
         ORDER BY created_at DESC, id DESC
-        LIMIT $9 OFFSET $10
+        LIMIT $10 OFFSET $11
         "#,
     )
     .bind(instance_id)
@@ -707,6 +711,7 @@ pub async fn list_events(
     .bind(&filter.payload_contains)
     .bind(&filter.scope_id)
     .bind(&filter.parent_scope_id)
+    .bind(filter.root_scopes_only)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
@@ -742,6 +747,10 @@ pub async fn count_events(
               payload IS NOT NULL
               AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8
           ))
+          AND (NOT $9 OR (
+              payload IS NULL
+              OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL
+          ))
         "#,
     )
     .bind(instance_id)
@@ -752,6 +761,7 @@ pub async fn count_events(
     .bind(&filter.payload_contains)
     .bind(&filter.scope_id)
     .bind(&filter.parent_scope_id)
+    .bind(filter.root_scopes_only)
     .fetch_one(pool)
     .await?;
 
