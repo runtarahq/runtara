@@ -1881,6 +1881,7 @@ mod tests {
     // ========================================================================
 
     /// Helper to insert a step_debug_start event
+    #[allow(clippy::too_many_arguments)]
     async fn insert_step_start(
         persistence: &SqlitePersistence,
         instance_id: &str,
