@@ -107,7 +107,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     // Clone scenario inputs var for debug events (to access _loop_indices)
     let scenario_inputs_var = inputs_var.clone();
 
-    // Generate debug event emissions
+    // Split creates a scope - use sc_{step_id} as its scope_id
+    let split_scope_id = format!("sc_{}", step_id);
+
+    // Generate debug event emissions with the Split's own scope_id
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -116,6 +119,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
         Some(&split_inputs_var),
         config_json.as_deref(),
         Some(&scenario_inputs_var),
+        Some(&split_scope_id),
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -124,6 +128,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
         "Split",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        Some(&split_scope_id),
     );
 
     // Cache key for the split step's final result checkpoint
@@ -218,16 +223,17 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                     }
                 };
 
-                // Inject _scope_id into subgraph variables
+                // Inject _scope_id into subgraph variables (iteration-specific for cache key uniqueness)
                 merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
 
-                // Inner steps use the iteration scope as their parent.
-                // This ensures `root_scopes_only` filter correctly excludes them
-                // (they have non-null parent_scope_id = the iteration scope).
+                // Inner steps use the Split's scope (sc_{step_id}) as their parent, NOT the iteration scope.
+                // This ensures all iterations share the same parent scope for hierarchy queries,
+                // while still having unique scope_ids for cache key differentiation.
+                let __split_scope_id = format!("sc_{}", step_id);
                 let subgraph_inputs = ScenarioInputs {
                     data: Arc::new(item.clone()),
                     variables: Arc::new(serde_json::Value::Object(merged_vars)),
-                    parent_scope_id: Some(__iteration_scope_id.clone()),
+                    parent_scope_id: Some(__split_scope_id),
                 };
 
                 match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {

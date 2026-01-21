@@ -104,7 +104,10 @@ fn emit_with_embedded_child(
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
 
-    // Generate debug event emissions
+    // StartScenario creates a scope - use sc_{step_id} as its scope_id
+    let start_scenario_scope_id = format!("sc_{}", step_id);
+
+    // Generate debug event emissions with the StartScenario's own scope_id
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -113,6 +116,7 @@ fn emit_with_embedded_child(
         Some(&child_inputs_var),
         input_mapping_json.as_deref(),
         Some(&scenario_inputs_var),
+        Some(&start_scenario_scope_id),
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -121,6 +125,7 @@ fn emit_with_embedded_child(
         "StartScenario",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        Some(&start_scenario_scope_id),
     );
 
     // Static base for cache key - will be combined with loop indices at runtime
@@ -303,7 +308,10 @@ fn emit_placeholder(
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
 
-    // Generate debug event emissions
+    // StartScenario creates a scope - use sc_{step_id} as its scope_id
+    let start_scenario_scope_id = format!("sc_{}", step_id);
+
+    // Generate debug event emissions with the StartScenario's own scope_id
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -312,6 +320,7 @@ fn emit_placeholder(
         Some(&placeholder_inputs_var),
         None,
         Some(&scenario_inputs_var),
+        Some(&start_scenario_scope_id),
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -320,6 +329,7 @@ fn emit_placeholder(
         "StartScenario",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        Some(&start_scenario_scope_id),
     );
 
     quote! {
