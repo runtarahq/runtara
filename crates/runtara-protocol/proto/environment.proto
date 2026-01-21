@@ -402,6 +402,7 @@ message ListEventsRequest {
   optional string scope_id = 9; // Filter by scope_id in payload (for hierarchy filtering)
   optional string parent_scope_id = 10; // Filter by parent_scope_id in payload (for getting direct children)
   bool root_scopes_only = 11; // When true, only return events with no parent_scope_id (root-level scopes)
+  optional string sort_order = 12; // Sort order: "asc" (oldest first) or "desc" (newest first, default)
 }
 
 message ListEventsResponse {

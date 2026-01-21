@@ -840,6 +840,27 @@ pub struct Checkpoint {
 // Event Types
 // ============================================================================
 
+/// Sort order for listing events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSortOrder {
+    /// Newest events first (default).
+    #[default]
+    Desc,
+    /// Oldest events first.
+    Asc,
+}
+
+impl EventSortOrder {
+    /// Convert to string value for proto.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Desc => "desc",
+            Self::Asc => "asc",
+        }
+    }
+}
+
 /// Options for listing events.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListEventsOptions {
@@ -864,12 +885,20 @@ pub struct ListEventsOptions {
     /// When true, only return events with no parent_scope_id (root-level scopes).
     /// This is useful for getting top-level execution scopes without nested children.
     pub root_scopes_only: bool,
+    /// Sort order for events by created_at.
+    pub sort_order: Option<EventSortOrder>,
 }
 
 impl ListEventsOptions {
     /// Create new options with defaults.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the sort order for events.
+    pub fn with_sort_order(mut self, sort_order: EventSortOrder) -> Self {
+        self.sort_order = Some(sort_order);
+        self
     }
 
     /// Filter by event type.

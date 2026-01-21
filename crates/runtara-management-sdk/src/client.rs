@@ -870,6 +870,7 @@ impl ManagementSdk {
                 scope_id: options.scope_id,
                 parent_scope_id: options.parent_scope_id,
                 root_scopes_only: options.root_scopes_only,
+                sort_order: options.sort_order.map(|s| s.as_str().to_string()),
             }))
             .await?;
 

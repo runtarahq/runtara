@@ -9,8 +9,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use crate::error::CoreError;
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    Persistence, SignalRecord,
+    CheckpointRecord, CustomSignalRecord, EventRecord, EventSortOrder, InstanceRecord,
+    ListEventsFilter, Persistence, SignalRecord,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -719,7 +719,17 @@ impl Persistence for SqlitePersistence {
         // For SQLite, we use CAST and LIKE for text search within BLOB payload
         // The payload is expected to be valid UTF-8 JSON when subtype is set
         // Scope filtering uses json_extract for efficient querying
-        let records = sqlx::query_as::<_, EventRecord>(
+
+        // Determine sort order - ASC or DESC based on filter
+        let order_direction = match filter.sort_order {
+            EventSortOrder::Asc => "ASC",
+            EventSortOrder::Desc => "DESC",
+        };
+
+        // Build query with dynamic ORDER BY
+        // Note: ORDER BY direction cannot be parameterized, so we use format!
+        // The direction is from a trusted enum, so this is safe from injection
+        let query = format!(
             r#"
             SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype
             FROM instance_events
@@ -744,23 +754,26 @@ impl Persistence for SqlitePersistence {
                   payload IS NULL
                   OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
               ))
-            ORDER BY created_at DESC, id DESC
+            ORDER BY created_at {}, id {}
             LIMIT ?10 OFFSET ?11
             "#,
-        )
-        .bind(instance_id)
-        .bind(&filter.event_type)
-        .bind(&filter.subtype)
-        .bind(filter.created_after)
-        .bind(filter.created_before)
-        .bind(&filter.payload_contains)
-        .bind(&filter.scope_id)
-        .bind(&filter.parent_scope_id)
-        .bind(filter.root_scopes_only)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+            order_direction, order_direction
+        );
+
+        let records = sqlx::query_as::<_, EventRecord>(&query)
+            .bind(instance_id)
+            .bind(&filter.event_type)
+            .bind(&filter.subtype)
+            .bind(filter.created_after)
+            .bind(filter.created_before)
+            .bind(&filter.payload_contains)
+            .bind(&filter.scope_id)
+            .bind(&filter.parent_scope_id)
+            .bind(filter.root_scopes_only)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(records)
     }

@@ -119,6 +119,16 @@ pub struct CustomSignalRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Sort order for event queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventSortOrder {
+    /// Newest events first (default).
+    #[default]
+    Desc,
+    /// Oldest events first.
+    Asc,
+}
+
 /// Filter options for listing events.
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsFilter {
@@ -142,6 +152,8 @@ pub struct ListEventsFilter {
     /// When true, only return events that have no parent_scope_id (root-level scopes).
     /// This is useful for getting top-level execution scopes.
     pub root_scopes_only: bool,
+    /// Sort order for events by created_at.
+    pub sort_order: EventSortOrder,
 }
 
 /// Error history record for structured error tracking.

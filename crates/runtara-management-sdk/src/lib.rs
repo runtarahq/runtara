@@ -52,10 +52,10 @@ pub use client::ManagementSdk;
 pub use config::SdkConfig;
 pub use error::{Result, SdkError};
 pub use types::{
-    AgentInfo, CapabilityField, CapabilityInfo, Checkpoint, CheckpointSummary, EventSummary,
-    GetTenantMetricsOptions, HealthStatus, ImageSummary, InstanceInfo, InstanceStatus,
-    InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult, ListEventsOptions,
-    ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
+    AgentInfo, CapabilityField, CapabilityInfo, Checkpoint, CheckpointSummary, EventSortOrder,
+    EventSummary, GetTenantMetricsOptions, HealthStatus, ImageSummary, InstanceInfo,
+    InstanceStatus, InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult,
+    ListEventsOptions, ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
     ListInstancesOrder, ListInstancesResult, MetricsBucket, MetricsGranularity,
     RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions, RunnerType, ScopeInfo,
     SignalType, StartInstanceOptions, StartInstanceResult, StopInstanceOptions,

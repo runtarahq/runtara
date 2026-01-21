@@ -1038,7 +1038,7 @@ async fn handle_list_events(
     state: &EnvironmentHandlerState,
     req: environment_proto::ListEventsRequest,
 ) -> Result<environment_proto::ListEventsResponse, crate::error::Error> {
-    use runtara_core::persistence::ListEventsFilter;
+    use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
 
     debug!(
         instance_id = %req.instance_id,
@@ -1047,6 +1047,7 @@ async fn handle_list_events(
         limit = ?req.limit,
         offset = ?req.offset,
         payload_contains = ?req.payload_contains,
+        sort_order = ?req.sort_order,
         "Listing events via shared persistence"
     );
 
@@ -1061,6 +1062,12 @@ async fn handle_list_events(
     let limit = req.limit.unwrap_or(100) as i64;
     let offset = req.offset.unwrap_or(0) as i64;
 
+    // Parse sort order from proto string
+    let sort_order = match req.sort_order.as_deref() {
+        Some("asc") => EventSortOrder::Asc,
+        _ => EventSortOrder::Desc, // Default to DESC (newest first)
+    };
+
     // Build filter
     let filter = ListEventsFilter {
         event_type: req.event_type,
@@ -1071,6 +1078,7 @@ async fn handle_list_events(
         scope_id: req.scope_id,
         parent_scope_id: req.parent_scope_id,
         root_scopes_only: req.root_scopes_only,
+        sort_order,
     };
 
     // Get events from persistence
@@ -1210,7 +1218,7 @@ async fn handle_get_scope_ancestors(
     state: &EnvironmentHandlerState,
     req: environment_proto::GetScopeAncestorsRequest,
 ) -> Result<environment_proto::GetScopeAncestorsResponse, crate::error::Error> {
-    use runtara_core::persistence::ListEventsFilter;
+    use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
 
     debug!(
         instance_id = %req.instance_id,
@@ -1240,6 +1248,7 @@ async fn handle_get_scope_ancestors(
         scope_id: None,
         parent_scope_id: None,
         root_scopes_only: false,
+        sort_order: EventSortOrder::Asc, // Oldest first for building scope hierarchy
     };
 
     let events = state
