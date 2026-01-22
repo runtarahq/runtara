@@ -201,7 +201,7 @@ fn emit_with_embedded_child(
                     let child_error: serde_json::Value = serde_json::from_str(&e)
                         .unwrap_or_else(|_| serde_json::json!({
                             "message": e,
-                            "code": null::<String>,
+                            "code": null,
                             "category": "unknown",
                             "severity": "error"
                         }));
@@ -959,6 +959,25 @@ mod tests {
         assert!(
             code.contains("return e"),
             "Should propagate Error step errors directly"
+        );
+    }
+
+    #[test]
+    fn test_emit_no_turbofish_null_in_json_macro() {
+        // Regression test: ensure null::<Type> is not used inside serde_json::json! macro
+        // The json! macro doesn't support turbofish syntax on null, causing:
+        // "error: no rules expected `::` in macro call"
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Ensure no turbofish null syntax appears in generated code
+        assert!(
+            !code.contains("null::<") && !code.contains("null :: <"),
+            "Generated code must not contain null::<Type> - json! macro doesn't support turbofish"
         );
     }
 }

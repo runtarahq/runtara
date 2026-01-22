@@ -491,7 +491,7 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
                         .unwrap_or_else(|_| serde_json::json!({
                             "message": __error_msg,
                             "stepId": #sid,
-                            "code": null::<String>,
+                            "code": null,
                             "category": "unknown",
                             "severity": "error"
                         }));
