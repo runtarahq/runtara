@@ -178,6 +178,39 @@ pub struct SelectFirstInput {
     pub value: Option<Vec<Value>>,
 }
 
+/// Input for coalescing values (returning first non-null)
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Coalesce Input")]
+pub struct CoalesceInput {
+    /// The array of values to check in order
+    #[field(
+        display_name = "Values",
+        description = "Array of values to check; returns the first non-null/non-undefined value",
+        example = r#"[null, 42, "fallback"]"#
+    )]
+    pub values: Vec<Value>,
+
+    /// Treat empty strings as null
+    #[field(
+        display_name = "Treat Empty String As Null",
+        description = "If true, empty strings are treated as null and skipped",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub treat_empty_string_as_null: bool,
+
+    /// Treat zero as null
+    #[field(
+        display_name = "Treat Zero As Null",
+        description = "If true, zero values (0, 0.0) are treated as null and skipped",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub treat_zero_as_null: bool,
+}
+
 /// Input for parsing a JSON string into a value
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "Parse JSON Input")]
@@ -755,6 +788,43 @@ pub fn select_first(input: SelectFirstInput) -> Result<Value, String> {
         }
 
         return Ok(item);
+    }
+
+    Ok(Value::Null)
+}
+
+/// Returns the first non-null value from an array
+#[capability(
+    module = "transform",
+    display_name = "Coalesce",
+    description = "Return the first non-null value from an array of values"
+)]
+pub fn coalesce(input: CoalesceInput) -> Result<Value, String> {
+    for value in input.values {
+        // Skip null values
+        if value.is_null() {
+            continue;
+        }
+
+        // Skip empty strings if flag is set
+        if input.treat_empty_string_as_null {
+            if let Some(s) = value.as_str() {
+                if s.is_empty() {
+                    continue;
+                }
+            }
+        }
+
+        // Skip zero values if flag is set
+        if input.treat_zero_as_null {
+            if let Some(n) = value.as_f64() {
+                if n == 0.0 {
+                    continue;
+                }
+            }
+        }
+
+        return Ok(value);
     }
 
     Ok(Value::Null)
@@ -1834,5 +1904,175 @@ mod tests {
         let result = flat_map(input).unwrap();
         assert_eq!(result.count, 3);
         assert_eq!(result.items, vec![json!(1), json!(2), json!(3)]);
+    }
+
+    // ==================== Coalesce Tests ====================
+
+    #[test]
+    fn test_coalesce_basic() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(42)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(42));
+    }
+
+    #[test]
+    fn test_coalesce_multiple_fallbacks() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(null), json!("fallback")],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("fallback"));
+    }
+
+    #[test]
+    fn test_coalesce_first_value_wins() {
+        let input = CoalesceInput {
+            values: vec![json!("first"), json!("second"), json!("third")],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("first"));
+    }
+
+    #[test]
+    fn test_coalesce_zero_valid_by_default() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(0), json!(100)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(0));
+    }
+
+    #[test]
+    fn test_coalesce_treat_zero_as_null() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(0), json!(100)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: true,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(100));
+    }
+
+    #[test]
+    fn test_coalesce_empty_string_valid_by_default() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(""), json!("fallback")],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(""));
+    }
+
+    #[test]
+    fn test_coalesce_treat_empty_string_as_null() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(""), json!("fallback")],
+            treat_empty_string_as_null: true,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("fallback"));
+    }
+
+    #[test]
+    fn test_coalesce_all_null() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(null)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_coalesce_empty_array() {
+        let input = CoalesceInput {
+            values: vec![],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_coalesce_object_value() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!({"name": "Alice"})],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!({"name": "Alice"}));
+    }
+
+    #[test]
+    fn test_coalesce_array_value() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!([1, 2, 3])],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_coalesce_boolean_false_is_valid() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(false), json!(true)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(false));
+    }
+
+    #[test]
+    fn test_coalesce_both_flags_enabled() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(""), json!(0), json!("valid")],
+            treat_empty_string_as_null: true,
+            treat_zero_as_null: true,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("valid"));
+    }
+
+    #[test]
+    fn test_coalesce_float_zero() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(0.0), json!(1.5)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: true,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(1.5));
     }
 }
