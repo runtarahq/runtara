@@ -133,6 +133,38 @@ fn test_parse_split_workflow() {
 }
 
 #[test]
+fn test_parse_parallel_split_workflow() {
+    let workflow_json = include_str!("fixtures/split_parallel_workflow.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "split");
+    assert!(graph.steps.contains_key("split"));
+    assert!(graph.steps.contains_key("finish"));
+
+    // Verify the split step has parallelism configuration
+    use runtara_dsl::Step;
+    if let Some(Step::Split(split_step)) = graph.steps.get("split") {
+        assert_eq!(split_step.subgraph.entry_point, "transform");
+
+        // Verify parallelism config
+        let config = split_step
+            .config
+            .as_ref()
+            .expect("Split should have config");
+        assert_eq!(config.parallelism, Some(10), "Parallelism should be 10");
+        assert_eq!(config.sequential, Some(false), "Sequential should be false");
+        assert_eq!(
+            config.dont_stop_on_failed,
+            Some(true),
+            "dontStopOnFailed should be true"
+        );
+    } else {
+        panic!("Expected Split step");
+    }
+}
+
+#[test]
 fn test_parse_start_scenario_workflow() {
     let workflow_json = include_str!("fixtures/start_scenario_workflow.json");
     let graph: ExecutionGraph =

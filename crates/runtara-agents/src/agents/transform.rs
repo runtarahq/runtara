@@ -807,21 +807,13 @@ pub fn coalesce(input: CoalesceInput) -> Result<Value, String> {
         }
 
         // Skip empty strings if flag is set
-        if input.treat_empty_string_as_null {
-            if let Some(s) = value.as_str() {
-                if s.is_empty() {
-                    continue;
-                }
-            }
+        if input.treat_empty_string_as_null && value.as_str().is_some_and(|s| s.is_empty()) {
+            continue;
         }
 
         // Skip zero values if flag is set
-        if input.treat_zero_as_null {
-            if let Some(n) = value.as_f64() {
-                if n == 0.0 {
-                    continue;
-                }
-            }
+        if input.treat_zero_as_null && value.as_f64().is_some_and(|n| n == 0.0) {
+            continue;
         }
 
         return Ok(value);

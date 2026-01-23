@@ -154,10 +154,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                 vec![]
             });
 
-        let _parallelism = #split_inputs_var.get("parallelism")
+        let parallelism = #split_inputs_var.get("parallelism")
             .and_then(|v| v.as_i64())
             .unwrap_or(0) as usize;
-        let _sequential = #split_inputs_var.get("sequential")
+        let sequential = #split_inputs_var.get("sequential")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let dont_stop_on_failed = #split_inputs_var.get("dontStopOnFailed")
@@ -180,19 +180,21 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
             variables_base: serde_json::Value,
             extra_variables: serde_json::Value,
             dont_stop_on_failed: bool,
+            parallelism: usize,
+            sequential: bool,
             step_id: &str,
             step_name: &str,
         ) -> std::result::Result<serde_json::Value, String> {
             let mut results: Vec<serde_json::Value> = Vec::with_capacity(split_array.len());
             let mut errors: Vec<serde_json::Value> = Vec::new();
 
-            for (idx, item) in split_array.iter().enumerate() {
-                // Each iteration: data = current item, variables = inherited + extra from mapping + _index
-                let mut merged_vars = match &variables_base {
+            // Helper to build iteration inputs
+            let build_iteration_inputs = |idx: usize, item: &serde_json::Value, variables_base: &serde_json::Value, extra_variables: &serde_json::Value| {
+                let mut merged_vars = match variables_base {
                     serde_json::Value::Object(base) => base.clone(),
                     _ => serde_json::Map::new(),
                 };
-                if let serde_json::Value::Object(extra) = &extra_variables {
+                if let serde_json::Value::Object(extra) = extra_variables {
                     for (k, v) in extra {
                         merged_vars.insert(k.clone(), v.clone());
                     }
@@ -224,35 +226,166 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                 };
 
                 // Inject _scope_id into subgraph variables (iteration-specific for cache key uniqueness)
-                merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
+                merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id));
 
                 // Inner steps use the Split's scope (sc_{step_id}) as their parent, NOT the iteration scope.
-                // This ensures all iterations share the same parent scope for hierarchy queries,
-                // while still having unique scope_ids for cache key differentiation.
                 let __split_scope_id = format!("sc_{}", step_id);
-                let subgraph_inputs = ScenarioInputs {
+                ScenarioInputs {
                     data: Arc::new(item.clone()),
                     variables: Arc::new(serde_json::Value::Object(merged_vars)),
                     parent_scope_id: Some(__split_scope_id),
-                };
+                }
+            };
 
-                match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {
-                    Ok(result) => results.push(result),
-                    Err(e) => {
-                        if dont_stop_on_failed {
-                            errors.push(serde_json::json!({"error": e, "index": idx}));
-                        } else {
-                            eprintln!("ERROR in split iteration {}: {}", idx, e);
-                            return Err(format!("Split step failed at index {}: {}", idx, e));
+            if parallelism <= 1 {
+                // Sequential execution (backward compatible)
+                for (idx, item) in split_array.iter().enumerate() {
+                    let subgraph_inputs = build_iteration_inputs(idx, item, &variables_base, &extra_variables);
+
+                    match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {
+                        Ok(result) => results.push(result),
+                        Err(e) => {
+                            if dont_stop_on_failed {
+                                errors.push(serde_json::json!({"error": e, "index": idx}));
+                            } else {
+                                eprintln!("ERROR in split iteration {}: {}", idx, e);
+                                return Err(format!("Split step failed at index {}: {}", idx, e));
+                            }
+                        }
+                    }
+
+                    // Check for cancellation after each iteration
+                    {
+                        let mut __sdk = sdk().lock().await;
+                        if let Err(e) = __sdk.check_cancelled().await {
+                            return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, e));
                         }
                     }
                 }
+            } else {
+                // Parallel execution with bounded concurrency
+                use futures::stream::{self, StreamExt};
+                use std::sync::atomic::{AtomicBool, Ordering};
 
-                // Check for cancellation after each iteration
-                {
-                    let mut __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.check_cancelled().await {
-                        return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, e));
+                let cancel_token = Arc::new(AtomicBool::new(false));
+                let error_token = Arc::new(AtomicBool::new(false));
+
+                // Build iteration data
+                let iteration_data: Vec<_> = split_array.iter().enumerate()
+                    .map(|(idx, item)| (idx, item.clone()))
+                    .collect();
+
+                // Clone values for use in async closures
+                let variables_base = Arc::new(variables_base);
+                let extra_variables = Arc::new(extra_variables);
+                let step_id_owned = step_id.to_string();
+
+                let stream = stream::iter(iteration_data)
+                    .map(|(idx, item)| {
+                        let cancel_token = cancel_token.clone();
+                        let error_token = error_token.clone();
+                        let variables_base = variables_base.clone();
+                        let extra_variables = extra_variables.clone();
+                        let step_id = step_id_owned.clone();
+
+                        async move {
+                            // Check if we should skip due to cancellation or error (when dont_stop_on_failed is false)
+                            if cancel_token.load(Ordering::Relaxed) {
+                                return (idx, Err("Cancelled".to_string()));
+                            }
+                            if error_token.load(Ordering::Relaxed) {
+                                return (idx, Err("Aborted due to previous error".to_string()));
+                            }
+
+                            // Build inputs for this iteration
+                            let subgraph_inputs = {
+                                let mut merged_vars = match variables_base.as_ref() {
+                                    serde_json::Value::Object(base) => base.clone(),
+                                    _ => serde_json::Map::new(),
+                                };
+                                if let serde_json::Value::Object(extra) = extra_variables.as_ref() {
+                                    for (k, v) in extra {
+                                        merged_vars.insert(k.clone(), v.clone());
+                                    }
+                                }
+
+                                let parent_indices = merged_vars.get("_loop_indices")
+                                    .and_then(|v| v.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let mut all_indices = parent_indices;
+                                all_indices.push(serde_json::json!(idx));
+                                merged_vars.insert("_loop_indices".to_string(), serde_json::json!(all_indices));
+                                merged_vars.insert("_index".to_string(), serde_json::json!(idx));
+
+                                let __iteration_scope_id = {
+                                    let parent_scope = merged_vars.get("_scope_id")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+
+                                    if let Some(parent) = parent_scope {
+                                        format!("{}_{}_{}", parent, step_id, idx)
+                                    } else {
+                                        format!("sc_{}_{}", step_id, idx)
+                                    }
+                                };
+                                merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id));
+
+                                let __split_scope_id = format!("sc_{}", step_id);
+                                ScenarioInputs {
+                                    data: Arc::new(item.clone()),
+                                    variables: Arc::new(serde_json::Value::Object(merged_vars)),
+                                    parent_scope_id: Some(__split_scope_id),
+                                }
+                            };
+
+                            // Execute subgraph
+                            let result = #subgraph_fn_name(Arc::new(subgraph_inputs)).await;
+
+                            // Check for cancellation via SDK
+                            {
+                                let mut __sdk = sdk().lock().await;
+                                if let Err(e) = __sdk.check_cancelled().await {
+                                    cancel_token.store(true, Ordering::Relaxed);
+                                    return (idx, Err(format!("Cancelled: {}", e)));
+                                }
+                            }
+
+                            (idx, result)
+                        }
+                    });
+
+                // Execute with bounded concurrency
+                let collected: Vec<(usize, std::result::Result<serde_json::Value, String>)> = if sequential {
+                    // Preserve order with buffered()
+                    stream.buffered(parallelism).collect().await
+                } else {
+                    // Unordered for maximum throughput
+                    stream.buffer_unordered(parallelism).collect().await
+                };
+
+                // Sort results by index to maintain original order
+                let mut sorted_results = collected;
+                sorted_results.sort_by_key(|(idx, _)| *idx);
+
+                // Process results
+                for (idx, result) in sorted_results {
+                    match result {
+                        Ok(value) => results.push(value),
+                        Err(e) => {
+                            // Skip "Aborted" errors - they're just placeholders for skipped iterations
+                            if e.starts_with("Aborted") {
+                                continue;
+                            }
+                            if dont_stop_on_failed {
+                                errors.push(serde_json::json!({"error": e, "index": idx}));
+                            } else {
+                                // Signal to skip remaining iterations
+                                error_token.store(true, Ordering::Relaxed);
+                                eprintln!("ERROR in split iteration {}: {}", idx, e);
+                                return Err(format!("Split step failed at index {}: {}", idx, e));
+                            }
+                        }
                     }
                 }
             }
@@ -299,6 +432,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
             variables_base,
             extra_variables,
             dont_stop_on_failed,
+            parallelism,
+            sequential,
             #step_id,
             #step_name_display,
         ).await?;
@@ -779,6 +914,240 @@ mod tests {
         assert!(
             code.contains("\"Unnamed\""),
             "Should use 'Unnamed' for unnamed steps"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_parallel_execution_code() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-parallel".to_string(),
+            name: Some("Parallel Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: Some(10),
+                sequential: Some(false),
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify parallel execution code is generated
+        assert!(
+            code.contains("if parallelism <= 1"),
+            "Should have conditional for parallel vs sequential execution"
+        );
+        assert!(
+            code.contains("buffer_unordered"),
+            "Should use buffer_unordered for parallel execution"
+        );
+        assert!(
+            code.contains("buffered"),
+            "Should use buffered for sequential ordered execution"
+        );
+        assert!(
+            code.contains("futures :: stream"),
+            "Should use futures stream for parallel execution"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_parallel_with_sequential_flag() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-seq-parallel".to_string(),
+            name: Some("Sequential Parallel Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: Some(5),
+                sequential: Some(true), // Sequential ordering with parallelism
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify the code handles the sequential flag
+        assert!(
+            code.contains("if sequential"),
+            "Should check sequential flag for execution order"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_parallel_cancellation_tokens() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-cancel-parallel".to_string(),
+            name: Some("Cancellable Parallel Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: Some(10),
+                sequential: None,
+                dont_stop_on_failed: Some(false),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify cancellation and error tokens are present
+        assert!(
+            code.contains("cancel_token"),
+            "Should have cancel_token for parallel execution"
+        );
+        assert!(
+            code.contains("error_token"),
+            "Should have error_token for early termination on failure"
+        );
+        assert!(
+            code.contains("AtomicBool"),
+            "Should use AtomicBool for thread-safe cancellation"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_parallel_result_sorting() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-sort".to_string(),
+            name: Some("Sorted Results Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: Some(10),
+                sequential: Some(false),
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify results are sorted by index after collection
+        assert!(
+            code.contains("sort_by_key"),
+            "Should sort results by index to maintain original order"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_parallel_passes_parameters() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-params".to_string(),
+            name: Some("Parameterized Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: Some(20),
+                sequential: Some(true),
+                dont_stop_on_failed: Some(true),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify parallelism and sequential are passed to durable function
+        assert!(
+            code.contains("parallelism : usize"),
+            "Should have parallelism parameter in durable function"
+        );
+        assert!(
+            code.contains("sequential : bool"),
+            "Should have sequential parameter in durable function"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_zero_parallelism_is_sequential() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-zero".to_string(),
+            name: Some("Zero Parallelism Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: Some(0), // Should be treated as sequential
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify the conditional check treats 0 and 1 as sequential
+        assert!(
+            code.contains("if parallelism <= 1"),
+            "Should treat parallelism 0 and 1 as sequential execution"
         );
     }
 }

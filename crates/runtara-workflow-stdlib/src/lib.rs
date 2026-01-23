@@ -43,6 +43,9 @@ pub use libc;
 // Re-export tokio for async runtime in generated workflows
 pub use tokio;
 
+// Re-export futures for stream-based concurrency in generated workflows
+pub use futures;
+
 // Re-export runtara-sdk for direct use
 pub use runtara_sdk;
 
