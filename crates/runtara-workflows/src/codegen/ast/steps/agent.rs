@@ -214,7 +214,7 @@ fn emit_durable_call(
             format!("{}{}", base, indices_suffix)
         };
 
-        // Define the durable agent execution function
+        // Define the durable agent execution function with cancellation support
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         async fn #durable_fn_name(
             cache_key: &str,
@@ -223,7 +223,12 @@ fn emit_durable_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            let result = registry::execute_capability(agent_id, capability_id, inputs).await
+            // Wrap agent execution with cancellation support - allows long-running
+            // operations (HTTP requests, DB queries) to be interrupted mid-execution
+            let result = runtara_sdk::with_cancellation(
+                registry::execute_capability(agent_id, capability_id, inputs)
+            ).await
+                .map_err(|e| format!("Step {} cancelled: {}", step_id, e))?
                 .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
                     step_id, agent_id, capability_id, e))?;
             Ok(result)
@@ -292,7 +297,7 @@ fn emit_durable_rate_limited_call(
             format!("{}{}", base, indices_suffix)
         };
 
-        // Define the durable agent execution function (rate-limited)
+        // Define the durable agent execution function (rate-limited) with cancellation support
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         async fn #durable_fn_name(
             cache_key: &str,
@@ -301,7 +306,12 @@ fn emit_durable_rate_limited_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            let result = registry::execute_capability(agent_id, capability_id, inputs).await
+            // Wrap agent execution with cancellation support - allows long-running
+            // operations (HTTP requests, DB queries) to be interrupted mid-execution
+            let result = runtara_sdk::with_cancellation(
+                registry::execute_capability(agent_id, capability_id, inputs)
+            ).await
+                .map_err(|e| format!("Step {} cancelled: {}", step_id, e))?
                 .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
                     step_id, agent_id, capability_id, e))?;
             Ok(result)

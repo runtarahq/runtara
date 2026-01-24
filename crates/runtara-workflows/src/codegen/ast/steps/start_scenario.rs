@@ -194,9 +194,45 @@ fn emit_with_embedded_child(
                 parent_scope_id: Some(__child_scope_id.clone()),
             };
 
-            // Execute child scenario
-            let child_result = #child_fn_name(Arc::new(child_scenario_inputs)).await
-                .map_err(|e| {
+            // Check for cancellation before executing child scenario
+            if runtara_sdk::is_cancelled() {
+                let structured_error = serde_json::json!({
+                    "stepId": step_id,
+                    "stepName": step_name,
+                    "stepType": "StartScenario",
+                    "code": "STEP_CANCELLED",
+                    "message": format!("StartScenario step {} cancelled before execution", step_id),
+                    "category": "transient",
+                    "severity": "info",
+                    "childScenarioId": child_scenario_id
+                });
+                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                    format!("StartScenario step {} cancelled", step_id)
+                }));
+            }
+
+            // Execute child scenario with cancellation support
+            let child_result = match runtara_sdk::with_cancellation(
+                #child_fn_name(Arc::new(child_scenario_inputs))
+            ).await {
+                Ok(result) => result,
+                Err(cancel_err) => {
+                    let structured_error = serde_json::json!({
+                        "stepId": step_id,
+                        "stepName": step_name,
+                        "stepType": "StartScenario",
+                        "code": "STEP_CANCELLED",
+                        "message": format!("StartScenario step {} cancelled during execution", step_id),
+                        "category": "transient",
+                        "severity": "info",
+                        "childScenarioId": child_scenario_id,
+                        "cancellationReason": cancel_err
+                    });
+                    return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                        format!("StartScenario step {} cancelled", step_id)
+                    }));
+                }
+            }.map_err(|e| {
                     // Try to parse the child error as structured JSON
                     let child_error: serde_json::Value = serde_json::from_str(&e)
                         .unwrap_or_else(|_| serde_json::json!({

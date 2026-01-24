@@ -170,8 +170,20 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
                     parent_scope_id: Some(__while_scope_id),
                 };
 
-                // Execute subgraph
-                __loop_outputs = #subgraph_fn_name(Arc::new(__subgraph_inputs)).await?;
+                // Check for cancellation before executing subgraph
+                if runtara_sdk::is_cancelled() {
+                    return Err(format!("While step {} cancelled before iteration {}", #step_id, __loop_index));
+                }
+
+                // Execute subgraph with cancellation support
+                __loop_outputs = match runtara_sdk::with_cancellation(
+                    #subgraph_fn_name(Arc::new(__subgraph_inputs))
+                ).await {
+                    Ok(result) => result?,
+                    Err(cancel_err) => {
+                        return Err(format!("While step {} cancelled at iteration {}: {}", #step_id, __loop_index, cancel_err));
+                    }
+                };
 
                 __loop_index += 1;
 
@@ -181,7 +193,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
                     let _ = __sdk.heartbeat().await;
                 }
 
-                // Check for cancellation after each iteration
+                // Also check for cancellation after each iteration (belt and suspenders)
                 {
                     let mut __sdk = sdk().lock().await;
                     if let Err(e) = __sdk.check_cancelled().await {

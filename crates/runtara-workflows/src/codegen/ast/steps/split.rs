@@ -240,11 +240,21 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
             if parallelism <= 1 {
                 // Sequential execution (backward compatible)
                 for (idx, item) in split_array.iter().enumerate() {
+                    // Check for cancellation before starting each iteration
+                    if runtara_sdk::is_cancelled() {
+                        return Err(format!("Split step {} cancelled before iteration {}", step_id, idx));
+                    }
+
                     let subgraph_inputs = build_iteration_inputs(idx, item, &variables_base, &extra_variables);
 
-                    match #subgraph_fn_name(Arc::new(subgraph_inputs)).await {
-                        Ok(result) => results.push(result),
-                        Err(e) => {
+                    // Wrap subgraph execution with cancellation support
+                    let subgraph_result = runtara_sdk::with_cancellation(
+                        #subgraph_fn_name(Arc::new(subgraph_inputs))
+                    ).await;
+
+                    match subgraph_result {
+                        Ok(Ok(result)) => results.push(result),
+                        Ok(Err(e)) => {
                             if dont_stop_on_failed {
                                 errors.push(serde_json::json!({"error": e, "index": idx}));
                             } else {
@@ -252,9 +262,13 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                                 return Err(format!("Split step failed at index {}: {}", idx, e));
                             }
                         }
+                        Err(cancel_err) => {
+                            // Cancellation during subgraph execution
+                            return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, cancel_err));
+                        }
                     }
 
-                    // Check for cancellation after each iteration
+                    // Also check for cancellation after each iteration (belt and suspenders)
                     {
                         let mut __sdk = sdk().lock().await;
                         if let Err(e) = __sdk.check_cancelled().await {
@@ -290,7 +304,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
 
                         async move {
                             // Check if we should skip due to cancellation or error (when dont_stop_on_failed is false)
-                            if cancel_token.load(Ordering::Relaxed) {
+                            if cancel_token.load(Ordering::Relaxed) || runtara_sdk::is_cancelled() {
                                 return (idx, Err("Cancelled".to_string()));
                             }
                             if error_token.load(Ordering::Relaxed) {
@@ -339,10 +353,19 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                                 }
                             };
 
-                            // Execute subgraph
-                            let result = #subgraph_fn_name(Arc::new(subgraph_inputs)).await;
+                            // Execute subgraph with cancellation support
+                            let result = match runtara_sdk::with_cancellation(
+                                #subgraph_fn_name(Arc::new(subgraph_inputs))
+                            ).await {
+                                Ok(subgraph_result) => subgraph_result,
+                                Err(cancel_err) => {
+                                    // Global cancellation triggered
+                                    cancel_token.store(true, Ordering::Relaxed);
+                                    return (idx, Err(cancel_err));
+                                }
+                            };
 
-                            // Check for cancellation via SDK
+                            // Also check for cancellation via SDK (belt and suspenders)
                             {
                                 let mut __sdk = sdk().lock().await;
                                 if let Err(e) = __sdk.check_cancelled().await {
