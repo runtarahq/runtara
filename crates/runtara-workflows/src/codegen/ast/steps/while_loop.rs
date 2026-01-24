@@ -58,7 +58,10 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
     // Clone scenario inputs var for debug events (to access _loop_indices)
     let scenario_inputs_var = inputs_var.clone();
 
-    // Generate debug event emissions
+    // While creates a scope - use sc_{step_id} as its scope_id
+    let while_scope_id = format!("sc_{}", step_id);
+
+    // Generate debug event emissions with the While's own scope_id
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -67,6 +70,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
         Some(&loop_inputs_var),
         condition_json.as_deref(),
         Some(&scenario_inputs_var),
+        Some(&while_scope_id),
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -75,6 +79,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
         "While",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        Some(&while_scope_id),
     );
 
     quote! {
@@ -139,9 +144,30 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
                     __loop_vars.insert("_previousOutputs".to_string(), __loop_outputs.clone());
                 }
 
+                // Generate scope ID for this iteration
+                let __iteration_scope_id = {
+                    let parent_scope = __loop_vars.get("_scope_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if let Some(parent) = parent_scope {
+                        format!("{}_{}_{}", parent, #step_id, __loop_index)
+                    } else {
+                        format!("sc_{}_{}", #step_id, __loop_index)
+                    }
+                };
+
+                // Inject _scope_id into subgraph variables (iteration-specific for cache key uniqueness)
+                __loop_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
+
+                // Inner steps use the While's scope (sc_{step_id}) as their parent, NOT the iteration scope.
+                // This ensures all iterations share the same parent scope for hierarchy queries,
+                // while still having unique scope_ids for cache key differentiation.
+                let __while_scope_id = format!("sc_{}", #step_id);
                 let __subgraph_inputs = ScenarioInputs {
                     data: #inputs_var.data.clone(),
                     variables: Arc::new(serde_json::Value::Object(__loop_vars)),
+                    parent_scope_id: Some(__while_scope_id),
                 };
 
                 // Execute subgraph

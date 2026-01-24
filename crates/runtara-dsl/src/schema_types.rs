@@ -112,7 +112,29 @@ pub struct ExecutionGraph {
     pub edges: Option<serde_json::Value>,
 }
 
-/// An edge in the execution plan defining control flow
+/// An edge in the execution plan defining control flow between steps.
+///
+/// # Edge Selection Semantics
+///
+/// When multiple edges originate from the same step with the same label:
+///
+/// 1. **Conditional edges** (with `condition`): Evaluated in priority order (highest first).
+///    The first condition that evaluates to true wins.
+///
+/// 2. **Default edge** (without `condition`): At most one is allowed per (from_step, label) pair.
+///    Only taken if no conditional edge matches.
+///
+/// 3. **Parallel edges** (without conditions OR labels): Multiple unlabeled, condition-less
+///    edges can exist - they execute in parallel (e.g., fan-out patterns).
+///
+/// 4. **Conditional step exception**: `true`/`false` labeled edges from a Conditional step
+///    are mutually exclusive based on the condition result, not evaluated via edge conditions.
+///
+/// # Validation Rules
+///
+/// - Multiple conditional edges from the same step with the same label must have unique priorities
+/// - At most one default (condition-less) edge per (from_step, label) pair
+/// - If no condition matches and no default exists, the workflow fails (for onError) or continues normally
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -127,8 +149,46 @@ pub struct ExecutionPlanEdge {
     /// - `"true"`/`"false"` for Conditional step branches
     /// - `"onError"` for error handling transition (step failed after retries)
     /// - `None` or empty for normal sequential flow
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+
+    /// Optional condition expression for conditional transitions.
+    ///
+    /// Uses the same format as `Conditional` step conditions, supporting
+    /// operators like EQ, AND, OR, STARTS_WITH, CONTAINS, etc.
+    ///
+    /// Available context for conditions:
+    /// - `data.*` - Input data
+    /// - `steps.<stepId>.outputs.*` - Previous step outputs
+    /// - `variables.*` - Workflow variables
+    /// - `__error.*` - Error details (for `onError` edges): code, message, category, severity, attributes
+    ///
+    /// Example for onError routing:
+    /// ```json
+    /// {
+    ///   "condition": {
+    ///     "type": "operation",
+    ///     "op": "EQ",
+    ///     "arguments": [
+    ///       { "valueType": "reference", "value": "__error.category" },
+    ///       { "valueType": "immediate", "value": "transient" }
+    ///     ]
+    ///   }
+    /// }
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub condition: Option<ConditionExpression>,
+
+    /// Priority for conditional edge selection (higher = checked first, default = 0).
+    ///
+    /// When multiple edges with conditions exist for the same (from_step, label) pair:
+    /// - Edges are evaluated in descending priority order
+    /// - The first condition that evaluates to true wins
+    /// - Priorities must be unique among conditional edges from the same step/label
+    /// - Edges without conditions (default fallback) are always checked last
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 /// Visual annotation for scenario editor UI
@@ -188,6 +248,9 @@ pub enum Step {
 
     /// Acquire a connection for use with secure agents
     Connection(ConnectionStep),
+
+    /// Emit a structured error and terminate the workflow
+    Error(ErrorStep),
 }
 
 /// Common fields shared by all step types
@@ -218,6 +281,30 @@ pub struct FinishStep {
     /// Maps scenario data to output values
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
+}
+
+/// Compensation configuration for saga pattern support.
+///
+/// Defines what compensation step to execute if a downstream step fails,
+/// enabling distributed transaction rollback.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CompensationConfig {
+    /// Step ID to execute for compensation (rollback)
+    pub compensation_step: String,
+
+    /// Data to pass to compensation step (maps from current step's context)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compensation_data: Option<InputMapping>,
+
+    /// When to trigger compensation: "on_downstream_error" (default), "on_any_error", "manual"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+
+    /// Compensation order (higher = compensate first, default = step execution order reversed)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 /// Executes an agent capability
@@ -257,6 +344,11 @@ pub struct AgentStep {
     /// Step timeout in milliseconds. If exceeded, step fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+
+    /// Compensation configuration for saga pattern support.
+    /// Defines what step to execute to rollback this step's effects on failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation: Option<CompensationConfig>,
 }
 
 /// Evaluates conditions and branches execution
@@ -497,6 +589,100 @@ pub struct ConnectionStep {
 
     /// Type of connection (bearer, api_key, basic_auth, sftp, etc.)
     pub integration_id: String,
+}
+
+/// Emit a structured error and terminate the workflow.
+///
+/// The Error step allows workflows to explicitly emit categorized errors
+/// with structured metadata. This is the primary mechanism for business
+/// logic errors that should be distinguishable from technical errors.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "Error",
+///   "id": "credit_limit_error",
+///   "category": "business",
+///   "code": "CREDIT_LIMIT_EXCEEDED",
+///   "message": "Order total ${data.total} exceeds credit limit ${data.limit}"
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "ErrorStep")]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Error category determines retry behavior:
+    /// - "transient": Retry is likely to succeed (network, timeout, rate limit)
+    /// - "permanent": Don't retry (validation, not found, authorization, business rules)
+    ///
+    /// Use `code` and `severity` to distinguish technical vs business errors.
+    #[serde(default)]
+    pub category: ErrorCategory,
+
+    /// Machine-readable error code (e.g., "CREDIT_LIMIT_EXCEEDED", "INVALID_ACCOUNT")
+    pub code: String,
+
+    /// Human-readable error message (static string).
+    /// For dynamic data, use the `context` field with mappings.
+    pub message: String,
+
+    /// Error severity for logging/alerting:
+    /// - "info": Informational (expected errors)
+    /// - "warning": Warning (degraded but functional)
+    /// - "error": Error (operation failed) - default
+    /// - "critical": Critical (system-level failure)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<ErrorSeverity>,
+
+    /// Additional context data to include with the error.
+    /// Keys are field names, values specify how to obtain the data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<InputMapping>,
+}
+
+/// Error category for structured errors.
+/// Determines retry behavior.
+///
+/// Two categories:
+/// - **Transient**: Auto-retry likely to succeed (network, timeout, rate limit)
+/// - **Permanent**: Don't auto-retry (validation, not found, auth, business rules)
+///
+/// To distinguish technical vs business errors within Permanent, use:
+/// - `code`: e.g., `VALIDATION_*` vs `BUSINESS_*` or `CREDIT_LIMIT_EXCEEDED`
+/// - `severity`: `error` for technical, `warning` for expected business outcomes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ErrorCategory {
+    /// Transient error - retry is likely to succeed (network, timeout, rate limit)
+    Transient,
+    /// Permanent error - don't retry (validation, not found, authorization, business rules)
+    #[default]
+    Permanent,
+}
+
+/// Error severity for logging and alerting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ErrorSeverity {
+    /// Informational - expected errors
+    Info,
+    /// Warning - degraded but functional
+    Warning,
+    /// Error - operation failed (default)
+    #[default]
+    Error,
+    /// Critical - system-level failure
+    Critical,
 }
 
 // ============================================================================

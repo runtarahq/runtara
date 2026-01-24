@@ -31,25 +31,25 @@ message HealthCheckResponse {
 // ============================================================================
 
 enum RunnerType {
-  RUNNER_OCI = 0;     // OCI container runner (default)
-  RUNNER_NATIVE = 1;  // Native process runner
-  RUNNER_WASM = 2;    // WebAssembly runner
+  RUNNER_OCI = 0; // OCI container runner (default)
+  RUNNER_NATIVE = 1; // Native process runner
+  RUNNER_WASM = 2; // WebAssembly runner
 }
 
 // Register a new image (small binary < 16MB)
 message RegisterImageRequest {
-  string tenant_id = 1;             // Tenant that owns this image
-  string name = 2;                  // Human-readable name (unique per tenant)
-  optional string description = 3;  // Optional description
-  bytes binary = 4;                 // Compiled binary content
-  RunnerType runner_type = 5;       // Type of runner to use (default: OCI)
-  optional bytes metadata = 6;      // Optional metadata (JSON)
+  string tenant_id = 1; // Tenant that owns this image
+  string name = 2; // Human-readable name (unique per tenant)
+  optional string description = 3; // Optional description
+  bytes binary = 4; // Compiled binary content
+  RunnerType runner_type = 5; // Type of runner to use (default: OCI)
+  optional bytes metadata = 6; // Optional metadata (JSON)
 }
 
 message RegisterImageResponse {
   bool success = 1;
-  string image_id = 2;              // Assigned image UUID
-  string error = 3;                 // Error if failed
+  string image_id = 2; // Assigned image UUID
+  string error = 3; // Error if failed
 }
 
 // Register a new image (streaming for large binaries)
@@ -62,16 +62,16 @@ message RegisterImageStreamStart {
   string tenant_id = 1;
   string name = 2;
   optional string description = 3;
-  uint64 binary_size = 4;           // Total size in bytes
+  uint64 binary_size = 4; // Total size in bytes
   RunnerType runner_type = 5;
   optional bytes metadata = 6;
-  optional string sha256 = 7;       // Optional checksum for verification
+  optional string sha256 = 7; // Optional checksum for verification
 }
 
 message ListImagesRequest {
-  optional string tenant_id = 1;    // Filter by tenant
-  uint32 limit = 2;                 // Max results (default: 100)
-  uint32 offset = 3;                // Pagination offset
+  optional string tenant_id = 1; // Filter by tenant
+  uint32 limit = 2; // Max results (default: 100)
+  uint32 offset = 3; // Pagination offset
 }
 
 message ListImagesResponse {
@@ -90,7 +90,7 @@ message ImageSummary {
 
 message GetImageRequest {
   string image_id = 1;
-  string tenant_id = 2;  // Required for tenant isolation
+  string tenant_id = 2; // Required for tenant isolation
 }
 
 message GetImageResponse {
@@ -100,7 +100,7 @@ message GetImageResponse {
 
 message DeleteImageRequest {
   string image_id = 1;
-  string tenant_id = 2;  // Required for tenant isolation
+  string tenant_id = 2; // Required for tenant isolation
 }
 
 message DeleteImageResponse {
@@ -114,35 +114,35 @@ message DeleteImageResponse {
 
 enum InstanceStatus {
   STATUS_UNKNOWN = 0;
-  STATUS_PENDING = 1;     // Queued, not yet started
-  STATUS_RUNNING = 2;     // Currently executing
-  STATUS_SUSPENDED = 3;   // Sleeping / paused, waiting for wake or resume
-  STATUS_COMPLETED = 4;   // Finished successfully
-  STATUS_FAILED = 5;      // Finished with error
-  STATUS_CANCELLED = 6;   // Cancelled by signal
+  STATUS_PENDING = 1; // Queued, not yet started
+  STATUS_RUNNING = 2; // Currently executing
+  STATUS_SUSPENDED = 3; // Sleeping / paused, waiting for wake or resume
+  STATUS_COMPLETED = 4; // Finished successfully
+  STATUS_FAILED = 5; // Finished with error
+  STATUS_CANCELLED = 6; // Cancelled by signal
 }
 
 // Start a new instance
 message StartInstanceRequest {
-  string image_id = 1;              // Image to launch
-  string tenant_id = 2;             // Tenant ID
-  optional string instance_id = 3;  // Optional custom instance ID (UUID generated if not provided)
-  bytes input = 4;                  // JSON input data
+  string image_id = 1; // Image to launch
+  string tenant_id = 2; // Tenant ID
+  optional string instance_id = 3; // Optional custom instance ID (UUID generated if not provided)
+  bytes input = 4; // JSON input data
   optional uint32 timeout_seconds = 5; // Execution timeout (default: 300)
-  map<string, string> env = 6;      // Custom environment variables (override system vars)
+  map<string, string> env = 6; // Custom environment variables (override system vars)
 }
 
 message StartInstanceResponse {
   bool success = 1;
-  string instance_id = 2;           // Created instance ID
-  string error = 3;                 // Error if failed
+  string instance_id = 2; // Created instance ID
+  string error = 3; // Error if failed
 }
 
 // Stop a running instance
 message StopInstanceRequest {
   string instance_id = 1;
-  uint32 grace_period_seconds = 2;  // Grace period before force kill (default: 5)
-  string reason = 3;                // Reason for stopping
+  uint32 grace_period_seconds = 2; // Grace period before force kill (default: 5)
+  string reason = 3; // Reason for stopping
 }
 
 message StopInstanceResponse {
@@ -166,41 +166,41 @@ message GetInstanceStatusRequest {
 }
 
 message GetInstanceStatusResponse {
-  bool found = 1;                     // Whether the instance was found
+  bool found = 1; // Whether the instance was found
   string instance_id = 2;
   InstanceStatus status = 3;
-  optional string checkpoint_id = 4;  // Last known checkpoint
+  optional string checkpoint_id = 4; // Last known checkpoint
   int64 created_at_ms = 5;
   optional int64 started_at_ms = 6;
   optional int64 finished_at_ms = 7;
-  optional bytes output = 8;          // If completed
-  optional string error = 9;          // If failed (execution error, NOT "not found")
-  optional string stderr = 19;        // Raw stderr output (for debugging/logging)
+  optional bytes output = 8; // If completed
+  optional string error = 9; // If failed (execution error, NOT "not found")
+  optional string stderr = 19; // Raw stderr output (for debugging/logging)
   // Extended fields for detailed instance info
-  string image_id = 10;               // Image UUID used for this instance
-  string image_name = 11;             // Human-readable image name
-  string tenant_id = 12;              // Tenant that owns this instance
-  optional bytes input = 13;          // Input data provided when starting
+  string image_id = 10; // Image UUID used for this instance
+  string image_name = 11; // Human-readable image name
+  string tenant_id = 12; // Tenant that owns this instance
+  optional bytes input = 13; // Input data provided when starting
   optional int64 heartbeat_at_ms = 14; // Last heartbeat timestamp
-  uint32 retry_count = 15;            // Current retry attempt number
-  uint32 max_retries = 16;            // Maximum allowed retries
+  uint32 retry_count = 15; // Current retry attempt number
+  uint32 max_retries = 16; // Maximum allowed retries
   // Execution metrics (available for terminal states)
-  optional uint64 memory_peak_bytes = 17;   // Peak memory usage in bytes
-  optional uint64 cpu_usage_usec = 18;      // Total CPU time in microseconds
+  optional uint64 memory_peak_bytes = 17; // Peak memory usage in bytes
+  optional uint64 cpu_usage_usec = 18; // Total CPU time in microseconds
 }
 
 // List instances
 message ListInstancesRequest {
-  optional string tenant_id = 1;      // Filter by tenant
+  optional string tenant_id = 1; // Filter by tenant
   optional InstanceStatus status = 2; // Filter by status
-  uint32 limit = 3;                   // Max results (default: 100)
-  uint32 offset = 4;                  // Pagination offset
-  optional string image_id = 5;       // Filter by image UUID (exact match)
-  optional int64 created_after_ms = 6;  // Date range start (created_at >= value)
+  uint32 limit = 3; // Max results (default: 100)
+  uint32 offset = 4; // Pagination offset
+  optional string image_id = 5; // Filter by image UUID (exact match)
+  optional int64 created_after_ms = 6; // Date range start (created_at >= value)
   optional int64 created_before_ms = 7; // Date range end (created_at < value)
   optional int64 finished_after_ms = 8; // Completion date range start (finished_at >= value)
   optional int64 finished_before_ms = 9; // Completion date range end (finished_at < value)
-  optional string order_by = 10;      // Sort: created_at_desc, created_at_asc, finished_at_desc, finished_at_asc
+  optional string order_by = 10; // Sort: created_at_desc, created_at_asc, finished_at_desc, finished_at_asc
   optional string image_name_prefix = 11; // Filter by image name prefix (e.g., "scenario_id:")
 }
 
@@ -215,9 +215,9 @@ message InstanceSummary {
   string image_id = 3;
   InstanceStatus status = 4;
   int64 created_at_ms = 5;
-  optional int64 started_at_ms = 6;   // When execution started
-  optional int64 finished_at_ms = 7;  // When execution finished
-  bool has_error = 8;                 // Quick error indicator
+  optional int64 started_at_ms = 6; // When execution started
+  optional int64 finished_at_ms = 7; // When execution finished
+  bool has_error = 8; // Quick error indicator
 }
 
 // ============================================================================
@@ -225,21 +225,21 @@ message InstanceSummary {
 // ============================================================================
 
 enum SignalType {
-  SIGNAL_CANCEL = 0;      // Cancel execution
-  SIGNAL_PAUSE = 1;       // Pause execution (checkpoint and wait)
-  SIGNAL_RESUME = 2;      // Resume paused execution
+  SIGNAL_CANCEL = 0; // Cancel execution
+  SIGNAL_PAUSE = 1; // Pause execution (checkpoint and wait)
+  SIGNAL_RESUME = 2; // Resume paused execution
 }
 
 // Send signal to an instance (Environment proxies to Core)
 message SendSignalRequest {
   string instance_id = 1;
   SignalType signal_type = 2;
-  bytes payload = 3;            // Signal-specific data (e.g., cancel reason)
+  bytes payload = 3; // Signal-specific data (e.g., cancel reason)
 }
 
 message SendSignalResponse {
   bool success = 1;
-  string error = 2;             // Error if instance not found, etc.
+  string error = 2; // Error if instance not found, etc.
 }
 
 // Send custom signal scoped to a checkpoint/wait key
@@ -260,28 +260,28 @@ message SendCustomSignalResponse {
 
 // Test a single agent capability (runs in OCI container)
 message TestCapabilityRequest {
-  string tenant_id = 1;           // Tenant ID for isolation
-  string agent_id = 2;            // Agent module name (e.g., "http", "utils", "transform")
-  string capability_id = 3;       // Capability ID (e.g., "http-request", "random-double")
-  bytes input = 4;                // JSON-encoded capability input
-  optional bytes connection = 5;  // Optional JSON-encoded connection credentials
+  string tenant_id = 1; // Tenant ID for isolation
+  string agent_id = 2; // Agent module name (e.g., "http", "utils", "transform")
+  string capability_id = 3; // Capability ID (e.g., "http-request", "random-double")
+  bytes input = 4; // JSON-encoded capability input
+  optional bytes connection = 5; // Optional JSON-encoded connection credentials
   optional uint32 timeout_ms = 6; // Execution timeout (default: 30000)
 }
 
 message TestCapabilityResponse {
   bool success = 1;
-  bytes output = 2;               // JSON-encoded result on success
-  optional string error = 3;      // Error message on failure
-  uint64 execution_time_ms = 4;   // How long the capability took to execute
+  bytes output = 2; // JSON-encoded result on success
+  optional string error = 3; // Error message on failure
+  uint64 execution_time_ms = 4; // How long the capability took to execute
 }
 
 // List all available agents and their capabilities
 message ListAgentsRequest {
-  optional string tenant_id = 1;  // Reserved for future tenant-specific filtering
+  optional string tenant_id = 1; // Reserved for future tenant-specific filtering
 }
 
 message ListAgentsResponse {
-  bytes agents_json = 1;          // JSON-encoded Vec<AgentInfo>
+  bytes agents_json = 1; // JSON-encoded Vec<AgentInfo>
 }
 
 // Get details about a specific capability including input schema
@@ -292,8 +292,8 @@ message GetCapabilityRequest {
 
 message GetCapabilityResponse {
   bool found = 1;
-  bytes capability_json = 2;      // JSON-encoded CapabilityInfo
-  bytes inputs_json = 3;          // JSON-encoded Vec<CapabilityField>
+  bytes capability_json = 2; // JSON-encoded CapabilityInfo
+  bytes inputs_json = 3; // JSON-encoded Vec<CapabilityField>
 }
 
 // ============================================================================
@@ -303,10 +303,10 @@ message GetCapabilityResponse {
 // List checkpoints for an instance
 message ListCheckpointsRequest {
   string instance_id = 1;
-  optional string checkpoint_id = 2;  // Filter by checkpoint_id
-  optional uint32 limit = 3;          // Max results (default: 100)
-  optional uint32 offset = 4;         // Pagination offset
-  optional int64 created_after_ms = 5;  // Filter checkpoints created after this time
+  optional string checkpoint_id = 2; // Filter by checkpoint_id
+  optional uint32 limit = 3; // Max results (default: 100)
+  optional uint32 offset = 4; // Pagination offset
+  optional int64 created_after_ms = 5; // Filter checkpoints created after this time
   optional int64 created_before_ms = 6; // Filter checkpoints created before this time
 }
 
@@ -321,7 +321,7 @@ message CheckpointSummary {
   string checkpoint_id = 1;
   string instance_id = 2;
   int64 created_at_ms = 3;
-  uint64 data_size_bytes = 4;         // Size of checkpoint data in bytes
+  uint64 data_size_bytes = 4; // Size of checkpoint data in bytes
 }
 
 // Get full checkpoint data
@@ -335,7 +335,7 @@ message GetCheckpointResponse {
   string checkpoint_id = 2;
   string instance_id = 3;
   int64 created_at_ms = 4;
-  bytes data = 5;                     // Checkpoint state data (JSON bytes)
+  bytes data = 5; // Checkpoint state data (JSON bytes)
 }
 
 // ============================================================================
@@ -343,15 +343,15 @@ message GetCheckpointResponse {
 // ============================================================================
 
 enum MetricsGranularity {
-  GRANULARITY_HOURLY = 0;   // Hourly time buckets (default)
-  GRANULARITY_DAILY = 1;    // Daily time buckets
+  GRANULARITY_HOURLY = 0; // Hourly time buckets (default)
+  GRANULARITY_DAILY = 1; // Daily time buckets
 }
 
 // Get aggregated metrics for a tenant
 message GetTenantMetricsRequest {
-  string tenant_id = 1;                        // Required: tenant to get metrics for
-  optional int64 start_time_ms = 2;            // Start of time range (default: 24h ago)
-  optional int64 end_time_ms = 3;              // End of time range (default: now)
+  string tenant_id = 1; // Required: tenant to get metrics for
+  optional int64 start_time_ms = 2; // Start of time range (default: 24h ago)
+  optional int64 end_time_ms = 3; // End of time range (default: now)
   optional MetricsGranularity granularity = 4; // Bucket granularity (default: hourly)
 }
 
@@ -364,7 +364,7 @@ message GetTenantMetricsResponse {
 }
 
 message MetricsBucket {
-  int64 bucket_time_ms = 1;               // Start of bucket (UTC)
+  int64 bucket_time_ms = 1; // Start of bucket (UTC)
 
   // Counts
   int64 invocation_count = 2;
@@ -392,13 +392,17 @@ message MetricsBucket {
 // List events for an instance (debug events, workflow logs, etc.)
 message ListEventsRequest {
   string instance_id = 1;
-  optional string event_type = 2;         // Filter by event_type (e.g., "custom", "started")
-  optional string subtype = 3;            // Filter by subtype (e.g., "step_debug_start", "workflow_log")
-  optional uint32 limit = 4;              // Max results (default: 100)
-  optional uint32 offset = 5;             // Pagination offset
-  optional int64 created_after_ms = 6;    // Filter events created after this time
-  optional int64 created_before_ms = 7;   // Filter events created before this time
-  optional string payload_contains = 8;   // Full-text search in JSON payload
+  optional string event_type = 2; // Filter by event_type (e.g., "custom", "started")
+  optional string subtype = 3; // Filter by subtype (e.g., "step_debug_start", "workflow_log")
+  optional uint32 limit = 4; // Max results (default: 100)
+  optional uint32 offset = 5; // Pagination offset
+  optional int64 created_after_ms = 6; // Filter events created after this time
+  optional int64 created_before_ms = 7; // Filter events created before this time
+  optional string payload_contains = 8; // Full-text search in JSON payload
+  optional string scope_id = 9; // Filter by scope_id in payload (for hierarchy filtering)
+  optional string parent_scope_id = 10; // Filter by parent_scope_id in payload (for getting direct children)
+  bool root_scopes_only = 11; // When true, only return events with no parent_scope_id (root-level scopes)
+  optional string sort_order = 12; // Sort order: "asc" (oldest first) or "desc" (newest first, default)
 }
 
 message ListEventsResponse {
@@ -413,9 +417,79 @@ message EventSummary {
   string instance_id = 2;
   string event_type = 3;
   optional string checkpoint_id = 4;
-  optional bytes payload = 5;             // JSON payload bytes
+  optional bytes payload = 5; // JSON payload bytes
   int64 created_at_ms = 6;
   optional string subtype = 7;
+}
+
+// ============================================================================
+// Step Summaries (paired step events)
+// ============================================================================
+
+enum StepStatus {
+  STEP_STATUS_RUNNING = 0;
+  STEP_STATUS_COMPLETED = 1;
+  STEP_STATUS_FAILED = 2;
+}
+
+// List step summaries for an instance (pairs step_debug_start and step_debug_end events)
+message ListStepSummariesRequest {
+  string instance_id = 1;
+  optional string status = 2; // Filter by status: "running", "completed", "failed"
+  optional string step_type = 3; // Filter by step type (e.g., "Http", "Transform")
+  optional string scope_id = 4; // Filter by scope_id
+  optional string parent_scope_id = 5; // Filter by parent_scope_id
+  bool root_scopes_only = 6; // When true, only return steps with no parent_scope_id
+  optional string sort_order = 7; // Sort order: "asc" (oldest first) or "desc" (newest first, default)
+  optional uint32 limit = 8; // Max results (default: 100)
+  optional uint32 offset = 9; // Pagination offset
+}
+
+message ListStepSummariesResponse {
+  repeated StepSummary steps = 1;
+  uint32 total_count = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message StepSummary {
+  string step_id = 1;
+  optional string step_name = 2;
+  string step_type = 3;
+  StepStatus status = 4;
+  int64 started_at_ms = 5;
+  optional int64 completed_at_ms = 6;
+  optional int64 duration_ms = 7;
+  optional bytes inputs = 8; // JSON inputs
+  optional bytes outputs = 9; // JSON outputs (if completed)
+  optional bytes error = 10; // JSON error (if failed)
+  optional string scope_id = 11;
+  optional string parent_scope_id = 12;
+}
+
+// ============================================================================
+// Scope Hierarchy (for call stack reconstruction)
+// ============================================================================
+
+// Get ancestors of a scope for call stack reconstruction
+message GetScopeAncestorsRequest {
+  string instance_id = 1;
+  string scope_id = 2; // Starting scope to walk up from
+}
+
+message GetScopeAncestorsResponse {
+  repeated ScopeInfo ancestors = 1; // Ordered from immediate parent to root
+}
+
+// Information about a scope (from scope_enter events)
+message ScopeInfo {
+  string scope_id = 1;
+  optional string parent_scope_id = 2;
+  string step_id = 3;
+  optional string step_name = 4;
+  string step_type = 5; // "Split", "While", "StartScenario"
+  optional uint32 index = 6; // Iteration index for Split/While
+  int64 created_at_ms = 7;
 }
 
 // ============================================================================
@@ -452,6 +526,10 @@ message RpcRequest {
     ListEventsRequest list_events = 20;
     // Tenant metrics
     GetTenantMetricsRequest get_tenant_metrics = 21;
+    // Scope hierarchy
+    GetScopeAncestorsRequest get_scope_ancestors = 22;
+    // Step summaries (paired events)
+    ListStepSummariesRequest list_step_summaries = 23;
   }
 }
 
@@ -486,6 +564,10 @@ message RpcResponse {
     ListEventsResponse list_events = 20;
     // Tenant metrics
     GetTenantMetricsResponse get_tenant_metrics = 21;
+    // Scope hierarchy
+    GetScopeAncestorsResponse get_scope_ancestors = 22;
+    // Step summaries
+    ListStepSummariesResponse list_step_summaries = 23;
   }
 }
 

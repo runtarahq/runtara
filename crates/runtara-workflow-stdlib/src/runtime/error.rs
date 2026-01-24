@@ -70,3 +70,61 @@ impl From<&str> for Error {
 
 /// Result type for workflow execution
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Structured workflow error with category, code, and context.
+///
+/// This error type is emitted by Error steps and carries rich metadata
+/// for error categorization and routing.
+#[derive(Debug, Clone)]
+pub struct WorkflowError {
+    /// Machine-readable error code (e.g., "CREDIT_LIMIT_EXCEEDED")
+    pub code: String,
+    /// Human-readable error message
+    pub message: String,
+    /// Additional context as JSON
+    pub context: serde_json::Value,
+}
+
+impl WorkflowError {
+    /// Create a new structured workflow error.
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        context: serde_json::Value,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            context,
+        }
+    }
+
+    /// Get the error category from context (transient, permanent, business).
+    pub fn category(&self) -> Option<&str> {
+        self.context.get("category").and_then(|v| v.as_str())
+    }
+
+    /// Get the error severity from context (info, warning, error, critical).
+    pub fn severity(&self) -> Option<&str> {
+        self.context.get("severity").and_then(|v| v.as_str())
+    }
+
+    /// Check if this error should be retried (transient category).
+    pub fn should_retry(&self) -> bool {
+        self.category() == Some("transient")
+    }
+}
+
+impl fmt::Display for WorkflowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for WorkflowError {}
+
+impl From<WorkflowError> for Error {
+    fn from(e: WorkflowError) -> Self {
+        Error::StepFailed(e.to_string())
+    }
+}

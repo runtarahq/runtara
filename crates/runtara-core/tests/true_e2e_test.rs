@@ -164,6 +164,7 @@ fn create_multi_step_workflow() -> ExecutionGraph {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            compensation: None,
         }),
     );
 
@@ -196,6 +197,7 @@ fn create_multi_step_workflow() -> ExecutionGraph {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            compensation: None,
         }),
     );
 
@@ -229,11 +231,15 @@ fn create_multi_step_workflow() -> ExecutionGraph {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ],
         variables: HashMap::new(),

@@ -9,7 +9,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runtara_core::error::CoreError;
 use runtara_core::persistence::{
     CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    Persistence, SignalRecord,
+    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
 };
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use sqlx::PgPool;
@@ -405,6 +405,24 @@ impl Persistence for MockPersistence {
         &self,
         _instance_id: &str,
         _filter: &ListEventsFilter,
+    ) -> Result<i64, CoreError> {
+        Ok(0)
+    }
+
+    async fn list_step_summaries(
+        &self,
+        _instance_id: &str,
+        _filter: &ListStepSummariesFilter,
+        _limit: i64,
+        _offset: i64,
+    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+        Ok(vec![])
+    }
+
+    async fn count_step_summaries(
+        &self,
+        _instance_id: &str,
+        _filter: &ListStepSummariesFilter,
     ) -> Result<i64, CoreError> {
         Ok(0)
     }

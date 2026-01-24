@@ -47,15 +47,15 @@ pub fn values_equal(left: &Value, right: &Value) -> bool {
                 return false;
             }
             l.iter()
-                .all(|(k, v)| r.get(k).map_or(false, |rv| values_equal(v, rv)))
+                .all(|(k, v)| r.get(k).is_some_and(|rv| values_equal(v, rv)))
         }
 
         // String to number coercion (common in JSON APIs)
         (Value::String(s), Value::Number(n)) | (Value::Number(n), Value::String(s)) => {
-            if let Ok(parsed) = s.parse::<f64>() {
-                if let Some(num) = n.as_f64() {
-                    return (parsed - num).abs() < f64::EPSILON;
-                }
+            if let Ok(parsed) = s.parse::<f64>()
+                && let Some(num) = n.as_f64()
+            {
+                return (parsed - num).abs() < f64::EPSILON;
             }
             false
         }

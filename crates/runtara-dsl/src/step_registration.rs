@@ -10,7 +10,10 @@
 //! the goal of single-source-of-truth: the step struct IS the schema.
 
 use crate::agent_meta::StepTypeMeta;
-use crate::{AgentStep, ConditionalStep, FinishStep, SplitStep, StartScenarioStep, SwitchStep};
+use crate::{
+    AgentStep, ConditionalStep, ConnectionStep, ErrorStep, FinishStep, LogStep, SplitStep,
+    StartScenarioStep, SwitchStep, WhileStep,
+};
 
 // ============================================================================
 // Schema Generator Functions
@@ -38,6 +41,22 @@ fn schema_switch_step() -> schemars::schema::RootSchema {
 
 fn schema_start_scenario_step() -> schemars::schema::RootSchema {
     schemars::schema_for!(StartScenarioStep)
+}
+
+fn schema_while_step() -> schemars::schema::RootSchema {
+    schemars::schema_for!(WhileStep)
+}
+
+fn schema_log_step() -> schemars::schema::RootSchema {
+    schemars::schema_for!(LogStep)
+}
+
+fn schema_connection_step() -> schemars::schema::RootSchema {
+    schemars::schema_for!(ConnectionStep)
+}
+
+fn schema_error_step() -> schemars::schema::RootSchema {
+    schemars::schema_for!(ErrorStep)
 }
 
 // ============================================================================
@@ -92,6 +111,38 @@ static START_SCENARIO_STEP_META: StepTypeMeta = StepTypeMeta {
     schema_fn: schema_start_scenario_step,
 };
 
+static WHILE_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "While",
+    display_name: "While Loop",
+    description: "Repeats execution while condition is true",
+    category: "control",
+    schema_fn: schema_while_step,
+};
+
+static LOG_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "Log",
+    display_name: "Log",
+    description: "Emit custom log/debug events",
+    category: "utility",
+    schema_fn: schema_log_step,
+};
+
+static CONNECTION_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "Connection",
+    display_name: "Connection",
+    description: "Acquire a connection for secure agents",
+    category: "utility",
+    schema_fn: schema_connection_step,
+};
+
+static ERROR_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "Error",
+    display_name: "Error",
+    description: "Emit a structured error and terminate workflow",
+    category: "control",
+    schema_fn: schema_error_step,
+};
+
 // Register all step types with inventory
 inventory::submit! { &FINISH_STEP_META }
 inventory::submit! { &AGENT_STEP_META }
@@ -99,3 +150,7 @@ inventory::submit! { &CONDITIONAL_STEP_META }
 inventory::submit! { &SPLIT_STEP_META }
 inventory::submit! { &SWITCH_STEP_META }
 inventory::submit! { &START_SCENARIO_STEP_META }
+inventory::submit! { &WHILE_STEP_META }
+inventory::submit! { &LOG_STEP_META }
+inventory::submit! { &CONNECTION_STEP_META }
+inventory::submit! { &ERROR_STEP_META }

@@ -58,6 +58,23 @@ pub async fn execute_capability(
     Err(format!("Unknown capability: {}:{}", module, capability_id))
 }
 
+/// Hint for how to compensate (undo) a capability's effects.
+///
+/// This is **metadata only** - the system never auto-compensates.
+/// Tools can use this to suggest compensation configurations to users.
+///
+/// Note: The actual compensation data mapping is defined by the workflow author
+/// in the workflow definition, not here. This hint only suggests which capability
+/// can reverse the effects - the author decides how to wire up the inputs.
+#[derive(Debug, Clone)]
+pub struct CompensationHint {
+    /// The capability ID that reverses this capability's effects.
+    /// Must be in the same module (e.g., "release" for "reserve").
+    pub capability_id: &'static str,
+    /// Human-readable description of what the compensation does.
+    pub description: Option<&'static str>,
+}
+
 /// Metadata for an agent capability
 #[derive(Debug, Clone)]
 pub struct CapabilityMeta {
@@ -81,10 +98,48 @@ pub struct CapabilityMeta {
     pub is_idempotent: bool,
     /// Whether this capability requires rate limiting (external API calls)
     pub rate_limited: bool,
+    /// Optional compensation hint - suggests how to undo this capability's effects.
+    /// This is metadata only; the system never auto-compensates.
+    pub compensation_hint: Option<CompensationHint>,
+    /// Known errors this capability can return.
+    /// Used for tooling hints, validation, and documentation generation.
+    pub known_errors: &'static [KnownError],
 }
 
 // Register CapabilityMeta with inventory
 inventory::collect!(&'static CapabilityMeta);
+
+/// Error category for capability errors
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// Transient error - retry is likely to succeed
+    Transient,
+    /// Permanent error - don't retry
+    Permanent,
+}
+
+impl ErrorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorKind::Transient => "transient",
+            ErrorKind::Permanent => "permanent",
+        }
+    }
+}
+
+/// A known error that a capability can return.
+/// Used for compile-time introspection and tooling.
+#[derive(Debug, Clone)]
+pub struct KnownError {
+    /// Machine-readable error code (e.g., "HTTP_TIMEOUT", "SFTP_AUTH_ERROR")
+    pub code: &'static str,
+    /// Human-readable description of when this error occurs
+    pub description: &'static str,
+    /// Error category (transient or permanent)
+    pub kind: ErrorKind,
+    /// Context attributes that are included with this error (e.g., ["host", "port"])
+    pub attributes: &'static [&'static str],
+}
 
 /// Metadata for an input field
 #[derive(Clone)]
@@ -230,6 +285,44 @@ pub struct AgentInfo {
     pub capabilities: Vec<CapabilityInfo>,
 }
 
+/// API-compatible compensation hint info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CompensationHintInfo {
+    /// Capability ID that reverses this capability's effects
+    #[serde(rename = "capabilityId")]
+    pub capability_id: String,
+    /// Human-readable description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// API-compatible known error info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct KnownErrorInfo {
+    /// Machine-readable error code (e.g., "HTTP_TIMEOUT")
+    pub code: String,
+    /// Human-readable description of when this error occurs
+    pub description: String,
+    /// Error kind: "transient" or "permanent"
+    pub kind: String,
+    /// Context attributes included with this error
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<String>,
+}
+
+impl From<&KnownError> for KnownErrorInfo {
+    fn from(err: &KnownError) -> Self {
+        KnownErrorInfo {
+            code: err.code.to_string(),
+            description: err.description.to_string(),
+            kind: err.kind.as_str().to_string(),
+            attributes: err.attributes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
 /// API-compatible capability info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -250,6 +343,14 @@ pub struct CapabilityInfo {
     pub is_idempotent: bool,
     #[serde(rename = "rateLimited")]
     pub rate_limited: bool,
+    /// Optional compensation hint - suggests how to undo this capability.
+    /// This is metadata only; the system never auto-compensates.
+    #[serde(rename = "compensationHint", skip_serializing_if = "Option::is_none")]
+    pub compensation_hint: Option<CompensationHintInfo>,
+    /// Known errors this capability can return.
+    /// Used for tooling hints and documentation.
+    #[serde(rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
+    pub known_errors: Vec<KnownErrorInfo>,
 }
 
 /// API-compatible capability field info.
@@ -707,6 +808,19 @@ fn capability_to_api(
     let output_fields = output_type_meta
         .map(|m| Box::new(m.fields.iter().map(output_field_to_api).collect::<Vec<_>>()));
 
+    // Convert compensation hint if present
+    let compensation_hint = cap
+        .compensation_hint
+        .as_ref()
+        .map(|h| CompensationHintInfo {
+            capability_id: h.capability_id.to_string(),
+            description: h.description.map(|s| s.to_string()),
+        });
+
+    // Convert known errors
+    let known_errors: Vec<KnownErrorInfo> =
+        cap.known_errors.iter().map(KnownErrorInfo::from).collect();
+
     CapabilityInfo {
         id: cap.capability_id.to_string(),
         name: cap.function_name.to_string(),
@@ -726,6 +840,8 @@ fn capability_to_api(
         has_side_effects: cap.has_side_effects,
         is_idempotent: cap.is_idempotent,
         rate_limited: cap.rate_limited,
+        compensation_hint,
+        known_errors,
     }
 }
 
@@ -1191,5 +1307,230 @@ mod tests {
             integration_ids.contains(&"sftp"),
             "sftp should support sftp integration"
         );
+    }
+
+    // ========================================================================
+    // Error Introspection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_error_kind_as_str() {
+        assert_eq!(ErrorKind::Transient.as_str(), "transient");
+        assert_eq!(ErrorKind::Permanent.as_str(), "permanent");
+    }
+
+    #[test]
+    fn test_error_kind_equality() {
+        assert_eq!(ErrorKind::Transient, ErrorKind::Transient);
+        assert_eq!(ErrorKind::Permanent, ErrorKind::Permanent);
+        assert_ne!(ErrorKind::Transient, ErrorKind::Permanent);
+    }
+
+    #[test]
+    fn test_known_error_creation() {
+        let error = KnownError {
+            code: "TEST_ERROR",
+            description: "A test error for validation",
+            kind: ErrorKind::Transient,
+            attributes: &["field1", "field2"],
+        };
+
+        assert_eq!(error.code, "TEST_ERROR");
+        assert_eq!(error.description, "A test error for validation");
+        assert_eq!(error.kind, ErrorKind::Transient);
+        assert_eq!(error.attributes.len(), 2);
+        assert!(error.attributes.contains(&"field1"));
+        assert!(error.attributes.contains(&"field2"));
+    }
+
+    #[test]
+    fn test_known_error_empty_attributes() {
+        let error = KnownError {
+            code: "SIMPLE_ERROR",
+            description: "An error without attributes",
+            kind: ErrorKind::Permanent,
+            attributes: &[],
+        };
+
+        assert_eq!(error.code, "SIMPLE_ERROR");
+        assert_eq!(error.kind, ErrorKind::Permanent);
+        assert!(error.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_known_error_info_from_known_error() {
+        let known_error = KnownError {
+            code: "HTTP_TIMEOUT",
+            description: "Request timed out",
+            kind: ErrorKind::Transient,
+            attributes: &["url", "timeout_ms"],
+        };
+
+        let info = KnownErrorInfo::from(&known_error);
+
+        assert_eq!(info.code, "HTTP_TIMEOUT");
+        assert_eq!(info.description, "Request timed out");
+        assert_eq!(info.kind, "transient");
+        assert_eq!(info.attributes.len(), 2);
+        assert!(info.attributes.contains(&"url".to_string()));
+        assert!(info.attributes.contains(&"timeout_ms".to_string()));
+    }
+
+    #[test]
+    fn test_known_error_info_permanent_kind() {
+        let known_error = KnownError {
+            code: "VALIDATION_ERROR",
+            description: "Input validation failed",
+            kind: ErrorKind::Permanent,
+            attributes: &["field"],
+        };
+
+        let info = KnownErrorInfo::from(&known_error);
+        assert_eq!(info.kind, "permanent");
+    }
+
+    #[test]
+    fn test_known_error_info_serialization() {
+        let info = KnownErrorInfo {
+            code: "NETWORK_ERROR".to_string(),
+            description: "Network request failed".to_string(),
+            kind: "transient".to_string(),
+            attributes: vec!["url".to_string(), "status_code".to_string()],
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json.get("code").unwrap(), "NETWORK_ERROR");
+        assert_eq!(json.get("description").unwrap(), "Network request failed");
+        assert_eq!(json.get("kind").unwrap(), "transient");
+
+        let attrs = json.get("attributes").unwrap().as_array().unwrap();
+        assert_eq!(attrs.len(), 2);
+    }
+
+    #[test]
+    fn test_known_error_info_serialization_empty_attributes_skipped() {
+        let info = KnownErrorInfo {
+            code: "SIMPLE_ERROR".to_string(),
+            description: "A simple error".to_string(),
+            kind: "permanent".to_string(),
+            attributes: vec![],
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json.get("code").unwrap(), "SIMPLE_ERROR");
+        // Empty attributes should be skipped due to skip_serializing_if
+        assert!(json.get("attributes").is_none());
+    }
+
+    #[test]
+    fn test_known_error_info_deserialization() {
+        let json = serde_json::json!({
+            "code": "RATE_LIMITED",
+            "description": "Too many requests",
+            "kind": "transient",
+            "attributes": ["retry_after_ms"]
+        });
+
+        let info: KnownErrorInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.code, "RATE_LIMITED");
+        assert_eq!(info.description, "Too many requests");
+        assert_eq!(info.kind, "transient");
+        assert_eq!(info.attributes, vec!["retry_after_ms"]);
+    }
+
+    #[test]
+    fn test_known_error_info_deserialization_without_attributes() {
+        let json = serde_json::json!({
+            "code": "AUTH_ERROR",
+            "description": "Authentication failed",
+            "kind": "permanent"
+        });
+
+        let info: KnownErrorInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.code, "AUTH_ERROR");
+        assert_eq!(info.kind, "permanent");
+        // Attributes should default to empty vec
+        assert!(info.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_capability_info_with_known_errors() {
+        let info = CapabilityInfo {
+            id: "http-request".to_string(),
+            name: "http_request".to_string(),
+            display_name: Some("HTTP Request".to_string()),
+            description: Some("Make HTTP request".to_string()),
+            input_type: "HttpRequestInput".to_string(),
+            inputs: vec![],
+            output: FieldTypeInfo {
+                type_name: "object".to_string(),
+                format: None,
+                display_name: None,
+                description: None,
+                fields: None,
+                items: None,
+                nullable: false,
+            },
+            has_side_effects: true,
+            is_idempotent: false,
+            rate_limited: false,
+            compensation_hint: None,
+            known_errors: vec![
+                KnownErrorInfo {
+                    code: "NETWORK_ERROR".to_string(),
+                    description: "Network failed".to_string(),
+                    kind: "transient".to_string(),
+                    attributes: vec!["url".to_string()],
+                },
+                KnownErrorInfo {
+                    code: "HTTP_4XX".to_string(),
+                    description: "Client error".to_string(),
+                    kind: "permanent".to_string(),
+                    attributes: vec!["url".to_string(), "status_code".to_string()],
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        let errors = json.get("knownErrors").unwrap().as_array().unwrap();
+        assert_eq!(errors.len(), 2);
+
+        // First error
+        assert_eq!(errors[0].get("code").unwrap(), "NETWORK_ERROR");
+        assert_eq!(errors[0].get("kind").unwrap(), "transient");
+
+        // Second error
+        assert_eq!(errors[1].get("code").unwrap(), "HTTP_4XX");
+        assert_eq!(errors[1].get("kind").unwrap(), "permanent");
+    }
+
+    #[test]
+    fn test_capability_info_empty_known_errors_skipped() {
+        let info = CapabilityInfo {
+            id: "random-double".to_string(),
+            name: "random_double".to_string(),
+            display_name: None,
+            description: None,
+            input_type: "RandomDoubleInput".to_string(),
+            inputs: vec![],
+            output: FieldTypeInfo {
+                type_name: "number".to_string(),
+                format: Some("double".to_string()),
+                display_name: None,
+                description: None,
+                fields: None,
+                items: None,
+                nullable: false,
+            },
+            has_side_effects: false,
+            is_idempotent: true,
+            rate_limited: false,
+            compensation_hint: None,
+            known_errors: vec![],
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        // Empty knownErrors should be skipped due to skip_serializing_if
+        assert!(json.get("knownErrors").is_none());
     }
 }

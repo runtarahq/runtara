@@ -54,6 +54,21 @@ pub struct CheckpointRecord {
     pub state: Vec<u8>,
     /// When the checkpoint was created.
     pub created_at: DateTime<Utc>,
+    /// Whether this checkpoint is marked for compensation (saga pattern).
+    #[sqlx(default)]
+    pub is_compensatable: bool,
+    /// Step ID to execute for compensation/rollback.
+    #[sqlx(default)]
+    pub compensation_step_id: Option<String>,
+    /// Serialized data for the compensation step.
+    #[sqlx(default)]
+    pub compensation_data: Option<Vec<u8>>,
+    /// Current state of compensation (none, pending, triggered, completed, failed).
+    #[sqlx(default)]
+    pub compensation_state: Option<String>,
+    /// Order in which to execute compensation (higher = compensate first).
+    #[sqlx(default)]
+    pub compensation_order: i32,
 }
 
 /// Event record from the persistence layer.
@@ -104,6 +119,16 @@ pub struct CustomSignalRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Sort order for event queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventSortOrder {
+    /// Newest events first (default).
+    #[default]
+    Desc,
+    /// Oldest events first.
+    Asc,
+}
+
 /// Filter options for listing events.
 #[derive(Debug, Clone, Default)]
 pub struct ListEventsFilter {
@@ -117,6 +142,135 @@ pub struct ListEventsFilter {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
+    /// Filter by scope_id in the event payload (for hierarchy filtering).
+    /// When set, only events with matching scope_id in their payload are returned.
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id in the event payload (for hierarchy filtering).
+    /// When set, only events with matching parent_scope_id in their payload are returned.
+    /// Use this to get direct children of a scope.
+    pub parent_scope_id: Option<String>,
+    /// When true, only return events that have no parent_scope_id (root-level scopes).
+    /// This is useful for getting top-level execution scopes.
+    pub root_scopes_only: bool,
+    /// Sort order for events by created_at.
+    pub sort_order: EventSortOrder,
+}
+
+// ============================================================================
+// Step Summary Types (for paired step_debug_start/end events)
+// ============================================================================
+
+/// Status of a step execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+    /// Step is currently running (has start event, no end event yet).
+    Running,
+    /// Step completed successfully.
+    Completed,
+    /// Step failed with an error.
+    Failed,
+}
+
+/// Summary of a step execution, pairing step_debug_start and step_debug_end events.
+#[derive(Debug, Clone)]
+pub struct StepSummaryRecord {
+    /// Unique step identifier within the instance.
+    pub step_id: String,
+    /// Human-readable step name.
+    pub step_name: Option<String>,
+    /// Step type (e.g., "Agent", "Conditional", "Split").
+    pub step_type: String,
+    /// Current status of the step.
+    pub status: StepStatus,
+    /// When the step started executing.
+    pub started_at: DateTime<Utc>,
+    /// When the step completed (None if still running).
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Duration in milliseconds (None if still running).
+    pub duration_ms: Option<i64>,
+    /// Step inputs from step_debug_start payload.
+    pub inputs: Option<serde_json::Value>,
+    /// Step outputs from step_debug_end payload.
+    pub outputs: Option<serde_json::Value>,
+    /// Error details from step_debug_end payload (if failed).
+    pub error: Option<serde_json::Value>,
+    /// Scope ID for nested execution contexts (Split/While/StartScenario).
+    pub scope_id: Option<String>,
+    /// Parent scope ID for hierarchy.
+    pub parent_scope_id: Option<String>,
+}
+
+/// Filter options for listing step summaries.
+#[derive(Debug, Clone, Default)]
+pub struct ListStepSummariesFilter {
+    /// Sort order for steps by started_at.
+    pub sort_order: EventSortOrder,
+    /// Filter by step status.
+    pub status: Option<StepStatus>,
+    /// Filter by step type (e.g., "Agent", "Conditional").
+    pub step_type: Option<String>,
+    /// Filter by scope_id (for steps within a specific scope).
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id (for direct children of a scope).
+    pub parent_scope_id: Option<String>,
+    /// When true, only return steps with no parent_scope_id (root-level steps).
+    pub root_scopes_only: bool,
+}
+
+/// Error history record for structured error tracking.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ErrorHistoryRecord {
+    /// Database primary key.
+    pub id: i64,
+    /// Instance this error belongs to.
+    pub instance_id: String,
+    /// Checkpoint ID where error occurred (if applicable).
+    pub checkpoint_id: Option<String>,
+    /// Step ID where error occurred (if applicable).
+    pub step_id: Option<String>,
+    /// Machine-readable error code (e.g., "RATE_LIMITED").
+    pub error_code: String,
+    /// Human-readable error message.
+    pub error_message: String,
+    /// Error category (unknown, transient, permanent, business).
+    pub category: String,
+    /// Error severity (info, warning, error, critical).
+    pub severity: String,
+    /// Retry hint (unknown, retry_immediately, retry_with_backoff, retry_after, do_not_retry).
+    pub retry_hint: Option<String>,
+    /// Milliseconds for retry_after hint.
+    pub retry_after_ms: Option<i64>,
+    /// Additional context as JSON.
+    pub attributes: Option<serde_json::Value>,
+    /// Cause error ID for error chains.
+    pub cause_error_id: Option<i64>,
+    /// When the error was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Compensation log record for audit trail.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CompensationLogRecord {
+    /// Database primary key.
+    pub id: i64,
+    /// Instance this compensation is for.
+    pub instance_id: String,
+    /// Checkpoint being compensated.
+    pub checkpoint_id: String,
+    /// Step executed for compensation.
+    pub compensation_step_id: String,
+    /// Attempt number (for retries).
+    pub attempt_number: i32,
+    /// When compensation started.
+    pub started_at: DateTime<Utc>,
+    /// When compensation finished (None if still running).
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Whether compensation succeeded.
+    pub success: Option<bool>,
+    /// Error message if compensation failed.
+    pub error_message: Option<String>,
+    /// Reference to error_history entry.
+    pub error_id: Option<i64>,
 }
 
 /// Wake queue entry from the persistence layer.
@@ -362,4 +516,147 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError>;
+
+    // ========================================================================
+    // Step Summaries (paired step_debug_start/end events)
+    // ========================================================================
+
+    /// List step summaries for an instance, pairing step_debug_start and step_debug_end events.
+    ///
+    /// Returns unified step execution records with status, timing, inputs/outputs.
+    /// Steps are matched by step_id within the same scope context.
+    async fn list_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StepSummaryRecord>, CoreError>;
+
+    /// Count step summaries for an instance with filtering.
+    async fn count_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+    ) -> Result<i64, CoreError>;
+
+    // ========================================================================
+    // Structured Error Tracking (optional - default implementations no-op)
+    // ========================================================================
+
+    /// Record a structured error in the error history table.
+    ///
+    /// Returns the error ID for chaining or reference.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_error(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: Option<&str>,
+        _step_id: Option<&str>,
+        _error_code: &str,
+        _error_message: &str,
+        _category: &str,
+        _severity: &str,
+        _retry_hint: Option<&str>,
+        _retry_after_ms: Option<i64>,
+        _attributes: Option<&serde_json::Value>,
+        _cause_error_id: Option<i64>,
+    ) -> Result<i64, CoreError> {
+        // Default: no-op, return 0
+        Ok(0)
+    }
+
+    /// Get the most recent error for an instance.
+    async fn get_last_error(
+        &self,
+        _instance_id: &str,
+    ) -> Result<Option<ErrorHistoryRecord>, CoreError> {
+        // Default: no-op
+        Ok(None)
+    }
+
+    /// List errors for an instance.
+    async fn list_errors(
+        &self,
+        _instance_id: &str,
+        _limit: i64,
+        _offset: i64,
+    ) -> Result<Vec<ErrorHistoryRecord>, CoreError> {
+        // Default: empty list
+        Ok(vec![])
+    }
+
+    // ========================================================================
+    // Compensation Framework (optional - default implementations no-op)
+    // ========================================================================
+
+    /// Mark a checkpoint as compensatable (for saga pattern).
+    async fn register_compensatable_checkpoint(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: &str,
+        _compensation_step_id: &str,
+        _compensation_data: Option<&[u8]>,
+        _compensation_order: i32,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Get all compensatable checkpoints for an instance (in reverse order).
+    async fn get_compensatable_checkpoints(
+        &self,
+        _instance_id: &str,
+    ) -> Result<Vec<CheckpointRecord>, CoreError> {
+        // Default: empty list
+        Ok(vec![])
+    }
+
+    /// Update the compensation state of a checkpoint.
+    async fn set_checkpoint_compensation_state(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: &str,
+        _state: &str,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Update the instance-level compensation state.
+    async fn set_instance_compensation_state(
+        &self,
+        _instance_id: &str,
+        _state: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Log a compensation attempt.
+    async fn log_compensation_attempt(
+        &self,
+        _instance_id: &str,
+        _checkpoint_id: &str,
+        _compensation_step_id: &str,
+        _success: bool,
+        _error_message: Option<&str>,
+        _error_id: Option<i64>,
+    ) -> Result<(), CoreError> {
+        // Default: no-op
+        Ok(())
+    }
+
+    /// Count pending compensations for an instance.
+    async fn count_pending_compensations(&self, _instance_id: &str) -> Result<i64, CoreError> {
+        // Default: 0
+        Ok(0)
+    }
+
+    /// Check if all compensations for an instance succeeded.
+    async fn all_compensations_succeeded(&self, _instance_id: &str) -> Result<bool, CoreError> {
+        // Default: true (no compensations = all succeeded)
+        Ok(true)
+    }
 }

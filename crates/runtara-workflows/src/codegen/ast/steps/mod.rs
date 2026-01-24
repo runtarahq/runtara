@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod conditional;
 pub mod connection;
+pub mod error;
 pub mod finish;
 pub mod log;
 pub mod split;
@@ -39,6 +40,7 @@ impl StepEmitter for Step {
             Step::While(s) => while_loop::emit(s, ctx),
             Step::Log(s) => log::emit(s, ctx),
             Step::Connection(s) => connection::emit(s, ctx),
+            Step::Error(s) => error::emit(s, ctx),
         }
     }
 }
@@ -55,6 +57,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::While(_) => "While",
         Step::Log(_) => "Log",
         Step::Connection(_) => "Connection",
+        Step::Error(_) => "Error",
     }
 }
 
@@ -70,6 +73,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::While(s) => &s.id,
         Step::Log(s) => &s.id,
         Step::Connection(s) => &s.id,
+        Step::Error(s) => &s.id,
     }
 }
 
@@ -85,14 +89,154 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::While(s) => s.name.as_deref(),
         Step::Log(s) => s.name.as_deref(),
         Step::Connection(s) => s.name.as_deref(),
+        Step::Error(s) => s.name.as_deref(),
     }
 }
 
 /// Maximum size in bytes for inputs/outputs in debug events before truncation.
 const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
 
+// ==========================================
+// Scope tracking for hierarchy support
+// ==========================================
+
+/// Emit code to generate a deterministic scope ID at runtime.
+///
+/// The scope ID is constructed from step_id and the current loop indices,
+/// producing a unique identifier for each scope instance.
+///
+/// Format: "sc_{step_id}[_{index}]*"
+/// Examples:
+///   - "sc_split-orders_0" (first Split iteration)
+///   - "sc_split-orders_0_while-retry_2" (nested While iteration)
+///
+/// # Arguments
+/// * `step_id` - The step ID creating this scope
+/// * `scenario_inputs_var` - Variable holding ScenarioInputs (for extracting _loop_indices)
+/// * `iteration_index_var` - Optional variable holding the current iteration index
+pub fn emit_generate_scope_id(
+    step_id: &str,
+    scenario_inputs_var: &proc_macro2::Ident,
+    iteration_index_var: Option<&str>,
+) -> TokenStream {
+    let index_part = if let Some(idx_var) = iteration_index_var {
+        let idx_ident = proc_macro2::Ident::new(idx_var, proc_macro2::Span::call_site());
+        quote! {
+            format!("_{}", #idx_ident)
+        }
+    } else {
+        quote! { String::new() }
+    };
+
+    quote! {
+        {
+            let parent_scope = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let base_scope_id = format!("sc_{}", #step_id);
+            let index_suffix = #index_part;
+
+            if let Some(parent) = parent_scope {
+                format!("{}_{}{}", parent, #step_id, index_suffix)
+            } else {
+                format!("{}{}", base_scope_id, index_suffix)
+            }
+        }
+    }
+}
+
+/// Emit scope_enter event for entering a hierarchical step (Split, While, StartScenario).
+///
+/// The generated code builds a scope_enter event payload and sends it via `sdk.custom_event()`.
+///
+/// # Arguments
+/// * `ctx` - Emit context (checks debug_mode)
+/// * `step_id` - Unique step identifier
+/// * `step_name` - Optional human-readable step name
+/// * `step_type` - Step type string ("Split", "While", "StartScenario")
+/// * `scope_id_var` - Variable name holding the generated scope_id
+/// * `scenario_inputs_var` - Variable holding ScenarioInputs (for extracting parent_scope_id)
+/// * `iteration_index_var` - Optional variable name holding iteration index (omit for StartScenario)
+pub fn emit_scope_enter_event(
+    ctx: &EmitContext,
+    step_id: &str,
+    step_name: Option<&str>,
+    step_type: &str,
+    scope_id_var: &str,
+    scenario_inputs_var: &proc_macro2::Ident,
+    iteration_index_var: Option<&str>,
+) -> TokenStream {
+    if !ctx.debug_mode {
+        return quote! {};
+    }
+
+    let scope_id_ident = proc_macro2::Ident::new(scope_id_var, proc_macro2::Span::call_site());
+
+    let name_expr = step_name
+        .map(|n| quote! { Some(#n.to_string()) })
+        .unwrap_or(quote! { None::<String> });
+
+    let index_expr = if let Some(idx_var) = iteration_index_var {
+        let idx_ident = proc_macro2::Ident::new(idx_var, proc_macro2::Span::call_site());
+        quote! { Some(#idx_ident as u32) }
+    } else {
+        quote! { None::<u32> }
+    };
+
+    quote! {
+        {
+            let __parent_scope_id = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let __payload = serde_json::json!({
+                "scope_id": #scope_id_ident,
+                "parent_scope_id": __parent_scope_id,
+                "step_id": #step_id,
+                "step_name": #name_expr,
+                "step_type": #step_type,
+                "index": #index_expr,
+            });
+
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
+            let __sdk_guard = sdk().lock().await;
+            let _ = __sdk_guard.custom_event("scope_enter", __payload_bytes).await;
+        }
+    }
+}
+
+/// Emit scope_exit event for exiting a hierarchical step scope.
+///
+/// # Arguments
+/// * `ctx` - Emit context (checks debug_mode)
+/// * `scope_id_var` - Variable name holding the scope_id
+pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStream {
+    if !ctx.debug_mode {
+        return quote! {};
+    }
+
+    let scope_id_ident = proc_macro2::Ident::new(scope_id_var, proc_macro2::Span::call_site());
+
+    quote! {
+        {
+            let __payload = serde_json::json!({
+                "scope_id": #scope_id_ident,
+            });
+
+            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
+            let __sdk_guard = sdk().lock().await;
+            let _ = __sdk_guard.custom_event("scope_exit", __payload_bytes).await;
+        }
+    }
+}
+
 /// Emit debug event for step execution start.
-/// Captures step metadata, inputs, input mapping, and loop indices for iteration tracking.
+/// Captures step metadata, inputs, input mapping, loop indices, and scope_id for hierarchy tracking.
 ///
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
@@ -103,7 +247,9 @@ const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `inputs_var` - Optional Ident of variable holding step inputs (as serde_json::Value)
 /// * `input_mapping_json` - Optional static JSON string of input mapping DSL
-/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices)
+/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices and _scope_id)
+/// * `override_scope_id` - Optional scope_id override for scope-creating steps (Split, While, StartScenario)
+#[allow(clippy::too_many_arguments)]
 pub fn emit_step_debug_start(
     ctx: &EmitContext,
     step_id: &str,
@@ -112,6 +258,7 @@ pub fn emit_step_debug_start(
     inputs_var: Option<&proc_macro2::Ident>,
     input_mapping_json: Option<&str>,
     scenario_inputs_var: Option<&proc_macro2::Ident>,
+    override_scope_id: Option<&str>,
 ) -> TokenStream {
     if !ctx.debug_mode {
         return quote! {};
@@ -150,6 +297,32 @@ pub fn emit_step_debug_start(
         })
         .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
 
+    // Use override_scope_id if provided (for scope-creating steps), otherwise extract from variables
+    let scope_id_expr = if let Some(scope_id) = override_scope_id {
+        quote! { Some(#scope_id.to_string()) }
+    } else {
+        scenario_inputs_var
+            .map(|v| {
+                quote! {
+                    (*#v.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                }
+            })
+            .unwrap_or(quote! { None::<String> })
+    };
+
+    // Extract parent_scope_id from ScenarioInputs struct field
+    let parent_scope_id_expr = scenario_inputs_var
+        .map(|v| {
+            quote! {
+                #v.parent_scope_id.clone()
+            }
+        })
+        .unwrap_or(quote! { None::<String> });
+
     quote! {
         let __step_start_time = std::time::Instant::now();
         {
@@ -169,11 +342,15 @@ pub fn emit_step_debug_start(
             }
 
             let __loop_indices = #loop_indices_expr;
+            let __scope_id: Option<String> = #scope_id_expr;
+            let __parent_scope_id: Option<String> = #parent_scope_id_expr;
 
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
+                "scope_id": __scope_id,
+                "parent_scope_id": __parent_scope_id,
                 "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -191,7 +368,7 @@ pub fn emit_step_debug_start(
 }
 
 /// Emit debug event for step execution end.
-/// Captures step metadata, outputs, duration, and loop indices for iteration tracking.
+/// Captures step metadata, outputs, duration, loop indices, and scope_id for hierarchy tracking.
 ///
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
@@ -201,7 +378,8 @@ pub fn emit_step_debug_start(
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `outputs_var` - Optional Ident of variable holding step outputs (as serde_json::Value)
-/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices)
+/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices and _scope_id)
+/// * `override_scope_id` - Optional scope_id override for scope-creating steps (Split, While, StartScenario)
 pub fn emit_step_debug_end(
     ctx: &EmitContext,
     step_id: &str,
@@ -209,6 +387,7 @@ pub fn emit_step_debug_end(
     step_type: &str,
     outputs_var: Option<&proc_macro2::Ident>,
     scenario_inputs_var: Option<&proc_macro2::Ident>,
+    override_scope_id: Option<&str>,
 ) -> TokenStream {
     if !ctx.debug_mode {
         return quote! {};
@@ -241,6 +420,32 @@ pub fn emit_step_debug_end(
         })
         .unwrap_or(quote! { serde_json::Value::Array(vec![]) });
 
+    // Use override_scope_id if provided (for scope-creating steps), otherwise extract from variables
+    let scope_id_expr = if let Some(scope_id) = override_scope_id {
+        quote! { Some(#scope_id.to_string()) }
+    } else {
+        scenario_inputs_var
+            .map(|v| {
+                quote! {
+                    (*#v.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                }
+            })
+            .unwrap_or(quote! { None::<String> })
+    };
+
+    // Extract parent_scope_id from ScenarioInputs struct field
+    let parent_scope_id_expr = scenario_inputs_var
+        .map(|v| {
+            quote! {
+                #v.parent_scope_id.clone()
+            }
+        })
+        .unwrap_or(quote! { None::<String> });
+
     quote! {
         {
             let __duration_ms = __step_start_time.elapsed().as_millis() as u64;
@@ -261,11 +466,15 @@ pub fn emit_step_debug_end(
             }
 
             let __loop_indices = #loop_indices_expr;
+            let __scope_id: Option<String> = #scope_id_expr;
+            let __parent_scope_id: Option<String> = #parent_scope_id_expr;
 
             let __payload = serde_json::json!({
                 "step_id": #step_id,
                 "step_name": #name_expr,
                 "step_type": #step_type,
+                "scope_id": __scope_id,
+                "parent_scope_id": __parent_scope_id,
                 "loop_indices": __loop_indices,
                 "timestamp_ms": std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -351,11 +560,48 @@ pub fn find_next_step_for_label<'a>(
 }
 
 /// Find the onError handler step for a given step.
+///
+/// For backward compatibility, returns the first onError edge found.
+/// Use `find_on_error_edges` for full conditional edge support.
 pub fn find_on_error_step<'a>(
     step_id: &str,
     execution_plan: &'a [ExecutionPlanEdge],
 ) -> Option<&'a str> {
     find_next_step_for_label(step_id, "onError", execution_plan)
+}
+
+/// Find all onError edges for a given step, sorted by priority (highest first).
+///
+/// Returns edges in evaluation order: highest priority first, then edges without
+/// conditions (default fallback) last.
+pub fn find_on_error_edges<'a>(
+    step_id: &str,
+    execution_plan: &'a [ExecutionPlanEdge],
+) -> Vec<&'a ExecutionPlanEdge> {
+    let mut edges: Vec<_> = execution_plan
+        .iter()
+        .filter(|e| e.from_step == step_id && e.label.as_deref() == Some("onError"))
+        .collect();
+
+    // Sort by priority: higher priority first, condition-less edges last
+    edges.sort_by(|a, b| {
+        let a_has_condition = a.condition.is_some();
+        let b_has_condition = b.condition.is_some();
+
+        // Edges with conditions come before edges without
+        match (a_has_condition, b_has_condition) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                // Both have or both lack conditions: sort by priority (higher first)
+                let a_priority = a.priority.unwrap_or(0);
+                let b_priority = b.priority.unwrap_or(0);
+                b_priority.cmp(&a_priority)
+            }
+        }
+    });
+
+    edges
 }
 
 #[cfg(test)]
@@ -373,8 +619,16 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_disabled_when_not_debug_mode() {
         let ctx = make_non_debug_ctx();
-        let tokens =
-            emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step-1",
+            Some("Test Step"),
+            "Agent",
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             tokens.is_empty(),
             "Should emit nothing when debug_mode is false"
@@ -384,8 +638,16 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_emits_code_in_debug_mode() {
         let ctx = make_debug_ctx();
-        let tokens =
-            emit_step_debug_start(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step-1",
+            Some("Test Step"),
+            "Agent",
+            None,
+            None,
+            None,
+            None,
+        );
         let code = tokens.to_string();
 
         // Verify key elements are present in generated code
@@ -419,6 +681,7 @@ mod tests {
             Some(&inputs_var),
             None,
             None,
+            None,
         );
         let code = tokens.to_string();
 
@@ -443,6 +706,7 @@ mod tests {
             "Agent",
             None,
             Some(mapping_json),
+            None,
             None,
         );
         let code = tokens.to_string();
@@ -470,6 +734,7 @@ mod tests {
             None,
             None,
             Some(&scenario_var),
+            None,
         );
         let code = tokens.to_string();
 
@@ -487,7 +752,8 @@ mod tests {
     #[test]
     fn test_emit_step_debug_end_disabled_when_not_debug_mode() {
         let ctx = make_non_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
+        let tokens =
+            emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
         assert!(
             tokens.is_empty(),
             "Should emit nothing when debug_mode is false"
@@ -497,7 +763,8 @@ mod tests {
     #[test]
     fn test_emit_step_debug_end_emits_code_in_debug_mode() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None);
+        let tokens =
+            emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
         let code = tokens.to_string();
 
         // Verify key elements are present in generated code
@@ -522,7 +789,15 @@ mod tests {
     fn test_emit_step_debug_end_with_outputs_var() {
         let ctx = make_debug_ctx();
         let outputs_var = proc_macro2::Ident::new("step_result", proc_macro2::Span::call_site());
-        let tokens = emit_step_debug_end(&ctx, "step-4", None, "Split", Some(&outputs_var), None);
+        let tokens = emit_step_debug_end(
+            &ctx,
+            "step-4",
+            None,
+            "Split",
+            Some(&outputs_var),
+            None,
+            None,
+        );
         let code = tokens.to_string();
 
         assert!(
@@ -540,8 +815,15 @@ mod tests {
         let ctx = make_debug_ctx();
         let scenario_var =
             proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
-        let tokens =
-            emit_step_debug_end(&ctx, "step-loop", None, "Agent", None, Some(&scenario_var));
+        let tokens = emit_step_debug_end(
+            &ctx,
+            "step-loop",
+            None,
+            "Agent",
+            None,
+            Some(&scenario_var),
+            None,
+        );
         let code = tokens.to_string();
 
         // Verify loop_indices extraction from scenario inputs
@@ -558,7 +840,7 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_includes_timestamp() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_start(&ctx, "step-5", None, "Finish", None, None, None);
+        let tokens = emit_step_debug_start(&ctx, "step-5", None, "Finish", None, None, None, None);
         let code = tokens.to_string();
 
         assert!(code.contains("timestamp_ms"), "Should include timestamp");
@@ -571,7 +853,7 @@ mod tests {
     #[test]
     fn test_emit_step_debug_end_includes_timestamp_and_duration() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "step-6", None, "Agent", None, None);
+        let tokens = emit_step_debug_end(&ctx, "step-6", None, "Agent", None, None, None);
         let code = tokens.to_string();
 
         assert!(code.contains("timestamp_ms"), "Should include timestamp");
@@ -594,7 +876,8 @@ mod tests {
     #[test]
     fn test_emit_step_debug_start_without_name() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_start(&ctx, "nameless-step", None, "Agent", None, None, None);
+        let tokens =
+            emit_step_debug_start(&ctx, "nameless-step", None, "Agent", None, None, None, None);
         let code = tokens.to_string();
 
         // Should still work, with None for step_name
@@ -612,6 +895,7 @@ mod tests {
             "Finish",
             None,
             None,
+            None,
         );
         let code = tokens.to_string();
 
@@ -624,8 +908,16 @@ mod tests {
     fn test_emit_step_debug_generates_truncation_function() {
         let ctx = make_debug_ctx();
         let inputs_var = proc_macro2::Ident::new("big_data", proc_macro2::Span::call_site());
-        let tokens =
-            emit_step_debug_start(&ctx, "step", None, "Agent", Some(&inputs_var), None, None);
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step",
+            None,
+            "Agent",
+            Some(&inputs_var),
+            None,
+            None,
+            None,
+        );
         let code = tokens.to_string();
 
         // Verify truncation function is generated
@@ -786,6 +1078,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             connection_id: None,
+            compensation: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx);
@@ -862,8 +1155,16 @@ mod tests {
     #[test]
     fn test_debug_event_includes_loop_indices_field() {
         let ctx = make_debug_ctx();
-        let tokens =
-            emit_step_debug_start(&ctx, "test-step", Some("Test"), "Agent", None, None, None);
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "test-step",
+            Some("Test"),
+            "Agent",
+            None,
+            None,
+            None,
+            None,
+        );
         let code = tokens.to_string();
 
         // Verify the payload includes loop_indices field
@@ -876,7 +1177,8 @@ mod tests {
     #[test]
     fn test_debug_end_event_includes_loop_indices_field() {
         let ctx = make_debug_ctx();
-        let tokens = emit_step_debug_end(&ctx, "test-step", Some("Test"), "Agent", None, None);
+        let tokens =
+            emit_step_debug_end(&ctx, "test-step", Some("Test"), "Agent", None, None, None);
         let code = tokens.to_string();
 
         // Verify the payload includes loop_indices field
@@ -899,6 +1201,7 @@ mod tests {
             None,
             None,
             Some(&scenario_var),
+            None,
         );
         let code = tokens.to_string();
 
@@ -934,6 +1237,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         let code = tokens.to_string();
 
@@ -949,8 +1253,16 @@ mod tests {
         let ctx = make_debug_ctx();
         let scenario_var =
             proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
-        let tokens =
-            emit_step_debug_start(&ctx, "step", None, "Agent", None, None, Some(&scenario_var));
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step",
+            None,
+            "Agent",
+            None,
+            None,
+            Some(&scenario_var),
+            None,
+        );
         let code = tokens.to_string();
 
         // Should have fallback to empty array if _loop_indices is not present
@@ -1023,6 +1335,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             connection_id: None,
+            compensation: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx);
@@ -1198,10 +1511,18 @@ mod tests {
         let scenario_var =
             proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
 
-        let start_tokens =
-            emit_step_debug_start(&ctx, "step", None, "Agent", None, None, Some(&scenario_var));
+        let start_tokens = emit_step_debug_start(
+            &ctx,
+            "step",
+            None,
+            "Agent",
+            None,
+            None,
+            Some(&scenario_var),
+            None,
+        );
         let end_tokens =
-            emit_step_debug_end(&ctx, "step", None, "Agent", None, Some(&scenario_var));
+            emit_step_debug_end(&ctx, "step", None, "Agent", None, Some(&scenario_var), None);
 
         assert!(
             start_tokens.is_empty(),
@@ -1217,8 +1538,16 @@ mod tests {
     fn test_loop_indices_cloned_from_variables() {
         let ctx = make_debug_ctx();
         let scenario_var = proc_macro2::Ident::new("inputs", proc_macro2::Span::call_site());
-        let tokens =
-            emit_step_debug_start(&ctx, "step", None, "Agent", None, None, Some(&scenario_var));
+        let tokens = emit_step_debug_start(
+            &ctx,
+            "step",
+            None,
+            "Agent",
+            None,
+            None,
+            Some(&scenario_var),
+            None,
+        );
         let code = tokens.to_string();
 
         // Verify we use .cloned() to avoid ownership issues

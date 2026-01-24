@@ -8,11 +8,12 @@ use tracing::{debug, info, instrument};
 use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 use runtara_protocol::environment_proto::{
     DeleteImageRequest, GetCapabilityRequest, GetCheckpointRequest, GetImageRequest,
-    GetInstanceStatusRequest, GetTenantMetricsRequest, HealthCheckRequest, ListAgentsRequest,
-    ListCheckpointsRequest, ListEventsRequest, ListImagesRequest, ListInstancesRequest,
-    RegisterImageRequest, RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse,
-    SendSignalRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
-    rpc_request::Request, rpc_response::Response,
+    GetInstanceStatusRequest, GetScopeAncestorsRequest, GetTenantMetricsRequest,
+    HealthCheckRequest, ListAgentsRequest, ListCheckpointsRequest, ListEventsRequest,
+    ListImagesRequest, ListInstancesRequest, ListStepSummariesRequest, RegisterImageRequest,
+    RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse, SendSignalRequest,
+    StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, rpc_request::Request,
+    rpc_response::Response,
 };
 use runtara_protocol::frame::{Frame, write_frame};
 use tokio::io::AsyncRead;
@@ -24,9 +25,10 @@ use crate::types::{
     GetTenantMetricsOptions, HealthStatus, ImageSummary, InstanceInfo, InstanceStatus,
     InstanceSummary, ListCheckpointsOptions, ListCheckpointsResult, ListEventsOptions,
     ListEventsResult, ListImagesOptions, ListImagesResult, ListInstancesOptions,
-    ListInstancesResult, MetricsBucket, MetricsGranularity, RegisterImageOptions,
-    RegisterImageResult, RegisterImageStreamOptions, RunnerType, SignalType, StartInstanceOptions,
-    StartInstanceResult, StopInstanceOptions, TenantMetricsResult, TestCapabilityOptions,
+    ListInstancesResult, ListStepSummariesOptions, ListStepSummariesResult, MetricsBucket,
+    MetricsGranularity, RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions,
+    RunnerType, ScopeInfo, SignalType, StartInstanceOptions, StartInstanceResult, StepStatus,
+    StepSummary, StopInstanceOptions, TenantMetricsResult, TestCapabilityOptions,
     TestCapabilityResult,
 };
 
@@ -867,6 +869,10 @@ impl ManagementSdk {
                 created_after_ms: options.created_after.map(|t| t.timestamp_millis()),
                 created_before_ms: options.created_before.map(|t| t.timestamp_millis()),
                 payload_contains: options.payload_contains,
+                scope_id: options.scope_id,
+                parent_scope_id: options.parent_scope_id,
+                root_scopes_only: options.root_scopes_only,
+                sort_order: options.sort_order.map(|s| s.as_str().to_string()),
             }))
             .await?;
 
@@ -909,6 +915,185 @@ impl ManagementSdk {
             }
             _ => Err(SdkError::UnexpectedResponse(
                 "expected ListEventsResponse".to_string(),
+            )),
+        }
+    }
+
+    /// Get the ancestors of a scope in the execution hierarchy.
+    ///
+    /// Returns a list of `ScopeInfo` starting from the requested scope and walking
+    /// up through parent scopes to the root. This is useful for reconstructing
+    /// the call stack at any point in a workflow execution.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let ancestors = sdk.get_scope_ancestors("instance-123", "sc_split-orders_0_while-retry_2").await?;
+    /// for scope in &ancestors {
+    ///     println!("{}:{} (index {:?})", scope.step_type, scope.step_id, scope.index);
+    /// }
+    /// // Output:
+    /// // While:while-retry (index Some(2))
+    /// // Split:split-orders (index Some(0))
+    /// ```
+    #[instrument(skip(self), fields(instance_id = %instance_id, scope_id = %scope_id))]
+    pub async fn get_scope_ancestors(
+        &self,
+        instance_id: &str,
+        scope_id: &str,
+    ) -> Result<Vec<ScopeInfo>> {
+        debug!("Getting scope ancestors");
+
+        let response = self
+            .send_request(Request::GetScopeAncestors(GetScopeAncestorsRequest {
+                instance_id: instance_id.to_string(),
+                scope_id: scope_id.to_string(),
+            }))
+            .await?;
+
+        match response {
+            Response::GetScopeAncestors(resp) => {
+                let ancestors = resp
+                    .ancestors
+                    .into_iter()
+                    .map(|info| ScopeInfo {
+                        scope_id: info.scope_id,
+                        parent_scope_id: info.parent_scope_id,
+                        step_id: info.step_id,
+                        step_name: info.step_name,
+                        step_type: info.step_type,
+                        index: info.index,
+                        created_at: Utc
+                            .timestamp_millis_opt(info.created_at_ms)
+                            .single()
+                            .unwrap_or_else(Utc::now),
+                    })
+                    .collect();
+
+                Ok(ancestors)
+            }
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected GetScopeAncestorsResponse".to_string(),
+            )),
+        }
+    }
+
+    /// List step summaries for an instance.
+    ///
+    /// Returns paired step events as unified records with status, duration, and I/O.
+    /// This solves pagination issues where start/end events may appear on different
+    /// pages, and provides accurate counts (100 steps = 100 records, not 200 events).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use runtara_management_sdk::{ListStepSummariesOptions, StepStatus};
+    ///
+    /// // List all steps
+    /// let result = sdk.list_step_summaries(
+    ///     "instance-123",
+    ///     ListStepSummariesOptions::new()
+    /// ).await?;
+    ///
+    /// // Filter by status
+    /// let failed_steps = sdk.list_step_summaries(
+    ///     "instance-123",
+    ///     ListStepSummariesOptions::new().with_status(StepStatus::Failed)
+    /// ).await?;
+    ///
+    /// for step in &failed_steps.steps {
+    ///     println!("{}: {:?} ({}ms)", step.step_id, step.status, step.duration_ms.unwrap_or(0));
+    /// }
+    /// ```
+    #[instrument(skip(self, options), fields(instance_id = %instance_id))]
+    pub async fn list_step_summaries(
+        &self,
+        instance_id: &str,
+        options: ListStepSummariesOptions,
+    ) -> Result<ListStepSummariesResult> {
+        debug!("Listing step summaries");
+
+        let response = self
+            .send_request(Request::ListStepSummaries(ListStepSummariesRequest {
+                instance_id: instance_id.to_string(),
+                status: options.status.map(|s| {
+                    match s {
+                        StepStatus::Running => "running",
+                        StepStatus::Completed => "completed",
+                        StepStatus::Failed => "failed",
+                    }
+                    .to_string()
+                }),
+                step_type: options.step_type,
+                scope_id: options.scope_id,
+                parent_scope_id: options.parent_scope_id,
+                root_scopes_only: options.root_scopes_only,
+                sort_order: options.sort_order.map(|s| s.as_str().to_string()),
+                limit: options.limit,
+                offset: options.offset,
+            }))
+            .await?;
+
+        match response {
+            Response::ListStepSummaries(resp) => {
+                let steps = resp
+                    .steps
+                    .into_iter()
+                    .map(|step| {
+                        // Parse payload bytes as JSON if present
+                        let inputs = step.inputs.and_then(|bytes| {
+                            if bytes.is_empty() {
+                                None
+                            } else {
+                                serde_json::from_slice(&bytes).ok()
+                            }
+                        });
+                        let outputs = step.outputs.and_then(|bytes| {
+                            if bytes.is_empty() {
+                                None
+                            } else {
+                                serde_json::from_slice(&bytes).ok()
+                            }
+                        });
+                        let error = step.error.and_then(|bytes| {
+                            if bytes.is_empty() {
+                                None
+                            } else {
+                                serde_json::from_slice(&bytes).ok()
+                            }
+                        });
+
+                        StepSummary {
+                            step_id: step.step_id,
+                            step_name: step.step_name,
+                            step_type: step.step_type,
+                            status: StepStatus::from(step.status),
+                            started_at: Utc
+                                .timestamp_millis_opt(step.started_at_ms)
+                                .single()
+                                .unwrap_or_else(Utc::now),
+                            completed_at: step
+                                .completed_at_ms
+                                .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
+                            duration_ms: step.duration_ms,
+                            inputs,
+                            outputs,
+                            error,
+                            scope_id: step.scope_id,
+                            parent_scope_id: step.parent_scope_id,
+                        }
+                    })
+                    .collect();
+
+                Ok(ListStepSummariesResult {
+                    steps,
+                    total_count: resp.total_count,
+                    limit: resp.limit,
+                    offset: resp.offset,
+                })
+            }
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected ListStepSummariesResponse".to_string(),
             )),
         }
     }

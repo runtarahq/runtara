@@ -19,6 +19,125 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DeriveInput, ItemFn, Type, parse_macro_input};
 
+/// A known error specification for a capability
+#[derive(Debug, Clone)]
+struct KnownErrorSpec {
+    /// Error code (e.g., "HTTP_TIMEOUT")
+    code: String,
+    /// Description of when this error occurs
+    description: String,
+    /// Error kind: transient or permanent
+    kind: String,
+    /// Context attributes included with this error
+    attributes: Vec<String>,
+}
+
+impl FromMeta for KnownErrorSpec {
+    fn from_meta(item: &syn::Meta) -> darling::Result<Self> {
+        // Parse: transient("CODE", "description", ["attr1", "attr2"])
+        // or: permanent("CODE", "description")
+        match item {
+            syn::Meta::List(list) => {
+                let kind = list
+                    .path
+                    .get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                if kind != "transient" && kind != "permanent" {
+                    return Err(darling::Error::custom(
+                        "Expected 'transient' or 'permanent' for error kind",
+                    )
+                    .with_span(&list.path));
+                }
+
+                // Parse tokens manually to extract: (code, description) or (code, description, [attrs])
+                let tokens: proc_macro2::TokenStream = list.tokens.clone();
+                let mut code = String::new();
+                let mut description = String::new();
+                let mut attributes: Vec<String> = Vec::new();
+                let mut string_count = 0;
+
+                for token in tokens {
+                    match token {
+                        proc_macro2::TokenTree::Literal(lit) => {
+                            let lit_str = lit.to_string();
+                            // Remove quotes from string literal
+                            if lit_str.starts_with('"') && lit_str.ends_with('"') {
+                                let value = lit_str[1..lit_str.len() - 1].to_string();
+                                if string_count == 0 {
+                                    code = value;
+                                    string_count += 1;
+                                } else if string_count == 1 {
+                                    description = value;
+                                    string_count += 1;
+                                }
+                            }
+                        }
+                        proc_macro2::TokenTree::Group(group) => {
+                            if group.delimiter() == proc_macro2::Delimiter::Bracket {
+                                for inner in group.stream() {
+                                    if let proc_macro2::TokenTree::Literal(lit) = inner {
+                                        let lit_str = lit.to_string();
+                                        if lit_str.starts_with('"') && lit_str.ends_with('"') {
+                                            attributes
+                                                .push(lit_str[1..lit_str.len() - 1].to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if code.is_empty() {
+                    return Err(darling::Error::custom("Error code is required"));
+                }
+                if description.is_empty() {
+                    return Err(darling::Error::custom("Error description is required"));
+                }
+
+                Ok(KnownErrorSpec {
+                    code,
+                    description,
+                    kind,
+                    attributes,
+                })
+            }
+            _ => Err(darling::Error::custom(
+                "Expected error specification like: transient(\"CODE\", \"description\")",
+            )),
+        }
+    }
+}
+
+/// Container for multiple error specifications
+#[derive(Debug, Default)]
+struct ErrorsSpec(Vec<KnownErrorSpec>);
+
+impl FromMeta for ErrorsSpec {
+    fn from_meta(item: &syn::Meta) -> darling::Result<Self> {
+        match item {
+            syn::Meta::List(list) => {
+                let mut errors = Vec::new();
+
+                // Parse each nested error specification using Parser trait
+                use syn::parse::Parser;
+                let parser =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated;
+                let nested = parser.parse2(list.tokens.clone())?;
+
+                for meta in nested {
+                    errors.push(KnownErrorSpec::from_meta(&meta)?);
+                }
+
+                Ok(ErrorsSpec(errors))
+            }
+            _ => Err(darling::Error::custom("Expected errors(...)")),
+        }
+    }
+}
+
 /// Attributes for the `#[capability]` macro
 #[derive(Debug, FromMeta)]
 struct CapabilityArgs {
@@ -43,6 +162,21 @@ struct CapabilityArgs {
     /// Whether this capability requires rate limiting (external API calls)
     #[darling(default)]
     rate_limited: bool,
+
+    // === Compensation hint attributes ===
+    /// Capability ID that compensates (undoes) this capability's effects.
+    /// Example: compensates_with = "release" for a "reserve" capability.
+    #[darling(default)]
+    compensates_with: Option<String>,
+    /// Description of what the compensation does.
+    #[darling(default)]
+    compensates_description: Option<String>,
+
+    // === Error introspection attributes ===
+    /// Known errors this capability can return.
+    /// Example: errors(transient("HTTP_TIMEOUT", "Request timed out", ["url"]))
+    #[darling(default)]
+    errors: Option<ErrorsSpec>,
 
     // === Module registration attributes ===
     // When module_display_name is provided, automatically registers an AgentModuleConfig
@@ -258,6 +392,10 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Detect if the function is async
     let is_async = input_fn.sig.asyncness.is_some();
 
+    // Reference to the InputTypeMeta static generated by CapabilityInput derive
+    // This follows the naming convention: __INPUT_META_{StructName}
+    let input_meta_ident = format_ident!("__INPUT_META_{}", input_type);
+
     // Generate executor wrapper based on sync/async
     let executor_wrapper = if is_async {
         // Async function: directly await the result
@@ -265,7 +403,9 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[doc(hidden)]
             fn #executor_fn_ident(input: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>> {
                 Box::pin(async move {
-                    let typed_input: #input_type_ident = serde_json::from_value(input)
+                    // Apply type coercion before deserialization
+                    let coerced_input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
+                    let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
                         .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
                     let result = #fn_name(typed_input).await?;
                     serde_json::to_value(result)
@@ -280,7 +420,9 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn #executor_fn_ident(input: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>> {
                 Box::pin(async move {
                     tokio::task::spawn_blocking(move || {
-                        let typed_input: #input_type_ident = serde_json::from_value(input)
+                        // Apply type coercion before deserialization
+                        let coerced_input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
+                        let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
                             .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
                         let result = #fn_name(typed_input)?;
                         serde_json::to_value(result)
@@ -291,8 +433,69 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate compensation hint if compensates_with is provided
+    let compensation_hint_token = if let Some(ref comp_cap_id) = args.compensates_with {
+        let description_token = match &args.compensates_description {
+            Some(d) => quote! { Some(#d) },
+            None => quote! { None },
+        };
+
+        quote! {
+            Some(runtara_dsl::agent_meta::CompensationHint {
+                capability_id: #comp_cap_id,
+                description: #description_token,
+            })
+        }
+    } else {
+        quote! { None }
+    };
+
+    // Generate known_errors array from errors attribute
+    let known_errors_ident = format_ident!("__{}_KNOWN_ERRORS", fn_name.to_string().to_uppercase());
+    let (known_errors_static, known_errors_token) = if let Some(ref errors_spec) = args.errors {
+        let error_tokens: Vec<_> = errors_spec
+            .0
+            .iter()
+            .map(|err| {
+                let code = &err.code;
+                let description = &err.description;
+                let kind_token = if err.kind == "transient" {
+                    quote! { runtara_dsl::agent_meta::ErrorKind::Transient }
+                } else {
+                    quote! { runtara_dsl::agent_meta::ErrorKind::Permanent }
+                };
+                let attrs = &err.attributes;
+
+                quote! {
+                    runtara_dsl::agent_meta::KnownError {
+                        code: #code,
+                        description: #description,
+                        kind: #kind_token,
+                        attributes: &[#(#attrs),*],
+                    }
+                }
+            })
+            .collect();
+
+        let count = error_tokens.len();
+        (
+            quote! {
+                #[allow(non_upper_case_globals)]
+                #[doc(hidden)]
+                static #known_errors_ident: [runtara_dsl::agent_meta::KnownError; #count] = [
+                    #(#error_tokens),*
+                ];
+            },
+            quote! { &#known_errors_ident },
+        )
+    } else {
+        (quote! {}, quote! { &[] })
+    };
+
     let expanded = quote! {
         #input_fn
+
+        #known_errors_static
 
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]
@@ -307,6 +510,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             has_side_effects: #side_effects,
             is_idempotent: #idempotent,
             rate_limited: #rate_limited,
+            compensation_hint: #compensation_hint_token,
+            known_errors: #known_errors_token,
         };
 
         inventory::submit! {

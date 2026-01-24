@@ -11,6 +11,7 @@
 //!
 //! All operations accept Rust data structures directly (no CloudEvents wrapper)
 
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -175,6 +176,39 @@ pub struct SelectFirstInput {
         example = r#"[null, "", 0, "hello", "world"]"#
     )]
     pub value: Option<Vec<Value>>,
+}
+
+/// Input for coalescing values (returning first non-null)
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Coalesce Input")]
+pub struct CoalesceInput {
+    /// The array of values to check in order
+    #[field(
+        display_name = "Values",
+        description = "Array of values to check; returns the first non-null/non-undefined value",
+        example = r#"[null, 42, "fallback"]"#
+    )]
+    pub values: Vec<Value>,
+
+    /// Treat empty strings as null
+    #[field(
+        display_name = "Treat Empty String As Null",
+        description = "If true, empty strings are treated as null and skipped",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub treat_empty_string_as_null: bool,
+
+    /// Treat zero as null
+    #[field(
+        display_name = "Treat Zero As Null",
+        description = "If true, zero values (0, 0.0) are treated as null and skipped",
+        example = "false",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub treat_zero_as_null: bool,
 }
 
 /// Input for parsing a JSON string into a value
@@ -759,17 +793,51 @@ pub fn select_first(input: SelectFirstInput) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
+/// Returns the first non-null value from an array
+#[capability(
+    module = "transform",
+    display_name = "Coalesce",
+    description = "Return the first non-null value from an array of values"
+)]
+pub fn coalesce(input: CoalesceInput) -> Result<Value, String> {
+    for value in input.values {
+        // Skip null values
+        if value.is_null() {
+            continue;
+        }
+
+        // Skip empty strings if flag is set
+        if input.treat_empty_string_as_null && value.as_str().is_some_and(|s| s.is_empty()) {
+            continue;
+        }
+
+        // Skip zero values if flag is set
+        if input.treat_zero_as_null && value.as_f64().is_some_and(|n| n == 0.0) {
+            continue;
+        }
+
+        return Ok(value);
+    }
+
+    Ok(Value::Null)
+}
+
 /// Parses a JSON string into a Value
 #[capability(
     module = "transform",
     display_name = "From JSON String",
-    description = "Parse a JSON string into a structured value"
+    description = "Parse a JSON string into a structured value",
+    errors(permanent("TRANSFORM_JSON_PARSE_ERROR", "Failed to parse JSON string"),)
 )]
-pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, String> {
+pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, AgentError> {
     match input.value {
-        Some(json_str) if !json_str.is_empty() => {
-            serde_json::from_str(&json_str).map_err(|e| format!("Failed to parse JSON: {}", e))
-        }
+        Some(json_str) if !json_str.is_empty() => serde_json::from_str(&json_str).map_err(|e| {
+            AgentError::permanent(
+                "TRANSFORM_JSON_PARSE_ERROR",
+                format!("Failed to parse JSON: {}", e),
+            )
+            .with_attr("parse_error", e.to_string())
+        }),
         _ => Ok(Value::Null),
     }
 }
@@ -778,11 +846,17 @@ pub fn from_json_string(input: FromJsonStringInput) -> Result<Value, String> {
 #[capability(
     module = "transform",
     display_name = "To JSON String",
-    description = "Convert a value to a JSON string"
+    description = "Convert a value to a JSON string",
+    errors(permanent("TRANSFORM_JSON_SERIALIZE_ERROR", "Failed to serialize value to JSON"),)
 )]
-pub fn to_json_string(input: ToJsonStringInput) -> Result<ToJsonStringOutput, String> {
-    let json = serde_json::to_string(&input.value)
-        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+pub fn to_json_string(input: ToJsonStringInput) -> Result<ToJsonStringOutput, AgentError> {
+    let json = serde_json::to_string(&input.value).map_err(|e| {
+        AgentError::permanent(
+            "TRANSFORM_JSON_SERIALIZE_ERROR",
+            format!("Failed to serialize JSON: {}", e),
+        )
+        .with_attr("serialize_error", e.to_string())
+    })?;
     let length = json.len();
     Ok(ToJsonStringOutput { json, length })
 }
@@ -923,17 +997,39 @@ pub fn map_fields(input: MapFieldsInput) -> Result<MapFieldsOutput, String> {
 #[capability(
     module = "transform",
     display_name = "Group By",
-    description = "Group array items by a property key, returning either a map or array of groups"
+    description = "Group array items by a property key, returning either a map or array of groups",
+    errors(
+        permanent("TRANSFORM_INVALID_INPUT", "Expected array or collection input"),
+        permanent(
+            "TRANSFORM_KEY_SERIALIZE_ERROR",
+            "Failed to serialize group key to string"
+        ),
+    )
 )]
-pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, String> {
+pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, AgentError> {
     // Validate input - only arrays are supported
     let collection = match &input.value {
         Value::Array(arr) => arr,
         Value::Null => {
-            return Err("Unsupported value. Expected array or collection.".to_string());
+            return Err(AgentError::permanent(
+                "TRANSFORM_INVALID_INPUT",
+                "Unsupported value. Expected array or collection.",
+            )
+            .with_attr("received_type", "null"));
         }
-        _ => {
-            return Err("Unsupported value. Expected array or collection.".to_string());
+        other => {
+            let type_name = match other {
+                Value::Object(_) => "object",
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Bool(_) => "boolean",
+                _ => "unknown",
+            };
+            return Err(AgentError::permanent(
+                "TRANSFORM_INVALID_INPUT",
+                "Unsupported value. Expected array or collection.",
+            )
+            .with_attr("received_type", type_name));
         }
     };
 
@@ -974,7 +1070,12 @@ pub fn group_by(input: GroupByInput) -> Result<GroupByOutput, String> {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
-            _ => serde_json::to_string(&key_value).map_err(|e| e.to_string())?,
+            _ => serde_json::to_string(&key_value).map_err(|e| {
+                AgentError::permanent(
+                    "TRANSFORM_KEY_SERIALIZE_ERROR",
+                    format!("Failed to serialize group key to string: {}", e),
+                )
+            })?,
         };
 
         grouped.entry(key_str).or_default().push(item.clone());
@@ -1621,7 +1722,13 @@ mod tests {
 
         let result = group_by(input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Expected array"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "TRANSFORM_INVALID_INPUT");
+        assert!(err.message.contains("Expected array"));
+        assert_eq!(
+            err.attributes.get("received_type"),
+            Some(&"object".to_string())
+        );
     }
 
     #[test]
@@ -1789,5 +1896,175 @@ mod tests {
         let result = flat_map(input).unwrap();
         assert_eq!(result.count, 3);
         assert_eq!(result.items, vec![json!(1), json!(2), json!(3)]);
+    }
+
+    // ==================== Coalesce Tests ====================
+
+    #[test]
+    fn test_coalesce_basic() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(42)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(42));
+    }
+
+    #[test]
+    fn test_coalesce_multiple_fallbacks() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(null), json!("fallback")],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("fallback"));
+    }
+
+    #[test]
+    fn test_coalesce_first_value_wins() {
+        let input = CoalesceInput {
+            values: vec![json!("first"), json!("second"), json!("third")],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("first"));
+    }
+
+    #[test]
+    fn test_coalesce_zero_valid_by_default() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(0), json!(100)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(0));
+    }
+
+    #[test]
+    fn test_coalesce_treat_zero_as_null() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(0), json!(100)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: true,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(100));
+    }
+
+    #[test]
+    fn test_coalesce_empty_string_valid_by_default() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(""), json!("fallback")],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(""));
+    }
+
+    #[test]
+    fn test_coalesce_treat_empty_string_as_null() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(""), json!("fallback")],
+            treat_empty_string_as_null: true,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("fallback"));
+    }
+
+    #[test]
+    fn test_coalesce_all_null() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(null)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_coalesce_empty_array() {
+        let input = CoalesceInput {
+            values: vec![],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_coalesce_object_value() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!({"name": "Alice"})],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!({"name": "Alice"}));
+    }
+
+    #[test]
+    fn test_coalesce_array_value() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!([1, 2, 3])],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_coalesce_boolean_false_is_valid() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(false), json!(true)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: false,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(false));
+    }
+
+    #[test]
+    fn test_coalesce_both_flags_enabled() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(""), json!(0), json!("valid")],
+            treat_empty_string_as_null: true,
+            treat_zero_as_null: true,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!("valid"));
+    }
+
+    #[test]
+    fn test_coalesce_float_zero() {
+        let input = CoalesceInput {
+            values: vec![json!(null), json!(0.0), json!(1.5)],
+            treat_empty_string_as_null: false,
+            treat_zero_as_null: true,
+        };
+
+        let result = coalesce(input).unwrap();
+        assert_eq!(result, json!(1.5));
     }
 }

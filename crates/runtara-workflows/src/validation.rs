@@ -173,6 +173,21 @@ pub enum ValidationError {
     // === Naming Errors ===
     /// Multiple steps have the same name.
     DuplicateStepName { name: String, step_ids: Vec<String> },
+
+    // === Edge Condition Errors ===
+    /// Multiple conditional edges from the same step have the same priority.
+    DuplicateEdgePriority {
+        from_step: String,
+        label: Option<String>,
+        priority: i32,
+        duplicate_targets: Vec<String>,
+    },
+    /// More than one edge without a condition from the same step (for same label).
+    MultipleDefaultEdges {
+        from_step: String,
+        label: Option<String>,
+        targets: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for ValidationError {
@@ -435,6 +450,40 @@ impl std::fmt::Display for ValidationError {
                     step_ids.join(", ")
                 )
             }
+
+            // Edge Condition Errors
+            ValidationError::DuplicateEdgePriority {
+                from_step,
+                label,
+                priority,
+                duplicate_targets,
+            } => {
+                let label_str = label.as_deref().unwrap_or("(default)");
+                write!(
+                    f,
+                    "[E070] Step '{}' has multiple '{}' edges with the same priority {}. \
+                     Conditional edges must have unique priorities. Targets: {}",
+                    from_step,
+                    label_str,
+                    priority,
+                    duplicate_targets.join(", ")
+                )
+            }
+            ValidationError::MultipleDefaultEdges {
+                from_step,
+                label,
+                targets,
+            } => {
+                let label_str = label.as_deref().unwrap_or("(default)");
+                write!(
+                    f,
+                    "[E071] Step '{}' has multiple '{}' edges without conditions. \
+                     At most one default (condition-less) edge is allowed. Targets: {}",
+                    from_step,
+                    label_str,
+                    targets.join(", ")
+                )
+            }
         }
     }
 }
@@ -496,6 +545,34 @@ pub enum ValidationWarning {
     },
     /// A non-Finish step has no outgoing edges (terminal step without explicit Finish).
     DanglingStep { step_id: String, step_type: String },
+    /// A step with side effects has no compensation defined in its transaction.
+    MissingCompensation {
+        step_id: String,
+        agent_id: String,
+        capability_id: String,
+        /// If the agent provides a compensation hint, this suggests what to use.
+        suggested_compensation: Option<CompensationSuggestion>,
+    },
+}
+
+// ============================================================================
+// Compensation Suggestions
+// ============================================================================
+
+/// Suggestion for how to compensate a step with side effects.
+///
+/// These suggestions come from agent capability metadata and are never
+/// auto-applied - they're only provided to help workflow authors.
+///
+/// Note: The actual compensation data mapping is defined by the workflow author
+/// in the workflow definition, not here. This hint only suggests which capability
+/// can reverse the effects - the author decides how to wire up the inputs.
+#[derive(Debug, Clone)]
+pub struct CompensationSuggestion {
+    /// The capability ID that can undo the effects (e.g., "release" for "reserve").
+    pub compensation_capability_id: String,
+    /// Human-readable description of what the compensation does.
+    pub description: Option<String>,
 }
 
 impl std::fmt::Display for ValidationWarning {
@@ -612,6 +689,35 @@ impl std::fmt::Display for ValidationWarning {
                     step_id, step_type
                 )
             }
+            ValidationWarning::MissingCompensation {
+                step_id,
+                agent_id,
+                capability_id,
+                suggested_compensation,
+            } => {
+                let base_msg = format!(
+                    "[W060] Step '{}' calls '{}:{}' which has side effects but no compensation is defined",
+                    step_id, agent_id, capability_id
+                );
+                if let Some(suggestion) = suggested_compensation {
+                    let desc_str = suggestion
+                        .description
+                        .as_ref()
+                        .map(|d| format!(" ({})", d))
+                        .unwrap_or_default();
+                    write!(
+                        f,
+                        "{}\n       Suggested: use '{}:{}' as compensation{}",
+                        base_msg, agent_id, suggestion.compensation_capability_id, desc_str
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{}\n       Note: Agent does not provide a compensation hint. Consider defining manual compensation.",
+                        base_msg
+                    )
+                }
+            }
         }
     }
 }
@@ -653,6 +759,12 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
+
+    // Phase 9: Compensation validation (warnings for missing compensation)
+    validate_compensation(graph, &mut result);
+
+    // Phase 10: Edge condition validation (unique priorities, at most one default)
+    validate_edge_conditions(graph, &mut result);
 
     result
 }
@@ -958,6 +1070,11 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
             if let Some(config) = &split_step.config
                 && let Some(m) = &config.variables
             {
+                mappings.push(m);
+            }
+        }
+        Step::Error(error_step) => {
+            if let Some(m) = &error_step.context {
                 mappings.push(m);
             }
         }
@@ -1554,6 +1671,17 @@ fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 // Recursively validate subgraph
                 validate_security(&while_step.subgraph, result);
             }
+            Step::Error(error_step) => {
+                // Connection data cannot be in error context
+                if let Some(mapping) = &error_step.context {
+                    for conn_id in find_connection_references(mapping, &connection_step_ids) {
+                        result.errors.push(ValidationError::ConnectionLeakToLog {
+                            connection_step_id: conn_id,
+                            log_step_id: step_id.clone(),
+                        });
+                    }
+                }
+            }
             Step::Conditional(_)
             | Step::Switch(_)
             | Step::StartScenario(_)
@@ -1646,6 +1774,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::While(s) => s.name.as_ref(),
             Step::Log(s) => s.name.as_ref(),
             Step::Connection(s) => s.name.as_ref(),
+            Step::Error(s) => s.name.as_ref(),
         };
 
         if let Some(name) = name {
@@ -1664,6 +1793,168 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             }
             Step::While(while_step) => {
                 collect_step_names(&while_step.subgraph, name_to_step_ids);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
+// Phase 9: Compensation Validation
+// ============================================================================
+
+/// Validate that steps with side effects have proper compensation when needed.
+///
+/// This generates warnings (not errors) for steps that:
+/// - Have side effects (according to agent capability metadata)
+/// - Don't have compensation defined
+///
+/// The warning includes a suggestion if the agent provides compensation hints.
+fn validate_compensation(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_compensation_recursive(graph, result);
+}
+
+fn validate_compensation_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        if let Step::Agent(agent_step) = step {
+            // Find the capability metadata
+            let capability = runtara_dsl::agent_meta::get_all_capabilities().find(|c| {
+                c.module
+                    .map(|m| m.eq_ignore_ascii_case(&agent_step.agent_id))
+                    .unwrap_or(false)
+                    && c.capability_id
+                        .eq_ignore_ascii_case(&agent_step.capability_id)
+            });
+
+            // Check if capability has side effects and no compensation is defined
+            if let Some(cap) = capability
+                && cap.has_side_effects
+                && agent_step.compensation.is_none()
+            {
+                // Build suggestion from capability's compensation hint
+                let suggested_compensation =
+                    cap.compensation_hint
+                        .as_ref()
+                        .map(|hint| CompensationSuggestion {
+                            compensation_capability_id: hint.capability_id.to_string(),
+                            description: hint.description.map(|s| s.to_string()),
+                        });
+
+                result
+                    .warnings
+                    .push(ValidationWarning::MissingCompensation {
+                        step_id: step_id.clone(),
+                        agent_id: agent_step.agent_id.clone(),
+                        capability_id: agent_step.capability_id.clone(),
+                        suggested_compensation,
+                    });
+            }
+        }
+
+        // Recursively validate subgraphs
+        match step {
+            Step::Split(split_step) => {
+                validate_compensation_recursive(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_compensation_recursive(&while_step.subgraph, result);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
+// Phase 10: Edge Condition Validation
+// ============================================================================
+
+/// Validate edge conditions for proper priority uniqueness and default edge rules.
+///
+/// Rules:
+/// - Conditional edges from the same step (with the same label) must have unique priorities
+/// - At most one edge without a condition is allowed per (from_step, label) pair
+/// - Edges without conditions and without labels work in parallel (no validation needed)
+/// - Exception: Conditional step uses true/false labels which are mutually exclusive
+fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    validate_edge_conditions_recursive(graph, result);
+}
+
+fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    // Group edges by (from_step, label)
+    let mut edges_by_from_label: HashMap<
+        (String, Option<String>),
+        Vec<&runtara_dsl::ExecutionPlanEdge>,
+    > = HashMap::new();
+
+    for edge in &graph.execution_plan {
+        let key = (edge.from_step.clone(), edge.label.clone());
+        edges_by_from_label.entry(key).or_default().push(edge);
+    }
+
+    // Validate each group
+    for ((from_step, label), edges) in edges_by_from_label {
+        // Skip groups with only one edge - no conflicts possible
+        if edges.len() <= 1 {
+            continue;
+        }
+
+        // Special case: Conditional step uses true/false labels which are mutually exclusive
+        // Check if this is a Conditional step
+        if let Some(step) = graph.steps.get(&from_step)
+            && matches!(step, Step::Conditional(_))
+        {
+            // For Conditional steps, true/false edges are expected to be exclusive
+            // Skip validation for these
+            continue;
+        }
+
+        // Separate edges with conditions from those without
+        let (conditional_edges, default_edges): (Vec<_>, Vec<_>) =
+            edges.into_iter().partition(|e| e.condition.is_some());
+
+        // Check for multiple default edges (edges without conditions)
+        // Only applies when there are conditional edges OR when edges have a label (like onError)
+        if default_edges.len() > 1 && (label.is_some() || !conditional_edges.is_empty()) {
+            result.errors.push(ValidationError::MultipleDefaultEdges {
+                from_step: from_step.clone(),
+                label: label.clone(),
+                targets: default_edges.iter().map(|e| e.to_step.clone()).collect(),
+            });
+        }
+
+        // Check for duplicate priorities among conditional edges
+        if conditional_edges.len() > 1 {
+            let mut priorities_to_targets: HashMap<i32, Vec<String>> = HashMap::new();
+
+            for edge in conditional_edges {
+                let priority = edge.priority.unwrap_or(0);
+                priorities_to_targets
+                    .entry(priority)
+                    .or_default()
+                    .push(edge.to_step.clone());
+            }
+
+            for (priority, targets) in priorities_to_targets {
+                if targets.len() > 1 {
+                    result.errors.push(ValidationError::DuplicateEdgePriority {
+                        from_step: from_step.clone(),
+                        label: label.clone(),
+                        priority,
+                        duplicate_targets: targets,
+                    });
+                }
+            }
+        }
+    }
+
+    // Recursively validate subgraphs
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_edge_conditions_recursive(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_edge_conditions_recursive(&while_step.subgraph, result);
             }
             _ => {}
         }
@@ -1838,6 +2129,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::While(_) => "While",
         Step::Log(_) => "Log",
         Step::Connection(_) => "Connection",
+        Step::Error(_) => "Error",
     }
 }
 
@@ -1917,6 +2209,10 @@ mod tests {
         AgentStep, ConnectionStep, FinishStep, LogLevel, LogStep, ReferenceValue, StartScenarioStep,
     };
 
+    // Link runtara-agents so that the inventory crate can find registered capabilities
+    #[allow(unused_imports)]
+    use runtara_agents as _;
+
     fn create_connection_step(id: &str) -> Step {
         Step::Connection(ConnectionStep {
             id: id.to_string(),
@@ -1927,13 +2223,13 @@ mod tests {
     }
 
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
-        // Use a real capability for the transform agent
+        // Use a real capability for the agent
         let capability_id = if agent_id == "transform" {
-            "map".to_string()
+            "extract".to_string() // extract has no required inputs
         } else if agent_id == "http" {
-            "request".to_string()
+            "http-request".to_string()
         } else {
-            "map".to_string() // Default to map for transform
+            "extract".to_string() // Default to transform/extract
         };
         Step::Agent(AgentStep {
             id: id.to_string(),
@@ -1945,6 +2241,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            compensation: None,
         })
     }
 
@@ -2047,6 +2344,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2072,6 +2371,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2100,6 +2401,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2136,11 +2439,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -2173,11 +2480,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "transform".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "transform".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -2205,6 +2516,8 @@ mod tests {
             from_step: "conn".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2235,11 +2548,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "log".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -2269,6 +2586,7 @@ mod tests {
                 max_retries: Some(100),
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -2278,6 +2596,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2316,6 +2636,8 @@ mod tests {
             from_step: "start_child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2351,6 +2673,8 @@ mod tests {
             from_step: "start_child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2671,6 +2995,8 @@ mod tests {
             from_step: "my_step".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2696,6 +3022,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: Some(5_000_000), // 5000 seconds
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -2705,6 +3032,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2732,6 +3061,7 @@ mod tests {
                 max_retries: Some(3),    // Normal
                 retry_delay: Some(1000), // 1 second - normal
                 timeout: Some(30_000),   // 30 seconds - normal
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -2741,6 +3071,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2781,6 +3113,8 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2815,6 +3149,8 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2849,6 +3185,8 @@ mod tests {
             from_step: "child".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -2980,11 +3318,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3026,6 +3368,8 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -3054,11 +3398,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3103,11 +3451,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3169,11 +3521,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3220,6 +3576,8 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -3242,11 +3600,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3295,6 +3657,8 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3332,21 +3696,29 @@ mod tests {
                 from_step: "log_debug".to_string(),
                 to_step: "log_info".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_info".to_string(),
                 to_step: "log_warn".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_warn".to_string(),
                 to_step: "log_error".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log_error".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3385,11 +3757,15 @@ mod tests {
                 from_step: "process".to_string(),
                 to_step: "log".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "log".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3424,6 +3800,8 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3451,6 +3829,8 @@ mod tests {
             from_step: "log".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3500,11 +3880,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3542,11 +3926,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3583,11 +3971,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "http_call".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "http_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3624,11 +4016,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "sftp_call".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "sftp_call".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3663,11 +4059,15 @@ mod tests {
                 from_step: "conn".to_string(),
                 to_step: "agent".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "agent".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3715,21 +4115,29 @@ mod tests {
                 from_step: "conn1".to_string(),
                 to_step: "conn2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "conn2".to_string(),
                 to_step: "call1".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "call1".to_string(),
                 to_step: "call2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "call2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3794,11 +4202,15 @@ mod tests {
                     from_step: "conn".to_string(),
                     to_step: "call".to_string(),
                     label: None,
+                    condition: None,
+                    priority: None,
                 },
                 runtara_dsl::ExecutionPlanEdge {
                     from_step: "call".to_string(),
                     to_step: "finish".to_string(),
                     label: None,
+                    condition: None,
+                    priority: None,
                 },
             ],
             variables: HashMap::new(),
@@ -3826,11 +4238,15 @@ mod tests {
                 from_step: "init".to_string(),
                 to_step: "loop".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "loop".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3878,11 +4294,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3922,11 +4342,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -3961,6 +4385,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -3993,6 +4419,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
         // Add the variable to the graph
         graph.variables.insert(
@@ -4038,6 +4466,8 @@ mod tests {
             from_step: "agent".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
         // Add the variable to the graph
         graph.variables.insert(
@@ -4079,6 +4509,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert(
@@ -4093,6 +4524,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -4103,11 +4535,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -4140,6 +4576,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
 
@@ -4157,6 +4594,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         subgraph_steps.insert(
@@ -4173,6 +4611,8 @@ mod tests {
                 from_step: "sub_step".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -4203,11 +4643,15 @@ mod tests {
                 from_step: "main_step".to_string(),
                 to_step: "split".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "split".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -4237,6 +4681,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert(
@@ -4251,6 +4696,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                compensation: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -4261,11 +4707,15 @@ mod tests {
                 from_step: "step1".to_string(),
                 to_step: "step2".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
             runtara_dsl::ExecutionPlanEdge {
                 from_step: "step2".to_string(),
                 to_step: "finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             },
         ];
 
@@ -4544,6 +4994,8 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             }],
             variables: HashMap::new(), // No variables declared here
             input_schema: HashMap::new(),
@@ -4594,6 +5046,8 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -4637,6 +5091,8 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             }],
             variables: HashMap::new(),
             input_schema: HashMap::new(),
@@ -4687,6 +5143,8 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -4742,6 +5200,8 @@ mod tests {
                 from_step: "sub_agent".to_string(),
                 to_step: "sub_finish".to_string(),
                 label: None,
+                condition: None,
+                priority: None,
             }],
             variables: subgraph_variables,
             input_schema: HashMap::new(),
@@ -4792,6 +5252,8 @@ mod tests {
             from_step: "split".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }];
 
         let result = validate_workflow(&graph);
@@ -4806,6 +5268,540 @@ mod tests {
             unknown_var_errors.is_empty(),
             "Both config.variables and subgraph.variables should be available; got errors: {:?}",
             unknown_var_errors
+        );
+    }
+
+    // === Compensation Validation Tests ===
+
+    #[test]
+    fn test_side_effects_without_compensation_generates_warning() {
+        // http:request has side_effects = true
+        let mut steps = HashMap::new();
+        steps.insert(
+            "http_call".to_string(),
+            Step::Agent(AgentStep {
+                id: "http_call".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "url".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("https://example.com"),
+                        }),
+                    );
+                    m.insert(
+                        "method".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("POST"),
+                        }),
+                    );
+                    m
+                }),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None, // No compensation defined
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "http_call");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "http_call".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should have MissingCompensation warning
+        let missing_comp_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
+            .collect();
+        assert!(
+            !missing_comp_warnings.is_empty(),
+            "Should have MissingCompensation warning for http:request step"
+        );
+
+        // Check warning contents
+        if let Some(ValidationWarning::MissingCompensation {
+            step_id,
+            agent_id,
+            capability_id,
+            ..
+        }) = missing_comp_warnings.first()
+        {
+            assert_eq!(step_id, "http_call");
+            assert_eq!(agent_id, "http");
+            assert_eq!(capability_id, "http-request");
+        }
+    }
+
+    #[test]
+    fn test_no_side_effects_no_compensation_warning() {
+        // transform:map has no side effects
+        let mut steps = HashMap::new();
+        steps.insert(
+            "transform_step".to_string(),
+            create_agent_step(
+                "transform_step",
+                "transform",
+                Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "data".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!({"key": "value"}),
+                        }),
+                    );
+                    m.insert(
+                        "expression".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("data"),
+                        }),
+                    );
+                    m
+                }),
+            ),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "transform_step");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "transform_step".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have MissingCompensation warning
+        let missing_comp_warnings: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { .. }))
+            .collect();
+        assert!(
+            missing_comp_warnings.is_empty(),
+            "Should NOT have MissingCompensation warning for transform:map (no side effects)"
+        );
+    }
+
+    #[test]
+    fn test_side_effects_with_compensation_no_warning() {
+        // http:request with compensation defined should NOT warn
+        let mut steps = HashMap::new();
+        steps.insert(
+            "http_call".to_string(),
+            Step::Agent(AgentStep {
+                id: "http_call".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "url".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("https://example.com"),
+                        }),
+                    );
+                    m.insert(
+                        "method".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("POST"),
+                        }),
+                    );
+                    m
+                }),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: Some(runtara_dsl::CompensationConfig {
+                    compensation_step: "rollback_step".to_string(),
+                    compensation_data: None,
+                    trigger: None,
+                    order: None,
+                }),
+            }),
+        );
+        // Add a rollback step (even though we won't actually execute it in this test)
+        steps.insert(
+            "rollback_step".to_string(),
+            Step::Agent(AgentStep {
+                id: "rollback_step".to_string(),
+                name: None,
+                agent_id: "http".to_string(),
+                capability_id: "http-request".to_string(),
+                connection_id: None,
+                input_mapping: Some({
+                    let mut m = InputMapping::new();
+                    m.insert(
+                        "url".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("https://example.com/rollback"),
+                        }),
+                    );
+                    m.insert(
+                        "method".to_string(),
+                        MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                            value: serde_json::json!("DELETE"),
+                        }),
+                    );
+                    m
+                }),
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "http_call");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "http_call".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have MissingCompensation warning for http_call (has compensation)
+        let missing_comp_for_http_call: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ValidationWarning::MissingCompensation { step_id, .. } if step_id == "http_call"))
+            .collect();
+        assert!(
+            missing_comp_for_http_call.is_empty(),
+            "Should NOT have MissingCompensation warning for http_call (has compensation defined)"
+        );
+    }
+
+    #[test]
+    fn test_compensation_warning_display_format() {
+        let warning = ValidationWarning::MissingCompensation {
+            step_id: "test_step".to_string(),
+            agent_id: "inventory".to_string(),
+            capability_id: "reserve".to_string(),
+            suggested_compensation: Some(CompensationSuggestion {
+                compensation_capability_id: "release".to_string(),
+                description: Some("Releases the reserved inventory".to_string()),
+            }),
+        };
+
+        let display = format!("{}", warning);
+        assert!(display.contains("[W060]"), "Should have warning code W060");
+        assert!(display.contains("test_step"), "Should include step ID");
+        assert!(
+            display.contains("inventory:reserve"),
+            "Should include capability"
+        );
+        assert!(
+            display.contains("inventory:release"),
+            "Should suggest compensation"
+        );
+        assert!(
+            display.contains("Releases the reserved inventory"),
+            "Should include description"
+        );
+    }
+
+    #[test]
+    fn test_compensation_warning_display_no_hint() {
+        let warning = ValidationWarning::MissingCompensation {
+            step_id: "test_step".to_string(),
+            agent_id: "http".to_string(),
+            capability_id: "http-request".to_string(),
+            suggested_compensation: None,
+        };
+
+        let display = format!("{}", warning);
+        assert!(display.contains("[W060]"), "Should have warning code W060");
+        assert!(display.contains("test_step"), "Should include step ID");
+        assert!(
+            display.contains("manual compensation"),
+            "Should mention manual compensation when no hint"
+        );
+    }
+
+    // === Edge Condition Tests ===
+
+    fn create_condition_eq(left_ref: &str, right_val: &str) -> runtara_dsl::ConditionExpression {
+        runtara_dsl::ConditionExpression::Operation(runtara_dsl::ConditionOperation {
+            op: runtara_dsl::ConditionOperator::Eq,
+            arguments: vec![
+                runtara_dsl::ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                    value: left_ref.to_string(),
+                    type_hint: None,
+                    default: None,
+                })),
+                runtara_dsl::ConditionArgument::Value(MappingValue::Immediate(
+                    runtara_dsl::ImmediateValue {
+                        value: serde_json::json!(right_val),
+                    },
+                )),
+            ],
+        })
+    }
+
+    #[test]
+    fn test_edge_condition_unique_priorities_pass() {
+        // Two onError edges with different priorities should pass
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert("error2".to_string(), create_finish_step("error2", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "transient")),
+                priority: Some(10),
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error2".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "permanent")),
+                priority: Some(5),
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: unique priorities on onError edges. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_duplicate_priorities_fail() {
+        // Two onError edges with the same priority should fail
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert("error2".to_string(), create_finish_step("error2", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "transient")),
+                priority: Some(5), // Same priority as error2
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error2".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "permanent")),
+                priority: Some(5), // Same priority as error1
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(result.has_errors(), "Should fail: duplicate priorities");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::DuplicateEdgePriority { .. })),
+            "Should have DuplicateEdgePriority error"
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_multiple_default_edges_fail() {
+        // Two onError edges without conditions should fail
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert("error2".to_string(), create_finish_step("error2", None));
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: None, // No condition
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error2".to_string(),
+                label: Some("onError".to_string()),
+                condition: None, // No condition - duplicate default
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            result.has_errors(),
+            "Should fail: multiple default onError edges"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MultipleDefaultEdges { .. })),
+            "Should have MultipleDefaultEdges error"
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_single_default_with_conditional_pass() {
+        // One default edge + one conditional edge should pass
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("step1".to_string(), create_log_step("step1", None));
+        steps.insert("error1".to_string(), create_finish_step("error1", None));
+        steps.insert(
+            "error_default".to_string(),
+            create_finish_step("error_default", None),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "step1");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: Some(create_condition_eq("__error.category", "transient")),
+                priority: Some(10),
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "step1".to_string(),
+                to_step: "error_default".to_string(),
+                label: Some("onError".to_string()),
+                condition: None, // Default fallback
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: one conditional + one default onError edge. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_unlabeled_parallel_edges_pass() {
+        // Multiple unlabeled edges without conditions should pass (parallel execution)
+        let mut steps = HashMap::new();
+        // Use Log steps to avoid capability validation issues
+        steps.insert("start".to_string(), create_log_step("start", None));
+        steps.insert("branch1".to_string(), create_finish_step("branch1", None));
+        steps.insert("branch2".to_string(), create_finish_step("branch2", None));
+
+        let mut graph = create_basic_graph(steps, "start");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "branch1".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "branch2".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: multiple unlabeled edges can run in parallel. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_error_display() {
+        let err = ValidationError::DuplicateEdgePriority {
+            from_step: "agent1".to_string(),
+            label: Some("onError".to_string()),
+            priority: 5,
+            duplicate_targets: vec!["error1".to_string(), "error2".to_string()],
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("[E070]"), "Should have error code E070");
+        assert!(display.contains("agent1"), "Should include from_step");
+        assert!(display.contains("onError"), "Should include label");
+        assert!(display.contains("priority 5"), "Should include priority");
+
+        let err2 = ValidationError::MultipleDefaultEdges {
+            from_step: "agent1".to_string(),
+            label: Some("onError".to_string()),
+            targets: vec!["error1".to_string(), "error2".to_string()],
+        };
+        let display2 = format!("{}", err2);
+        assert!(display2.contains("[E071]"), "Should have error code E071");
+        assert!(
+            display2.contains("At most one"),
+            "Should mention single default"
         );
     }
 }

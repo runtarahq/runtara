@@ -79,7 +79,7 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
 
-    // Generate debug event emissions
+    // Generate debug event emissions (Conditional doesn't create a scope)
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -88,6 +88,7 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
         Some(&condition_inputs_var),
         condition_json.as_deref(),
         Some(&scenario_inputs_var),
+        None,
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -96,6 +97,7 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
         "Conditional",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        None,
     );
 
     quote! {
@@ -709,6 +711,8 @@ mod tests {
             from_step: from.to_string(),
             to_step: to.to_string(),
             label: label.map(|s| s.to_string()),
+            condition: None,
+            priority: None,
         }
     }
 

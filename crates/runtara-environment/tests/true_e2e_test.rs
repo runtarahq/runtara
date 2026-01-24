@@ -165,6 +165,7 @@ fn create_transform_graph() -> ExecutionGraph {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            compensation: None,
         }),
     );
 
@@ -197,6 +198,8 @@ fn create_transform_graph() -> ExecutionGraph {
             from_step: "transform".to_string(),
             to_step: "finish".to_string(),
             label: None,
+            condition: None,
+            priority: None,
         }],
         variables: HashMap::new(),
         input_schema: HashMap::new(),

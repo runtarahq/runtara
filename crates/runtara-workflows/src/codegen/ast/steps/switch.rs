@@ -73,7 +73,7 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
     // Clone scenario inputs var for debug events (to access _loop_indices)
     let scenario_inputs_var = ctx.inputs_var.clone();
 
-    // Generate debug event emissions
+    // Generate debug event emissions (Switch doesn't create a scope)
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -82,6 +82,7 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
         Some(&inputs_var),
         config_json.as_deref(),
         Some(&scenario_inputs_var),
+        None,
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -90,6 +91,7 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
         "Switch",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        None,
     );
 
     quote! {

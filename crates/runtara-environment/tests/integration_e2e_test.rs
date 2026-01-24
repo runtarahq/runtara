@@ -1282,23 +1282,29 @@ async fn test_sleeping_instances_due_query() {
     .await
     .expect("Failed to create active instance");
 
-    // Query for due instances (same query wake scheduler uses)
+    // Query for due instances (same logic as wake scheduler, but filtered to our tenant for test isolation)
     let due_rows: Vec<(String,)> = sqlx::query_as(
         r#"
         SELECT instance_id
         FROM instances
         WHERE sleep_until IS NOT NULL
           AND sleep_until <= NOW()
+          AND tenant_id = $1
         ORDER BY sleep_until ASC
         LIMIT 10
         "#,
     )
+    .bind(tenant_id)
     .fetch_all(&ctx.pool)
     .await
     .expect("Query failed");
 
-    // Should only return the due instance
-    assert_eq!(due_rows.len(), 1, "Should have exactly one due instance");
+    // Should only return the due instance (filtered by tenant for test isolation)
+    assert_eq!(
+        due_rows.len(),
+        1,
+        "Should have exactly one due instance for this tenant"
+    );
     assert_eq!(due_rows[0].0, instance_due);
 
     // Cleanup

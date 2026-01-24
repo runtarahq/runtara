@@ -108,10 +108,10 @@ async fn execute_capability_test(
 ) -> std::result::Result<serde_json::Value, String> {
     // Build input with connection injected as _connection field
     let mut input = request.input.clone();
-    if let Some(conn) = &request.connection {
-        if let serde_json::Value::Object(ref mut map) = input {
-            map.insert("_connection".to_string(), conn.clone());
-        }
+    if let Some(conn) = &request.connection
+        && let serde_json::Value::Object(ref mut map) = input
+    {
+        map.insert("_connection".to_string(), conn.clone());
     }
 
     // Execute the capability via the registry

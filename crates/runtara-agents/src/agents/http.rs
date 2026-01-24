@@ -11,6 +11,7 @@
 //! The actual HTTP execution happens on the host side via host functions,
 //! while this module handles request preparation and response parsing.
 
+use crate::types::{http_error, network_error};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
@@ -402,7 +403,13 @@ pub fn extract_connection_config(
     module = "http",
     display_name = "HTTP Request",
     description = "Execute an HTTP request with the specified method, URL, headers, and body",
-    side_effects = true
+    side_effects = true,
+    errors(
+        transient("NETWORK_ERROR", "Network request failed (connection, DNS, timeout)", ["url"]),
+        transient("HTTP_5XX", "Server error response (5xx status code)", ["url", "status_code"]),
+        transient("HTTP_429", "Rate limited (429 Too Many Requests)", ["url", "status_code"]),
+        permanent("HTTP_4XX", "Client error response (4xx status code except 429)", ["url", "status_code"]),
+    )
 )]
 pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     // Start with input values
@@ -488,10 +495,12 @@ pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, Strin
     };
 
     // Execute request
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request to {} failed: {}", input.url, e))?;
+    let response = request.send().await.map_err(|e| {
+        let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
+            .with_attr("url", &input.url);
+        // Serialize as JSON to preserve structured error info
+        serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
+    })?;
 
     let status_code = response.status().as_u16();
     let success = response.status().is_success();
@@ -507,10 +516,9 @@ pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, Strin
     // Check for error status before consuming body
     if !success && input.fail_on_error {
         let body_text = response.text().await.unwrap_or_else(|_| String::new());
-        return Err(format!(
-            "HTTP request failed with status {}: {}",
-            status_code, body_text
-        ));
+        let err = http_error(status_code, &body_text).with_attr("url", &input.url);
+        // Serialize as JSON to preserve structured error info
+        return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
     }
 
     // Read body based on response type

@@ -1,0 +1,56 @@
+{
+  "name": "Error Transient",
+  "description": "Workflow demonstrating transient error (retryable)",
+  "steps": {
+    "simulate_failure": {
+      "stepType": "Agent",
+      "id": "simulate_failure",
+      "name": "Simulate Network Check",
+      "agentId": "transform",
+      "capabilityId": "passthrough",
+      "inputMapping": {
+        "success": { "valueType": "reference", "value": "data.success" }
+      }
+    },
+    "check_success": {
+      "stepType": "Conditional",
+      "id": "check_success",
+      "name": "Check Success",
+      "condition": {
+        "type": "operation",
+        "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "steps.simulate_failure.outputs.success" },
+          { "valueType": "immediate", "value": true }
+        ]
+      }
+    },
+    "error_timeout": {
+      "stepType": "Error",
+      "id": "error_timeout",
+      "name": "Network Timeout",
+      "category": "transient",
+      "code": "NETWORK_TIMEOUT",
+      "message": "Connection to external service timed out",
+      "severity": "warning"
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "immediate", "value": "success" }
+      }
+    }
+  },
+  "entryPoint": "simulate_failure",
+  "executionPlan": [
+    { "fromStep": "simulate_failure", "toStep": "check_success" },
+    { "fromStep": "check_success", "toStep": "finish", "label": "true" },
+    { "fromStep": "check_success", "toStep": "error_timeout", "label": "false" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "success": { "type": "boolean", "required": true }
+  },
+  "outputSchema": {}
+}

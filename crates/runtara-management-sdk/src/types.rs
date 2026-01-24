@@ -840,6 +840,27 @@ pub struct Checkpoint {
 // Event Types
 // ============================================================================
 
+/// Sort order for listing events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSortOrder {
+    /// Newest events first (default).
+    #[default]
+    Desc,
+    /// Oldest events first.
+    Asc,
+}
+
+impl EventSortOrder {
+    /// Convert to string value for proto.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Desc => "desc",
+            Self::Asc => "asc",
+        }
+    }
+}
+
 /// Options for listing events.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListEventsOptions {
@@ -857,12 +878,27 @@ pub struct ListEventsOptions {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in JSON payload content.
     pub payload_contains: Option<String>,
+    /// Filter by scope_id in event payload (for hierarchy filtering).
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id in event payload (for hierarchy filtering).
+    pub parent_scope_id: Option<String>,
+    /// When true, only return events with no parent_scope_id (root-level scopes).
+    /// This is useful for getting top-level execution scopes without nested children.
+    pub root_scopes_only: bool,
+    /// Sort order for events by created_at.
+    pub sort_order: Option<EventSortOrder>,
 }
 
 impl ListEventsOptions {
     /// Create new options with defaults.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the sort order for events.
+    pub fn with_sort_order(mut self, sort_order: EventSortOrder) -> Self {
+        self.sort_order = Some(sort_order);
+        self
     }
 
     /// Filter by event type.
@@ -906,6 +942,25 @@ impl ListEventsOptions {
         self.payload_contains = Some(search.into());
         self
     }
+
+    /// Filter by scope_id in event payload.
+    pub fn with_scope_id(mut self, scope_id: impl Into<String>) -> Self {
+        self.scope_id = Some(scope_id.into());
+        self
+    }
+
+    /// Filter by parent_scope_id in event payload.
+    pub fn with_parent_scope_id(mut self, parent_scope_id: impl Into<String>) -> Self {
+        self.parent_scope_id = Some(parent_scope_id.into());
+        self
+    }
+
+    /// Only return events with no parent_scope_id (root-level scopes).
+    /// This is useful for getting top-level execution scopes without nested children.
+    pub fn with_root_scopes_only(mut self) -> Self {
+        self.root_scopes_only = true;
+        self
+    }
 }
 
 /// Summary of an event (for list results).
@@ -932,6 +987,200 @@ pub struct EventSummary {
 pub struct ListEventsResult {
     /// List of event summaries.
     pub events: Vec<EventSummary>,
+    /// Total count (for pagination).
+    pub total_count: u32,
+    /// Limit used in query.
+    pub limit: u32,
+    /// Offset used in query.
+    pub offset: u32,
+}
+
+/// Information about a scope in the execution hierarchy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeInfo {
+    /// Unique scope identifier.
+    pub scope_id: String,
+    /// Parent scope ID (None for root scopes).
+    pub parent_scope_id: Option<String>,
+    /// Step ID that created this scope.
+    pub step_id: String,
+    /// Human-readable step name.
+    pub step_name: Option<String>,
+    /// Step type (e.g., "Split", "While", "StartScenario").
+    pub step_type: String,
+    /// Iteration index (for Split/While loops).
+    pub index: Option<u32>,
+    /// When this scope was entered.
+    pub created_at: DateTime<Utc>,
+}
+
+// ============================================================================
+// Step Summary Types
+// ============================================================================
+
+/// Status of a step in execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    /// Step is currently running (no end event yet).
+    Running,
+    /// Step completed successfully.
+    Completed,
+    /// Step failed with an error.
+    Failed,
+}
+
+impl From<i32> for StepStatus {
+    fn from(value: i32) -> Self {
+        match value {
+            1 => StepStatus::Completed,
+            2 => StepStatus::Failed,
+            _ => StepStatus::Running,
+        }
+    }
+}
+
+impl From<StepStatus> for i32 {
+    fn from(status: StepStatus) -> Self {
+        match status {
+            StepStatus::Running => 0,
+            StepStatus::Completed => 1,
+            StepStatus::Failed => 2,
+        }
+    }
+}
+
+/// Sort order for listing step summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepSortOrder {
+    /// Newest steps first (default).
+    #[default]
+    Desc,
+    /// Oldest steps first.
+    Asc,
+}
+
+impl StepSortOrder {
+    /// Convert to string value for proto.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Desc => "desc",
+            Self::Asc => "asc",
+        }
+    }
+}
+
+/// Options for listing step summaries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListStepSummariesOptions {
+    /// Filter by step status (running, completed, failed).
+    pub status: Option<StepStatus>,
+    /// Filter by step type (e.g., "Http", "Transform").
+    pub step_type: Option<String>,
+    /// Filter by scope_id.
+    pub scope_id: Option<String>,
+    /// Filter by parent_scope_id.
+    pub parent_scope_id: Option<String>,
+    /// When true, only return steps with no parent_scope_id (root-level).
+    pub root_scopes_only: bool,
+    /// Sort order for steps by started_at.
+    pub sort_order: Option<StepSortOrder>,
+    /// Maximum results to return.
+    pub limit: Option<u32>,
+    /// Pagination offset.
+    pub offset: Option<u32>,
+}
+
+impl ListStepSummariesOptions {
+    /// Create new options with defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filter by step status.
+    pub fn with_status(mut self, status: StepStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Filter by step type.
+    pub fn with_step_type(mut self, step_type: impl Into<String>) -> Self {
+        self.step_type = Some(step_type.into());
+        self
+    }
+
+    /// Filter by scope_id.
+    pub fn with_scope_id(mut self, scope_id: impl Into<String>) -> Self {
+        self.scope_id = Some(scope_id.into());
+        self
+    }
+
+    /// Filter by parent_scope_id.
+    pub fn with_parent_scope_id(mut self, parent_scope_id: impl Into<String>) -> Self {
+        self.parent_scope_id = Some(parent_scope_id.into());
+        self
+    }
+
+    /// Only return steps with no parent_scope_id (root-level).
+    pub fn with_root_scopes_only(mut self) -> Self {
+        self.root_scopes_only = true;
+        self
+    }
+
+    /// Set the sort order.
+    pub fn with_sort_order(mut self, sort_order: StepSortOrder) -> Self {
+        self.sort_order = Some(sort_order);
+        self
+    }
+
+    /// Set the limit.
+    pub fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Set the offset.
+    pub fn with_offset(mut self, offset: u32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+}
+
+/// Summary of a step execution (paired start/end events).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepSummary {
+    /// Step ID.
+    pub step_id: String,
+    /// Human-readable step name.
+    pub step_name: Option<String>,
+    /// Step type (e.g., "Http", "Transform", "Split").
+    pub step_type: String,
+    /// Current status of the step.
+    pub status: StepStatus,
+    /// When the step started.
+    pub started_at: DateTime<Utc>,
+    /// When the step completed (None if still running).
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Duration in milliseconds (None if still running).
+    pub duration_ms: Option<i64>,
+    /// Step inputs (JSON).
+    pub inputs: Option<serde_json::Value>,
+    /// Step outputs (JSON, None if not completed).
+    pub outputs: Option<serde_json::Value>,
+    /// Error details (JSON, None if not failed).
+    pub error: Option<serde_json::Value>,
+    /// Scope ID this step belongs to.
+    pub scope_id: Option<String>,
+    /// Parent scope ID (None for root-level steps).
+    pub parent_scope_id: Option<String>,
+}
+
+/// Result of listing step summaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListStepSummariesResult {
+    /// List of step summaries.
+    pub steps: Vec<StepSummary>,
     /// Total count (for pagination).
     pub total_count: u32,
     /// Limit used in query.
@@ -1692,5 +1941,224 @@ mod tests {
             info.stderr,
             Some("thread 'main' panicked at 'assertion failed'".to_string())
         );
+    }
+
+    // ========================================================================
+    // StepStatus tests
+    // ========================================================================
+
+    #[test]
+    fn test_step_status_from_i32() {
+        assert_eq!(StepStatus::from(0), StepStatus::Running);
+        assert_eq!(StepStatus::from(1), StepStatus::Completed);
+        assert_eq!(StepStatus::from(2), StepStatus::Failed);
+        assert_eq!(StepStatus::from(99), StepStatus::Running); // Unknown defaults to Running
+    }
+
+    #[test]
+    fn test_step_status_to_i32() {
+        assert_eq!(i32::from(StepStatus::Running), 0);
+        assert_eq!(i32::from(StepStatus::Completed), 1);
+        assert_eq!(i32::from(StepStatus::Failed), 2);
+    }
+
+    #[test]
+    fn test_step_status_serde() {
+        let status = StepStatus::Failed;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"failed\"");
+
+        let deserialized: StepStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, StepStatus::Failed);
+    }
+
+    // ========================================================================
+    // StepSortOrder tests
+    // ========================================================================
+
+    #[test]
+    fn test_step_sort_order_default() {
+        assert_eq!(StepSortOrder::default(), StepSortOrder::Desc);
+    }
+
+    #[test]
+    fn test_step_sort_order_as_str() {
+        assert_eq!(StepSortOrder::Desc.as_str(), "desc");
+        assert_eq!(StepSortOrder::Asc.as_str(), "asc");
+    }
+
+    #[test]
+    fn test_step_sort_order_serde() {
+        let order = StepSortOrder::Asc;
+        let json = serde_json::to_string(&order).unwrap();
+        assert_eq!(json, "\"asc\"");
+
+        let deserialized: StepSortOrder = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, StepSortOrder::Asc);
+    }
+
+    // ========================================================================
+    // ListStepSummariesOptions tests
+    // ========================================================================
+
+    #[test]
+    fn test_list_step_summaries_options_builder() {
+        let opts = ListStepSummariesOptions::new()
+            .with_status(StepStatus::Failed)
+            .with_step_type("Http")
+            .with_scope_id("sc_main")
+            .with_limit(50)
+            .with_offset(10);
+
+        assert_eq!(opts.status, Some(StepStatus::Failed));
+        assert_eq!(opts.step_type, Some("Http".to_string()));
+        assert_eq!(opts.scope_id, Some("sc_main".to_string()));
+        assert_eq!(opts.limit, Some(50));
+        assert_eq!(opts.offset, Some(10));
+    }
+
+    #[test]
+    fn test_list_step_summaries_options_defaults() {
+        let opts = ListStepSummariesOptions::new();
+
+        assert!(opts.status.is_none());
+        assert!(opts.step_type.is_none());
+        assert!(opts.scope_id.is_none());
+        assert!(opts.parent_scope_id.is_none());
+        assert!(!opts.root_scopes_only);
+        assert!(opts.sort_order.is_none());
+        assert!(opts.limit.is_none());
+        assert!(opts.offset.is_none());
+    }
+
+    #[test]
+    fn test_list_step_summaries_options_root_scopes_only() {
+        let opts = ListStepSummariesOptions::new()
+            .with_root_scopes_only()
+            .with_sort_order(StepSortOrder::Asc);
+
+        assert!(opts.root_scopes_only);
+        assert_eq!(opts.sort_order, Some(StepSortOrder::Asc));
+    }
+
+    #[test]
+    fn test_list_step_summaries_options_parent_scope() {
+        let opts = ListStepSummariesOptions::new().with_parent_scope_id("sc_parent_123");
+
+        assert_eq!(opts.parent_scope_id, Some("sc_parent_123".to_string()));
+    }
+
+    // ========================================================================
+    // StepSummary tests
+    // ========================================================================
+
+    #[test]
+    fn test_step_summary_serde() {
+        let summary = StepSummary {
+            step_id: "step-123".to_string(),
+            step_name: Some("Fetch Orders".to_string()),
+            step_type: "Http".to_string(),
+            status: StepStatus::Completed,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            duration_ms: Some(150),
+            inputs: Some(json!({"url": "/api/orders"})),
+            outputs: Some(json!({"count": 42})),
+            error: None,
+            scope_id: Some("sc_main".to_string()),
+            parent_scope_id: None,
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: StepSummary = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.step_id, "step-123");
+        assert_eq!(deserialized.step_name, Some("Fetch Orders".to_string()));
+        assert_eq!(deserialized.step_type, "Http");
+        assert_eq!(deserialized.status, StepStatus::Completed);
+        assert_eq!(deserialized.duration_ms, Some(150));
+    }
+
+    #[test]
+    fn test_step_summary_running_step() {
+        let summary = StepSummary {
+            step_id: "step-456".to_string(),
+            step_name: None,
+            step_type: "Transform".to_string(),
+            status: StepStatus::Running,
+            started_at: Utc::now(),
+            completed_at: None,
+            duration_ms: None,
+            inputs: Some(json!({"data": [1, 2, 3]})),
+            outputs: None,
+            error: None,
+            scope_id: None,
+            parent_scope_id: None,
+        };
+
+        assert_eq!(summary.status, StepStatus::Running);
+        assert!(summary.completed_at.is_none());
+        assert!(summary.duration_ms.is_none());
+        assert!(summary.outputs.is_none());
+    }
+
+    #[test]
+    fn test_step_summary_failed_step() {
+        let summary = StepSummary {
+            step_id: "step-789".to_string(),
+            step_name: Some("Call External API".to_string()),
+            step_type: "Http".to_string(),
+            status: StepStatus::Failed,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            duration_ms: Some(5000),
+            inputs: Some(json!({"url": "/api/external"})),
+            outputs: None,
+            error: Some(json!({"message": "Connection timeout", "code": "ETIMEDOUT"})),
+            scope_id: Some("sc_retry_0".to_string()),
+            parent_scope_id: Some("sc_main".to_string()),
+        };
+
+        assert_eq!(summary.status, StepStatus::Failed);
+        assert!(summary.error.is_some());
+        assert_eq!(
+            summary.error.as_ref().unwrap()["message"],
+            "Connection timeout"
+        );
+    }
+
+    // ========================================================================
+    // ListStepSummariesResult tests
+    // ========================================================================
+
+    #[test]
+    fn test_list_step_summaries_result_serde() {
+        let result = ListStepSummariesResult {
+            steps: vec![StepSummary {
+                step_id: "step-1".to_string(),
+                step_name: None,
+                step_type: "Transform".to_string(),
+                status: StepStatus::Completed,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                duration_ms: Some(10),
+                inputs: None,
+                outputs: None,
+                error: None,
+                scope_id: None,
+                parent_scope_id: None,
+            }],
+            total_count: 1,
+            limit: 100,
+            offset: 0,
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: ListStepSummariesResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.steps.len(), 1);
+        assert_eq!(deserialized.total_count, 1);
+        assert_eq!(deserialized.limit, 100);
+        assert_eq!(deserialized.offset, 0);
     }
 }

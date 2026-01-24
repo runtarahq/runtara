@@ -210,23 +210,23 @@ fn generate_markdown(spec: &Value) -> String {
                     md.push_str(&format!("- **{}**: {}\n", cap_id, cap_desc));
 
                     // Input fields
-                    if let Some(inputs) = cap["inputs"].as_array() {
-                        if !inputs.is_empty() {
-                            md.push_str("  - Inputs:\n");
-                            for input in inputs {
-                                let input_name = input["name"].as_str().unwrap_or("?");
-                                let input_type = input["type"].as_str().unwrap_or("any");
-                                let required = input["required"].as_bool().unwrap_or(false);
-                                let req_str = if required { "required" } else { "optional" };
-                                md.push_str(&format!(
-                                    "    - `{}` ({}, {})\n",
-                                    input_name, input_type, req_str
-                                ));
-                            }
+                    if let Some(inputs) = cap["inputs"].as_array()
+                        && !inputs.is_empty()
+                    {
+                        md.push_str("  - Inputs:\n");
+                        for input in inputs {
+                            let input_name = input["name"].as_str().unwrap_or("?");
+                            let input_type = input["type"].as_str().unwrap_or("any");
+                            let required = input["required"].as_bool().unwrap_or(false);
+                            let req_str = if required { "required" } else { "optional" };
+                            md.push_str(&format!(
+                                "    - `{}` ({}, {})\n",
+                                input_name, input_type, req_str
+                            ));
                         }
                     }
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
     }
@@ -259,7 +259,7 @@ fn generate_markdown(spec: &Value) -> String {
                         field_name, field_type, req_str, secret_str
                     ));
                 }
-                md.push_str("\n");
+                md.push('\n');
             }
         }
     }

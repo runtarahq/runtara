@@ -23,6 +23,9 @@ pub mod paths;
 // Agent capability metadata types for runtime introspection
 pub mod agent_meta;
 
+// Type coercion utilities for agent inputs
+pub mod coercion;
+
 // Specification generation (DSL schema, OpenAPI, compatibility)
 pub mod spec;
 
@@ -166,6 +169,101 @@ impl From<&SchemaFieldType> for String {
 }
 
 // ============================================================================
+// Scenario Error Introspection
+// ============================================================================
+
+/// Information about a terminal error that a scenario can emit.
+/// Terminal errors are Error steps that don't have outgoing edges -
+/// they terminate the workflow and bubble up to the parent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalErrorInfo {
+    /// The step ID where this error is emitted
+    pub step_id: String,
+    /// Human-readable step name (if provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_name: Option<String>,
+    /// Machine-readable error code (e.g., "CREDIT_LIMIT_EXCEEDED")
+    pub code: String,
+    /// Human-readable error message template
+    pub message: String,
+    /// Error category: "transient" or "permanent"
+    pub category: String,
+    /// Error severity: "info", "warning", "error", "critical"
+    pub severity: String,
+    /// Whether this error comes from a nested subgraph (Split, While)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub from_subgraph: bool,
+}
+
+impl ExecutionGraph {
+    /// Collect all terminal Error steps from this execution graph.
+    ///
+    /// A terminal Error step is one that:
+    /// 1. Is of type Error (stepType: "Error")
+    /// 2. Has no outgoing edges in the execution plan (it terminates the workflow)
+    ///
+    /// This recursively searches nested subgraphs (Split, While steps).
+    ///
+    /// # Returns
+    /// A vector of `TerminalErrorInfo` describing each terminal error.
+    pub fn get_terminal_errors(&self) -> Vec<TerminalErrorInfo> {
+        self.collect_terminal_errors_recursive(false)
+    }
+
+    fn collect_terminal_errors_recursive(&self, from_subgraph: bool) -> Vec<TerminalErrorInfo> {
+        let mut errors = Vec::new();
+
+        // Build a set of step IDs that have outgoing edges
+        let steps_with_outgoing: std::collections::HashSet<&str> = self
+            .execution_plan
+            .iter()
+            .map(|edge| edge.from_step.as_str())
+            .collect();
+
+        // Find all Error steps
+        for (step_id, step) in &self.steps {
+            match step {
+                Step::Error(error_step) => {
+                    // Check if this error step has no outgoing edges (terminal)
+                    if !steps_with_outgoing.contains(step_id.as_str()) {
+                        errors.push(TerminalErrorInfo {
+                            step_id: error_step.id.clone(),
+                            step_name: error_step.name.clone(),
+                            code: error_step.code.clone(),
+                            message: error_step.message.clone(),
+                            category: match error_step.category {
+                                ErrorCategory::Transient => "transient".to_string(),
+                                ErrorCategory::Permanent => "permanent".to_string(),
+                            },
+                            severity: match error_step.severity.unwrap_or_default() {
+                                ErrorSeverity::Info => "info".to_string(),
+                                ErrorSeverity::Warning => "warning".to_string(),
+                                ErrorSeverity::Error => "error".to_string(),
+                                ErrorSeverity::Critical => "critical".to_string(),
+                            },
+                            from_subgraph,
+                        });
+                    }
+                }
+                // Recursively search nested subgraphs
+                Step::Split(split_step) => {
+                    errors.extend(split_step.subgraph.collect_terminal_errors_recursive(true));
+                }
+                Step::While(while_step) => {
+                    errors.extend(while_step.subgraph.collect_terminal_errors_recursive(true));
+                }
+                // Other step types don't have subgraphs
+                _ => {}
+            }
+        }
+
+        errors
+    }
+}
+
+// ============================================================================
 // MappingValue Helper Methods
 // ============================================================================
 
@@ -290,10 +388,10 @@ mod tests {
     fn test_get_step_types_from_inventory() {
         let step_types = get_step_types();
 
-        // Should have at least 7 step types (Start + 6 registered)
+        // Should have at least 11 step types (Start + 10 registered)
         assert!(
-            step_types.len() >= 7,
-            "Expected at least 7 step types, got {}",
+            step_types.len() >= 11,
+            "Expected at least 11 step types, got {}",
             step_types.len()
         );
 
@@ -313,6 +411,13 @@ mod tests {
             step_ids.contains(&"StartScenario"),
             "Missing StartScenario step type"
         );
+        assert!(step_ids.contains(&"While"), "Missing While step type");
+        assert!(step_ids.contains(&"Log"), "Missing Log step type");
+        assert!(
+            step_ids.contains(&"Connection"),
+            "Missing Connection step type"
+        );
+        assert!(step_ids.contains(&"Error"), "Missing Error step type");
     }
 
     #[test]
@@ -328,10 +433,17 @@ mod tests {
                         step.step_type
                     );
                 }
-                "Start" | "Finish" | "Conditional" | "Split" | "Switch" => {
+                "Start" | "Finish" | "Conditional" | "Split" | "Switch" | "While" | "Error" => {
                     assert_eq!(
                         step.category, "control",
                         "{} should be control category",
+                        step.step_type
+                    );
+                }
+                "Log" | "Connection" => {
+                    assert_eq!(
+                        step.category, "utility",
+                        "{} should be utility category",
                         step.step_type
                     );
                 }
@@ -1373,5 +1485,301 @@ mod tests {
         assert_eq!(json.get("id").unwrap(), "conn1");
         assert_eq!(json.get("connectionId").unwrap(), "my-api-key");
         assert_eq!(json.get("integrationId").unwrap(), "http_bearer");
+    }
+
+    // ========================================================================
+    // Terminal Error Introspection Tests
+    // ========================================================================
+
+    #[test]
+    fn test_terminal_errors_empty_graph() {
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: HashMap::new(),
+            entry_point: "start".to_string(),
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let errors = graph.get_terminal_errors();
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_terminal_errors_single_terminal_error() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "error1".to_string(),
+            Step::Error(ErrorStep {
+                id: "error1".to_string(),
+                name: Some("Credit Limit Error".to_string()),
+                category: ErrorCategory::Permanent,
+                code: "CREDIT_LIMIT_EXCEEDED".to_string(),
+                message: "Order exceeds credit limit".to_string(),
+                severity: Some(ErrorSeverity::Warning),
+                context: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps,
+            entry_point: "start".to_string(),
+            execution_plan: vec![ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "error1".to_string(),
+                label: Some("onError".to_string()),
+                condition: None,
+                priority: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let errors = graph.get_terminal_errors();
+        assert_eq!(errors.len(), 1);
+
+        let err = &errors[0];
+        assert_eq!(err.step_id, "error1");
+        assert_eq!(err.step_name, Some("Credit Limit Error".to_string()));
+        assert_eq!(err.code, "CREDIT_LIMIT_EXCEEDED");
+        assert_eq!(err.category, "permanent");
+        assert_eq!(err.severity, "warning");
+        assert!(!err.from_subgraph);
+    }
+
+    #[test]
+    fn test_terminal_errors_non_terminal_error_excluded() {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "error1".to_string(),
+            Step::Error(ErrorStep {
+                id: "error1".to_string(),
+                name: None,
+                category: ErrorCategory::Transient,
+                code: "RATE_LIMITED".to_string(),
+                message: "Rate limited".to_string(),
+                severity: None,
+                context: None,
+            }),
+        );
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: None,
+                input_mapping: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps,
+            entry_point: "start".to_string(),
+            execution_plan: vec![
+                // error1 has outgoing edge -> not terminal
+                ExecutionPlanEdge {
+                    from_step: "error1".to_string(),
+                    to_step: "finish".to_string(),
+                    label: None,
+                    condition: None,
+                    priority: None,
+                },
+            ],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let errors = graph.get_terminal_errors();
+        // error1 has outgoing edge, so it's not terminal
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn test_terminal_errors_in_nested_subgraph() {
+        // Create an error step in a Split subgraph
+        let mut subgraph_steps = HashMap::new();
+        subgraph_steps.insert(
+            "nested_error".to_string(),
+            Step::Error(ErrorStep {
+                id: "nested_error".to_string(),
+                name: Some("Nested Error".to_string()),
+                category: ErrorCategory::Permanent,
+                code: "ITEM_VALIDATION_FAILED".to_string(),
+                message: "Item validation failed".to_string(),
+                severity: Some(ErrorSeverity::Error),
+                context: None,
+            }),
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "start".to_string(),
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split1".to_string(),
+            Step::Split(SplitStep {
+                id: "split1".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: None,
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps,
+            entry_point: "split1".to_string(),
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let errors = graph.get_terminal_errors();
+        assert_eq!(errors.len(), 1);
+
+        let err = &errors[0];
+        assert_eq!(err.step_id, "nested_error");
+        assert_eq!(err.code, "ITEM_VALIDATION_FAILED");
+        assert!(err.from_subgraph); // Should be marked as from subgraph
+    }
+
+    #[test]
+    fn test_terminal_errors_multiple_errors_mixed() {
+        let mut steps = HashMap::new();
+
+        // Terminal error at top level
+        steps.insert(
+            "top_error".to_string(),
+            Step::Error(ErrorStep {
+                id: "top_error".to_string(),
+                name: None,
+                category: ErrorCategory::Permanent,
+                code: "TOP_LEVEL_ERROR".to_string(),
+                message: "Top level error".to_string(),
+                severity: None,
+                context: None,
+            }),
+        );
+
+        // Non-terminal error (has outgoing edge)
+        steps.insert(
+            "recoverable_error".to_string(),
+            Step::Error(ErrorStep {
+                id: "recoverable_error".to_string(),
+                name: None,
+                category: ErrorCategory::Transient,
+                code: "RECOVERABLE".to_string(),
+                message: "Can recover".to_string(),
+                severity: None,
+                context: None,
+            }),
+        );
+
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: None,
+                input_mapping: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps,
+            entry_point: "start".to_string(),
+            execution_plan: vec![ExecutionPlanEdge {
+                from_step: "recoverable_error".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let errors = graph.get_terminal_errors();
+        // Only top_error is terminal (no outgoing edges)
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "TOP_LEVEL_ERROR");
+    }
+
+    #[test]
+    fn test_terminal_error_info_serialization() {
+        let info = TerminalErrorInfo {
+            step_id: "error1".to_string(),
+            step_name: Some("My Error".to_string()),
+            code: "MY_ERROR".to_string(),
+            message: "Something went wrong".to_string(),
+            category: "permanent".to_string(),
+            severity: "error".to_string(),
+            from_subgraph: false,
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json.get("stepId").unwrap(), "error1");
+        assert_eq!(json.get("stepName").unwrap(), "My Error");
+        assert_eq!(json.get("code").unwrap(), "MY_ERROR");
+        assert_eq!(json.get("category").unwrap(), "permanent");
+        assert_eq!(json.get("severity").unwrap(), "error");
+        // from_subgraph is false, should be skipped
+        assert!(json.get("fromSubgraph").is_none());
+
+        // Test with from_subgraph = true
+        let info_subgraph = TerminalErrorInfo {
+            step_id: "error2".to_string(),
+            step_name: None,
+            code: "NESTED_ERROR".to_string(),
+            message: "Nested".to_string(),
+            category: "transient".to_string(),
+            severity: "warning".to_string(),
+            from_subgraph: true,
+        };
+
+        let json2 = serde_json::to_value(&info_subgraph).unwrap();
+        assert_eq!(json2.get("fromSubgraph").unwrap(), true);
+        // stepName is None, should be skipped
+        assert!(json2.get("stepName").is_none());
     }
 }

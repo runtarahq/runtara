@@ -58,7 +58,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
 
-    // Generate debug event emissions
+    // Generate debug event emissions (Finish doesn't create a scope)
     let debug_start = emit_step_debug_start(
         ctx,
         step_id,
@@ -67,6 +67,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
         Some(&finish_inputs_var),
         input_mapping_json.as_deref(),
         Some(&scenario_inputs_var),
+        None,
     );
     let debug_end = emit_step_debug_end(
         ctx,
@@ -75,6 +76,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
         "Finish",
         Some(&step_var),
         Some(&scenario_inputs_var),
+        None,
     );
 
     // The Finish step immediately returns from the workflow function.

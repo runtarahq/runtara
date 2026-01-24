@@ -150,7 +150,7 @@ async fn test_multiple_custom_events_with_different_subtypes() {
     let rows: Vec<(String,)> = sqlx::query_as(
         r#"SELECT subtype FROM instance_events
            WHERE instance_id = $1 AND event_type = 'custom'
-           ORDER BY created_at"#,
+           ORDER BY created_at, id"#,
     )
     .bind(instance_id.to_string())
     .fetch_all(&ctx.pool)

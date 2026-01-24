@@ -342,6 +342,20 @@ async fn handle_stream(
                 message: e.to_string(),
             }),
         },
+        Request::GetScopeAncestors(req) => match handle_get_scope_ancestors(&state, req).await {
+            Ok(resp) => Response::GetScopeAncestors(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "GET_SCOPE_ANCESTORS_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
+        Request::ListStepSummaries(req) => match handle_list_step_summaries(&state, req).await {
+            Ok(resp) => Response::ListStepSummaries(resp),
+            Err(e) => Response::Error(RpcError {
+                code: "LIST_STEP_SUMMARIES_ERROR".to_string(),
+                message: e.to_string(),
+            }),
+        },
     };
 
     // Send response
@@ -1031,7 +1045,7 @@ async fn handle_list_events(
     state: &EnvironmentHandlerState,
     req: environment_proto::ListEventsRequest,
 ) -> Result<environment_proto::ListEventsResponse, crate::error::Error> {
-    use runtara_core::persistence::ListEventsFilter;
+    use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
 
     debug!(
         instance_id = %req.instance_id,
@@ -1040,6 +1054,7 @@ async fn handle_list_events(
         limit = ?req.limit,
         offset = ?req.offset,
         payload_contains = ?req.payload_contains,
+        sort_order = ?req.sort_order,
         "Listing events via shared persistence"
     );
 
@@ -1054,6 +1069,12 @@ async fn handle_list_events(
     let limit = req.limit.unwrap_or(100) as i64;
     let offset = req.offset.unwrap_or(0) as i64;
 
+    // Parse sort order from proto string
+    let sort_order = match req.sort_order.as_deref() {
+        Some("asc") => EventSortOrder::Asc,
+        _ => EventSortOrder::Desc, // Default to DESC (newest first)
+    };
+
     // Build filter
     let filter = ListEventsFilter {
         event_type: req.event_type,
@@ -1061,6 +1082,10 @@ async fn handle_list_events(
         created_after,
         created_before,
         payload_contains: req.payload_contains,
+        scope_id: req.scope_id,
+        parent_scope_id: req.parent_scope_id,
+        root_scopes_only: req.root_scopes_only,
+        sort_order,
     };
 
     // Get events from persistence
@@ -1191,5 +1216,223 @@ async fn handle_get_tenant_metrics(
         end_time_ms: end_time.timestamp_millis(),
         granularity: proto_granularity,
         buckets,
+    })
+}
+
+/// Handle get scope ancestors request.
+/// Walks up the scope hierarchy by querying scope_enter events and following parent_scope_id.
+async fn handle_get_scope_ancestors(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::GetScopeAncestorsRequest,
+) -> Result<environment_proto::GetScopeAncestorsResponse, crate::error::Error> {
+    use runtara_core::persistence::{EventSortOrder, ListEventsFilter};
+
+    debug!(
+        instance_id = %req.instance_id,
+        scope_id = %req.scope_id,
+        "Getting scope ancestors"
+    );
+
+    // Validate inputs
+    if req.instance_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "instance_id is required".to_string(),
+        ));
+    }
+    if req.scope_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "scope_id is required".to_string(),
+        ));
+    }
+
+    // Fetch all scope_enter events for this instance
+    let filter = ListEventsFilter {
+        event_type: Some("scope_enter".to_string()),
+        subtype: None,
+        created_after: None,
+        created_before: None,
+        payload_contains: None,
+        scope_id: None,
+        parent_scope_id: None,
+        root_scopes_only: false,
+        sort_order: EventSortOrder::Asc, // Oldest first for building scope hierarchy
+    };
+
+    let events = state
+        .persistence
+        .list_events(&req.instance_id, &filter, 10000, 0) // Large limit to get all scope events
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to list scope events: {}", e)))?;
+
+    // Build a map of scope_id -> ScopeInfo from scope_enter events
+    let mut scope_map: std::collections::HashMap<String, environment_proto::ScopeInfo> =
+        std::collections::HashMap::new();
+
+    for event in events {
+        let Some(payload) = &event.payload else {
+            continue;
+        };
+        let Ok(payload_json) = serde_json::from_slice::<serde_json::Value>(payload) else {
+            continue;
+        };
+        let Some(scope_id) = payload_json.get("scope_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let parent_scope_id = payload_json
+            .get("parent_scope_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let step_id = payload_json
+            .get("step_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let step_name = payload_json
+            .get("step_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let step_type = payload_json
+            .get("step_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let index = payload_json
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .map(|i| i as u32);
+
+        scope_map.insert(
+            scope_id.to_string(),
+            environment_proto::ScopeInfo {
+                scope_id: scope_id.to_string(),
+                parent_scope_id,
+                step_id,
+                step_name,
+                step_type,
+                index,
+                created_at_ms: event.created_at.timestamp_millis(),
+            },
+        );
+    }
+
+    // Walk up the hierarchy from the requested scope_id
+    let mut ancestors = Vec::new();
+    let mut current_scope_id = Some(req.scope_id.clone());
+
+    while let Some(scope_id) = current_scope_id {
+        if let Some(scope_info) = scope_map.get(&scope_id) {
+            ancestors.push(scope_info.clone());
+            current_scope_id = scope_info.parent_scope_id.clone();
+        } else {
+            // Scope not found - this is the end of the chain (or scope doesn't exist)
+            break;
+        }
+    }
+
+    Ok(environment_proto::GetScopeAncestorsResponse { ancestors })
+}
+
+/// Handle list step summaries request.
+/// Returns paired step events as unified records with status, duration, and I/O.
+async fn handle_list_step_summaries(
+    state: &EnvironmentHandlerState,
+    req: environment_proto::ListStepSummariesRequest,
+) -> Result<environment_proto::ListStepSummariesResponse, crate::error::Error> {
+    use runtara_core::persistence::{EventSortOrder, ListStepSummariesFilter, StepStatus};
+
+    debug!(
+        instance_id = %req.instance_id,
+        status = ?req.status,
+        step_type = ?req.step_type,
+        scope_id = ?req.scope_id,
+        limit = ?req.limit,
+        offset = ?req.offset,
+        "Listing step summaries via shared persistence"
+    );
+
+    // Validate inputs
+    if req.instance_id.is_empty() {
+        return Err(crate::error::Error::InvalidRequest(
+            "instance_id is required".to_string(),
+        ));
+    }
+
+    let limit = req.limit.unwrap_or(100) as i64;
+    let offset = req.offset.unwrap_or(0) as i64;
+
+    // Parse sort order from proto string
+    let sort_order = match req.sort_order.as_deref() {
+        Some("asc") => EventSortOrder::Asc,
+        _ => EventSortOrder::Desc, // Default to DESC (newest first)
+    };
+
+    // Parse status filter
+    let status = match req.status.as_deref() {
+        Some("running") => Some(StepStatus::Running),
+        Some("completed") => Some(StepStatus::Completed),
+        Some("failed") => Some(StepStatus::Failed),
+        _ => None,
+    };
+
+    // Build filter
+    let filter = ListStepSummariesFilter {
+        sort_order,
+        status,
+        step_type: req.step_type,
+        scope_id: req.scope_id,
+        parent_scope_id: req.parent_scope_id,
+        root_scopes_only: req.root_scopes_only,
+    };
+
+    // Get step summaries from persistence
+    let steps = state
+        .persistence
+        .list_step_summaries(&req.instance_id, &filter, limit, offset)
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("Failed to list step summaries: {}", e)))?;
+
+    // Get total count for pagination
+    let total_count = state
+        .persistence
+        .count_step_summaries(&req.instance_id, &filter)
+        .await
+        .map_err(|e| {
+            crate::error::Error::Other(format!("Failed to count step summaries: {}", e))
+        })?;
+
+    // Convert to proto summaries
+    let summaries: Vec<environment_proto::StepSummary> = steps
+        .into_iter()
+        .map(|step| {
+            // Convert status to proto enum
+            let status = match step.status {
+                StepStatus::Running => environment_proto::StepStatus::Running,
+                StepStatus::Completed => environment_proto::StepStatus::Completed,
+                StepStatus::Failed => environment_proto::StepStatus::Failed,
+            };
+
+            environment_proto::StepSummary {
+                step_id: step.step_id,
+                step_name: step.step_name,
+                step_type: step.step_type,
+                status: status.into(),
+                started_at_ms: step.started_at.timestamp_millis(),
+                completed_at_ms: step.completed_at.map(|t| t.timestamp_millis()),
+                duration_ms: step.duration_ms,
+                inputs: step.inputs.map(|v| v.to_string().into_bytes()),
+                outputs: step.outputs.map(|v| v.to_string().into_bytes()),
+                error: step.error.map(|v| v.to_string().into_bytes()),
+                scope_id: step.scope_id,
+                parent_scope_id: step.parent_scope_id,
+            }
+        })
+        .collect();
+
+    Ok(environment_proto::ListStepSummariesResponse {
+        steps: summaries,
+        total_count: total_count as u32,
+        limit: limit as u32,
+        offset: offset as u32,
     })
 }

@@ -1,0 +1,53 @@
+{
+  "name": "Retry Exhausted Error",
+  "description": "Workflow demonstrating transient error becoming permanent after retries exhausted",
+  "steps": {
+    "unreliable_call": {
+      "stepType": "Agent",
+      "id": "unreliable_call",
+      "name": "Unreliable API Call",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "method": { "valueType": "immediate", "value": "GET" },
+        "url": { "valueType": "reference", "value": "data.apiUrl" },
+        "failOnError": { "valueType": "immediate", "value": true }
+      }
+    },
+    "handle_retries_exhausted": {
+      "stepType": "Error",
+      "id": "handle_retries_exhausted",
+      "name": "Retries Exhausted",
+      "category": "permanent",
+      "code": "RETRIES_EXHAUSTED",
+      "message": "All retry attempts failed for transient error",
+      "severity": "error",
+      "context": {
+        "originalCategory": { "valueType": "immediate", "value": "transient" },
+        "originalError": { "valueType": "reference", "value": "__error.message" },
+        "retryCount": { "valueType": "reference", "value": "__error.attributes.retry_count" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": { "valueType": "reference", "value": "unreliable_call.output.body" }
+      }
+    }
+  },
+  "entryPoint": "unreliable_call",
+  "executionPlan": [
+    { "fromStep": "unreliable_call", "toStep": "finish" },
+    { "fromStep": "unreliable_call", "toStep": "handle_retries_exhausted", "label": "onError" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "apiUrl": {
+      "type": "string",
+      "description": "URL to call",
+      "required": true
+    }
+  },
+  "outputSchema": {}
+}

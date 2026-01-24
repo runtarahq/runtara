@@ -9,8 +9,9 @@ use sqlx::sqlite::SqlitePoolOptions;
 use crate::error::CoreError;
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    Persistence, SignalRecord,
+    CheckpointRecord, CustomSignalRecord, EventRecord, EventSortOrder, InstanceRecord,
+    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepStatus,
+    StepSummaryRecord,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -718,7 +719,18 @@ impl Persistence for SqlitePersistence {
     ) -> Result<Vec<EventRecord>, CoreError> {
         // For SQLite, we use CAST and LIKE for text search within BLOB payload
         // The payload is expected to be valid UTF-8 JSON when subtype is set
-        let records = sqlx::query_as::<_, EventRecord>(
+        // Scope filtering uses json_extract for efficient querying
+
+        // Determine sort order - ASC or DESC based on filter
+        let order_direction = match filter.sort_order {
+            EventSortOrder::Asc => "ASC",
+            EventSortOrder::Desc => "DESC",
+        };
+
+        // Build query with dynamic ORDER BY
+        // Note: ORDER BY direction cannot be parameterized, so we use format!
+        // The direction is from a trusted enum, so this is safe from injection
+        let query = format!(
             r#"
             SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype
             FROM instance_events
@@ -731,20 +743,38 @@ impl Persistence for SqlitePersistence {
                   payload IS NOT NULL
                   AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
               ))
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?7 OFFSET ?8
+              AND (?7 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7
+              ))
+              AND (?8 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
+              ))
+              AND (NOT ?9 OR (
+                  payload IS NULL
+                  OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
+              ))
+            ORDER BY created_at {}, id {}
+            LIMIT ?10 OFFSET ?11
             "#,
-        )
-        .bind(instance_id)
-        .bind(&filter.event_type)
-        .bind(&filter.subtype)
-        .bind(filter.created_after)
-        .bind(filter.created_before)
-        .bind(&filter.payload_contains)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+            order_direction, order_direction
+        );
+
+        let records = sqlx::query_as::<_, EventRecord>(&query)
+            .bind(instance_id)
+            .bind(&filter.event_type)
+            .bind(&filter.subtype)
+            .bind(filter.created_after)
+            .bind(filter.created_before)
+            .bind(&filter.payload_contains)
+            .bind(&filter.scope_id)
+            .bind(&filter.parent_scope_id)
+            .bind(filter.root_scopes_only)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(records)
     }
@@ -767,6 +797,18 @@ impl Persistence for SqlitePersistence {
                   payload IS NOT NULL
                   AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
               ))
+              AND (?7 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7
+              ))
+              AND (?8 IS NULL OR (
+                  payload IS NOT NULL
+                  AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
+              ))
+              AND (NOT ?9 OR (
+                  payload IS NULL
+                  OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
+              ))
             "#,
         )
         .bind(instance_id)
@@ -775,6 +817,220 @@ impl Persistence for SqlitePersistence {
         .bind(filter.created_after)
         .bind(filter.created_before)
         .bind(&filter.payload_contains)
+        .bind(&filter.scope_id)
+        .bind(&filter.parent_scope_id)
+        .bind(filter.root_scopes_only)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count.0)
+    }
+
+    async fn list_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StepSummaryRecord>, CoreError> {
+        // Determine sort order
+        let order_direction = match filter.sort_order {
+            EventSortOrder::Asc => "ASC",
+            EventSortOrder::Desc => "DESC",
+        };
+
+        // Convert status filter to string for SQL CASE matching
+        let status_filter: Option<&str> = filter.status.map(|s| match s {
+            StepStatus::Running => "running",
+            StepStatus::Completed => "completed",
+            StepStatus::Failed => "failed",
+        });
+
+        // Build query with dynamic ORDER BY
+        // SQLite uses json_extract instead of PostgreSQL's jsonb operators
+        let query = format!(
+            r#"
+            WITH start_events AS (
+                SELECT
+                    id,
+                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
+                    json_extract(CAST(payload AS TEXT), '$.step_name') as step_name,
+                    json_extract(CAST(payload AS TEXT), '$.step_type') as step_type,
+                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
+                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id,
+                    json_extract(CAST(payload AS TEXT), '$.inputs') as inputs,
+                    created_at
+                FROM instance_events
+                WHERE instance_id = ?1 AND subtype = 'step_debug_start'
+            ),
+            end_events AS (
+                SELECT
+                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
+                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
+                    json_extract(CAST(payload AS TEXT), '$.outputs') as outputs,
+                    json_extract(CAST(payload AS TEXT), '$.error') as error,
+                    created_at
+                FROM instance_events
+                WHERE instance_id = ?1 AND subtype = 'step_debug_end'
+            ),
+            paired AS (
+                SELECT
+                    s.step_id,
+                    s.step_name,
+                    s.step_type,
+                    s.scope_id,
+                    s.parent_scope_id,
+                    s.inputs,
+                    s.created_at as started_at,
+                    e.created_at as completed_at,
+                    e.outputs,
+                    e.error,
+                    CASE
+                        WHEN e.step_id IS NULL THEN 'running'
+                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed'
+                        ELSE 'completed'
+                    END as status,
+                    CASE
+                        WHEN e.created_at IS NOT NULL
+                        THEN CAST((julianday(e.created_at) - julianday(s.created_at)) * 86400000 AS INTEGER)
+                        ELSE NULL
+                    END as duration_ms,
+                    s.id as sort_id
+                FROM start_events s
+                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
+            )
+            SELECT
+                step_id, step_name, step_type, scope_id, parent_scope_id,
+                inputs, started_at, completed_at, outputs, error, status, duration_ms
+            FROM paired
+            WHERE (?2 IS NULL OR status = ?2)
+              AND (?3 IS NULL OR step_type = ?3)
+              AND (?4 IS NULL OR scope_id = ?4)
+              AND (?5 IS NULL OR parent_scope_id = ?5)
+              AND (NOT ?6 OR parent_scope_id IS NULL)
+            ORDER BY sort_id {}
+            LIMIT ?7 OFFSET ?8
+            "#,
+            order_direction
+        );
+
+        // Execute query and map results
+        let rows = sqlx::query(&query)
+            .bind(instance_id)
+            .bind(status_filter)
+            .bind(&filter.step_type)
+            .bind(&filter.scope_id)
+            .bind(&filter.parent_scope_id)
+            .bind(filter.root_scopes_only)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        // Map rows to StepSummaryRecord
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            use sqlx::Row;
+
+            let status_str: &str = row.get("status");
+            let status = match status_str {
+                "running" => StepStatus::Running,
+                "failed" => StepStatus::Failed,
+                _ => StepStatus::Completed,
+            };
+
+            // Parse JSON strings for inputs/outputs/error
+            let inputs: Option<serde_json::Value> = row
+                .get::<Option<String>, _>("inputs")
+                .and_then(|s| serde_json::from_str(&s).ok());
+            let outputs: Option<serde_json::Value> = row
+                .get::<Option<String>, _>("outputs")
+                .and_then(|s| serde_json::from_str(&s).ok());
+            let error: Option<serde_json::Value> = row
+                .get::<Option<String>, _>("error")
+                .and_then(|s| serde_json::from_str(&s).ok());
+
+            records.push(StepSummaryRecord {
+                step_id: row.get("step_id"),
+                step_name: row.get("step_name"),
+                step_type: row
+                    .get::<Option<String>, _>("step_type")
+                    .unwrap_or_default(),
+                status,
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+                duration_ms: row.get("duration_ms"),
+                inputs,
+                outputs,
+                error,
+                scope_id: row.get("scope_id"),
+                parent_scope_id: row.get("parent_scope_id"),
+            });
+        }
+
+        Ok(records)
+    }
+
+    async fn count_step_summaries(
+        &self,
+        instance_id: &str,
+        filter: &ListStepSummariesFilter,
+    ) -> Result<i64, CoreError> {
+        // Convert status filter to string for SQL CASE matching
+        let status_filter: Option<&str> = filter.status.map(|s| match s {
+            StepStatus::Running => "running",
+            StepStatus::Completed => "completed",
+            StepStatus::Failed => "failed",
+        });
+
+        let count: (i64,) = sqlx::query_as(
+            r#"
+            WITH start_events AS (
+                SELECT
+                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
+                    json_extract(CAST(payload AS TEXT), '$.step_type') as step_type,
+                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
+                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id
+                FROM instance_events
+                WHERE instance_id = ?1 AND subtype = 'step_debug_start'
+            ),
+            end_events AS (
+                SELECT
+                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
+                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
+                    json_extract(CAST(payload AS TEXT), '$.error') as error
+                FROM instance_events
+                WHERE instance_id = ?1 AND subtype = 'step_debug_end'
+            ),
+            paired AS (
+                SELECT
+                    s.step_id,
+                    s.step_type,
+                    s.scope_id,
+                    s.parent_scope_id,
+                    CASE
+                        WHEN e.step_id IS NULL THEN 'running'
+                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed'
+                        ELSE 'completed'
+                    END as status
+                FROM start_events s
+                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
+            )
+            SELECT COUNT(*)
+            FROM paired
+            WHERE (?2 IS NULL OR status = ?2)
+              AND (?3 IS NULL OR step_type = ?3)
+              AND (?4 IS NULL OR scope_id = ?4)
+              AND (?5 IS NULL OR parent_scope_id = ?5)
+              AND (NOT ?6 OR parent_scope_id IS NULL)
+            "#,
+        )
+        .bind(instance_id)
+        .bind(status_filter)
+        .bind(&filter.step_type)
+        .bind(&filter.scope_id)
+        .bind(&filter.parent_scope_id)
+        .bind(filter.root_scopes_only)
         .fetch_one(&self.pool)
         .await?;
 
@@ -1618,5 +1874,639 @@ mod tests {
                 .unwrap();
 
         assert_eq!(row.0, Some(input_data.to_vec()));
+    }
+
+    // ========================================================================
+    // Step Summaries Tests
+    // ========================================================================
+
+    /// Helper to insert a step_debug_start event
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_step_start(
+        persistence: &SqlitePersistence,
+        instance_id: &str,
+        step_id: &str,
+        step_name: Option<&str>,
+        step_type: &str,
+        scope_id: Option<&str>,
+        parent_scope_id: Option<&str>,
+        inputs: Option<serde_json::Value>,
+    ) {
+        let mut payload = serde_json::json!({
+            "step_id": step_id,
+            "step_type": step_type,
+        });
+        if let Some(name) = step_name {
+            payload["step_name"] = serde_json::json!(name);
+        }
+        if let Some(scope) = scope_id {
+            payload["scope_id"] = serde_json::json!(scope);
+        }
+        if let Some(parent) = parent_scope_id {
+            payload["parent_scope_id"] = serde_json::json!(parent);
+        }
+        if let Some(inp) = inputs {
+            payload["inputs"] = inp;
+        }
+
+        let event = EventRecord {
+            id: None,
+            instance_id: instance_id.to_string(),
+            event_type: "custom".to_string(),
+            checkpoint_id: None,
+            payload: Some(serde_json::to_vec(&payload).unwrap()),
+            created_at: Utc::now(),
+            subtype: Some("step_debug_start".to_string()),
+        };
+        persistence.insert_event(&event).await.unwrap();
+    }
+
+    /// Helper to insert a step_debug_end event
+    async fn insert_step_end(
+        persistence: &SqlitePersistence,
+        instance_id: &str,
+        step_id: &str,
+        scope_id: Option<&str>,
+        outputs: Option<serde_json::Value>,
+        error: Option<serde_json::Value>,
+    ) {
+        let mut payload = serde_json::json!({
+            "step_id": step_id,
+        });
+        if let Some(scope) = scope_id {
+            payload["scope_id"] = serde_json::json!(scope);
+        }
+        if let Some(out) = outputs {
+            payload["outputs"] = out;
+        }
+        if let Some(err) = error {
+            payload["error"] = err;
+        }
+
+        let event = EventRecord {
+            id: None,
+            instance_id: instance_id.to_string(),
+            event_type: "custom".to_string(),
+            checkpoint_id: None,
+            payload: Some(serde_json::to_vec(&payload).unwrap()),
+            created_at: Utc::now(),
+            subtype: Some("step_debug_end".to_string()),
+        };
+        persistence.insert_event(&event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_empty() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert!(steps.is_empty());
+
+        let count = persistence
+            .count_step_summaries(&instance_id, &filter)
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_completed_step() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Insert a completed step (start + end events)
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-1",
+            Some("Fetch Data"),
+            "Http",
+            None,
+            None,
+            Some(serde_json::json!({"url": "/api/data"})),
+        )
+        .await;
+
+        // Small delay to ensure different timestamps
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-1",
+            None,
+            Some(serde_json::json!({"count": 42})),
+            None,
+        )
+        .await;
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-1");
+        assert_eq!(steps[0].step_name, Some("Fetch Data".to_string()));
+        assert_eq!(steps[0].step_type, "Http");
+        assert_eq!(steps[0].status, StepStatus::Completed);
+        assert!(steps[0].completed_at.is_some());
+        assert!(steps[0].duration_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_running_step() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Insert only start event (no end = running)
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-running",
+            None,
+            "Transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-running");
+        assert_eq!(steps[0].status, StepStatus::Running);
+        assert!(steps[0].completed_at.is_none());
+        assert!(steps[0].duration_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_failed_step() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Insert a failed step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-failed",
+            Some("Call API"),
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-failed",
+            None,
+            None,
+            Some(serde_json::json!({"message": "Connection refused"})),
+        )
+        .await;
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-failed");
+        assert_eq!(steps[0].status, StepStatus::Failed);
+        assert!(steps[0].error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_filter_by_status() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Insert completed step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-1",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-1",
+            None,
+            Some(serde_json::json!({})),
+            None,
+        )
+        .await;
+
+        // Insert running step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-2",
+            None,
+            "Transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // Insert failed step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-3",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-3",
+            None,
+            None,
+            Some(serde_json::json!({"error": true})),
+        )
+        .await;
+
+        // Filter by completed
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: Some(StepStatus::Completed),
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-1");
+
+        // Filter by running
+        let filter = ListStepSummariesFilter {
+            status: Some(StepStatus::Running),
+            ..filter
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-2");
+
+        // Filter by failed
+        let filter = ListStepSummariesFilter {
+            status: Some(StepStatus::Failed),
+            ..filter
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-3");
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_filter_by_step_type() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Insert Http step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-http",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end(&persistence, &instance_id, "step-http", None, None, None).await;
+
+        // Insert Transform step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-transform",
+            None,
+            "Transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-transform",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: Some("Http".to_string()),
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-http");
+        assert_eq!(steps[0].step_type, "Http");
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_pagination() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Insert 5 steps
+        for i in 1..=5 {
+            insert_step_start(
+                &persistence,
+                &instance_id,
+                &format!("step-{}", i),
+                None,
+                "Http",
+                None,
+                None,
+                None,
+            )
+            .await;
+            insert_step_end(
+                &persistence,
+                &instance_id,
+                &format!("step-{}", i),
+                None,
+                None,
+                None,
+            )
+            .await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        }
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Asc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        // Get total count
+        let count = persistence
+            .count_step_summaries(&instance_id, &filter)
+            .await
+            .unwrap();
+        assert_eq!(count, 5);
+
+        // Get first page (limit 2)
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 2, 0)
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_id, "step-1");
+        assert_eq!(steps[1].step_id, "step-2");
+
+        // Get second page
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_id, "step-3");
+        assert_eq!(steps[1].step_id, "step-4");
+    }
+
+    #[tokio::test]
+    async fn test_list_step_summaries_with_scopes() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        // Root level step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-root",
+            None,
+            "Http",
+            None,
+            None,
+            None,
+        )
+        .await;
+        insert_step_end(&persistence, &instance_id, "step-root", None, None, None).await;
+
+        // Step in scope
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-scoped",
+            None,
+            "Transform",
+            Some("sc_main"),
+            None,
+            None,
+        )
+        .await;
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-scoped",
+            Some("sc_main"),
+            None,
+            None,
+        )
+        .await;
+
+        // Nested step
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "step-nested",
+            None,
+            "Http",
+            Some("sc_child"),
+            Some("sc_main"),
+            None,
+        )
+        .await;
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "step-nested",
+            Some("sc_child"),
+            None,
+            None,
+        )
+        .await;
+
+        // Filter by root scopes only
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: true,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        // Both step-root and step-scoped have no parent_scope_id
+        assert_eq!(steps.len(), 2);
+        let step_ids: Vec<_> = steps.iter().map(|s| s.step_id.as_str()).collect();
+        assert!(step_ids.contains(&"step-root"));
+        assert!(step_ids.contains(&"step-scoped"));
+
+        // Filter by parent scope
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: Some("sc_main".to_string()),
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "step-nested");
     }
 }

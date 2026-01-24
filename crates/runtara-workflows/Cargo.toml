@@ -24,3 +24,4 @@ path = "src/bin/compile.rs"
 
 [dev-dependencies]
 tempfile = "3"
+runtara-agents = { path = "../runtara-agents", version = "1.0" }

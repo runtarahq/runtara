@@ -63,7 +63,7 @@ impl StatusHistory {
     }
 
     fn final_status(&self) -> Option<InstanceStatus> {
-        self.transitions.last().map(|(_, s)| s.clone())
+        self.transitions.last().map(|(_, s)| *s)
     }
 }
 
@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(info) => {
                     let mut h = histories.lock().await;
                     if let Some(history) = h.get_mut(instance_id) {
-                        history.record(info.status.clone());
+                        history.record(info.status);
                     }
 
                     // Check if terminal

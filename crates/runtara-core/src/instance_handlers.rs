@@ -237,6 +237,7 @@ pub async fn handle_checkpoint(
                 checkpoint_id: request.checkpoint_id.clone(),
                 payload: sig.payload,
             }),
+            last_error: None, // TODO: Fetch last error from error_history when available
         });
     }
 
@@ -278,6 +279,7 @@ pub async fn handle_checkpoint(
         state: Vec::new(),
         pending_signal,
         custom_signal,
+        last_error: None,
     })
 }
 
@@ -735,7 +737,8 @@ pub fn map_signal_type(signal_type: SignalType) -> &'static str {
 mod tests {
     use super::*;
     use crate::persistence::{
-        CheckpointRecord, CustomSignalRecord, InstanceRecord, ListEventsFilter, SignalRecord,
+        CheckpointRecord, CustomSignalRecord, InstanceRecord, ListEventsFilter,
+        ListStepSummariesFilter, SignalRecord, StepSummaryRecord,
     };
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -840,6 +843,11 @@ mod tests {
             checkpoint_id: checkpoint_id.to_string(),
             state: state.to_vec(),
             created_at: Utc::now(),
+            is_compensatable: false,
+            compensation_step_id: None,
+            compensation_data: None,
+            compensation_state: None,
+            compensation_order: 0,
         }
     }
 
@@ -1098,6 +1106,24 @@ mod tests {
             &self,
             _instance_id: &str,
             _filter: &ListEventsFilter,
+        ) -> std::result::Result<i64, CoreError> {
+            Ok(0)
+        }
+
+        async fn list_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &ListStepSummariesFilter,
+            _limit: i64,
+            _offset: i64,
+        ) -> std::result::Result<Vec<StepSummaryRecord>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn count_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &ListStepSummariesFilter,
         ) -> std::result::Result<i64, CoreError> {
             Ok(0)
         }

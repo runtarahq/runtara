@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Compression agent for archive operations (ZIP, with extensibility for other formats)
 
-use crate::types::FileData;
+use crate::types::{AgentError, FileData};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read, Write};
@@ -346,11 +346,22 @@ fn filename_from_path(path: &str) -> String {
 #[capability(
     module = "compression",
     display_name = "Create Archive",
-    description = "Create an archive from one or more files"
+    description = "Create an archive from one or more files",
+    errors(
+        permanent(
+            "ARCHIVE_NO_FILES",
+            "At least one file is required to create an archive"
+        ),
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode file data"),
+        permanent("ARCHIVE_WRITE_ERROR", "Failed to write or finalize archive"),
+    )
 )]
-pub fn create_archive(input: CreateArchiveInput) -> Result<FileData, String> {
+pub fn create_archive(input: CreateArchiveInput) -> Result<FileData, AgentError> {
     if input.files.is_empty() {
-        return Err("At least one file is required to create an archive".to_string());
+        return Err(AgentError::permanent(
+            "ARCHIVE_NO_FILES",
+            "At least one file is required to create an archive",
+        ));
     }
 
     let compression_level = input.compression_level.min(9);
@@ -366,7 +377,7 @@ fn create_zip_archive(
     files: &[ArchiveFileEntry],
     compression_level: u8,
     archive_name: Option<String>,
-) -> Result<FileData, String> {
+) -> Result<FileData, AgentError> {
     let mut buffer = Cursor::new(Vec::new());
 
     {
@@ -382,7 +393,9 @@ fn create_zip_archive(
 
         for entry in files {
             let file_data = entry.file.clone().into_file_data();
-            let bytes = file_data.decode()?;
+            let bytes = file_data
+                .decode()
+                .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e))?;
 
             // Determine path within archive
             let path = entry
@@ -391,15 +404,29 @@ fn create_zip_archive(
                 .or_else(|| file_data.filename.clone())
                 .unwrap_or_else(|| "file".to_string());
 
-            zip.start_file(&path, options)
-                .map_err(|e| format!("Failed to add file '{}' to archive: {}", path, e))?;
+            zip.start_file(&path, options).map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_WRITE_ERROR",
+                    format!("Failed to add file '{}' to archive: {}", path, e),
+                )
+                .with_attr("path", &path)
+            })?;
 
-            zip.write_all(&bytes)
-                .map_err(|e| format!("Failed to write file '{}' content: {}", path, e))?;
+            zip.write_all(&bytes).map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_WRITE_ERROR",
+                    format!("Failed to write file '{}' content: {}", path, e),
+                )
+                .with_attr("path", &path)
+            })?;
         }
 
-        zip.finish()
-            .map_err(|e| format!("Failed to finalize archive: {}", e))?;
+        zip.finish().map_err(|e| {
+            AgentError::permanent(
+                "ARCHIVE_WRITE_ERROR",
+                format!("Failed to finalize archive: {}", e),
+            )
+        })?;
     }
 
     let archive_bytes = buffer.into_inner();
@@ -416,11 +443,17 @@ fn create_zip_archive(
 #[capability(
     module = "compression",
     display_name = "Extract Archive",
-    description = "Extract all files from an archive"
+    description = "Extract all files from an archive",
+    errors(
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
+        permanent("ARCHIVE_READ_ERROR", "Failed to read archive or archive entry"),
+    )
 )]
-pub fn extract_archive(input: ExtractArchiveInput) -> Result<ExtractArchiveOutput, String> {
+pub fn extract_archive(input: ExtractArchiveInput) -> Result<ExtractArchiveOutput, AgentError> {
     let file_data = input.archive.into_file_data();
-    let bytes = file_data.decode()?;
+    let bytes = file_data
+        .decode()
+        .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e))?;
 
     // Currently only ZIP is supported
     let _format = input.format.unwrap_or(ArchiveFormat::Zip);
@@ -428,17 +461,25 @@ pub fn extract_archive(input: ExtractArchiveInput) -> Result<ExtractArchiveOutpu
     extract_zip_archive(&bytes)
 }
 
-fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, String> {
+fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, AgentError> {
     let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("Failed to read archive: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
+        )
+    })?;
 
     let mut files = Vec::new();
 
     for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read archive entry {}: {}", i, e))?;
+        let mut file = archive.by_index(i).map_err(|e| {
+            AgentError::permanent(
+                "ARCHIVE_READ_ERROR",
+                format!("Failed to read archive entry {}: {}", i, e),
+            )
+            .with_attr("entry_index", i.to_string())
+        })?;
 
         let path = file.name().to_string();
         let is_directory = file.is_dir();
@@ -458,8 +499,13 @@ fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, String> {
             });
         } else {
             let mut contents = Vec::new();
-            file.read_to_end(&mut contents)
-                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+            file.read_to_end(&mut contents).map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_READ_ERROR",
+                    format!("Failed to read file '{}': {}", path, e),
+                )
+                .with_attr("path", &path)
+            })?;
 
             let filename = filename_from_path(&path);
             let mime_type = infer_mime_type(&path);
@@ -482,11 +528,19 @@ fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, String> {
 #[capability(
     module = "compression",
     display_name = "Extract File",
-    description = "Extract a single file from an archive by its path"
+    description = "Extract a single file from an archive by its path",
+    errors(
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
+        permanent("ARCHIVE_READ_ERROR", "Failed to read archive"),
+        permanent("ARCHIVE_FILE_NOT_FOUND", "Specified file not found in archive"),
+        permanent("ARCHIVE_IS_DIRECTORY", "Specified path is a directory, not a file"),
+    )
 )]
-pub fn extract_file(input: ExtractFileInput) -> Result<FileData, String> {
+pub fn extract_file(input: ExtractFileInput) -> Result<FileData, AgentError> {
     let file_data = input.archive.into_file_data();
-    let bytes = file_data.decode()?;
+    let bytes = file_data
+        .decode()
+        .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e))?;
 
     // Currently only ZIP is supported
     let _format = input.format.unwrap_or(ArchiveFormat::Zip);
@@ -494,10 +548,14 @@ pub fn extract_file(input: ExtractFileInput) -> Result<FileData, String> {
     extract_file_from_zip(&bytes, &input.file_path)
 }
 
-fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, String> {
+fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, AgentError> {
     let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("Failed to read archive: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
+        )
+    })?;
 
     // Try different path variations to find the file
     let paths_to_try = [
@@ -517,25 +575,47 @@ fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, Stri
         }
     }
 
-    let actual_path =
-        found_file.ok_or_else(|| format!("File '{}' not found in archive", file_path))?;
+    let actual_path = found_file.ok_or_else(|| {
+        AgentError::permanent(
+            "ARCHIVE_FILE_NOT_FOUND",
+            format!("File '{}' not found in archive", file_path),
+        )
+        .with_attr("file_path", file_path)
+    })?;
 
     // Re-open the archive to get the file (since by_name consumes)
     let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("Failed to read archive: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
+        )
+    })?;
 
-    let mut file = archive
-        .by_name(&actual_path)
-        .map_err(|_| format!("File '{}' not found in archive", file_path))?;
+    let mut file = archive.by_name(&actual_path).map_err(|_| {
+        AgentError::permanent(
+            "ARCHIVE_FILE_NOT_FOUND",
+            format!("File '{}' not found in archive", file_path),
+        )
+        .with_attr("file_path", file_path)
+    })?;
 
     if file.is_dir() {
-        return Err(format!("'{}' is a directory, not a file", file_path));
+        return Err(AgentError::permanent(
+            "ARCHIVE_IS_DIRECTORY",
+            format!("'{}' is a directory, not a file", file_path),
+        )
+        .with_attr("file_path", file_path));
     }
 
     let mut contents = Vec::new();
-    file.read_to_end(&mut contents)
-        .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
+    file.read_to_end(&mut contents).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read file '{}': {}", file_path, e),
+        )
+        .with_attr("file_path", file_path)
+    })?;
 
     let filename = filename_from_path(file_path);
     let mime_type = infer_mime_type(file_path);
@@ -547,11 +627,17 @@ fn extract_file_from_zip(bytes: &[u8], file_path: &str) -> Result<FileData, Stri
 #[capability(
     module = "compression",
     display_name = "List Archive",
-    description = "List all files and directories in an archive without extracting"
+    description = "List all files and directories in an archive without extracting",
+    errors(
+        permanent("ARCHIVE_DECODE_ERROR", "Failed to decode archive data"),
+        permanent("ARCHIVE_READ_ERROR", "Failed to read archive or archive entry"),
+    )
 )]
-pub fn list_archive(input: ListArchiveInput) -> Result<ListArchiveOutput, String> {
+pub fn list_archive(input: ListArchiveInput) -> Result<ListArchiveOutput, AgentError> {
     let file_data = input.archive.into_file_data();
-    let bytes = file_data.decode()?;
+    let bytes = file_data
+        .decode()
+        .map_err(|e| AgentError::permanent("ARCHIVE_DECODE_ERROR", e))?;
 
     // Currently only ZIP is supported
     let format = input.format.unwrap_or(ArchiveFormat::Zip);
@@ -559,18 +645,26 @@ pub fn list_archive(input: ListArchiveInput) -> Result<ListArchiveOutput, String
     list_zip_archive(&bytes, format)
 }
 
-fn list_zip_archive(bytes: &[u8], format: ArchiveFormat) -> Result<ListArchiveOutput, String> {
+fn list_zip_archive(bytes: &[u8], format: ArchiveFormat) -> Result<ListArchiveOutput, AgentError> {
     let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("Failed to read archive: {}", e))?;
+    let mut archive = ZipArchive::new(cursor).map_err(|e| {
+        AgentError::permanent(
+            "ARCHIVE_READ_ERROR",
+            format!("Failed to read archive: {}", e),
+        )
+    })?;
 
     let mut entries = Vec::new();
     let mut total_size: u64 = 0;
 
     for i in 0..archive.len() {
-        let file = archive
-            .by_index_raw(i)
-            .map_err(|e| format!("Failed to read archive entry {}: {}", i, e))?;
+        let file = archive.by_index_raw(i).map_err(|e| {
+            AgentError::permanent(
+                "ARCHIVE_READ_ERROR",
+                format!("Failed to read archive entry {}: {}", i, e),
+            )
+            .with_attr("entry_index", i.to_string())
+        })?;
 
         let path = file.name().to_string();
         let size = file.size();
@@ -669,7 +763,9 @@ mod tests {
 
         let result = create_archive(input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("At least one file"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "ARCHIVE_NO_FILES");
+        assert!(err.message.contains("At least one file"));
     }
 
     #[test]
@@ -774,7 +870,13 @@ mod tests {
 
         let result = extract_file(extract_input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not found"));
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "ARCHIVE_FILE_NOT_FOUND");
+        assert!(err.message.contains("not found"));
+        assert_eq!(
+            err.attributes.get("file_path"),
+            Some(&"nonexistent.txt".to_string())
+        );
     }
 
     #[test]
