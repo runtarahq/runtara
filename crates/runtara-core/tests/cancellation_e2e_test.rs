@@ -720,23 +720,20 @@ async fn test_cancel_signal_persists_across_checkpoints() {
         .ok();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Subsequent checkpoint should NOT see the signal
-    let cp_req = instance_proto::CheckpointRequest {
+    // Use PollSignals to verify the signal is cleared (not Checkpoint, since
+    // the instance is now in "cancelled" terminal state after SignalAck)
+    let poll_req = instance_proto::PollSignalsRequest {
         instance_id: instance_id.to_string(),
-        checkpoint_id: "cp-after-ack".to_string(),
-        state: b"after ack".to_vec(),
+        checkpoint_id: None,
     };
     let resp: instance_proto::RpcResponse = ctx
         .instance_client
-        .request(&wrap_checkpoint(cp_req))
+        .request(&wrap_poll_signals(poll_req))
         .await
         .unwrap();
     match resp.response {
-        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
-            assert!(
-                r.pending_signal.is_none(),
-                "Signal should be cleared after ack"
-            );
+        Some(instance_proto::rpc_response::Response::PollSignals(r)) => {
+            assert!(r.signal.is_none(), "Signal should be cleared after ack");
         }
         _ => panic!("Unexpected response"),
     }
