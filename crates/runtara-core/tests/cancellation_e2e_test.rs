@@ -741,6 +741,148 @@ async fn test_cancel_signal_persists_across_checkpoints() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
+/// Test that cancellation acknowledgement sets finished_at timestamp.
+/// This verifies the fix that uses complete_instance_extended instead of update_instance_status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cancel_ack_sets_finished_at() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Verify finished_at is initially NULL
+    let finished_at_before = ctx.get_instance_finished_at(&instance_id).await;
+    assert!(
+        finished_at_before.is_none(),
+        "finished_at should be NULL before cancellation"
+    );
+
+    // Send cancel signal
+    ctx.send_signal(&instance_id, "cancel", &[])
+        .await
+        .expect("Send cancel should succeed");
+
+    // Poll the signal (required before ack)
+    let poll_req = instance_proto::PollSignalsRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: None,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_poll_signals(poll_req))
+        .await
+        .unwrap();
+
+    // Acknowledge the cancel signal
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalCancel as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify status is cancelled
+    let status = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(
+        status,
+        Some("cancelled".to_string()),
+        "Status should be 'cancelled'"
+    );
+
+    // Verify finished_at is now set
+    let finished_at_after = ctx.get_instance_finished_at(&instance_id).await;
+    assert!(
+        finished_at_after.is_some(),
+        "finished_at should be set after cancel acknowledgement"
+    );
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test that cancellation acknowledgement sets pending_signals.acknowledged_at.
+/// This verifies the acknowledge_signal() call in handle_signal_ack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cancel_ack_sets_acknowledged_at() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Send cancel signal
+    ctx.send_signal(&instance_id, "cancel", &[])
+        .await
+        .expect("Send cancel should succeed");
+
+    // Verify signal is pending (not acknowledged)
+    assert!(
+        ctx.has_pending_signal(&instance_id).await,
+        "Should have pending signal"
+    );
+    assert!(
+        !ctx.is_signal_acknowledged(&instance_id).await,
+        "Signal should not be acknowledged yet"
+    );
+
+    // Poll the signal (required before ack)
+    let poll_req = instance_proto::PollSignalsRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: None,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_poll_signals(poll_req))
+        .await
+        .unwrap();
+
+    // Acknowledge the cancel signal
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalCancel as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify acknowledged_at is now set
+    assert!(
+        ctx.is_signal_acknowledged(&instance_id).await,
+        "Signal should be acknowledged (acknowledged_at IS NOT NULL)"
+    );
+
+    // Verify no more pending signals (has_pending_signal checks acknowledged_at IS NULL)
+    assert!(
+        !ctx.has_pending_signal(&instance_id).await,
+        "Should not have any un-acknowledged pending signals"
+    );
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_during_checkpoint_save() {
     skip_if_no_db!();

@@ -379,8 +379,9 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 Err(e) => {
                     // Check if this is a cancellation
                     if e.contains("cancelled") || e.contains("Cancelled") {
-                        let sdk_guard = sdk().lock().await;
-                        let _ = sdk_guard.suspended().await;
+                        // Acknowledge cancellation to runtara-core (sends SignalAck)
+                        // This updates instance status to "cancelled" in the database
+                        runtara_sdk::acknowledge_cancellation().await;
                         // Write cancelled output for Environment
                         let _ = write_cancelled();
                         eprintln!("Workflow execution was cancelled");

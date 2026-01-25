@@ -183,6 +183,33 @@ impl TestContext {
         row.map(|r| r.0)
     }
 
+    /// Get instance finished_at timestamp from database.
+    pub async fn get_instance_finished_at(
+        &self,
+        instance_id: &Uuid,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let row: Option<(Option<chrono::DateTime<chrono::Utc>>,)> =
+            sqlx::query_as(r#"SELECT finished_at FROM instances WHERE instance_id = $1"#)
+                .bind(instance_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .ok()?;
+        row.and_then(|r| r.0)
+    }
+
+    /// Check if pending signal has been acknowledged (acknowledged_at is set).
+    pub async fn is_signal_acknowledged(&self, instance_id: &Uuid) -> bool {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"SELECT COUNT(*) FROM pending_signals WHERE instance_id = $1 AND acknowledged_at IS NOT NULL"#,
+        )
+        .bind(instance_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        row.map(|r| r.0 > 0).unwrap_or(false)
+    }
+
     /// Send a signal to an instance via the persistence layer.
     /// Returns Ok(true) if successful, Ok(false) if instance not found or in terminal state.
     pub async fn send_signal(

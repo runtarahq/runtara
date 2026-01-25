@@ -634,10 +634,17 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
         // Handle signal-specific side effects
         match ack.signal_type() {
             SignalType::SignalCancel => {
-                // Update instance status to cancelled
+                // Update instance status to cancelled with finished_at
                 state
                     .persistence
-                    .update_instance_status(&ack.instance_id, "cancelled", None)
+                    .complete_instance_extended(
+                        &ack.instance_id,
+                        "cancelled",
+                        None, // output
+                        None, // error
+                        None, // stderr
+                        None, // checkpoint_id
+                    )
                     .await?;
                 info!("Instance cancelled");
             }
