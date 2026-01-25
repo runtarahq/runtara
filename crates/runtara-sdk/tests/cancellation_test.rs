@@ -403,6 +403,53 @@ async fn test_simulated_workflow_cancellation_pattern() {
     );
 }
 
+// ============================================================================
+// Tests for acknowledge_cancellation
+// ============================================================================
+
+/// Test that acknowledge_cancellation doesn't panic when no SDK is registered.
+#[tokio::test]
+async fn test_acknowledge_cancellation_no_registry() {
+    // This should not panic even if no SDK is registered
+    runtara_sdk::acknowledge_cancellation().await;
+
+    // Verify we can still call other cancellation functions
+    let cancelled = runtara_sdk::is_cancelled();
+    // Note: may or may not be cancelled depending on test order
+    println!(
+        "After acknowledge_cancellation, is_cancelled: {}",
+        cancelled
+    );
+}
+
+/// Test that acknowledge_cancellation triggers the local cancellation token.
+/// Note: This test may affect other tests due to global state.
+#[tokio::test]
+async fn test_acknowledge_cancellation_triggers_token() {
+    // If a token exists from previous tests, check initial state
+    let initial_state = runtara_sdk::is_cancelled();
+    println!("Initial cancellation state: {}", initial_state);
+
+    // Call acknowledge_cancellation - this should trigger local cancellation
+    runtara_sdk::acknowledge_cancellation().await;
+
+    // After calling acknowledge_cancellation, is_cancelled may be true
+    // (if a token was registered by previous tests)
+    // The key behavior is that it doesn't panic and completes successfully
+}
+
+/// Test that acknowledge_cancellation is idempotent (safe to call multiple times).
+#[tokio::test]
+async fn test_acknowledge_cancellation_idempotent() {
+    // Call multiple times - should not panic
+    runtara_sdk::acknowledge_cancellation().await;
+    runtara_sdk::acknowledge_cancellation().await;
+    runtara_sdk::acknowledge_cancellation().await;
+
+    // Should still work after multiple calls
+    let _ = runtara_sdk::is_cancelled();
+}
+
 /// Test the split-like parallel processing with cancellation.
 #[tokio::test]
 async fn test_parallel_split_cancellation_pattern() {

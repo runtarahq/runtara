@@ -513,6 +513,237 @@ async fn test_pause_and_resume_flow() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
+/// Test that checkpoint response includes pending cancel signal.
+/// This is the flow used by the #[durable] macro to detect cancellation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_checkpoint_response_includes_cancel_signal() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Send cancel signal BEFORE checkpoint
+    ctx.send_signal(&instance_id, "cancel", b"test cancel")
+        .await
+        .expect("Send cancel should succeed");
+
+    // Now checkpoint - response should include the pending signal
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "cp-with-pending-cancel".to_string(),
+        state: b"state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(!r.found, "First checkpoint should save");
+            assert!(
+                r.pending_signal.is_some(),
+                "Checkpoint response should include pending cancel signal"
+            );
+            let signal = r.pending_signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalCancel as i32,
+                "Signal should be cancel type"
+            );
+            assert_eq!(signal.payload, b"test cancel".to_vec());
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test the full cancel → checkpoint → SignalAck → status=cancelled flow.
+/// This simulates what the #[durable] macro does when it detects cancellation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_durable_macro_cancellation_flow() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Step 1: Instance makes a checkpoint (normal workflow operation)
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "step-1".to_string(),
+        state: b"step 1 state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(r.pending_signal.is_none(), "No signal yet");
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Step 2: External system sends cancel signal
+    ctx.send_signal(&instance_id, "cancel", &[])
+        .await
+        .expect("Send cancel should succeed");
+
+    // Step 3: Instance makes another checkpoint - should see cancel signal
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "step-2".to_string(),
+        state: b"step 2 state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(
+                r.pending_signal.is_some(),
+                "Should have pending cancel signal"
+            );
+            let signal = r.pending_signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalCancel as i32
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Step 4: Instance acknowledges cancellation (what acknowledge_cancellation() does)
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalCancel as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Step 5: Verify instance status is "cancelled" (not "failed")
+    let status = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(
+        status,
+        Some("cancelled".to_string()),
+        "Status should be 'cancelled', not 'failed'"
+    );
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test that multiple checkpoints only see the cancel signal once (until ack).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_cancel_signal_persists_across_checkpoints() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Send cancel signal
+    ctx.send_signal(&instance_id, "cancel", &[])
+        .await
+        .expect("Send cancel should succeed");
+
+    // Multiple checkpoints should all see the pending signal
+    for i in 0..3 {
+        let cp_req = instance_proto::CheckpointRequest {
+            instance_id: instance_id.to_string(),
+            checkpoint_id: format!("cp-{}", i),
+            state: format!("state-{}", i).into_bytes(),
+        };
+        let resp: instance_proto::RpcResponse = ctx
+            .instance_client
+            .request(&wrap_checkpoint(cp_req))
+            .await
+            .unwrap();
+        match resp.response {
+            Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+                assert!(
+                    r.pending_signal.is_some(),
+                    "Checkpoint {} should still see pending cancel signal",
+                    i
+                );
+            }
+            _ => panic!("Unexpected response"),
+        }
+    }
+
+    // After ack, signal should be cleared
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalCancel as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Subsequent checkpoint should NOT see the signal
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "cp-after-ack".to_string(),
+        state: b"after ack".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(
+                r.pending_signal.is_none(),
+                "Signal should be cleared after ack"
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_during_checkpoint_save() {
     skip_if_no_db!();

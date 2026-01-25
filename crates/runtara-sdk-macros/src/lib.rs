@@ -258,13 +258,20 @@ fn generate_no_retry_wrapper(
                                 if checkpoint_result.should_cancel() {
                                     ::tracing::info!(
                                         function = #fn_name_str,
-                                        "Cancel signal pending - instance should exit"
+                                        "Cancel signal detected - exiting"
                                     );
+                                    // Acknowledge cancellation to core (sets status to "cancelled")
+                                    // and trigger local cancellation token
+                                    ::runtara_sdk::acknowledge_cancellation().await;
+                                    // Return error immediately to stop execution
+                                    return Err("Instance cancelled".to_string().into());
                                 } else if checkpoint_result.should_pause() {
                                     ::tracing::info!(
                                         function = #fn_name_str,
-                                        "Pause signal pending - instance should exit after returning"
+                                        "Pause signal detected - exiting"
                                     );
+                                    // Return error to trigger exit; caller should call sdk.suspended()
+                                    return Err("Instance paused".to_string().into());
                                 }
                             }
                             Err(e) => {
@@ -436,13 +443,20 @@ fn generate_retry_wrapper(
                                         if checkpoint_result.should_cancel() {
                                             ::tracing::info!(
                                                 function = #fn_name_str,
-                                                "Cancel signal pending - instance should exit"
+                                                "Cancel signal detected - exiting"
                                             );
+                                            // Acknowledge cancellation to core (sets status to "cancelled")
+                                            // and trigger local cancellation token
+                                            ::runtara_sdk::acknowledge_cancellation().await;
+                                            // Return error immediately to stop execution
+                                            return Err("Instance cancelled".to_string().into());
                                         } else if checkpoint_result.should_pause() {
                                             ::tracing::info!(
                                                 function = #fn_name_str,
-                                                "Pause signal pending - instance should exit after returning"
+                                                "Pause signal detected - exiting"
                                             );
+                                            // Return error to trigger exit; caller should call sdk.suspended()
+                                            return Err("Instance paused".to_string().into());
                                         }
                                     }
                                     Err(e) => {
@@ -838,5 +852,118 @@ mod tests {
         // Check that retry-specific code IS present
         assert!(tokens.contains("__max_retries"));
         assert!(tokens.contains("__base_delay_ms"));
+    }
+
+    #[test]
+    fn test_no_retry_wrapper_contains_cancellation_handling() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn process_item(key: &str) -> Result<(), String> {
+                Ok(())
+            }
+        };
+        let config = DurableAttr {
+            max_retries: Some(0),
+            strategy: None,
+            delay: None,
+        };
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        let tokens = result.unwrap().to_string();
+
+        // Verify cancellation handling is present
+        assert!(
+            tokens.contains("should_cancel"),
+            "Generated code should check for cancel signal"
+        );
+        assert!(
+            tokens.contains("acknowledge_cancellation"),
+            "Generated code should acknowledge cancellation to core"
+        );
+        assert!(
+            tokens.contains("Instance cancelled"),
+            "Generated code should return cancellation error"
+        );
+
+        // Verify pause handling is present
+        assert!(
+            tokens.contains("should_pause"),
+            "Generated code should check for pause signal"
+        );
+        assert!(
+            tokens.contains("Instance paused"),
+            "Generated code should return pause error"
+        );
+    }
+
+    #[test]
+    fn test_retry_wrapper_contains_cancellation_handling() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn process_item(key: &str) -> Result<(), String> {
+                Ok(())
+            }
+        };
+        let config = DurableAttr {
+            max_retries: Some(3),
+            strategy: None,
+            delay: Some(1000),
+        };
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        let tokens = result.unwrap().to_string();
+
+        // Verify cancellation handling is present in retry path
+        assert!(
+            tokens.contains("should_cancel"),
+            "Generated code should check for cancel signal"
+        );
+        assert!(
+            tokens.contains("acknowledge_cancellation"),
+            "Generated code should acknowledge cancellation to core"
+        );
+        assert!(
+            tokens.contains("Instance cancelled"),
+            "Generated code should return cancellation error"
+        );
+
+        // Verify pause handling is present
+        assert!(
+            tokens.contains("should_pause"),
+            "Generated code should check for pause signal"
+        );
+        assert!(
+            tokens.contains("Instance paused"),
+            "Generated code should return pause error"
+        );
+    }
+
+    #[test]
+    fn test_cancellation_returns_error_not_just_logs() {
+        let fn_item: ItemFn = parse_quote! {
+            async fn my_function(key: &str) -> Result<i32, String> {
+                Ok(42)
+            }
+        };
+        let config = DurableAttr::default();
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        let tokens = result.unwrap().to_string();
+
+        // The old buggy behavior just logged "should exit" without returning
+        // Verify we now have return statements after cancellation detection
+        assert!(
+            !tokens.contains("should exit"),
+            "Should not contain old 'should exit' message"
+        );
+        assert!(
+            tokens.contains("exiting"),
+            "Should contain new 'exiting' message"
+        );
+
+        // Verify we return Err, not just log
+        // The pattern is: if should_cancel() { ... return Err(...) }
+        assert!(
+            tokens.contains("return Err"),
+            "Should return error on cancellation, not just log"
+        );
     }
 }

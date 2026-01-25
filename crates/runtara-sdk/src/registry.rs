@@ -386,6 +386,49 @@ pub fn trigger_cancellation() {
     }
 }
 
+/// Acknowledge cancellation to runtara-core.
+///
+/// This should be called when the instance detects a cancel signal and is about
+/// to exit. It sends a SignalAck to the core, which will update the instance
+/// status to "cancelled" (rather than "failed").
+///
+/// This function is used by the `#[durable]` macro when cancellation is detected.
+/// It triggers the local cancellation token and sends the acknowledgment.
+///
+/// # Example
+///
+/// ```ignore
+/// // Detected cancel signal in checkpoint response
+/// if checkpoint_result.should_cancel() {
+///     acknowledge_cancellation().await;
+///     return Err("Instance cancelled".into());
+/// }
+/// ```
+#[cfg(feature = "quic")]
+pub async fn acknowledge_cancellation() {
+    use crate::types::SignalType;
+
+    // Trigger local cancellation token first
+    trigger_cancellation();
+
+    // Send acknowledgment to core
+    if let Some(sdk_arc) = SDK_INSTANCE.get() {
+        let sdk_guard = sdk_arc.lock().await;
+        if let Err(e) = sdk_guard.acknowledge_signal(SignalType::Cancel, true).await {
+            warn!(error = %e, "Failed to acknowledge cancellation signal");
+        } else {
+            info!("Cancellation acknowledged to core");
+        }
+    }
+}
+
+/// Acknowledge cancellation (no-op without QUIC feature).
+#[cfg(not(feature = "quic"))]
+pub async fn acknowledge_cancellation() {
+    trigger_cancellation();
+    debug!("Cancellation acknowledged (QUIC disabled, no ack sent)");
+}
+
 #[cfg(test)]
 mod tests {
     // Note: These tests can't run in parallel due to global state.
