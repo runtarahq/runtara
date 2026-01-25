@@ -268,11 +268,11 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                         }
                     }
 
-                    // Also check for cancellation after each iteration (belt and suspenders)
+                    // Also check for cancellation or pause after each iteration (belt and suspenders)
                     {
                         let mut __sdk = sdk().lock().await;
-                        if let Err(e) = __sdk.check_cancelled().await {
-                            return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, e));
+                        if let Err(e) = __sdk.check_signals().await {
+                            return Err(format!("Split step {} at iteration {}: {}", step_id, idx, e));
                         }
                     }
                 }
@@ -365,12 +365,12 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
                                 }
                             };
 
-                            // Also check for cancellation via SDK (belt and suspenders)
+                            // Also check for cancellation or pause via SDK (belt and suspenders)
                             {
                                 let mut __sdk = sdk().lock().await;
-                                if let Err(e) = __sdk.check_cancelled().await {
+                                if let Err(e) = __sdk.check_signals().await {
                                     cancel_token.store(true, Ordering::Relaxed);
-                                    return (idx, Err(format!("Cancelled: {}", e)));
+                                    return (idx, Err(format!("{}", e)));
                                 }
                             }
 
@@ -809,17 +809,17 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_split_cancellation_check() {
+    fn test_emit_split_signal_check() {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-cancel", "data.items");
 
         let tokens = emit(&split_step, &mut ctx);
         let code = tokens.to_string();
 
-        // Verify cancellation is checked
+        // Verify signals (cancel/pause) are checked
         assert!(
-            code.contains("check_cancelled"),
-            "Should check for cancellation after each iteration"
+            code.contains("check_signals"),
+            "Should check for signals (cancel/pause) after each iteration"
         );
     }
 

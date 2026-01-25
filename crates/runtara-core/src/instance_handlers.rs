@@ -649,8 +649,12 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 info!("Instance cancelled");
             }
             SignalType::SignalPause => {
-                // Instance should checkpoint and suspend
-                debug!("Pause signal acknowledged");
+                // Update instance status to suspended
+                state
+                    .persistence
+                    .update_instance_status(&ack.instance_id, "suspended", None)
+                    .await?;
+                info!("Instance paused/suspended");
             }
             SignalType::SignalResume => {
                 // Instance should resume execution

@@ -553,6 +553,27 @@ impl RuntaraSdk {
         Ok(())
     }
 
+    /// Check for any actionable signal (cancel or pause) and return appropriate error.
+    ///
+    /// This is a unified method that checks for both cancellation and pause signals.
+    /// Use this in workflow steps to detect both types of interruption.
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
+    pub async fn check_signals(&mut self) -> Result<()> {
+        if let Some(signal) = self.poll_signal().await? {
+            match signal.signal_type {
+                SignalType::Cancel => return Err(SdkError::Cancelled),
+                SignalType::Pause => return Err(SdkError::Paused),
+                SignalType::Resume => {
+                    // Resume is informational, cache it but don't error
+                    self.pending_signal = Some(signal);
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ========== Retry Tracking ==========
 
     /// Record a retry attempt for audit trail.

@@ -153,11 +153,11 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
         });
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // Check for cancellation via SDK checkpoint response
+        // Check for cancellation or pause via SDK signal polling
         {
             let mut __sdk = sdk().lock().await;
-            if let Err(e) = __sdk.check_cancelled().await {
-                return Err(format!("Step {} cancelled: {}", #step_id, e));
+            if let Err(e) = __sdk.check_signals().await {
+                return Err(format!("Step {}: {}", #step_id, e));
             }
         }
     }
@@ -677,21 +677,21 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_agent_cancellation_check() {
+    fn test_emit_agent_signal_check() {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-cancel", "utils", "noop");
 
         let tokens = emit(&step, &mut ctx);
         let code = tokens.to_string();
 
-        // Verify cancellation check after execution
+        // Verify signal check (cancel/pause) after execution
         assert!(
-            code.contains("check_cancelled"),
-            "Should check for cancellation after step"
+            code.contains("check_signals"),
+            "Should check for signals (cancel/pause) after step"
         );
         assert!(
             code.contains("sdk ()"),
-            "Should acquire SDK lock for cancellation check"
+            "Should acquire SDK lock for signal check"
         );
     }
 

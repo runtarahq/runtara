@@ -299,23 +299,23 @@ fn emit_with_embedded_child(
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // Check for cancellation after child scenario completes
+        // Check for cancellation or pause after child scenario completes
         {
             let mut __sdk = sdk().lock().await;
-            if let Err(e) = __sdk.check_cancelled().await {
+            if let Err(e) = __sdk.check_signals().await {
                 let structured_error = serde_json::json!({
                     "stepId": #step_id,
                     "stepName": #step_name_display,
                     "stepType": "StartScenario",
-                    "code": "STEP_CANCELLED",
-                    "message": format!("StartScenario step {} cancelled", #step_id),
+                    "code": "STEP_INTERRUPTED",
+                    "message": format!("StartScenario step {} interrupted: {}", #step_id, e),
                     "category": "transient",
                     "severity": "info",
                     "childScenarioId": #child_scenario_id,
-                    "cancellationReason": e.to_string()
+                    "reason": e.to_string()
                 });
                 return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("StartScenario step {} cancelled: {}", #step_id, e)
+                    format!("StartScenario step {}: {}", #step_id, e)
                 }));
             }
         }
@@ -394,23 +394,23 @@ fn emit_placeholder(
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // Check for cancellation after step completes
+        // Check for cancellation or pause after step completes
         {
             let mut __sdk = sdk().lock().await;
-            if let Err(e) = __sdk.check_cancelled().await {
+            if let Err(e) = __sdk.check_signals().await {
                 let structured_error = serde_json::json!({
                     "stepId": #step_id,
                     "stepName": #step_name_display,
                     "stepType": "StartScenario",
-                    "code": "STEP_CANCELLED",
-                    "message": format!("StartScenario step {} cancelled", #step_id),
+                    "code": "STEP_INTERRUPTED",
+                    "message": format!("StartScenario step {} interrupted: {}", #step_id, e),
                     "category": "transient",
                     "severity": "info",
                     "childScenarioId": #child_scenario_id,
-                    "cancellationReason": e.to_string()
+                    "reason": e.to_string()
                 });
                 return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("StartScenario step {} cancelled: {}", #step_id, e)
+                    format!("StartScenario step {}: {}", #step_id, e)
                 }));
             }
         }
@@ -521,15 +521,15 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_placeholder_includes_cancellation_check() {
+    fn test_emit_placeholder_includes_signal_check() {
         let mut ctx = EmitContext::new(false);
         let tokens = emit_placeholder("step-1", None, "Unnamed", "child-scenario", &mut ctx);
 
         let code = tokens.to_string();
 
-        // Check for cancellation handling
-        assert!(code.contains("check_cancelled"));
-        assert!(code.contains("cancelled"));
+        // Check for signal handling (cancel/pause)
+        assert!(code.contains("check_signals"));
+        assert!(code.contains("STEP_INTERRUPTED"));
     }
 
     #[test]
@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_with_embedded_child_cancellation_check() {
+    fn test_emit_with_embedded_child_signal_check() {
         let step = create_basic_step("start-child", "child-scenario-id");
         let child_graph = create_child_graph("Child");
         let mut ctx = EmitContext::new(false);
@@ -725,9 +725,9 @@ mod tests {
         let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
         let code = tokens.to_string();
 
-        // Should check for cancellation after child completes
-        assert!(code.contains("check_cancelled"));
-        assert!(code.contains("cancelled"));
+        // Should check for signals (cancel/pause) after child completes
+        assert!(code.contains("check_signals"));
+        assert!(code.contains("STEP_INTERRUPTED"));
     }
 
     // =============================================================================

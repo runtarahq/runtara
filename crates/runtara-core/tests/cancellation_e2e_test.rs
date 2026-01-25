@@ -883,6 +883,145 @@ async fn test_cancel_ack_sets_acknowledged_at() {
     ctx.cleanup_instance(&instance_id).await;
 }
 
+/// Test that pause signal acknowledgement sets instance status to suspended.
+/// This verifies the fix that updates status on pause ack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_pause_ack_sets_status_suspended() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Verify status is initially running
+    let status_before = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(
+        status_before,
+        Some("running".to_string()),
+        "Status should be 'running' initially"
+    );
+
+    // Send pause signal
+    ctx.send_signal(&instance_id, "pause", &[])
+        .await
+        .expect("Send pause should succeed");
+
+    // Poll the signal (required before ack)
+    let poll_req = instance_proto::PollSignalsRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: None,
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_poll_signals(poll_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::PollSignals(r)) => {
+            assert!(r.signal.is_some(), "Should have pause signal");
+            let signal = r.signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalPause as i32
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Acknowledge the pause signal
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalPause as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify status is now suspended
+    let status_after = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(
+        status_after,
+        Some("suspended".to_string()),
+        "Status should be 'suspended' after pause acknowledgement"
+    );
+
+    // Verify acknowledged_at is set
+    assert!(
+        ctx.is_signal_acknowledged(&instance_id).await,
+        "Signal should be acknowledged (acknowledged_at IS NOT NULL)"
+    );
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test that checkpoint response includes pending pause signal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_checkpoint_response_includes_pause_signal() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Send pause signal BEFORE checkpoint
+    ctx.send_signal(&instance_id, "pause", b"pausing for maintenance")
+        .await
+        .expect("Send pause should succeed");
+
+    // Now checkpoint - response should include the pending signal
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "cp-with-pending-pause".to_string(),
+        state: b"state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(!r.found, "First checkpoint should save");
+            assert!(
+                r.pending_signal.is_some(),
+                "Checkpoint response should include pending pause signal"
+            );
+            let signal = r.pending_signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalPause as i32,
+                "Signal should be pause type"
+            );
+            assert_eq!(signal.payload, b"pausing for maintenance".to_vec());
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_during_checkpoint_save() {
     skip_if_no_db!();
@@ -935,6 +1074,345 @@ async fn test_cancel_during_checkpoint_save() {
     match resp.response {
         Some(instance_proto::rpc_response::Response::GetCheckpoint(r)) => {
             assert!(r.found, "Checkpoint should still exist after cancel signal");
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test the full pause workflow pattern simulating what generated code does:
+/// 1. Workflow makes checkpoint
+/// 2. External system sends pause signal
+/// 3. Next checkpoint includes pending_signal with pause type
+/// 4. Workflow detects pause and acknowledges it
+/// 5. Instance status becomes "suspended"
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_full_pause_workflow_pattern() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Step 1: First checkpoint (simulating normal workflow step)
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "step-1".to_string(),
+        state: b"step 1 state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(r.pending_signal.is_none(), "No signal yet");
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Step 2: External system sends pause signal (like API call)
+    ctx.send_signal(&instance_id, "pause", b"maintenance pause")
+        .await
+        .expect("Send pause should succeed");
+
+    // Step 3: Next checkpoint - should see pause signal in response
+    // This is where check_signals() would detect the pause
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "step-2".to_string(),
+        state: b"step 2 state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+
+    let has_pause_signal = match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(
+                r.pending_signal.is_some(),
+                "Checkpoint should include pending pause signal"
+            );
+            let signal = r.pending_signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalPause as i32,
+                "Signal should be pause type"
+            );
+            true
+        }
+        _ => panic!("Unexpected response"),
+    };
+    assert!(has_pause_signal, "Pause signal should be detected");
+
+    // Step 4: Workflow acknowledges pause (what acknowledge_pause/sdk.suspended() does)
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalPause as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Step 5: Verify instance is now suspended
+    let status = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(
+        status,
+        Some("suspended".to_string()),
+        "Status should be 'suspended' after pause workflow"
+    );
+
+    // Signal should be acknowledged
+    assert!(
+        ctx.is_signal_acknowledged(&instance_id).await,
+        "Signal should be acknowledged"
+    );
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test pause signal persists across multiple checkpoints until acknowledged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_pause_signal_persists_across_checkpoints() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Send pause signal
+    ctx.send_signal(&instance_id, "pause", &[])
+        .await
+        .expect("Send pause should succeed");
+
+    // Multiple checkpoints should all see the pending pause signal
+    for i in 0..3 {
+        let cp_req = instance_proto::CheckpointRequest {
+            instance_id: instance_id.to_string(),
+            checkpoint_id: format!("pause-cp-{}", i),
+            state: format!("state-{}", i).into_bytes(),
+        };
+        let resp: instance_proto::RpcResponse = ctx
+            .instance_client
+            .request(&wrap_checkpoint(cp_req))
+            .await
+            .unwrap();
+        match resp.response {
+            Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+                assert!(
+                    r.pending_signal.is_some(),
+                    "Checkpoint {} should still see pending pause signal",
+                    i
+                );
+                let signal = r.pending_signal.unwrap();
+                assert_eq!(
+                    signal.signal_type,
+                    instance_proto::SignalType::SignalPause as i32,
+                    "Signal should be pause type"
+                );
+            }
+            _ => panic!("Unexpected response"),
+        }
+    }
+
+    // After ack, signal should be cleared
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalPause as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Status should be suspended
+    let status = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(status, Some("suspended".to_string()));
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test full pause → resume → complete workflow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_pause_resume_complete_workflow() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Phase 1: Running workflow, pause requested
+    ctx.send_signal(&instance_id, "pause", &[])
+        .await
+        .expect("Send pause should succeed");
+
+    // Workflow detects pause via checkpoint
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "before-pause".to_string(),
+        state: b"state before pause".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(r.pending_signal.is_some(), "Should see pause signal");
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Workflow acknowledges pause
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalPause as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify suspended
+    let status = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(status, Some("suspended".to_string()), "Should be suspended");
+
+    // Phase 2: Send resume signal
+    // First, update status back to running (simulating environment relaunch)
+    sqlx::query("UPDATE instances SET status = 'running' WHERE instance_id = $1")
+        .bind(instance_id.to_string())
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+    ctx.send_signal(&instance_id, "resume", &[])
+        .await
+        .expect("Send resume should succeed");
+
+    // Poll and verify resume signal
+    let poll_req = instance_proto::PollSignalsRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: None,
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_poll_signals(poll_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::PollSignals(r)) => {
+            assert!(r.signal.is_some(), "Should have resume signal");
+            let signal = r.signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalResume as i32
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Acknowledge resume
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalResume as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify still running (resume doesn't change status, workflow continues)
+    let status = ctx.get_instance_status(&instance_id).await;
+    assert_eq!(status, Some("running".to_string()), "Should be running");
+
+    ctx.cleanup_instance(&instance_id).await;
+}
+
+/// Test that pause signal is detectable via PollSignals (alternative to checkpoint).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_pause_signal_via_poll_signals() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Send pause signal
+    ctx.send_signal(&instance_id, "pause", b"poll test")
+        .await
+        .expect("Send pause should succeed");
+
+    // Poll signals directly (what check_signals() does internally)
+    let poll_req = instance_proto::PollSignalsRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: None,
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_poll_signals(poll_req))
+        .await
+        .unwrap();
+
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::PollSignals(r)) => {
+            assert!(r.signal.is_some(), "Should have pause signal via poll");
+            let signal = r.signal.unwrap();
+            assert_eq!(
+                signal.signal_type,
+                instance_proto::SignalType::SignalPause as i32,
+                "Signal should be pause type"
+            );
+            assert_eq!(signal.payload, b"poll test".to_vec());
         }
         _ => panic!("Unexpected response"),
     }

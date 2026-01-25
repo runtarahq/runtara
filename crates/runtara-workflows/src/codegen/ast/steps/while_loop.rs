@@ -193,11 +193,11 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
                     let _ = __sdk.heartbeat().await;
                 }
 
-                // Also check for cancellation after each iteration (belt and suspenders)
+                // Also check for cancellation or pause after each iteration (belt and suspenders)
                 {
                     let mut __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.check_cancelled().await {
-                        return Err(format!("While step {} cancelled at iteration {}: {}", #step_id, __loop_index, e));
+                    if let Err(e) = __sdk.check_signals().await {
+                        return Err(format!("While step {} at iteration {}: {}", #step_id, __loop_index, e));
                     }
                 }
             }
@@ -434,17 +434,17 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_while_cancellation_check() {
+    fn test_emit_while_signal_check() {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-cancel", Some(5), 3);
 
         let tokens = emit(&while_step, &mut ctx);
         let code = tokens.to_string();
 
-        // Verify cancellation is checked
+        // Verify signals (cancel/pause) are checked
         assert!(
-            code.contains("check_cancelled"),
-            "Should check for cancellation after each iteration"
+            code.contains("check_signals"),
+            "Should check for signals (cancel/pause) after each iteration"
         );
     }
 
