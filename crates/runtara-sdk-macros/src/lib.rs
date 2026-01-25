@@ -254,6 +254,10 @@ fn generate_no_retry_wrapper(
                                     "Result cached via checkpoint"
                                 );
 
+                                // Release SDK mutex BEFORE calling acknowledge_cancellation()
+                                // to prevent deadlock (it needs to acquire the same mutex)
+                                drop(__sdk_guard);
+
                                 // Check for pending pause/cancel signals
                                 if checkpoint_result.should_cancel() {
                                     ::tracing::info!(
@@ -438,6 +442,10 @@ fn generate_retry_wrapper(
                                             attempts = __attempt,
                                             "Result cached via checkpoint"
                                         );
+
+                                        // Release SDK mutex BEFORE calling acknowledge_cancellation()
+                                        // to prevent deadlock (it needs to acquire the same mutex)
+                                        drop(__sdk_guard);
 
                                         // Check for pending pause/cancel signals
                                         if checkpoint_result.should_cancel() {
@@ -884,6 +892,12 @@ mod tests {
             "Generated code should return cancellation error"
         );
 
+        // Verify SDK guard is dropped before acknowledge_cancellation to prevent deadlock
+        assert!(
+            tokens.contains("drop (__sdk_guard)"),
+            "Generated code should drop SDK guard before acknowledge_cancellation"
+        );
+
         // Verify pause handling is present
         assert!(
             tokens.contains("should_pause"),
@@ -934,6 +948,12 @@ mod tests {
             tokens.contains("Instance paused"),
             "Generated code should return pause error"
         );
+
+        // Verify SDK guard is dropped before acknowledge_cancellation to prevent deadlock
+        assert!(
+            tokens.contains("drop (__sdk_guard)"),
+            "Generated code should drop SDK guard before acknowledge_cancellation"
+        );
     }
 
     #[test]
@@ -965,5 +985,63 @@ mod tests {
             tokens.contains("return Err"),
             "Should return error on cancellation, not just log"
         );
+    }
+
+    /// Test that verifies the deadlock fix: drop(__sdk_guard) must appear BEFORE
+    /// acknowledge_cancellation() in the generated code.
+    ///
+    /// Background: The deadlock occurred because:
+    /// 1. __sdk_guard = __sdk.lock().await holds the SDK mutex
+    /// 2. acknowledge_cancellation() tries to acquire the same mutex via SDK_INSTANCE.get()
+    /// 3. This creates a self-deadlock
+    ///
+    /// The fix is to drop the guard before calling acknowledge_cancellation().
+    /// This test verifies the ORDER of operations, not just their presence.
+    #[test]
+    fn test_deadlock_fix_drop_guard_before_acknowledge() {
+        // Test both no-retry and retry paths
+        for (max_retries, path_name) in [(Some(0), "no-retry"), (Some(3), "retry")] {
+            let fn_item: ItemFn = parse_quote! {
+                async fn process_item(key: &str) -> Result<(), String> {
+                    Ok(())
+                }
+            };
+            let config = DurableAttr {
+                max_retries,
+                strategy: None,
+                delay: if max_retries == Some(3) {
+                    Some(1000)
+                } else {
+                    None
+                },
+            };
+            let result = generate_durable_wrapper(fn_item, config);
+            assert!(result.is_ok(), "{} path should compile", path_name);
+            let tokens = result.unwrap().to_string();
+
+            // Find positions of key statements
+            let drop_pos = tokens.find("drop (__sdk_guard)");
+            let ack_pos = tokens.find("acknowledge_cancellation");
+
+            assert!(
+                drop_pos.is_some(),
+                "{} path: drop(__sdk_guard) should be present",
+                path_name
+            );
+            assert!(
+                ack_pos.is_some(),
+                "{} path: acknowledge_cancellation should be present",
+                path_name
+            );
+
+            // CRITICAL: drop must come BEFORE acknowledge_cancellation
+            assert!(
+                drop_pos.unwrap() < ack_pos.unwrap(),
+                "{} path: drop(__sdk_guard) (pos {}) must appear BEFORE acknowledge_cancellation (pos {}) to prevent deadlock",
+                path_name,
+                drop_pos.unwrap(),
+                ack_pos.unwrap()
+            );
+        }
     }
 }
