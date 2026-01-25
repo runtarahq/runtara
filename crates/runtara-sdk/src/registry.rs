@@ -411,13 +411,22 @@ pub async fn acknowledge_cancellation() {
     // Trigger local cancellation token first
     trigger_cancellation();
 
-    // Send acknowledgment to core
+    // Send acknowledgment to core with timeout to prevent indefinite hang.
+    // This can happen if:
+    // 1. Multiple parallel durable functions try to acknowledge simultaneously
+    // 2. The QUIC connection is in a degraded state after stop signal
+    // 3. The grace period expired and core took action on the connection
     if let Some(sdk_arc) = SDK_INSTANCE.get() {
-        let sdk_guard = sdk_arc.lock().await;
-        if let Err(e) = sdk_guard.acknowledge_signal(SignalType::Cancel, true).await {
-            warn!(error = %e, "Failed to acknowledge cancellation signal");
-        } else {
-            info!("Cancellation acknowledged to core");
+        let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
+            let sdk_guard = sdk_arc.lock().await;
+            sdk_guard.acknowledge_signal(SignalType::Cancel, true).await
+        })
+        .await;
+
+        match ack_result {
+            Ok(Ok(())) => info!("Cancellation acknowledged to core"),
+            Ok(Err(e)) => warn!(error = %e, "Failed to acknowledge cancellation signal"),
+            Err(_) => warn!("Timeout acknowledging cancellation signal - continuing with exit"),
         }
     }
 }
