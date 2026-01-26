@@ -28,7 +28,7 @@ pub struct EmitContext {
 
     /// Child scenarios mapped by step_id -> ExecutionGraph
     /// These are scenarios that StartScenario steps reference
-    child_scenarios: HashMap<String, ExecutionGraph>,
+    pub(crate) child_scenarios: HashMap<String, ExecutionGraph>,
 
     /// URL for fetching connections at runtime (None = no connection support)
     pub connection_service_url: Option<String>,

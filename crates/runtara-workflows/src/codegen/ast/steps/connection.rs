@@ -11,6 +11,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use crate::codegen::ast::CodegenError;
 use crate::codegen::ast::context::EmitContext;
 use runtara_dsl::ConnectionStep;
 
@@ -20,7 +21,7 @@ use runtara_dsl::ConnectionStep;
 /// 1. Fetches connection from external service
 /// 2. Handles rate limiting with durable sleep
 /// 3. Stores connection data in step outputs (NOT logged or checkpointed)
-pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let connection_id = &step.connection_id;
     let _integration_id = &step.integration_id;
@@ -32,7 +33,7 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> TokenStream {
     // NOTE: We intentionally do NOT emit debug events for connection steps
     // to prevent sensitive data from being logged
     // CONNECTION_SERVICE_URL can be provided at compile-time or runtime via env var
-    quote! {
+    Ok(quote! {
         // Fetch connection from external service (no debug logging for security)
         let #result_var = {
             let __conn_service_url = get_connection_service_url()
@@ -93,7 +94,7 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> TokenStream {
             #step_id.to_string(),
             serde_json::json!({ "outputs": #result_var })
         );
-    }
+    })
 }
 
 #[cfg(test)]
@@ -116,7 +117,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-basic", "my-api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -135,7 +136,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-id", "test-connection-123");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -149,7 +150,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-rl", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify rate limit handling
@@ -163,7 +164,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-sleep", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify durable sleep for rate limiting
@@ -178,7 +179,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-hb", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify heartbeat calls during rate limit wait
@@ -193,7 +194,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-refetch", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should re-fetch connection after rate limit wait
@@ -210,7 +211,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-output", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output includes connection fields
@@ -233,7 +234,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-store", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context
@@ -249,7 +250,7 @@ mod tests {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let step = create_connection_step("conn-no-debug", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Connection steps should NOT emit debug events for security
@@ -268,7 +269,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-error", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify error handling with step context
@@ -284,7 +285,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_connection_step("conn-tenant", "api-conn");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify tenant ID is passed to fetch
@@ -306,7 +307,7 @@ mod tests {
                 integration_id: integration.to_string(),
             };
 
-            let tokens = emit(&step, &mut ctx);
+            let tokens = emit(&step, &mut ctx).unwrap();
             let code = tokens.to_string();
 
             // All integration types should generate similar code

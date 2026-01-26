@@ -9,6 +9,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
@@ -17,7 +18,7 @@ use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::WhileStep;
 
 /// Emit code for a While step.
-pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     #![allow(clippy::too_many_lines)]
     let step_id = &step.id;
     let step_name = step.name.as_deref();
@@ -47,7 +48,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
     let build_source = mapping::emit_build_source(ctx);
 
     // Generate the subgraph function using shared recursive emitter
-    let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx);
+    let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx)?;
 
     // Generate condition evaluation code
     let condition_eval = emit_condition_expression(&step.condition, ctx, &source_var);
@@ -82,7 +83,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
         Some(&while_scope_id),
     );
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #loop_inputs_var = serde_json::json!({"maxIterations": #max_iterations});
 
@@ -214,7 +215,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> TokenStream {
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
-    }
+    })
 }
 
 #[cfg(test)]
@@ -287,7 +288,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-1", None, 5);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -317,7 +318,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
         };
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Default max_iterations is 10
@@ -332,7 +333,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-custom", Some(25), 100);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use custom max_iterations
@@ -347,7 +348,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-ctx", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify loop context is injected
@@ -370,7 +371,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-indices", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify _loop_indices is tracked for nested loops
@@ -393,7 +394,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-compat", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify _index is injected for backward compatibility
@@ -408,7 +409,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-prev", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify previous outputs are passed to next iteration
@@ -423,7 +424,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-hb", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify heartbeat is sent after each iteration
@@ -438,7 +439,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-cancel", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify signals (cancel/pause) are checked
@@ -453,7 +454,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-subgraph", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify subgraph function is generated
@@ -472,7 +473,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-output", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output structure
@@ -500,7 +501,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let while_step = create_while_step("while-store", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context
@@ -515,7 +516,7 @@ mod tests {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let while_step = create_while_step("while-debug", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events are emitted
@@ -534,7 +535,7 @@ mod tests {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let while_step = create_while_step("while-no-debug", Some(5), 3);
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Debug events should not be present (or minimal)
@@ -559,7 +560,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
         };
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Unnamed" as display name
@@ -618,7 +619,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
         };
 
-        let tokens = emit(&while_step, &mut ctx);
+        let tokens = emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify condition is evaluated

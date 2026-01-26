@@ -13,6 +13,7 @@ use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use std::collections::HashSet;
 
+use super::CodegenError;
 use super::context::EmitContext;
 use super::mapping;
 use super::steps::conditional::emit_condition_expression;
@@ -74,20 +75,27 @@ fn collect_used_agents_recursive(
 }
 
 /// Emit the complete program.
-pub fn emit_program(graph: &ExecutionGraph, ctx: &mut EmitContext) -> TokenStream {
+///
+/// # Errors
+///
+/// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+pub fn emit_program(
+    graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> Result<TokenStream, CodegenError> {
     let imports = emit_imports(graph, ctx);
     let constants = emit_constants(ctx);
     let input_structs = emit_input_structs();
     let main_fn = emit_main(graph);
-    let execute_workflow = emit_execute_workflow(graph, ctx);
+    let execute_workflow = emit_execute_workflow(graph, ctx)?;
 
-    quote! {
+    Ok(quote! {
         #imports
         #constants
         #input_structs
         #main_fn
         #execute_workflow
-    }
+    })
 }
 
 /// Emit compile-time constants (connection service URL, tenant ID, etc.)
@@ -416,28 +424,27 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 }
 
 /// Emit the execute_workflow function.
-fn emit_execute_workflow(graph: &ExecutionGraph, ctx: &mut EmitContext) -> TokenStream {
+fn emit_execute_workflow(
+    graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> Result<TokenStream, CodegenError> {
     let step_order = steps::build_execution_order(graph);
 
     // Clone the idents to avoid borrow issues
     let steps_context_var = ctx.steps_context_var.clone();
     let inputs_var = ctx.inputs_var.clone();
 
-    // Generate code for each step in execution order
+    // Generate code for each step in execution order, collecting any errors
     let step_code: Vec<TokenStream> = step_order
         .iter()
-        .filter_map(|step_id_str| {
-            graph
-                .steps
-                .get(step_id_str)
-                .map(|step| emit_step_execution(step, graph, ctx))
-        })
-        .collect();
+        .filter_map(|step_id_str| graph.steps.get(step_id_str))
+        .map(|step| emit_step_execution(step, graph, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Find the finish step to get the final output
     let finish_output = emit_finish_output(graph, ctx);
 
-    quote! {
+    Ok(quote! {
         async fn execute_workflow(#inputs_var: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
             let mut #steps_context_var = serde_json::Map::new();
 
@@ -445,11 +452,15 @@ fn emit_execute_workflow(graph: &ExecutionGraph, ctx: &mut EmitContext) -> Token
 
             #finish_output
         }
-    }
+    })
 }
 
 /// Emit code for a single step execution.
-fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContext) -> TokenStream {
+fn emit_step_execution(
+    step: &Step,
+    graph: &ExecutionGraph,
+    ctx: &mut EmitContext,
+) -> Result<TokenStream, CodegenError> {
     let sid = step_id(step);
     let sname = step_name(step);
     let stype = step_type_str(step);
@@ -461,7 +472,7 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
     let on_error_edges = steps::find_on_error_edges(sid, &graph.execution_plan);
 
     // Emit the step-specific code
-    let step_code = step.emit(ctx, graph);
+    let step_code = step.emit(ctx, graph)?;
 
     // Steps that cannot have onError handling (they don't fail or handle errors differently)
     let can_have_on_error = matches!(
@@ -475,12 +486,12 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
 
     if can_have_on_error && !on_error_edges.is_empty() {
         // Generate the error routing code
-        let error_routing_code = emit_error_routing(&on_error_edges, graph, ctx);
+        let error_routing_code = emit_error_routing(&on_error_edges, graph, ctx)?;
 
         // Clone context vars we need in the quote
         let steps_context = ctx.steps_context_var.clone();
 
-        quote! {
+        Ok(quote! {
             // Step: #sid (#stype) with onError handling
             #debug_log
             {
@@ -509,13 +520,13 @@ fn emit_step_execution(step: &Step, graph: &ExecutionGraph, ctx: &mut EmitContex
                     #error_routing_code
                 }
             }
-        }
+        })
     } else {
-        quote! {
+        Ok(quote! {
             // Step: #sid (#stype)
             #debug_log
             #step_code
-        }
+        })
     }
 }
 
@@ -524,24 +535,22 @@ fn emit_error_branch(
     start_step_id: &str,
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
-) -> TokenStream {
+) -> Result<TokenStream, CodegenError> {
     // Collect steps in the error branch
     let branch_steps = collect_error_branch_steps(start_step_id, graph);
 
     let step_codes: Vec<TokenStream> = branch_steps
         .iter()
-        .filter_map(|step_id| {
-            graph.steps.get(step_id).map(|step| {
-                // For error branch steps, emit without onError wrapping to avoid recursion
-                let step_code = step.emit(ctx, graph);
-                quote! { #step_code }
-            })
+        .filter_map(|step_id| graph.steps.get(step_id))
+        .map(|step| {
+            // For error branch steps, emit without onError wrapping to avoid recursion
+            step.emit(ctx, graph)
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
-    quote! {
+    Ok(quote! {
         #(#step_codes)*
-    }
+    })
 }
 
 /// Emit code for routing errors to appropriate handlers based on conditions.
@@ -554,11 +563,11 @@ fn emit_error_routing(
     edges: &[&runtara_dsl::ExecutionPlanEdge],
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
-) -> TokenStream {
+) -> Result<TokenStream, CodegenError> {
     if edges.is_empty() {
-        return quote! {
+        return Ok(quote! {
             return Err(__error.to_string());
-        };
+        });
     }
 
     // Separate conditional edges from the default edge
@@ -582,14 +591,14 @@ fn emit_error_routing(
         if let Some(edge) = default_edge
             && graph.steps.contains_key(&edge.to_step)
         {
-            let branch_code = emit_error_branch(&edge.to_step, graph, ctx);
-            return quote! {
+            let branch_code = emit_error_branch(&edge.to_step, graph, ctx)?;
+            return Ok(quote! {
                 #branch_code
-            };
+            });
         }
-        return quote! {
+        return Ok(quote! {
             return Err(__error.to_string());
-        };
+        });
     }
 
     // Generate if-else chain for conditional edges
@@ -600,7 +609,7 @@ fn emit_error_routing(
         let condition_code = emit_condition_expression(condition, ctx, &source_var);
 
         let branch_code = if graph.steps.contains_key(&edge.to_step) {
-            emit_error_branch(&edge.to_step, graph, ctx)
+            emit_error_branch(&edge.to_step, graph, ctx)?
         } else {
             quote! {}
         };
@@ -623,7 +632,7 @@ fn emit_error_routing(
     // Add default branch (else) or re-throw
     let default_branch = if let Some(edge) = default_edge {
         if graph.steps.contains_key(&edge.to_step) {
-            let branch_code = emit_error_branch(&edge.to_step, graph, ctx);
+            let branch_code = emit_error_branch(&edge.to_step, graph, ctx)?;
             quote! {
                 else {
                     #branch_code
@@ -645,12 +654,12 @@ fn emit_error_routing(
         }
     };
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
 
         #(#branches)*
         #default_branch
-    }
+    })
 }
 
 /// Collect all steps along an error branch until we hit a Finish step or merge back.
@@ -746,11 +755,12 @@ pub fn emit_graph_as_function(
     fn_name: &proc_macro2::Ident,
     graph: &ExecutionGraph,
     parent_ctx: &EmitContext,
-) -> TokenStream {
-    // Create a fresh context for this graph, inheriting connection configuration
+) -> Result<TokenStream, CodegenError> {
+    // Create a fresh context for this graph, inheriting configuration from parent
     let mut ctx = EmitContext::new(parent_ctx.debug_mode);
     ctx.connection_service_url = parent_ctx.connection_service_url.clone();
     ctx.tenant_id = parent_ctx.tenant_id.clone();
+    ctx.child_scenarios = parent_ctx.child_scenarios.clone();
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
@@ -758,18 +768,14 @@ pub fn emit_graph_as_function(
     // Generate code for each step
     let step_code: Vec<TokenStream> = step_order
         .iter()
-        .filter_map(|step_id_str| {
-            graph
-                .steps
-                .get(step_id_str)
-                .map(|step| emit_step_execution(step, graph, &mut ctx))
-        })
-        .collect();
+        .filter_map(|step_id_str| graph.steps.get(step_id_str))
+        .map(|step| emit_step_execution(step, graph, &mut ctx))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Find the finish step to determine return value
     let finish_output = emit_finish_output(graph, &ctx);
 
-    quote! {
+    Ok(quote! {
         async fn #fn_name(inputs: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
             let mut steps_context = serde_json::Map::new();
 
@@ -777,7 +783,7 @@ pub fn emit_graph_as_function(
 
             #finish_output
         }
-    }
+    })
 }
 
 /// Check if the graph uses any conditional steps.
@@ -1675,7 +1681,7 @@ mod tests {
     fn test_emit_execute_workflow_structure() {
         let graph = create_minimal_finish_graph("finish");
         let mut ctx = EmitContext::new(false);
-        let tokens = emit_execute_workflow(&graph, &mut ctx);
+        let tokens = emit_execute_workflow(&graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -1706,7 +1712,7 @@ mod tests {
         let graph = create_minimal_finish_graph("finish");
         let ctx = EmitContext::new(false);
         let fn_name = Ident::new("execute_child_scenario", Span::call_site());
-        let tokens = emit_graph_as_function(&fn_name, &graph, &ctx);
+        let tokens = emit_graph_as_function(&fn_name, &graph, &ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -1733,7 +1739,7 @@ mod tests {
         let fn_name = Ident::new("child_fn", Span::call_site());
 
         // The function creates a fresh context but inherits connection config
-        let tokens = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
+        let tokens = emit_graph_as_function(&fn_name, &graph, &parent_ctx).unwrap();
         let code = tokens.to_string();
 
         // The child function should be defined
@@ -1741,6 +1747,111 @@ mod tests {
             code.contains("child_fn"),
             "Should create function with given name"
         );
+    }
+
+    #[test]
+    fn test_emit_graph_as_function_inherits_child_scenarios() {
+        // Create child scenario graph that will be looked up
+        let child_graph = create_minimal_finish_graph("child-finish");
+
+        // Create a graph with StartScenario step referencing the child
+        let mut steps = HashMap::new();
+        steps.insert(
+            "start-child".to_string(),
+            Step::StartScenario(StartScenarioStep {
+                id: "start-child".to_string(),
+                name: None,
+                child_scenario_id: "my-child-scenario".to_string(),
+                child_version: ChildVersion::Latest("latest".to_string()),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "start-child".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Create parent context with child_scenarios populated
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("start-child".to_string(), child_graph);
+        let parent_ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+
+        let fn_name = Ident::new("nested_fn", Span::call_site());
+
+        // This should succeed because child_scenarios is inherited
+        let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
+        assert!(
+            result.is_ok(),
+            "Should successfully emit when child_scenarios is inherited"
+        );
+    }
+
+    #[test]
+    fn test_emit_graph_as_function_fails_without_child_scenarios() {
+        // Create a graph with StartScenario step referencing a child
+        let mut steps = HashMap::new();
+        steps.insert(
+            "start-child".to_string(),
+            Step::StartScenario(StartScenarioStep {
+                id: "start-child".to_string(),
+                name: None,
+                child_scenario_id: "my-child-scenario".to_string(),
+                child_version: ChildVersion::Latest("latest".to_string()),
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+        );
+
+        let graph = ExecutionGraph {
+            name: None,
+            description: None,
+            entry_point: "start-child".to_string(),
+            steps,
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Create parent context WITHOUT child_scenarios
+        let parent_ctx = EmitContext::new(false);
+        let fn_name = Ident::new("nested_fn", Span::call_site());
+
+        // This should fail because child scenario is not found
+        let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
+        assert!(
+            result.is_err(),
+            "Should fail when child scenario is missing"
+        );
+
+        if let Err(CodegenError::MissingChildScenario {
+            step_id,
+            child_scenario_id,
+        }) = result
+        {
+            assert_eq!(step_id, "start-child");
+            assert_eq!(child_scenario_id, "my-child-scenario");
+        } else {
+            panic!("Expected MissingChildScenario error");
+        }
     }
 
     // ==========================================
@@ -1773,7 +1884,7 @@ mod tests {
     fn test_emit_program_includes_all_sections() {
         let graph = create_minimal_finish_graph("finish");
         let mut ctx = EmitContext::new(false);
-        let tokens = emit_program(&graph, &mut ctx);
+        let tokens = emit_program(&graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should include imports
@@ -1802,7 +1913,7 @@ mod tests {
     fn test_emit_program_with_debug_mode() {
         let graph = create_minimal_finish_graph("finish");
         let mut ctx = EmitContext::new(true); // debug_mode = true
-        let tokens = emit_program(&graph, &mut ctx);
+        let tokens = emit_program(&graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Debug mode should generate debug event code
@@ -2067,7 +2178,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
 
         let finish_step = &graph.steps.get("finish").unwrap();
-        let tokens = emit_step_execution(finish_step, &graph, &mut ctx);
+        let tokens = emit_step_execution(finish_step, &graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Finish step should generate return statement
@@ -2098,7 +2209,7 @@ mod tests {
 
         let mut ctx = EmitContext::new(false);
         let agent_step = modified_graph.steps.get("agent1").unwrap();
-        let tokens = emit_step_execution(agent_step, &modified_graph, &mut ctx);
+        let tokens = emit_step_execution(agent_step, &modified_graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should have error handling wrapper
@@ -2159,7 +2270,7 @@ mod tests {
         };
 
         let mut ctx = EmitContext::new(false);
-        let tokens = emit_error_branch("error-log", &graph, &mut ctx);
+        let tokens = emit_error_branch("error-log", &graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should emit code for both steps in the error branch

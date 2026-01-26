@@ -454,6 +454,21 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
             io::ErrorKind::InvalidData,
             format!("Code generation failed: {}", panic_msg),
         )
+    })?
+    // Handle codegen errors (e.g., missing child scenario)
+    .map_err(|codegen_err| {
+        tracing::error!(
+            tenant_id = %tenant_id,
+            scenario_id = %scenario_id,
+            version = version,
+            error = %codegen_err,
+            "Code generation failed"
+        );
+
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Code generation failed: {}", codegen_err),
+        )
     })?;
     let codegen_duration = codegen_start.elapsed();
     tracing::debug!(
@@ -720,11 +735,16 @@ pub fn translate_scenario(
     fs::create_dir_all(&build_dir)?;
 
     // Generate the Rust program using AST-based code generation
-    let rust_code = ast::compile(execution_graph, debug_mode);
+    let rust_code = ast::compile(execution_graph, debug_mode).map_err(|codegen_err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Code generation failed: {}", codegen_err),
+        )
+    })?;
 
     // Write main.rs
     let main_rs_path = build_dir.join("main.rs");
-    fs::write(&main_rs_path, rust_code)?;
+    fs::write(&main_rs_path, &rust_code)?;
 
     info!(
         "Generated Rust code for scenario {}/{} v{} at {:?}",

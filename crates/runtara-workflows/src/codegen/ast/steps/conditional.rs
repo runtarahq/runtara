@@ -9,6 +9,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping::{self, emit_mapping_value};
 use super::super::steps;
@@ -19,7 +20,11 @@ use runtara_dsl::{
 };
 
 /// Emit code for a Conditional step.
-pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGraph) -> TokenStream {
+pub fn emit(
+    step: &ConditionalStep,
+    ctx: &mut EmitContext,
+    graph: &ExecutionGraph,
+) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -57,21 +62,21 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
 
     // Emit code for the true branch (stopping at merge point)
     let true_branch_code = if let Some(start_step_id) = true_step_id {
-        emit_branch_code(start_step_id, graph, ctx, merge_point.as_deref())
+        emit_branch_code(start_step_id, graph, ctx, merge_point.as_deref())?
     } else {
         quote! {}
     };
 
     // Emit code for the false branch (stopping at merge point)
     let false_branch_code = if let Some(start_step_id) = false_step_id {
-        emit_branch_code(start_step_id, graph, ctx, merge_point.as_deref())
+        emit_branch_code(start_step_id, graph, ctx, merge_point.as_deref())?
     } else {
         quote! {}
     };
 
     // Emit code for the common suffix path after the merge point
     let common_suffix_code = if let Some(ref merge_step_id) = merge_point {
-        emit_branch_code(merge_step_id, graph, ctx, None)
+        emit_branch_code(merge_step_id, graph, ctx, None)?
     } else {
         quote! {}
     };
@@ -100,7 +105,7 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
         None,
     );
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
 
@@ -130,7 +135,7 @@ pub fn emit(step: &ConditionalStep, ctx: &mut EmitContext, graph: &ExecutionGrap
 
         // Execute common suffix path after merge point (if any)
         #common_suffix_code
-    }
+    })
 }
 
 /// Find the merge point where two branches converge (diamond pattern detection).
@@ -302,17 +307,18 @@ fn emit_branch_code(
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
     stop_at: Option<&str>,
-) -> TokenStream {
+) -> Result<TokenStream, CodegenError> {
     let branch_steps = collect_branch_steps(start_step_id, graph, stop_at);
 
     let step_codes: Vec<TokenStream> = branch_steps
         .iter()
-        .filter_map(|step_id| graph.steps.get(step_id).map(|step| step.emit(ctx, graph)))
-        .collect();
+        .filter_map(|step_id| graph.steps.get(step_id))
+        .map(|step| step.emit(ctx, graph))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    quote! {
+    Ok(quote! {
         #(#step_codes)*
-    }
+    })
 }
 
 // ============================================================================

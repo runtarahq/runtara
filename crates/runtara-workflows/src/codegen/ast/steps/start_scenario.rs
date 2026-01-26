@@ -10,6 +10,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
@@ -20,11 +21,15 @@ use runtara_dsl::{ExecutionGraph, StartScenarioStep};
 ///
 /// If the child scenario's ExecutionGraph is available in the EmitContext,
 /// it will be recursively emitted as an embedded function. Otherwise,
-/// a placeholder/warning is generated.
-pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> TokenStream {
+/// returns a compilation error.
+///
+/// # Errors
+///
+/// Returns `CodegenError::MissingChildScenario` if the child scenario is not found
+/// in the EmitContext. This ensures fail-fast at compile time rather than silent
+/// runtime failures.
+pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
-    let step_name = step.name.as_deref();
-    let step_name_display = step_name.unwrap_or("Unnamed");
     let child_scenario_id = &step.child_scenario_id;
 
     // Get retry configuration with defaults
@@ -36,14 +41,11 @@ pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> TokenStream {
         // We have the child graph - emit embedded version
         emit_with_embedded_child(step, &child_graph, ctx, max_retries, retry_delay)
     } else {
-        // No child graph available - emit placeholder
-        emit_placeholder(
-            step_id,
-            step_name,
-            step_name_display,
-            child_scenario_id,
-            ctx,
-        )
+        // No child graph available - fail compilation
+        Err(CodegenError::MissingChildScenario {
+            step_id: step_id.clone(),
+            child_scenario_id: child_scenario_id.clone(),
+        })
     }
 }
 
@@ -54,7 +56,7 @@ fn emit_with_embedded_child(
     ctx: &mut EmitContext,
     max_retries: u32,
     retry_delay: u64,
-) -> TokenStream {
+) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -99,7 +101,7 @@ fn emit_with_embedded_child(
     };
 
     // Generate the embedded child scenario function using shared recursive emitter
-    let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx);
+    let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx)?;
 
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
@@ -134,7 +136,7 @@ fn emit_with_embedded_child(
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
 
-    quote! {
+    Ok(quote! {
         // Define the embedded child scenario function
         #child_fn_code
 
@@ -365,104 +367,8 @@ fn emit_with_embedded_child(
                 }));
             }
         }
-    }
+    })
 }
-
-/// Emit a placeholder for when child scenario is not available.
-fn emit_placeholder(
-    step_id: &str,
-    step_name: Option<&str>,
-    step_name_display: &str,
-    child_scenario_id: &str,
-    ctx: &mut EmitContext,
-) -> TokenStream {
-    // Do all mutable operations first
-    let step_var = ctx.declare_step(step_id);
-    let source_var = ctx.temp_var("source");
-    let placeholder_inputs_var = ctx.temp_var("placeholder_inputs");
-
-    // Clone immutable references
-    let steps_context = ctx.steps_context_var.clone();
-
-    // Build the source for input mapping
-    let build_source = mapping::emit_build_source(ctx);
-
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
-
-    // StartScenario creates a scope - use sc_{step_id} as its scope_id
-    let start_scenario_scope_id = format!("sc_{}", step_id);
-
-    // Generate debug event emissions with the StartScenario's own scope_id
-    let debug_start = emit_step_debug_start(
-        ctx,
-        step_id,
-        step_name,
-        "StartScenario",
-        Some(&placeholder_inputs_var),
-        None,
-        Some(&scenario_inputs_var),
-        Some(&start_scenario_scope_id),
-    );
-    let debug_end = emit_step_debug_end(
-        ctx,
-        step_id,
-        step_name,
-        "StartScenario",
-        Some(&step_var),
-        Some(&scenario_inputs_var),
-        Some(&start_scenario_scope_id),
-    );
-
-    quote! {
-        let #source_var = #build_source;
-        let #placeholder_inputs_var = serde_json::json!({"childScenarioId": #child_scenario_id, "placeholder": true});
-
-        #debug_start
-
-        // Placeholder: child scenario not available at compile time
-        let child_result = {
-            eprintln!("WARNING: Child scenario {} not embedded - returning empty result", #child_scenario_id);
-            serde_json::json!({
-                "warning": format!("Child scenario {} was not available at compile time", #child_scenario_id)
-            })
-        };
-
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "StartScenario",
-            "childScenarioId": #child_scenario_id,
-            "outputs": child_result
-        });
-
-        #debug_end
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // Check for cancellation or pause after step completes
-        {
-            let mut __sdk = sdk().lock().await;
-            if let Err(e) = __sdk.check_signals().await {
-                let structured_error = serde_json::json!({
-                    "stepId": #step_id,
-                    "stepName": #step_name_display,
-                    "stepType": "StartScenario",
-                    "code": "STEP_INTERRUPTED",
-                    "message": format!("StartScenario step {} interrupted: {}", #step_id, e),
-                    "category": "transient",
-                    "severity": "info",
-                    "childScenarioId": #child_scenario_id,
-                    "reason": e.to_string()
-                });
-                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("StartScenario step {}: {}", #step_id, e)
-                }));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,87 +431,28 @@ mod tests {
     }
 
     // =============================================================================
-    // emit_placeholder tests
-    // =============================================================================
-
-    #[test]
-    fn test_emit_placeholder_basic() {
-        let mut ctx = EmitContext::new(false);
-        let tokens = emit_placeholder("step-1", None, "Unnamed", "child-scenario", &mut ctx);
-
-        let code = tokens.to_string();
-
-        // Check for placeholder JSON structure
-        assert!(code.contains("childScenarioId"));
-        assert!(code.contains("placeholder"));
-        assert!(code.contains("child-scenario"));
-
-        // Check for warning message
-        assert!(code.contains("WARNING"));
-        assert!(code.contains("not embedded"));
-
-        // Check step result is stored in context
-        assert!(code.contains("steps_context"));
-        assert!(code.contains("insert"));
-    }
-
-    #[test]
-    fn test_emit_placeholder_with_name() {
-        let mut ctx = EmitContext::new(false);
-        let tokens = emit_placeholder(
-            "step-1",
-            Some("My Step"),
-            "My Step",
-            "child-scenario",
-            &mut ctx,
-        );
-
-        let code = tokens.to_string();
-
-        // Check step name is used
-        assert!(code.contains("My Step"));
-    }
-
-    #[test]
-    fn test_emit_placeholder_includes_signal_check() {
-        let mut ctx = EmitContext::new(false);
-        let tokens = emit_placeholder("step-1", None, "Unnamed", "child-scenario", &mut ctx);
-
-        let code = tokens.to_string();
-
-        // Check for signal handling (cancel/pause)
-        assert!(code.contains("check_signals"));
-        assert!(code.contains("STEP_INTERRUPTED"));
-    }
-
-    #[test]
-    fn test_emit_placeholder_debug_mode() {
-        let mut ctx = EmitContext::new(true);
-        let tokens = emit_placeholder("step-1", Some("Test"), "Test", "child-scenario", &mut ctx);
-
-        let code = tokens.to_string();
-
-        // In debug mode, debug events should be emitted
-        // (The actual debug emission depends on emit_step_debug_start/end behavior)
-        assert!(code.contains("steps_context"));
-    }
-
-    // =============================================================================
     // emit tests (main entry point)
     // =============================================================================
 
     #[test]
-    fn test_emit_without_child_graph() {
+    fn test_emit_without_child_graph_returns_error() {
         let step = create_basic_step("start-child", "child-scenario-id");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit(&step, &mut ctx);
-        let code = tokens.to_string();
+        let result = emit(&step, &mut ctx);
 
-        // Should emit placeholder when no child graph is available
-        assert!(code.contains("WARNING"));
-        assert!(code.contains("not embedded"));
-        assert!(code.contains("child-scenario-id"));
+        // Should return error when no child graph is available
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            CodegenError::MissingChildScenario {
+                step_id,
+                child_scenario_id,
+            } => {
+                assert_eq!(step_id, "start-child");
+                assert_eq!(child_scenario_id, "child-scenario-id");
+            }
+        }
     }
 
     #[test]
@@ -618,7 +465,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should emit embedded version with durable wrapper
@@ -640,7 +487,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Default max_retries is 3
@@ -660,7 +507,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Custom retry config should be used
@@ -678,7 +525,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Check structure of generated code
@@ -720,7 +567,7 @@ mod tests {
         let child_graph = create_child_graph("Child");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Input mapping should be processed
@@ -736,7 +583,7 @@ mod tests {
         let child_graph = create_child_graph("Child");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Should use empty object for inputs
@@ -750,7 +597,7 @@ mod tests {
         let child_graph = create_child_graph("Child");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Result JSON should have expected structure
@@ -768,7 +615,7 @@ mod tests {
         let child_graph = create_child_graph("Child");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Should check for signals (cancel/pause) after child completes
@@ -792,29 +639,11 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Step ID should be sanitized in variable names
         assert!(code.contains("step_with_special_chars"));
-    }
-
-    #[test]
-    fn test_emit_placeholder_with_special_characters() {
-        let mut ctx = EmitContext::new(false);
-        let tokens = emit_placeholder(
-            "step.with-special",
-            None,
-            "Unnamed",
-            "child/scenario",
-            &mut ctx,
-        );
-
-        let code = tokens.to_string();
-
-        // Should still work with special characters
-        assert!(code.contains("steps_context"));
-        assert!(code.contains("child/scenario"));
     }
 
     // =============================================================================
@@ -830,7 +659,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(true, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Debug events depend on emit_step_debug_start/end
@@ -854,8 +683,8 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens1 = emit(&step1, &mut ctx);
-        let tokens2 = emit(&step2, &mut ctx);
+        let tokens1 = emit(&step1, &mut ctx).unwrap();
+        let tokens2 = emit(&step2, &mut ctx).unwrap();
 
         let code1 = tokens1.to_string();
         let code2 = tokens2.to_string();
@@ -878,7 +707,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Cache key should include the step ID (as a string literal in the code)
@@ -896,7 +725,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should handle loop indices in cache key
@@ -916,7 +745,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Should emit structured error for child scenario failures
@@ -942,7 +771,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Should emit structured error for interruption (cancel or pause)
@@ -965,30 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_placeholder_structured_cancellation() {
-        let mut ctx = EmitContext::new(false);
-        let tokens = emit_placeholder(
-            "step-1",
-            Some("Test Step"),
-            "Test Step",
-            "child-scenario",
-            &mut ctx,
-        );
-
-        let code = tokens.to_string();
-
-        // Placeholder should also emit structured error for interruption (cancel or pause)
-        assert!(
-            code.contains("STEP_INTERRUPTED"),
-            "Should include STEP_INTERRUPTED error code"
-        );
-        assert!(
-            code.contains("serde_json :: to_string"),
-            "Should serialize structured error to JSON"
-        );
-    }
-
-    #[test]
     fn test_emit_child_error_propagation() {
         let step = create_basic_step("start-child", "child-scenario-id");
 
@@ -997,7 +802,7 @@ mod tests {
 
         let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should parse child error as structured JSON
@@ -1025,7 +830,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Should check for stepType: "Error" to identify Error step errors
@@ -1053,7 +858,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Ensure no turbofish null syntax appears in generated code
@@ -1073,7 +878,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Verify _cache_key_prefix is set in child vars
@@ -1095,7 +900,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Verify parent prefix is read from variables
@@ -1111,7 +916,7 @@ mod tests {
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = EmitContext::new(false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
         let code = tokens.to_string();
 
         // Verify StartScenario's own cache key reads _cache_key_prefix

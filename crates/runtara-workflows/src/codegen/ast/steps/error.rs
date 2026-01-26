@@ -9,12 +9,13 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use runtara_dsl::{ErrorCategory, ErrorSeverity, ErrorStep};
 
 /// Emit code for an Error step.
-pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -58,7 +59,7 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> TokenStream {
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
 
@@ -113,7 +114,7 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> TokenStream {
         return Err(serde_json::to_string(&__error_context).unwrap_or_else(|_| {
             format!("[{}] {}", #error_code, #error_message)
         }));
-    }
+    })
 }
 
 #[cfg(test)]
@@ -151,7 +152,7 @@ mod tests {
             "Order is invalid",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -183,7 +184,7 @@ mod tests {
             "Request timed out",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -202,7 +203,7 @@ mod tests {
             "Resource not found",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -225,7 +226,7 @@ mod tests {
             context: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -251,7 +252,7 @@ mod tests {
             context: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(code.contains("\"info\""), "Should have severity = info");
@@ -270,7 +271,7 @@ mod tests {
             context: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -292,7 +293,7 @@ mod tests {
             context: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -311,7 +312,7 @@ mod tests {
             "Default severity",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Default severity is "error"
@@ -331,7 +332,7 @@ mod tests {
             "This is my error message",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(code.contains("MY_ERROR_CODE"), "Should include error code");
@@ -362,7 +363,7 @@ mod tests {
             context: Some(context),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should have context mapping code
@@ -385,7 +386,7 @@ mod tests {
             context: Some(HashMap::new()),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use empty object for empty context
@@ -405,7 +406,7 @@ mod tests {
             "Return test",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -428,7 +429,7 @@ mod tests {
             "Store test",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context before failing
@@ -451,7 +452,7 @@ mod tests {
             context: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Unnamed" as display name
@@ -471,7 +472,7 @@ mod tests {
             "SDK test",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify SDK custom_event call
@@ -496,7 +497,7 @@ mod tests {
             "Timestamp test",
         );
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(

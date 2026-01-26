@@ -9,6 +9,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::{emit_step_debug_end, emit_step_debug_start};
@@ -32,7 +33,7 @@ fn needs_rate_limiting(agent_id: &str, capability_id: &str) -> bool {
 }
 
 /// Emit code for an Agent step.
-pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -135,7 +136,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
         None,
     );
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #step_inputs_var = #base_inputs_code;
 
@@ -160,7 +161,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> TokenStream {
                 return Err(format!("Step {}: {}", #step_id, e));
             }
         }
-    }
+    })
 }
 
 /// Emit a durable capability call using #[durable] macro.
@@ -468,7 +469,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-basic", "utils", "random-double");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -491,7 +492,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("my-agent-step", "http", "http-request");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Cache key is a string literal - TokenStream should preserve it
@@ -507,7 +508,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-retry", "utils", "concat");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Default values: max_retries = 3, retry_delay = 1000
@@ -537,7 +538,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Custom values
@@ -575,7 +576,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should not use empty object
@@ -602,7 +603,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use empty object for empty input mapping
@@ -628,7 +629,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should include connection fetching code
@@ -655,7 +656,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-loop", "utils", "random-double");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify loop indices handling for cache key uniqueness
@@ -674,7 +675,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-output", "transform", "flatten");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output JSON structure
@@ -690,7 +691,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-store", "utils", "concat");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context
@@ -705,7 +706,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-cancel", "utils", "noop");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify signal check (cancel/pause) after execution
@@ -724,7 +725,7 @@ mod tests {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let step = create_agent_step("agent-debug", "utils", "noop");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events are emitted
@@ -743,7 +744,7 @@ mod tests {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let step = create_agent_step("agent-no-debug", "utils", "noop");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Core agent logic should still be present
@@ -773,7 +774,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Unnamed" as display name
@@ -788,7 +789,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-durable", "utils", "concat");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify durable function signature
@@ -811,7 +812,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("agent-error", "http", "http-request");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify error message includes context
@@ -847,7 +848,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use mapping code (resolve_path is called during mapping)
@@ -877,7 +878,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("step-1", "http", "request");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify prefix is read from variables
@@ -892,7 +893,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("step-1", "http", "request");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify the conditional prefix format is used

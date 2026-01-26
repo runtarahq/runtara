@@ -7,6 +7,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::{emit_step_debug_end, emit_step_debug_start};
@@ -17,7 +18,7 @@ use runtara_dsl::FinishStep;
 /// The Finish step computes its outputs and immediately returns from the
 /// workflow function. This is necessary to support multiple Finish steps
 /// in different branches (e.g., after a Conditional step).
-pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Finish");
@@ -81,7 +82,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
 
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #finish_inputs_var = serde_json::json!({"finishing": true});
 
@@ -105,7 +106,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> TokenStream {
 
         // Return immediately with the outputs
         return Ok(#outputs_var);
-    }
+    })
 }
 
 #[cfg(test)]
@@ -129,7 +130,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_finish_step("finish-basic");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -148,7 +149,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_finish_step("finish-return");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Finish step should return outputs
@@ -160,7 +161,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_finish_step("finish-extract");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should extract outputs field if present
@@ -193,7 +194,7 @@ mod tests {
             input_mapping: Some(mapping),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should not use empty object
@@ -213,7 +214,7 @@ mod tests {
             input_mapping: Some(HashMap::new()),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use empty object for empty mapping
@@ -228,7 +229,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_finish_step("finish-output");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output JSON structure
@@ -244,7 +245,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_finish_step("finish-store");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored before returning
@@ -259,7 +260,7 @@ mod tests {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let step = create_finish_step("finish-debug");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events are emitted
@@ -278,7 +279,7 @@ mod tests {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let step = create_finish_step("finish-no-debug");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Core finish logic should still be present
@@ -294,7 +295,7 @@ mod tests {
             input_mapping: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Finish" as default display name
@@ -321,7 +322,7 @@ mod tests {
             input_mapping: Some(mapping),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should include immediate value in mapping

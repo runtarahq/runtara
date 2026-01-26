@@ -17,10 +17,50 @@ use std::collections::HashMap;
 use context::EmitContext;
 use runtara_dsl::ExecutionGraph;
 
+// ============================================================================
+// Codegen Error Types
+// ============================================================================
+
+/// Errors that can occur during code generation.
+#[derive(Debug, Clone)]
+pub enum CodegenError {
+    /// A StartScenario step references a child scenario that was not provided.
+    MissingChildScenario {
+        /// The step ID of the StartScenario step.
+        step_id: String,
+        /// The child scenario ID that was not found.
+        child_scenario_id: String,
+    },
+}
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CodegenError::MissingChildScenario {
+                step_id,
+                child_scenario_id,
+            } => {
+                write!(
+                    f,
+                    "Missing child scenario '{}' for step '{}'. \
+                    Ensure the child scenario exists and is passed to compilation.",
+                    child_scenario_id, step_id
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {}
+
 /// Compile an execution graph to Rust source code.
 ///
 /// This is the main entry point for AST-based code generation.
-pub fn compile(graph: &ExecutionGraph, debug_mode: bool) -> String {
+///
+/// # Errors
+///
+/// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+pub fn compile(graph: &ExecutionGraph, debug_mode: bool) -> Result<String, CodegenError> {
     compile_with_children(graph, debug_mode, HashMap::new(), None, None)
 }
 
@@ -34,22 +74,26 @@ pub fn compile(graph: &ExecutionGraph, debug_mode: bool) -> String {
 /// * `tenant_id` - Optional tenant ID for connection service requests
 ///
 /// # Returns
-/// Generated Rust source code as a string
+/// Generated Rust source code as a string, or an error if code generation fails.
+///
+/// # Errors
+///
+/// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
 pub fn compile_with_children(
     graph: &ExecutionGraph,
     debug_mode: bool,
     child_scenarios: HashMap<String, ExecutionGraph>,
     connection_service_url: Option<String>,
     tenant_id: Option<String>,
-) -> String {
+) -> Result<String, CodegenError> {
     let ctx = EmitContext::with_child_scenarios(
         debug_mode,
         child_scenarios,
         connection_service_url,
         tenant_id,
     );
-    let tokens = program::emit_program(graph, &mut { ctx });
-    tokens.to_string()
+    let tokens = program::emit_program(graph, &mut { ctx })?;
+    Ok(tokens.to_string())
 }
 
 /// Convert a serde_json::Value to a TokenStream that constructs it.

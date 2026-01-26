@@ -8,12 +8,13 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use runtara_dsl::{LogLevel, LogStep};
 
 /// Emit code for a Log step.
-pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -50,7 +51,7 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> TokenStream {
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
 
@@ -84,7 +85,7 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> TokenStream {
         });
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
-    }
+    })
 }
 
 #[cfg(test)]
@@ -110,7 +111,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-basic", LogLevel::Info, "Hello world");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -129,7 +130,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-debug", LogLevel::Debug, "Debug message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(code.contains("\"debug\""), "Should have level = debug");
@@ -140,7 +141,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-info", LogLevel::Info, "Info message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(code.contains("\"info\""), "Should have level = info");
@@ -151,7 +152,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-warn", LogLevel::Warn, "Warning message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(code.contains("\"warn\""), "Should have level = warn");
@@ -162,7 +163,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-error", LogLevel::Error, "Error message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(code.contains("\"error\""), "Should have level = error");
@@ -173,7 +174,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-msg", LogLevel::Info, "Test message content");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -187,7 +188,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-ts", LogLevel::Info, "message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -219,7 +220,7 @@ mod tests {
             context: Some(context),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should have context mapping code
@@ -240,7 +241,7 @@ mod tests {
             context: Some(HashMap::new()),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use empty object for empty context
@@ -255,7 +256,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-output", LogLevel::Info, "message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output JSON structure
@@ -271,7 +272,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-store", LogLevel::Info, "message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context
@@ -292,7 +293,7 @@ mod tests {
             context: None,
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Unnamed" as display name
@@ -307,7 +308,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_log_step("log-sdk", LogLevel::Info, "message");
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify SDK custom_event call

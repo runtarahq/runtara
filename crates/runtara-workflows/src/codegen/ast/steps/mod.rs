@@ -19,17 +19,30 @@ pub mod while_loop;
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use crate::codegen::ast::CodegenError;
 use crate::codegen::ast::context::EmitContext;
 use runtara_dsl::{ExecutionGraph, ExecutionPlanEdge, Step};
 
 /// Trait for emitting step execution code.
 pub trait StepEmitter {
     /// Emit the TokenStream for this step's execution.
-    fn emit(&self, ctx: &mut EmitContext, graph: &ExecutionGraph) -> TokenStream;
+    ///
+    /// # Errors
+    ///
+    /// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+    fn emit(
+        &self,
+        ctx: &mut EmitContext,
+        graph: &ExecutionGraph,
+    ) -> Result<TokenStream, CodegenError>;
 }
 
 impl StepEmitter for Step {
-    fn emit(&self, ctx: &mut EmitContext, graph: &ExecutionGraph) -> TokenStream {
+    fn emit(
+        &self,
+        ctx: &mut EmitContext,
+        graph: &ExecutionGraph,
+    ) -> Result<TokenStream, CodegenError> {
         match self {
             Step::Finish(s) => finish::emit(s, ctx),
             Step::Agent(s) => agent::emit(s, ctx),
@@ -991,7 +1004,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = split::emit(&split_step, &mut ctx);
+        let tokens = split::emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify that _loop_indices injection is present
@@ -1044,7 +1057,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
         };
 
-        let tokens = while_loop::emit(&while_step, &mut ctx);
+        let tokens = while_loop::emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify that _loop_indices injection is present
@@ -1081,7 +1094,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = agent::emit(&agent_step, &mut ctx);
+        let tokens = agent::emit(&agent_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify that dynamic cache key generation is present
@@ -1130,7 +1143,7 @@ mod tests {
             timeout: None,
         };
 
-        let tokens = start_scenario::emit(&start_scenario_step, &mut ctx);
+        let tokens = start_scenario::emit(&start_scenario_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify that dynamic cache key generation is present
@@ -1300,7 +1313,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = split::emit(&split_step, &mut ctx);
+        let tokens = split::emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events are emitted with loop_indices
@@ -1338,7 +1351,7 @@ mod tests {
             compensation: None,
         };
 
-        let tokens = agent::emit(&agent_step, &mut ctx);
+        let tokens = agent::emit(&agent_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events include loop_indices
@@ -1387,7 +1400,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
         };
 
-        let tokens = while_loop::emit(&while_step, &mut ctx);
+        let tokens = while_loop::emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events include loop_indices
@@ -1430,7 +1443,7 @@ mod tests {
         };
 
         let graph = create_minimal_graph("finish");
-        let tokens = conditional::emit(&conditional_step, &mut ctx, &graph);
+        let tokens = conditional::emit(&conditional_step, &mut ctx, &graph).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events include loop_indices
@@ -1457,7 +1470,7 @@ mod tests {
             input_mapping: None,
         };
 
-        let tokens = finish::emit(&finish_step, &mut ctx);
+        let tokens = finish::emit(&finish_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events include loop_indices
@@ -1490,7 +1503,7 @@ mod tests {
             }),
         };
 
-        let tokens = switch::emit(&switch_step, &mut ctx);
+        let tokens = switch::emit(&switch_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events include loop_indices

@@ -10,6 +10,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
@@ -17,7 +18,7 @@ use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::{MappingValue, SplitStep};
 
 /// Emit code for a Split step.
-pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -96,7 +97,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     };
 
     // Generate the subgraph function using shared recursive emitter
-    let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx);
+    let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx)?;
 
     // Serialize config to JSON for debug events
     let config_json = step
@@ -138,7 +139,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
 
@@ -464,7 +465,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> TokenStream {
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
-    }
+    })
 }
 
 #[cfg(test)]
@@ -532,7 +533,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-1", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure
@@ -553,7 +554,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should have empty object as inputs when no config
@@ -588,7 +589,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify parallelism config is included
@@ -640,7 +641,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify variables mapping is included
@@ -675,7 +676,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify retry config in durable macro
@@ -694,7 +695,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-durable", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify durable function is generated
@@ -715,7 +716,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-indices", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify _loop_indices is tracked for nested loops
@@ -734,7 +735,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-subgraph", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify subgraph function is generated
@@ -773,7 +774,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify error handling structure
@@ -789,7 +790,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-output", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output structure
@@ -813,7 +814,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-cancel", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify signals (cancel/pause) are checked
@@ -828,7 +829,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("split-store", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context
@@ -843,7 +844,7 @@ mod tests {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let split_step = create_split_step("split-debug", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events are emitted
@@ -880,7 +881,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify immediate value is used
@@ -895,7 +896,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let split_step = create_split_step("my-split-step", "data.items");
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify cache key format
@@ -930,7 +931,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Unnamed" as display name
@@ -965,7 +966,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify parallel execution code is generated
@@ -1012,7 +1013,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify the code handles the sequential flag
@@ -1047,7 +1048,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify cancellation and error tokens are present
@@ -1090,7 +1091,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify results are sorted by index after collection
@@ -1125,7 +1126,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify parallelism and sequential are passed to durable function
@@ -1164,7 +1165,7 @@ mod tests {
             output_schema: HashMap::new(),
         };
 
-        let tokens = emit(&split_step, &mut ctx);
+        let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify the conditional check treats 0 and 1 as sequential

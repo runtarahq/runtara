@@ -7,6 +7,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::{emit_step_debug_end, emit_step_debug_start};
@@ -14,7 +15,7 @@ use runtara_dsl::{MappingValue, SwitchStep};
 
 /// Emit code for a Switch step.
 #[allow(clippy::too_many_lines)]
-pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
+pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
     let step_name_display = step_name.unwrap_or("Unnamed");
@@ -94,7 +95,7 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
         None,
     );
 
-    quote! {
+    Ok(quote! {
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
 
@@ -256,7 +257,7 @@ pub fn emit(step: &SwitchStep, ctx: &mut EmitContext) -> TokenStream {
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
-    }
+    })
 }
 
 #[cfg(test)]
@@ -305,7 +306,7 @@ mod tests {
         )];
         let step = create_switch_step("switch-basic", "steps.previous.output", cases);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify basic structure elements
@@ -326,7 +327,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-value", "inputs.status", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Debug: print actual code to see token format
@@ -361,7 +362,7 @@ mod tests {
         ];
         let step = create_switch_step("switch-cases", "data.status", cases);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify case iteration structure
@@ -386,7 +387,7 @@ mod tests {
         )];
         let step = create_switch_step("switch-match-type", "value", cases);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify match type is extracted (TokenStream adds spaces)
@@ -409,7 +410,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-compare", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify comparison operator handling (TokenStream adds spaces)
@@ -444,7 +445,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-string", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify string operator handling (TokenStream adds spaces)
@@ -468,7 +469,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-array", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify array operator handling (TokenStream adds spaces)
@@ -486,7 +487,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-utility", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify utility operator handling (TokenStream adds spaces)
@@ -511,7 +512,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-compound", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify compound operator handling (TokenStream adds spaces)
@@ -527,7 +528,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-default", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify default fallback logic
@@ -546,7 +547,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-output", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify output JSON structure
@@ -562,7 +563,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-store", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify result is stored in steps_context
@@ -581,7 +582,7 @@ mod tests {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let step = create_switch_step("switch-debug", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events are emitted
@@ -600,7 +601,7 @@ mod tests {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let step = create_switch_step("switch-no-debug", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Core switch logic should still be present
@@ -623,7 +624,7 @@ mod tests {
             }),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use "Unnamed" as display name
@@ -642,7 +643,7 @@ mod tests {
             config: None, // No config
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should create empty object for inputs
@@ -671,7 +672,7 @@ mod tests {
             }),
         };
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should handle immediate values
@@ -686,7 +687,7 @@ mod tests {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-helpers", "value", vec![]);
 
-        let tokens = emit(&step, &mut ctx);
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify helper function calls
