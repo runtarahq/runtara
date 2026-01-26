@@ -143,8 +143,15 @@ fn emit_with_embedded_child(
 
         #debug_start
 
-        // Build cache key dynamically, including loop indices if inside Split/While
+        // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
+            // Get prefix from parent context (set by parent StartScenario)
+            let prefix = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_cache_key_prefix"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
             let base = #cache_key_base;
             let indices_suffix = (*#scenario_inputs_var.variables)
                 .as_object()
@@ -158,7 +165,12 @@ fn emit_with_embedded_child(
                     format!("::[{}]", indices.join(","))
                 })
                 .unwrap_or_default();
-            format!("{}{}", base, indices_suffix)
+
+            if prefix.is_empty() {
+                format!("{}{}", base, indices_suffix)
+            } else {
+                format!("{}::{}{}", prefix, base, indices_suffix)
+            }
         };
 
         // Define the durable child scenario execution function
@@ -170,6 +182,8 @@ fn emit_with_embedded_child(
             step_id: &str,
             step_name: &str,
             parent_scope_id: Option<String>,
+            parent_cache_prefix: Option<String>,
+            loop_indices_suffix: String,
         ) -> std::result::Result<serde_json::Value, String> {
             // Generate scope ID for this child scenario execution
             let __child_scope_id = if let Some(ref parent) = parent_scope_id {
@@ -181,9 +195,20 @@ fn emit_with_embedded_child(
             // Prepare child scenario inputs
             // All mapped inputs become child's data (myParam1 -> data.myParam1)
             // Child variables are always isolated - never inherited from parent
-            // BUT we inject _scope_id so scope tracking works within child
+            // BUT we inject _scope_id and _cache_key_prefix so scope tracking and
+            // checkpoint cache keys work correctly within child
             let mut __child_vars = serde_json::Map::new();
             __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
+
+            // Build cache key prefix for child scenario
+            // Inherits parent's prefix (if any) and appends this step's identity + loop indices
+            let __child_cache_prefix = {
+                match &parent_cache_prefix {
+                    Some(p) if !p.is_empty() => format!("{}__{}{}",  p, step_id, loop_indices_suffix),
+                    _ => format!("{}{}", step_id, loop_indices_suffix),
+                }
+            };
+            __child_vars.insert("_cache_key_prefix".to_string(), serde_json::json!(__child_cache_prefix));
 
             // Inner steps use the child scenario scope as their parent.
             // This ensures `root_scopes_only` filter correctly excludes them
@@ -285,6 +310,25 @@ fn emit_with_embedded_child(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Get parent's cache key prefix from scenario variables
+        let __parent_cache_prefix = (*#scenario_inputs_var.variables)
+            .as_object()
+            .and_then(|vars| vars.get("_cache_key_prefix"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Get loop indices suffix for this StartScenario step
+        let __loop_indices_suffix = (*#scenario_inputs_var.variables)
+            .as_object()
+            .and_then(|vars| vars.get("_loop_indices"))
+            .and_then(|v| v.as_array())
+            .filter(|arr| !arr.is_empty())
+            .map(|arr| {
+                let indices: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                format!("[{}]", indices.join(","))
+            })
+            .unwrap_or_default();
+
         // Execute the durable child scenario function
         let #step_var = #durable_fn_name(
             &__durable_cache_key,
@@ -293,6 +337,8 @@ fn emit_with_embedded_child(
             #step_id,
             #step_name_display,
             __parent_scope_id,
+            __parent_cache_prefix,
+            __loop_indices_suffix,
         ).await?;
 
         #debug_end
@@ -1014,6 +1060,65 @@ mod tests {
         assert!(
             !code.contains("null::<") && !code.contains("null :: <"),
             "Generated code must not contain null::<Type> - json! macro doesn't support turbofish"
+        );
+    }
+
+    // =============================================================================
+    // Cache key prefix tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_with_embedded_child_sets_cache_key_prefix() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Verify _cache_key_prefix is set in child vars
+        assert!(
+            code.contains("_cache_key_prefix"),
+            "Generated code must set _cache_key_prefix in child variables"
+        );
+
+        // Verify prefix is built from step_id
+        assert!(
+            code.contains("__child_cache_prefix"),
+            "Generated code must build __child_cache_prefix"
+        );
+    }
+
+    #[test]
+    fn test_emit_with_embedded_child_reads_parent_prefix() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Verify parent prefix is read from variables
+        assert!(
+            code.contains("__parent_cache_prefix"),
+            "Generated code must extract __parent_cache_prefix from parent variables"
+        );
+    }
+
+    #[test]
+    fn test_emit_own_cache_key_includes_prefix() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
+        let code = tokens.to_string();
+
+        // Verify StartScenario's own cache key reads _cache_key_prefix
+        // The code should contain the prefix reading logic for the durable cache key
+        assert!(
+            code.contains("_cache_key_prefix") && code.contains("__durable_cache_key"),
+            "StartScenario's own cache key must include parent prefix"
         );
     }
 }

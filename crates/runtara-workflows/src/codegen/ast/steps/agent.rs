@@ -196,8 +196,15 @@ fn emit_durable_call(
     let retry_delay_lit = retry_delay;
 
     quote! {
-        // Build cache key dynamically, including loop indices if inside Split/While
+        // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
+            // Get prefix from parent context (set by StartScenario)
+            let prefix = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_cache_key_prefix"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
             let base = #cache_key_base;
             let indices_suffix = (*#scenario_inputs_var.variables)
                 .as_object()
@@ -211,7 +218,12 @@ fn emit_durable_call(
                     format!("::[{}]", indices.join(","))
                 })
                 .unwrap_or_default();
-            format!("{}{}", base, indices_suffix)
+
+            if prefix.is_empty() {
+                format!("{}{}", base, indices_suffix)
+            } else {
+                format!("{}::{}{}", prefix, base, indices_suffix)
+            }
         };
 
         // Define the durable agent execution function with cancellation support
@@ -279,8 +291,15 @@ fn emit_durable_rate_limited_call(
     let retry_delay_lit = retry_delay;
 
     quote! {
-        // Build cache key dynamically, including loop indices if inside Split/While
+        // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
+            // Get prefix from parent context (set by StartScenario)
+            let prefix = (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_cache_key_prefix"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
             let base = #cache_key_base;
             let indices_suffix = (*#scenario_inputs_var.variables)
                 .as_object()
@@ -294,7 +313,12 @@ fn emit_durable_rate_limited_call(
                     format!("::[{}]", indices.join(","))
                 })
                 .unwrap_or_default();
-            format!("{}{}", base, indices_suffix)
+
+            if prefix.is_empty() {
+                format!("{}{}", base, indices_suffix)
+            } else {
+                format!("{}::{}{}", prefix, base, indices_suffix)
+            }
         };
 
         // Define the durable agent execution function (rate-limited) with cancellation support
@@ -841,6 +865,46 @@ mod tests {
         assert!(
             !result,
             "Unknown capabilities should default to no rate limiting"
+        );
+    }
+
+    // =============================================================================
+    // Cache key prefix tests
+    // =============================================================================
+
+    #[test]
+    fn test_emit_agent_includes_cache_key_prefix() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("step-1", "http", "request");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify prefix is read from variables
+        assert!(
+            code.contains("_cache_key_prefix"),
+            "Agent cache key must check for _cache_key_prefix"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_cache_key_uses_prefix_format() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("step-1", "http", "request");
+
+        let tokens = emit(&step, &mut ctx);
+        let code = tokens.to_string();
+
+        // Verify the conditional prefix format is used
+        // When prefix is empty: format!("{}{}", base, indices_suffix)
+        // When prefix is present: format!("{}::{}{}", prefix, base, indices_suffix)
+        assert!(
+            code.contains("prefix . is_empty ()"),
+            "Should check if prefix is empty"
+        );
+        assert!(
+            code.contains("\"{}::{}{}\""),
+            "Should format with prefix when present"
         );
     }
 }
