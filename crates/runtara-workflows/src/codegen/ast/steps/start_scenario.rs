@@ -194,20 +194,20 @@ fn emit_with_embedded_child(
                 parent_scope_id: Some(__child_scope_id.clone()),
             };
 
-            // Check for cancellation before executing child scenario
+            // Check for interruption (cancel/pause) before executing child scenario
             if runtara_sdk::is_cancelled() {
                 let structured_error = serde_json::json!({
                     "stepId": step_id,
                     "stepName": step_name,
                     "stepType": "StartScenario",
-                    "code": "STEP_CANCELLED",
-                    "message": format!("StartScenario step {} cancelled before execution", step_id),
+                    "code": "STEP_INTERRUPTED",
+                    "message": format!("StartScenario step {} interrupted before execution", step_id),
                     "category": "transient",
                     "severity": "info",
                     "childScenarioId": child_scenario_id
                 });
                 return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("StartScenario step {} cancelled", step_id)
+                    format!("StartScenario step {} interrupted", step_id)
                 }));
             }
 
@@ -216,20 +216,20 @@ fn emit_with_embedded_child(
                 #child_fn_name(Arc::new(child_scenario_inputs))
             ).await {
                 Ok(result) => result,
-                Err(cancel_err) => {
+                Err(interrupt_err) => {
                     let structured_error = serde_json::json!({
                         "stepId": step_id,
                         "stepName": step_name,
                         "stepType": "StartScenario",
-                        "code": "STEP_CANCELLED",
-                        "message": format!("StartScenario step {} cancelled during execution", step_id),
+                        "code": "STEP_INTERRUPTED",
+                        "message": format!("StartScenario step {} interrupted during execution", step_id),
                         "category": "transient",
                         "severity": "info",
                         "childScenarioId": child_scenario_id,
-                        "cancellationReason": cancel_err
+                        "interruptionReason": interrupt_err
                     });
                     return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                        format!("StartScenario step {} cancelled", step_id)
+                        format!("StartScenario step {} interrupted", step_id)
                     }));
                 }
             }.map_err(|e| {
@@ -899,22 +899,22 @@ mod tests {
         let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000);
         let code = tokens.to_string();
 
-        // Should emit structured error for cancellation
+        // Should emit structured error for interruption (cancel or pause)
         assert!(
-            code.contains("STEP_CANCELLED"),
-            "Should include STEP_CANCELLED error code"
+            code.contains("STEP_INTERRUPTED"),
+            "Should include STEP_INTERRUPTED error code"
         );
         assert!(
-            code.contains("cancellationReason"),
-            "Should include cancellation reason"
+            code.contains("interruptionReason"),
+            "Should include interruption reason"
         );
         assert!(
             code.contains("\"transient\""),
-            "Cancellation should be transient category"
+            "Interruption should be transient category"
         );
         assert!(
             code.contains("\"info\""),
-            "Cancellation should be info severity"
+            "Interruption should be info severity"
         );
     }
 
@@ -931,10 +931,10 @@ mod tests {
 
         let code = tokens.to_string();
 
-        // Placeholder should also emit structured error for cancellation
+        // Placeholder should also emit structured error for interruption (cancel or pause)
         assert!(
-            code.contains("STEP_CANCELLED"),
-            "Should include STEP_CANCELLED error code"
+            code.contains("STEP_INTERRUPTED"),
+            "Should include STEP_INTERRUPTED error code"
         );
         assert!(
             code.contains("serde_json :: to_string"),

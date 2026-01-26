@@ -18,7 +18,6 @@ use runtara_agent_macro::{CapabilityInput, capability};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::thread;
 use std::time::Duration;
 
 // ============================================================================
@@ -281,8 +280,8 @@ pub fn do_nothing(_input: DoNothingInput) -> Result<Value, String> {
     display_name = "Delay",
     description = "Pause execution for specified milliseconds"
 )]
-pub fn delay_in_ms(input: DelayInMsInput) -> Result<u64, String> {
-    thread::sleep(Duration::from_millis(input.delay_value));
+pub async fn delay_in_ms(input: DelayInMsInput) -> Result<u64, String> {
+    tokio::time::sleep(Duration::from_millis(input.delay_value)).await;
     Ok(input.delay_value)
 }
 
@@ -1170,11 +1169,11 @@ mod tests {
         assert_eq!(result, Value::Null);
     }
 
-    #[test]
-    fn test_delay_in_ms() {
+    #[tokio::test]
+    async fn test_delay_in_ms() {
         let input = DelayInMsInput { delay_value: 10 };
         let start = std::time::Instant::now();
-        let result = delay_in_ms(input).unwrap();
+        let result = delay_in_ms(input).await.unwrap();
         let elapsed = start.elapsed().as_millis();
 
         assert_eq!(result, 10);
