@@ -438,6 +438,49 @@ pub async fn acknowledge_cancellation() {
     debug!("Cancellation acknowledged (QUIC disabled, no ack sent)");
 }
 
+/// Acknowledge a pause signal to runtara-core.
+///
+/// This must be called when the workflow suspends due to a pause signal.
+/// Without acknowledgment, the pause signal remains pending and will be
+/// detected again on resume, causing the workflow to suspend immediately
+/// in an infinite loop.
+///
+/// # Example
+///
+/// ```ignore
+/// // Detected pause signal in checkpoint response
+/// if checkpoint_result.should_pause() {
+///     acknowledge_pause().await;
+///     sdk.suspended().await?;
+///     return Ok(());
+/// }
+/// ```
+#[cfg(feature = "quic")]
+pub async fn acknowledge_pause() {
+    use crate::types::SignalType;
+
+    // Send acknowledgment to core with timeout to prevent indefinite hang.
+    if let Some(sdk_arc) = SDK_INSTANCE.get() {
+        let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
+            let sdk_guard = sdk_arc.lock().await;
+            sdk_guard.acknowledge_signal(SignalType::Pause, true).await
+        })
+        .await;
+
+        match ack_result {
+            Ok(Ok(())) => info!("Pause acknowledged to core"),
+            Ok(Err(e)) => warn!(error = %e, "Failed to acknowledge pause signal"),
+            Err(_) => warn!("Timeout acknowledging pause signal - continuing with suspend"),
+        }
+    }
+}
+
+/// Acknowledge pause (no-op without QUIC feature).
+#[cfg(not(feature = "quic"))]
+pub async fn acknowledge_pause() {
+    debug!("Pause acknowledged (QUIC disabled, no ack sent)");
+}
+
 #[cfg(test)]
 mod tests {
     // Note: These tests can't run in parallel due to global state.

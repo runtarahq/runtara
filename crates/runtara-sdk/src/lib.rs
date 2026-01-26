@@ -186,10 +186,10 @@ pub use config::SdkConfig;
 // Global SDK registry for #[durable] macro
 pub use registry::{register_sdk, sdk, stop_heartbeat, try_sdk};
 
-// Cancellation support - allows long-running operations to be interrupted
+// Cancellation/pause support - allows long-running operations to be interrupted
 pub use registry::{
-    acknowledge_cancellation, cancellation_token, is_cancelled, trigger_cancellation,
-    with_cancellation, with_cancellation_err,
+    acknowledge_cancellation, acknowledge_pause, cancellation_token, is_cancelled,
+    trigger_cancellation, with_cancellation, with_cancellation_err,
 };
 
 // Re-export the #[durable] macro

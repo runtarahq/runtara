@@ -1419,3 +1419,126 @@ async fn test_pause_signal_via_poll_signals() {
 
     ctx.cleanup_instance(&instance_id).await;
 }
+
+/// Test that pause signal is cleared after acknowledgment (prevents infinite loop on resume).
+///
+/// This test verifies the fix for the bug where:
+/// 1. Workflow pauses but doesn't acknowledge the signal
+/// 2. On resume, check_signals() finds the same pause signal
+/// 3. Workflow immediately pauses again → infinite loop
+///
+/// After the fix, acknowledge_pause() clears the signal so resume works correctly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_pause_signal_cleared_after_acknowledgment() {
+    skip_if_no_db!();
+
+    let Ok(ctx) = TestContext::new().await else {
+        eprintln!("Skipping test: failed to create test context");
+        return;
+    };
+
+    let instance_id = Uuid::new_v4();
+    ctx.create_running_instance(&instance_id, "test-tenant")
+        .await;
+    ctx.instance_client
+        .connect()
+        .await
+        .expect("Failed to connect instance client");
+
+    // Step 1: Send pause signal
+    ctx.send_signal(&instance_id, "pause", b"test pause")
+        .await
+        .expect("Send pause should succeed");
+
+    // Step 2: Checkpoint sees the pause signal
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "before-pause".to_string(),
+        state: b"state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(
+                r.pending_signal.is_some(),
+                "Should see pause signal before ack"
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Step 3: Acknowledge the pause signal (this is what acknowledge_pause() does)
+    let ack = instance_proto::SignalAck {
+        instance_id: instance_id.to_string(),
+        signal_type: instance_proto::SignalType::SignalPause as i32,
+        acknowledged: true,
+    };
+    ctx.instance_client
+        .request::<_, instance_proto::RpcResponse>(&wrap_signal_ack(ack))
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify signal is acknowledged in database
+    assert!(
+        ctx.is_signal_acknowledged(&instance_id).await,
+        "Signal should be acknowledged (acknowledged_at IS NOT NULL)"
+    );
+
+    // Step 4: Simulate resume - update status back to running
+    sqlx::query("UPDATE instances SET status = 'running' WHERE instance_id = $1")
+        .bind(instance_id.to_string())
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+
+    // Step 5: KEY TEST - Checkpoint should NOT see the old pause signal anymore
+    // This is what was broken before - unacknowledged signals kept appearing
+    let cp_req = instance_proto::CheckpointRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: "after-resume".to_string(),
+        state: b"resumed state".to_vec(),
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_checkpoint(cp_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::Checkpoint(r)) => {
+            assert!(
+                r.pending_signal.is_none(),
+                "After acknowledgment, checkpoint should NOT see old pause signal. \
+                 This would cause infinite pause loop on resume!"
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    // Step 6: Also verify PollSignals doesn't see the old pause signal
+    let poll_req = instance_proto::PollSignalsRequest {
+        instance_id: instance_id.to_string(),
+        checkpoint_id: None,
+    };
+    let resp: instance_proto::RpcResponse = ctx
+        .instance_client
+        .request(&wrap_poll_signals(poll_req))
+        .await
+        .unwrap();
+    match resp.response {
+        Some(instance_proto::rpc_response::Response::PollSignals(r)) => {
+            assert!(
+                r.signal.is_none(),
+                "After acknowledgment, PollSignals should NOT return old pause signal. \
+                 This would cause infinite pause loop on resume!"
+            );
+        }
+        _ => panic!("Unexpected response"),
+    }
+
+    ctx.cleanup_instance(&instance_id).await;
+}

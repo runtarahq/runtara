@@ -390,6 +390,9 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 
                     // Check if this is a pause (suspended)
                     if e.contains("paused") || e.contains("Paused") {
+                        // Acknowledge pause to runtara-core (sends SignalAck)
+                        // This clears the pending signal so it won't be detected on resume
+                        runtara_sdk::acknowledge_pause().await;
                         let sdk_guard = sdk().lock().await;
                         let _ = sdk_guard.suspended().await;
                         // Write suspended output for Environment
