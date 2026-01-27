@@ -1128,9 +1128,22 @@ mod tests {
         let child_graph = create_minimal_graph("child-finish");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("start-scenario-test".to_string(), child_graph);
+        // Key by scenario_id::version_resolved
+        child_scenarios.insert("child-scenario::1".to_string(), child_graph);
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-scenario-test".to_string(),
+            ("child-scenario".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let start_scenario_step = StartScenarioStep {
             id: "start-scenario-test".to_string(),

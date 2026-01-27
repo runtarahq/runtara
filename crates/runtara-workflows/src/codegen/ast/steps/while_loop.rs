@@ -48,9 +48,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     let build_source = mapping::emit_build_source(ctx);
 
     // Generate the subgraph function using shared recursive emitter
-    // While subgraphs inherit the parent's scope path (pass None to inherit)
-    let subgraph_code =
-        program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx, None)?;
+    let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx)?;
 
     // Generate condition evaluation code
     let condition_eval = emit_condition_expression(&step.condition, ctx, &source_var);

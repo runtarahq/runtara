@@ -61,7 +61,14 @@ impl std::error::Error for CodegenError {}
 ///
 /// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
 pub fn compile(graph: &ExecutionGraph, debug_mode: bool) -> Result<String, CodegenError> {
-    compile_with_children(graph, debug_mode, HashMap::new(), None, None)
+    compile_with_children(
+        graph,
+        debug_mode,
+        HashMap::new(),
+        HashMap::new(),
+        None,
+        None,
+    )
 }
 
 /// Compile an execution graph with child scenarios.
@@ -69,7 +76,9 @@ pub fn compile(graph: &ExecutionGraph, debug_mode: bool) -> Result<String, Codeg
 /// # Arguments
 /// * `graph` - The main execution graph
 /// * `debug_mode` - Whether to include debug instrumentation
-/// * `child_scenarios` - Map of step_id -> child ExecutionGraph for StartScenario steps
+/// * `child_scenarios` - Map of scenario reference key -> child ExecutionGraph
+///   (key format: "{scenario_id}::{version_resolved}")
+/// * `step_to_child_ref` - Map of step_id -> (scenario_id, version_resolved)
 /// * `connection_service_url` - Optional URL for fetching connections at runtime
 /// * `tenant_id` - Optional tenant ID for connection service requests
 ///
@@ -83,12 +92,14 @@ pub fn compile_with_children(
     graph: &ExecutionGraph,
     debug_mode: bool,
     child_scenarios: HashMap<String, ExecutionGraph>,
+    step_to_child_ref: HashMap<String, (String, i32)>,
     connection_service_url: Option<String>,
     tenant_id: Option<String>,
 ) -> Result<String, CodegenError> {
     let ctx = EmitContext::with_child_scenarios(
         debug_mode,
         child_scenarios,
+        step_to_child_ref,
         connection_service_url,
         tenant_id,
     );

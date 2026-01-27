@@ -26,26 +26,22 @@ pub struct EmitContext {
     /// Inputs variable name
     pub inputs_var: Ident,
 
-    /// Child scenarios mapped by qualified_path -> ExecutionGraph
-    /// These are scenarios that StartScenario steps reference.
+    /// Child scenarios mapped by scenario reference -> ExecutionGraph.
+    /// Key format: "{scenario_id}::{version_resolved}" (e.g., "child-scenario::3").
     ///
-    /// The qualified path prevents collisions when different parent scenarios
-    /// have child StartScenario steps with the same step_id. For example:
-    /// - `"run-inventory"` for a root-level child
-    /// - `"run-inventory::process-files"` for a grandchild
+    /// This mapping is used by StartScenario steps to look up their child's
+    /// ExecutionGraph for inline embedding during code generation.
     pub(crate) child_scenarios: HashMap<String, ExecutionGraph>,
+
+    /// Maps StartScenario step_id -> (scenario_id, version_resolved).
+    /// Used by StartScenario emitter to find the child scenario's resolved version.
+    pub(crate) step_to_child_ref: HashMap<String, (String, i32)>,
 
     /// URL for fetching connections at runtime (None = no connection support)
     pub connection_service_url: Option<String>,
 
     /// Tenant ID for connection service requests
     pub tenant_id: Option<String>,
-
-    /// Current scope path for qualified child scenario lookups.
-    ///
-    /// This tracks the path of ancestor StartScenario step IDs, used to build
-    /// qualified keys when looking up child scenarios. Empty string for root scope.
-    pub(crate) scope_path: String,
 }
 
 impl EmitContext {
@@ -58,16 +54,24 @@ impl EmitContext {
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios: HashMap::new(),
+            step_to_child_ref: HashMap::new(),
             connection_service_url: None,
             tenant_id: None,
-            scope_path: String::new(),
         }
     }
 
     /// Create a new emission context with child scenarios and connection configuration.
+    ///
+    /// # Arguments
+    /// * `debug_mode` - Enable debug logging in generated code
+    /// * `child_scenarios` - Map of scenario reference key -> ExecutionGraph
+    /// * `step_to_child_ref` - Map of step_id -> (scenario_id, version_resolved)
+    /// * `connection_service_url` - Optional URL for fetching connections at runtime
+    /// * `tenant_id` - Optional tenant ID for connection service requests
     pub fn with_child_scenarios(
         debug_mode: bool,
         child_scenarios: HashMap<String, ExecutionGraph>,
+        step_to_child_ref: HashMap<String, (String, i32)>,
         connection_service_url: Option<String>,
         tenant_id: Option<String>,
     ) -> Self {
@@ -78,48 +82,28 @@ impl EmitContext {
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios,
+            step_to_child_ref,
             connection_service_url,
             tenant_id,
-            scope_path: String::new(),
         }
     }
 
-    /// Get the current scope path.
-    pub fn scope_path(&self) -> &str {
-        &self.scope_path
+    /// Get a child scenario by scenario ID and resolved version.
+    ///
+    /// The key is formatted as "{scenario_id}::{version}" to uniquely identify
+    /// each child scenario version.
+    pub fn get_child_scenario(&self, scenario_id: &str, version: i32) -> Option<&ExecutionGraph> {
+        let key = format!("{}::{}", scenario_id, version);
+        self.child_scenarios.get(&key)
     }
 
-    /// Build the qualified key for a child scenario lookup.
+    /// Get a child scenario by the StartScenario step ID.
     ///
-    /// Combines the current scope path with the step ID to create a unique key
-    /// that distinguishes between child scenarios with the same step_id but
-    /// different parent contexts.
-    pub fn qualified_child_key(&self, step_id: &str) -> String {
-        if self.scope_path.is_empty() {
-            step_id.to_string()
-        } else {
-            format!("{}::{}", self.scope_path, step_id)
-        }
-    }
-
-    /// Build an extended scope path by appending a step ID to the current path.
-    ///
-    /// Used when entering a child scenario to track the hierarchy.
-    pub fn extended_scope_path(&self, step_id: &str) -> String {
-        if self.scope_path.is_empty() {
-            step_id.to_string()
-        } else {
-            format!("{}::{}", self.scope_path, step_id)
-        }
-    }
-
-    /// Get a child scenario by step ID, using qualified path lookup.
-    ///
-    /// This method builds the qualified key from the current scope path and
-    /// the provided step_id, then looks up the child scenario.
-    pub fn get_child_scenario(&self, step_id: &str) -> Option<&ExecutionGraph> {
-        let qualified_key = self.qualified_child_key(step_id);
-        self.child_scenarios.get(&qualified_key)
+    /// Uses the step_to_child_ref mapping to find the scenario reference,
+    /// then looks up the ExecutionGraph.
+    pub fn get_child_scenario_by_step_id(&self, step_id: &str) -> Option<&ExecutionGraph> {
+        let (scenario_id, version) = self.step_to_child_ref.get(step_id)?;
+        self.get_child_scenario(scenario_id, *version)
     }
 
     /// Sanitize a string to be a valid Rust identifier.
@@ -194,7 +178,8 @@ mod tests {
 
     #[test]
     fn test_with_child_scenarios_empty() {
-        let ctx = EmitContext::with_child_scenarios(true, HashMap::new(), None, None);
+        let ctx =
+            EmitContext::with_child_scenarios(true, HashMap::new(), HashMap::new(), None, None);
         assert!(ctx.debug_mode);
         assert!(ctx.connection_service_url.is_none());
         assert!(ctx.tenant_id.is_none());
@@ -204,6 +189,7 @@ mod tests {
     fn test_with_child_scenarios_with_connection_config() {
         let ctx = EmitContext::with_child_scenarios(
             false,
+            HashMap::new(),
             HashMap::new(),
             Some("http://connection-service:8080".to_string()),
             Some("tenant-123".to_string()),
@@ -220,6 +206,7 @@ mod tests {
     fn test_with_child_scenarios_only_connection_url() {
         let ctx = EmitContext::with_child_scenarios(
             true,
+            HashMap::new(),
             HashMap::new(),
             Some("http://localhost:3000".to_string()),
             None,
@@ -428,44 +415,83 @@ mod tests {
     #[test]
     fn test_get_child_scenario_not_found() {
         let ctx = EmitContext::new(false);
-        assert!(ctx.get_child_scenario("nonexistent").is_none());
+        assert!(ctx.get_child_scenario("nonexistent", 1).is_none());
     }
 
     #[test]
     fn test_get_child_scenario_found() {
+        // Key format: "scenario_id::version"
         let mut child_scenarios = HashMap::new();
         let graph = create_simple_graph("child-1");
-        child_scenarios.insert("start-child-step".to_string(), graph);
+        child_scenarios.insert("child-scenario::1".to_string(), graph);
 
-        let ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        // step_to_child_ref maps step_id -> (scenario_id, version)
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child-step".to_string(),
+            ("child-scenario".to_string(), 1),
+        );
 
-        let found = ctx.get_child_scenario("start-child-step");
+        let ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        // Test lookup by step_id
+        let found = ctx.get_child_scenario_by_step_id("start-child-step");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, Some("child-1".to_string()));
+
+        // Test direct lookup by scenario_id + version
+        let direct = ctx.get_child_scenario("child-scenario", 1);
+        assert!(direct.is_some());
+        assert_eq!(direct.unwrap().name, Some("child-1".to_string()));
     }
 
     #[test]
     fn test_get_child_scenario_multiple_children() {
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("step-a".to_string(), create_simple_graph("graph-a"));
-        child_scenarios.insert("step-b".to_string(), create_simple_graph("graph-b"));
-        child_scenarios.insert("step-c".to_string(), create_simple_graph("graph-c"));
+        child_scenarios.insert("scenario-a::1".to_string(), create_simple_graph("graph-a"));
+        child_scenarios.insert("scenario-b::2".to_string(), create_simple_graph("graph-b"));
+        child_scenarios.insert("scenario-c::1".to_string(), create_simple_graph("graph-c"));
 
-        let ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert("step-a".to_string(), ("scenario-a".to_string(), 1));
+        step_to_child_ref.insert("step-b".to_string(), ("scenario-b".to_string(), 2));
+        step_to_child_ref.insert("step-c".to_string(), ("scenario-c".to_string(), 1));
 
+        let ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        // Test lookup by step_id
         assert_eq!(
-            ctx.get_child_scenario("step-a").unwrap().name,
+            ctx.get_child_scenario_by_step_id("step-a").unwrap().name,
             Some("graph-a".to_string())
         );
         assert_eq!(
-            ctx.get_child_scenario("step-b").unwrap().name,
+            ctx.get_child_scenario_by_step_id("step-b").unwrap().name,
             Some("graph-b".to_string())
         );
         assert_eq!(
-            ctx.get_child_scenario("step-c").unwrap().name,
+            ctx.get_child_scenario_by_step_id("step-c").unwrap().name,
             Some("graph-c".to_string())
         );
-        assert!(ctx.get_child_scenario("step-d").is_none());
+        assert!(ctx.get_child_scenario_by_step_id("step-d").is_none());
+
+        // Test direct lookup by scenario_id + version
+        assert_eq!(
+            ctx.get_child_scenario("scenario-a", 1).unwrap().name,
+            Some("graph-a".to_string())
+        );
+        assert!(ctx.get_child_scenario("scenario-d", 1).is_none());
     }
 
     // =============================================================================
@@ -495,6 +521,7 @@ mod tests {
     fn test_context_preserves_state_across_operations() {
         let mut ctx = EmitContext::with_child_scenarios(
             true,
+            HashMap::new(),
             HashMap::new(),
             Some("http://test:8080".to_string()),
             Some("tenant-1".to_string()),

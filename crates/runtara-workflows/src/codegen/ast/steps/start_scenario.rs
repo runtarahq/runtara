@@ -37,7 +37,7 @@ pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> Result<TokenStre
     let retry_delay = step.retry_delay.unwrap_or(1000);
 
     // Check if we have the child scenario's graph
-    if let Some(child_graph) = ctx.get_child_scenario(step_id).cloned() {
+    if let Some(child_graph) = ctx.get_child_scenario_by_step_id(step_id).cloned() {
         // We have the child graph - emit embedded version
         emit_with_embedded_child(step, &child_graph, ctx, max_retries, retry_delay)
     } else {
@@ -101,12 +101,7 @@ fn emit_with_embedded_child(
     };
 
     // Generate the embedded child scenario function using shared recursive emitter
-    // The scope_path is extended with this step's ID so that grandchild scenarios
-    // can be looked up with qualified keys (preventing collisions when multiple
-    // child scenarios have steps with the same step_id).
-    let extended_scope = ctx.extended_scope_path(step_id);
-    let child_fn_code =
-        program::emit_graph_as_function(&child_fn_name, child_graph, ctx, Some(&extended_scope))?;
+    let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx)?;
 
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
@@ -465,10 +460,27 @@ mod tests {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
 
         // Create context with child scenario registered
+        // Key format: "scenario_id::version"
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("start-child".to_string(), create_child_graph("Child Graph"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child Graph"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        // step_to_child_ref maps step_id -> (scenario_id, version)
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -488,9 +500,24 @@ mod tests {
         let step = create_basic_step("start-child", "child-scenario-id");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -508,9 +535,24 @@ mod tests {
         step.retry_delay = Some(2000);
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -638,11 +680,23 @@ mod tests {
 
         let mut child_scenarios = HashMap::new();
         child_scenarios.insert(
-            "step-with.special-chars".to_string(),
+            "child-scenario-id::1".to_string(),
             create_child_graph("Child"),
         );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "step-with.special-chars".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -660,9 +714,19 @@ mod tests {
         let step = create_named_step("start-child", "Test Step", "child-scenario-id");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(true, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx =
+            EmitContext::with_child_scenarios(true, child_scenarios, step_to_child_ref, None, None);
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -683,10 +747,20 @@ mod tests {
         let step2 = create_basic_step("step-2", "child-2");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("step-1".to_string(), create_child_graph("Child 1"));
-        child_scenarios.insert("step-2".to_string(), create_child_graph("Child 2"));
+        child_scenarios.insert("child-1::1".to_string(), create_child_graph("Child 1"));
+        child_scenarios.insert("child-2::1".to_string(), create_child_graph("Child 2"));
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert("step-1".to_string(), ("child-1".to_string(), 1));
+        step_to_child_ref.insert("step-2".to_string(), ("child-2".to_string(), 1));
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens1 = emit(&step1, &mut ctx).unwrap();
         let tokens2 = emit(&step2, &mut ctx).unwrap();
@@ -708,9 +782,24 @@ mod tests {
         let step = create_basic_step("unique-step-id", "child-scenario-id");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("unique-step-id".to_string(), create_child_graph("Child"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "unique-step-id".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -726,9 +815,24 @@ mod tests {
         let step = create_basic_step("loop-step", "child-scenario-id");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("loop-step".to_string(), create_child_graph("Child"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "loop-step".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
@@ -803,9 +907,24 @@ mod tests {
         let step = create_basic_step("start-child", "child-scenario-id");
 
         let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("start-child".to_string(), create_child_graph("Child"));
+        child_scenarios.insert(
+            "child-scenario-id::1".to_string(),
+            create_child_graph("Child"),
+        );
 
-        let mut ctx = EmitContext::with_child_scenarios(false, child_scenarios, None, None);
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();

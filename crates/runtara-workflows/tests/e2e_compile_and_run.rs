@@ -897,7 +897,6 @@ fn test_compile_start_scenario_workflow() {
         version_requested: "latest".to_string(),
         version_resolved: 1,
         execution_graph: child_graph,
-        parent_step_path: String::new(), // Root-level child
     };
 
     let input = CompilationInput {
@@ -1980,7 +1979,6 @@ fn test_run_start_scenario_workflow_in_oci_container() {
         version_requested: "latest".to_string(),
         version_resolved: 1,
         execution_graph: child_graph,
-        parent_step_path: String::new(), // Root-level child
     };
 
     let input = CompilationInput {
