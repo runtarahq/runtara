@@ -97,7 +97,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     };
 
     // Generate the subgraph function using shared recursive emitter
-    let subgraph_code = program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx)?;
+    // Split subgraphs inherit the parent's scope path (pass None to inherit)
+    let subgraph_code =
+        program::emit_graph_as_function(&subgraph_fn_name, &step.subgraph, ctx, None)?;
 
     // Serialize config to JSON for debug events
     let config_json = step

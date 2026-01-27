@@ -26,8 +26,13 @@ pub struct EmitContext {
     /// Inputs variable name
     pub inputs_var: Ident,
 
-    /// Child scenarios mapped by step_id -> ExecutionGraph
-    /// These are scenarios that StartScenario steps reference
+    /// Child scenarios mapped by qualified_path -> ExecutionGraph
+    /// These are scenarios that StartScenario steps reference.
+    ///
+    /// The qualified path prevents collisions when different parent scenarios
+    /// have child StartScenario steps with the same step_id. For example:
+    /// - `"run-inventory"` for a root-level child
+    /// - `"run-inventory::process-files"` for a grandchild
     pub(crate) child_scenarios: HashMap<String, ExecutionGraph>,
 
     /// URL for fetching connections at runtime (None = no connection support)
@@ -35,6 +40,12 @@ pub struct EmitContext {
 
     /// Tenant ID for connection service requests
     pub tenant_id: Option<String>,
+
+    /// Current scope path for qualified child scenario lookups.
+    ///
+    /// This tracks the path of ancestor StartScenario step IDs, used to build
+    /// qualified keys when looking up child scenarios. Empty string for root scope.
+    pub(crate) scope_path: String,
 }
 
 impl EmitContext {
@@ -49,6 +60,7 @@ impl EmitContext {
             child_scenarios: HashMap::new(),
             connection_service_url: None,
             tenant_id: None,
+            scope_path: String::new(),
         }
     }
 
@@ -68,12 +80,46 @@ impl EmitContext {
             child_scenarios,
             connection_service_url,
             tenant_id,
+            scope_path: String::new(),
         }
     }
 
-    /// Get a child scenario by step ID.
+    /// Get the current scope path.
+    pub fn scope_path(&self) -> &str {
+        &self.scope_path
+    }
+
+    /// Build the qualified key for a child scenario lookup.
+    ///
+    /// Combines the current scope path with the step ID to create a unique key
+    /// that distinguishes between child scenarios with the same step_id but
+    /// different parent contexts.
+    pub fn qualified_child_key(&self, step_id: &str) -> String {
+        if self.scope_path.is_empty() {
+            step_id.to_string()
+        } else {
+            format!("{}::{}", self.scope_path, step_id)
+        }
+    }
+
+    /// Build an extended scope path by appending a step ID to the current path.
+    ///
+    /// Used when entering a child scenario to track the hierarchy.
+    pub fn extended_scope_path(&self, step_id: &str) -> String {
+        if self.scope_path.is_empty() {
+            step_id.to_string()
+        } else {
+            format!("{}::{}", self.scope_path, step_id)
+        }
+    }
+
+    /// Get a child scenario by step ID, using qualified path lookup.
+    ///
+    /// This method builds the qualified key from the current scope path and
+    /// the provided step_id, then looks up the child scenario.
     pub fn get_child_scenario(&self, step_id: &str) -> Option<&ExecutionGraph> {
-        self.child_scenarios.get(step_id)
+        let qualified_key = self.qualified_child_key(step_id);
+        self.child_scenarios.get(&qualified_key)
     }
 
     /// Sanitize a string to be a valid Rust identifier.

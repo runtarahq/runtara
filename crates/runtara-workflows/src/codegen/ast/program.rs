@@ -751,16 +751,33 @@ fn emit_finish_output(_graph: &ExecutionGraph, _ctx: &EmitContext) -> TokenStrea
 ///
 /// The generated function has the signature:
 /// `async fn <fn_name>(inputs: Arc<ScenarioInputs>) -> Result<serde_json::Value, String>`
+///
+/// # Arguments
+///
+/// * `fn_name` - The identifier for the generated function
+/// * `graph` - The execution graph to emit
+/// * `parent_ctx` - The parent emission context (configuration is inherited)
+/// * `scope_path` - Optional scope path for child scenario lookups. When emitting
+///   a StartScenario's child graph, this should be the extended scope path that
+///   includes the StartScenario step's ID.
 pub fn emit_graph_as_function(
     fn_name: &proc_macro2::Ident,
     graph: &ExecutionGraph,
     parent_ctx: &EmitContext,
+    scope_path: Option<&str>,
 ) -> Result<TokenStream, CodegenError> {
     // Create a fresh context for this graph, inheriting configuration from parent
     let mut ctx = EmitContext::new(parent_ctx.debug_mode);
     ctx.connection_service_url = parent_ctx.connection_service_url.clone();
     ctx.tenant_id = parent_ctx.tenant_id.clone();
     ctx.child_scenarios = parent_ctx.child_scenarios.clone();
+
+    // Set the scope path for qualified child scenario lookups
+    // If a scope_path is provided (e.g., when entering a StartScenario), use it.
+    // Otherwise, inherit the parent's scope_path (e.g., for Split subgraphs).
+    ctx.scope_path = scope_path
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| parent_ctx.scope_path.clone());
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
@@ -1712,7 +1729,7 @@ mod tests {
         let graph = create_minimal_finish_graph("finish");
         let ctx = EmitContext::new(false);
         let fn_name = Ident::new("execute_child_scenario", Span::call_site());
-        let tokens = emit_graph_as_function(&fn_name, &graph, &ctx).unwrap();
+        let tokens = emit_graph_as_function(&fn_name, &graph, &ctx, None).unwrap();
         let code = tokens.to_string();
 
         assert!(
@@ -1739,7 +1756,7 @@ mod tests {
         let fn_name = Ident::new("child_fn", Span::call_site());
 
         // The function creates a fresh context but inherits connection config
-        let tokens = emit_graph_as_function(&fn_name, &graph, &parent_ctx).unwrap();
+        let tokens = emit_graph_as_function(&fn_name, &graph, &parent_ctx, None).unwrap();
         let code = tokens.to_string();
 
         // The child function should be defined
@@ -1792,7 +1809,7 @@ mod tests {
         let fn_name = Ident::new("nested_fn", Span::call_site());
 
         // This should succeed because child_scenarios is inherited
-        let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
+        let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx, None);
         assert!(
             result.is_ok(),
             "Should successfully emit when child_scenarios is inherited"
@@ -1836,7 +1853,7 @@ mod tests {
         let fn_name = Ident::new("nested_fn", Span::call_site());
 
         // This should fail because child scenario is not found
-        let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
+        let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx, None);
         assert!(
             result.is_err(),
             "Should fail when child scenario is missing"

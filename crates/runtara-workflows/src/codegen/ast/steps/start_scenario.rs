@@ -101,7 +101,12 @@ fn emit_with_embedded_child(
     };
 
     // Generate the embedded child scenario function using shared recursive emitter
-    let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx)?;
+    // The scope_path is extended with this step's ID so that grandchild scenarios
+    // can be looked up with qualified keys (preventing collisions when multiple
+    // child scenarios have steps with the same step_id).
+    let extended_scope = ctx.extended_scope_path(step_id);
+    let child_fn_code =
+        program::emit_graph_as_function(&child_fn_name, child_graph, ctx, Some(&extended_scope))?;
 
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();

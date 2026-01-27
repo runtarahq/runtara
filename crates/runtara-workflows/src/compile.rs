@@ -282,6 +282,17 @@ pub struct ChildScenarioInput {
     pub version_resolved: i32,
     /// The child's execution graph.
     pub execution_graph: ExecutionGraph,
+    /// The path of ancestor StartScenario step IDs leading to this child.
+    ///
+    /// This is used to create qualified keys that distinguish between child scenarios
+    /// with the same step_id but different parent contexts. For example:
+    /// - Root-level child: `parent_step_path = ""`
+    /// - Grandchild under "run-inventory": `parent_step_path = "run-inventory"`
+    /// - Great-grandchild: `parent_step_path = "run-inventory::process-files"`
+    ///
+    /// The qualified key is computed as `"{parent_step_path}::{step_id}"` (or just
+    /// `step_id` if `parent_step_path` is empty).
+    pub parent_step_path: String,
 }
 
 /// Input for compilation (all data pre-loaded, no DB access needed).
@@ -415,10 +426,19 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     let build_dir = get_rustc_compile_dir(&tenant_id, &scenario_id, version);
     fs::create_dir_all(&build_dir)?;
 
-    // Convert child scenarios to HashMap<step_id, ExecutionGraph>
+    // Convert child scenarios to HashMap<qualified_path, ExecutionGraph>
+    // The qualified path prevents collisions when different parent scenarios
+    // have child StartScenario steps with the same step_id.
     let child_graphs: HashMap<String, ExecutionGraph> = child_scenarios
         .iter()
-        .map(|c| (c.step_id.clone(), c.execution_graph.clone()))
+        .map(|c| {
+            let qualified_key = if c.parent_step_path.is_empty() {
+                c.step_id.clone()
+            } else {
+                format!("{}::{}", c.parent_step_path, c.step_id)
+            };
+            (qualified_key, c.execution_graph.clone())
+        })
         .collect();
 
     // Generate the Rust program using AST-based code generation
