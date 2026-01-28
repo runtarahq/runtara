@@ -14,9 +14,9 @@ use quote::quote;
 use std::collections::HashSet;
 
 use super::CodegenError;
+use super::condition_emitters::emit_condition_expression;
 use super::context::EmitContext;
 use super::mapping;
-use super::steps::conditional::emit_condition_expression;
 use super::steps::{self, StepEmitter, step_id, step_name, step_type_str};
 use runtara_dsl::{ExecutionGraph, Step};
 
@@ -688,8 +688,8 @@ fn collect_error_branch_steps(start_step_id: &str, graph: &ExecutionGraph) -> Ve
             break;
         }
 
-        // Stop at Conditional steps (they have their own branches)
-        if matches!(step, Step::Conditional(_)) {
+        // Stop at branching steps (Conditional, routing Switch) — they have their own branches
+        if steps::branching::is_branching_step(step) {
             break;
         }
 
@@ -793,17 +793,16 @@ pub fn emit_graph_as_function(
     })
 }
 
-/// Check if the graph uses any conditional steps.
+/// Check if the graph uses any branching steps (Conditional or routing Switch).
 fn graph_uses_conditions(graph: &ExecutionGraph) -> bool {
     for step in graph.steps.values() {
-        match step {
-            Step::Conditional(_) => return true,
-            Step::Split(s) => {
-                if graph_uses_conditions(&s.subgraph) {
-                    return true;
-                }
-            }
-            _ => {}
+        if steps::branching::is_branching_step(step) {
+            return true;
+        }
+        if let Step::Split(s) = step
+            && graph_uses_conditions(&s.subgraph)
+        {
+            return true;
         }
     }
     false

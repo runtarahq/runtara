@@ -582,6 +582,7 @@ mod tests {
                 match_type: SwitchMatchType::Eq,
                 match_value: serde_json::json!("active"),
                 output: serde_json::json!({"result": true}),
+                route: None,
             }],
             default: Some(serde_json::json!({"result": false})),
         };

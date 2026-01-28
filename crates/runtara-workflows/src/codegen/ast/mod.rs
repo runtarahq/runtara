@@ -5,6 +5,7 @@
 //! This module generates Rust source code using syn/quote for type-safe
 //! AST construction instead of string templating.
 
+pub mod condition_emitters;
 pub mod context;
 pub mod mapping;
 pub mod program;

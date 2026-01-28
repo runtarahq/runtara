@@ -27,6 +27,9 @@ pub mod runtime;
 // Condition helpers for generated conditional steps
 pub mod conditions;
 
+// Switch step helpers for generated switch steps
+pub mod switch_helpers;
+
 // Connection management (fetches connections from external service)
 pub mod connections;
 
@@ -63,6 +66,9 @@ pub mod prelude {
 
     // Condition helpers for generated conditional steps
     pub use crate::conditions::{is_truthy, to_number, values_equal};
+
+    // Switch step output processing for generated switch steps
+    pub use crate::switch_helpers::process_switch_output;
 
     // Connection types
     pub use crate::connections::{

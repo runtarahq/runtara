@@ -6,6 +6,7 @@
 //! for executing that step.
 
 pub mod agent;
+pub mod branching;
 pub mod conditional;
 pub mod connection;
 pub mod error;
@@ -47,7 +48,7 @@ impl StepEmitter for Step {
             Step::Finish(s) => finish::emit(s, ctx),
             Step::Agent(s) => agent::emit(s, ctx),
             Step::Conditional(s) => conditional::emit(s, ctx, graph),
-            Step::Switch(s) => switch::emit(s, ctx),
+            Step::Switch(s) => switch::emit(s, ctx, graph),
             Step::Split(s) => split::emit(s, ctx),
             Step::StartScenario(s) => start_scenario::emit(s, ctx),
             Step::While(s) => while_loop::emit(s, ctx),
@@ -535,8 +536,9 @@ pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
             None => continue,
         };
 
-        // Stop BFS at Conditional steps - branches handled by the step itself
-        if matches!(step, Step::Conditional(_)) {
+        // Stop BFS at branching steps (Conditional, routing Switch) -
+        // branches handled by the step emitter itself
+        if branching::is_branching_step(step) {
             continue;
         }
 
@@ -1516,7 +1518,8 @@ mod tests {
             }),
         };
 
-        let tokens = switch::emit(&switch_step, &mut ctx).unwrap();
+        let graph = create_minimal_graph("finish");
+        let tokens = switch::emit(&switch_step, &mut ctx, &graph).unwrap();
         let code = tokens.to_string();
 
         // Verify debug events include loop_indices

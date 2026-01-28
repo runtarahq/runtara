@@ -10,10 +10,10 @@ use proc_macro2::TokenStream;
 use quote::quote;
 
 use super::super::CodegenError;
+use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::conditional::emit_condition_expression;
 use super::{emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::WhileStep;
 

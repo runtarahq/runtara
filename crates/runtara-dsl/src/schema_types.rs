@@ -980,7 +980,7 @@ pub struct SchemaField {
 // ============================================================================
 
 /// Condition expression operators
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConditionOperator {
@@ -1133,6 +1133,26 @@ pub struct SwitchConfig {
     pub default: Option<serde_json::Value>,
 }
 
+impl SwitchConfig {
+    /// Returns true if any case has a `route` field set,
+    /// meaning this switch routes to different branches.
+    pub fn is_routing(&self) -> bool {
+        self.cases.iter().any(|c| c.route.is_some())
+    }
+
+    /// Collect all unique route labels from cases (excluding "default").
+    pub fn route_labels(&self) -> Vec<&str> {
+        let mut labels: Vec<&str> = self
+            .cases
+            .iter()
+            .filter_map(|c| c.route.as_deref())
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        labels
+    }
+}
+
 /// A single case in a Switch step.
 /// Defines a match condition and the output to produce if matched.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1149,6 +1169,12 @@ pub struct SwitchCase {
 
     /// The output to produce if this case matches
     pub output: serde_json::Value,
+
+    /// Route label for routing switches. When present, the switch acts as a
+    /// branching control flow step. The label corresponds to edge labels in
+    /// the execution plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
 }
 
 // ============================================================================
