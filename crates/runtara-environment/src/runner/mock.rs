@@ -32,6 +32,9 @@ pub struct MockRunner {
     pub execution_delay_ms: u64,
     /// If true, instances will fail by default
     pub fail_by_default: bool,
+    /// If true, detached instances will stay running indefinitely until explicitly stopped.
+    /// This is useful for testing timeout enforcement.
+    pub never_complete: bool,
 }
 
 impl Default for MockRunner {
@@ -47,6 +50,7 @@ impl MockRunner {
             instances: Arc::new(Mutex::new(HashMap::new())),
             execution_delay_ms: 10,
             fail_by_default: false,
+            never_complete: false,
         }
     }
 
@@ -56,6 +60,19 @@ impl MockRunner {
             instances: Arc::new(Mutex::new(HashMap::new())),
             execution_delay_ms: 10,
             fail_by_default: true,
+            never_complete: false,
+        }
+    }
+
+    /// Create a mock runner where detached instances never complete on their own.
+    /// They stay running until explicitly stopped via `stop()`.
+    /// This is useful for testing timeout enforcement.
+    pub fn never_completing() -> Self {
+        Self {
+            instances: Arc::new(Mutex::new(HashMap::new())),
+            execution_delay_ms: 0,
+            fail_by_default: false,
+            never_complete: true,
         }
     }
 
@@ -155,31 +172,33 @@ impl Runner for MockRunner {
             );
         }
 
-        // Simulate async completion
-        let instances = self.instances.clone();
-        let instance_id = options.instance_id.clone();
-        let input = options.input.clone();
-        let fail = self.fail_by_default;
-        let delay = self.execution_delay_ms;
+        // Simulate async completion (unless never_complete is set)
+        if !self.never_complete {
+            let instances = self.instances.clone();
+            let instance_id = options.instance_id.clone();
+            let input = options.input.clone();
+            let fail = self.fail_by_default;
+            let delay = self.execution_delay_ms;
 
-        tokio::spawn(async move {
-            if delay > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            }
-
-            let mut instances = instances.lock().await;
-            if let Some(instance) = instances.get_mut(&instance_id) {
-                instance.running.store(false, Ordering::SeqCst);
-                if fail {
-                    instance.error = Some("Mock failure".to_string());
-                } else {
-                    instance.output = Some(serde_json::json!({
-                        "status": "completed",
-                        "result": input
-                    }));
+            tokio::spawn(async move {
+                if delay > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
-            }
-        });
+
+                let mut instances = instances.lock().await;
+                if let Some(instance) = instances.get_mut(&instance_id) {
+                    instance.running.store(false, Ordering::SeqCst);
+                    if fail {
+                        instance.error = Some("Mock failure".to_string());
+                    } else {
+                        instance.output = Some(serde_json::json!({
+                            "status": "completed",
+                            "result": input
+                        }));
+                    }
+                }
+            });
+        }
 
         Ok(handle)
     }
@@ -313,6 +332,28 @@ mod tests {
 
         runner.stop(&handle).await.unwrap();
 
+        assert!(!runner.is_running(&handle).await);
+    }
+
+    #[tokio::test]
+    async fn test_mock_runner_never_completing() {
+        let runner = MockRunner::never_completing();
+        let options = test_options();
+
+        let handle = runner.launch_detached(&options).await.unwrap();
+
+        // Should be running initially
+        assert!(runner.is_running(&handle).await);
+
+        // Wait longer than normal completion time - should still be running
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            runner.is_running(&handle).await,
+            "never_completing runner should stay running indefinitely"
+        );
+
+        // Only stops when explicitly stopped
+        runner.stop(&handle).await.unwrap();
         assert!(!runner.is_running(&handle).await);
     }
 }

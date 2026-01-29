@@ -11,10 +11,11 @@ use runtara_environment::handlers::{
     EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest, ResumeInstanceRequest,
     StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, handle_get_capability,
     handle_health_check, handle_list_agents, handle_register_image, handle_resume_instance,
-    handle_start_instance, handle_stop_instance, handle_test_capability,
+    handle_start_instance, handle_stop_instance, handle_test_capability, spawn_container_monitor,
 };
 use runtara_environment::image_registry::{ImageRegistry, RunnerType};
 use runtara_environment::runner::MockRunner;
+use runtara_environment::runner::{LaunchOptions, Runner, RunnerHandle};
 use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1214,4 +1215,296 @@ async fn test_start_instance_empty_env() {
     );
 
     cleanup(&pool, Some(&response.instance_id), Some(&image_id)).await;
+}
+
+// ============================================================================
+// spawn_container_monitor Timeout Tests
+// ============================================================================
+
+/// Test that spawn_container_monitor enforces execution timeout.
+///
+/// This test verifies that:
+/// 1. When timeout is exceeded, the container is stopped
+/// 2. Instance status is updated to "failed"
+/// 3. Error message indicates timeout
+#[tokio::test]
+async fn test_spawn_container_monitor_timeout_enforcement() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-timeout";
+
+    // Create a runner that never completes on its own
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
+    // Register the instance first
+    persistence
+        .register_instance(&instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+
+    // Update status to running (required for complete_instance_if_running to work)
+    persistence
+        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .await
+        .expect("Failed to update instance status");
+
+    // Create a handle for the "running" container
+    let handle = RunnerHandle {
+        handle_id: format!("mock_{}", &instance_id[..8]),
+        instance_id: instance_id.clone(),
+        tenant_id: tenant_id.to_string(),
+        started_at: Utc::now(),
+    };
+
+    // Register the mock instance in the runner
+    runner
+        .launch_detached(&LaunchOptions {
+            instance_id: instance_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            bundle_path: PathBuf::from("/test/bundle"),
+            input: serde_json::json!({}),
+            timeout: Duration::from_millis(100),
+            runtara_core_addr: "127.0.0.1:8001".to_string(),
+            checkpoint_id: None,
+            env: std::collections::HashMap::new(),
+        })
+        .await
+        .expect("Failed to launch detached");
+
+    // Verify runner shows as running
+    assert!(
+        runner.is_running(&handle).await,
+        "Runner should be running initially"
+    );
+
+    // Spawn the monitor with a very short timeout (100ms)
+    spawn_container_monitor(
+        pool.clone(),
+        runner.clone(),
+        handle.clone(),
+        tenant_id.to_string(),
+        temp_dir.path().to_path_buf(),
+        persistence.clone(),
+        Duration::from_millis(100),
+    );
+
+    // Wait for the timeout to trigger (100ms timeout + some buffer for processing)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Verify the runner was stopped
+    assert!(
+        !runner.is_running(&handle).await,
+        "Runner should be stopped after timeout"
+    );
+
+    // Verify instance status was updated to failed
+    let instance = persistence
+        .get_instance(&instance_id)
+        .await
+        .expect("Failed to get instance")
+        .expect("Instance not found");
+
+    assert_eq!(
+        instance.status, "failed",
+        "Instance status should be 'failed'"
+    );
+    assert!(
+        instance
+            .error
+            .as_ref()
+            .map_or(false, |e| e.contains("timed out")),
+        "Error should mention timeout, got: {:?}",
+        instance.error
+    );
+
+    // Cleanup
+    cleanup(&pool, Some(&instance_id), None).await;
+}
+
+/// Test that spawn_container_monitor does NOT timeout when container completes quickly.
+///
+/// This test verifies that:
+/// 1. When container completes before timeout, no timeout error occurs
+/// 2. Instance can complete successfully
+#[tokio::test]
+async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-no-timeout";
+
+    // Create a runner that completes quickly (default 10ms)
+    let runner = Arc::new(MockRunner::new());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
+    // Register the instance first
+    persistence
+        .register_instance(&instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+
+    // Update status to running
+    persistence
+        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .await
+        .expect("Failed to update instance status");
+
+    // Launch detached (this will auto-complete in 10ms)
+    let handle = runner
+        .launch_detached(&LaunchOptions {
+            instance_id: instance_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            bundle_path: PathBuf::from("/test/bundle"),
+            input: serde_json::json!({}),
+            timeout: Duration::from_secs(10), // Long timeout
+            runtara_core_addr: "127.0.0.1:8001".to_string(),
+            checkpoint_id: None,
+            env: std::collections::HashMap::new(),
+        })
+        .await
+        .expect("Failed to launch detached");
+
+    // Spawn the monitor with a long timeout (10 seconds - should never trigger)
+    spawn_container_monitor(
+        pool.clone(),
+        runner.clone(),
+        handle.clone(),
+        tenant_id.to_string(),
+        temp_dir.path().to_path_buf(),
+        persistence.clone(),
+        Duration::from_secs(10),
+    );
+
+    // Wait for the container to complete (10ms delay + buffer)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify the runner is no longer running (completed naturally)
+    assert!(
+        !runner.is_running(&handle).await,
+        "Runner should have completed"
+    );
+
+    // Verify instance status was NOT set to failed due to timeout
+    // Note: The monitor doesn't set status to "completed" - that's done by the SDK via Core.
+    // It only processes output. So we check that status is NOT "failed" with timeout error.
+    let instance = persistence
+        .get_instance(&instance_id)
+        .await
+        .expect("Failed to get instance")
+        .expect("Instance not found");
+
+    // The status might still be "running" since we didn't simulate SDK completion,
+    // but it should NOT be "failed" with timeout error
+    if instance.status == "failed" {
+        assert!(
+            !instance
+                .error
+                .as_ref()
+                .map_or(false, |e| e.contains("timed out")),
+            "Should not have timeout error on quick completion"
+        );
+    }
+
+    // Cleanup
+    cleanup(&pool, Some(&instance_id), None).await;
+}
+
+/// Test that spawn_container_monitor timeout respects race conditions.
+///
+/// This verifies the race condition handling via complete_instance_if_running:
+/// if another process (like Core) already marked the instance as completed,
+/// the timeout handler should not overwrite it.
+#[tokio::test]
+async fn test_spawn_container_monitor_timeout_race_condition() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-race";
+
+    // Create a runner that never completes
+    let runner = Arc::new(MockRunner::never_completing());
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+
+    // Register the instance
+    persistence
+        .register_instance(&instance_id, tenant_id)
+        .await
+        .expect("Failed to register instance");
+
+    // Start with running status
+    persistence
+        .update_instance_status(&instance_id, "running", Some(Utc::now()))
+        .await
+        .expect("Failed to update instance status");
+
+    let handle = runner
+        .launch_detached(&LaunchOptions {
+            instance_id: instance_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            bundle_path: PathBuf::from("/test/bundle"),
+            input: serde_json::json!({}),
+            timeout: Duration::from_millis(200),
+            runtara_core_addr: "127.0.0.1:8001".to_string(),
+            checkpoint_id: None,
+            env: std::collections::HashMap::new(),
+        })
+        .await
+        .expect("Failed to launch detached");
+
+    // Spawn the monitor with a 200ms timeout
+    spawn_container_monitor(
+        pool.clone(),
+        runner.clone(),
+        handle.clone(),
+        tenant_id.to_string(),
+        temp_dir.path().to_path_buf(),
+        persistence.clone(),
+        Duration::from_millis(200),
+    );
+
+    // Simulate Core marking instance as "completed" BEFORE timeout fires
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    persistence
+        .complete_instance(&instance_id, Some(b"success"), None)
+        .await
+        .expect("Failed to complete instance");
+
+    // Wait for the timeout to fire
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Verify the instance status is still "completed" (not overwritten by timeout)
+    let instance = persistence
+        .get_instance(&instance_id)
+        .await
+        .expect("Failed to get instance")
+        .expect("Instance not found");
+
+    assert_eq!(
+        instance.status, "completed",
+        "Status should remain 'completed' even after timeout fires"
+    );
+    assert!(
+        instance.error.is_none() || !instance.error.as_ref().unwrap().contains("timed out"),
+        "Should not have timeout error when completed first"
+    );
+
+    // Cleanup
+    cleanup(&pool, Some(&instance_id), None).await;
 }

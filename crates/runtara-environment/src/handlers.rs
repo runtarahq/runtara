@@ -509,6 +509,7 @@ pub async fn handle_start_instance(
                 tenant_id_for_monitor,
                 state.data_dir.clone(),
                 state.persistence.clone(),
+                timeout,
             );
 
             Ok(StartInstanceResponse {
@@ -800,6 +801,7 @@ pub async fn handle_resume_instance(
                 tenant_id_for_monitor,
                 state.data_dir.clone(),
                 state.persistence.clone(),
+                options.timeout,
             );
 
             Ok(ResumeInstanceResponse {
@@ -831,7 +833,8 @@ struct OutputProcessorState {
 /// Spawn a background task that monitors the container and processes output when done.
 ///
 /// This function should be called after launching an instance to monitor its lifecycle
-/// and process output when the container finishes.
+/// and process output when the container finishes. The timeout is enforced here - if the
+/// container runs longer than the specified timeout, it will be killed.
 pub fn spawn_container_monitor(
     pool: PgPool,
     runner: Arc<dyn Runner>,
@@ -839,6 +842,7 @@ pub fn spawn_container_monitor(
     tenant_id: String,
     data_dir: PathBuf,
     persistence: Arc<dyn Persistence>,
+    timeout: Duration,
 ) {
     let instance_id = handle.instance_id.clone();
 
@@ -848,8 +852,44 @@ pub fn spawn_container_monitor(
 
         // Poll to check if container is still running
         let poll_interval = Duration::from_millis(50);
+        let start = std::time::Instant::now();
 
         loop {
+            // Check timeout first
+            if start.elapsed() > timeout {
+                warn!(
+                    instance_id = %instance_id,
+                    timeout_secs = %timeout.as_secs(),
+                    "Execution timed out, killing container"
+                );
+                let _ = runner.stop(&handle).await;
+
+                // Update instance status to failed (only if still running)
+                if let Err(e) = persistence
+                    .complete_instance_if_running(
+                        &instance_id,
+                        "failed",
+                        None,
+                        Some("Execution timed out"),
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    warn!(
+                        instance_id = %instance_id,
+                        error = %e,
+                        "Failed to update instance status after timeout"
+                    );
+                }
+
+                // Clean up container registry
+                let container_registry = ContainerRegistry::new(pool.clone());
+                let _ = container_registry.cleanup(&instance_id).await;
+
+                return;
+            }
+
             if !runner.is_running(&handle).await {
                 info!(
                     instance_id = %instance_id,
