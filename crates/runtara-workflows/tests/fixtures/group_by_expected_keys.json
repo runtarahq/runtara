@@ -1,0 +1,72 @@
+{
+  "name": "GroupBy with Expected Keys",
+  "description": "A workflow demonstrating GroupBy with expectedKeys for guaranteed output structure",
+  "steps": {
+    "group-results": {
+      "stepType": "GroupBy",
+      "id": "group-results",
+      "name": "Group by Action with Expected Keys",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
+        "key": "action",
+        "expectedKeys": ["created", "updated", "linked", "unchanged", "failed"]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "created_count": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.counts.created"
+        },
+        "updated_count": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.counts.updated"
+        },
+        "failed_count": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.counts.failed"
+        },
+        "total_groups": {
+          "valueType": "reference",
+          "value": "steps.group-results.outputs.total_groups"
+        }
+      }
+    }
+  },
+  "entryPoint": "group-results",
+  "executionPlan": [
+    {
+      "fromStep": "group-results",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "items": {
+      "type": "array",
+      "description": "Array of items to group by action"
+    }
+  },
+  "outputSchema": {
+    "created_count": {
+      "type": "integer",
+      "description": "Count of created items (guaranteed to be 0 if no items)"
+    },
+    "updated_count": {
+      "type": "integer",
+      "description": "Count of updated items (guaranteed to be 0 if no items)"
+    },
+    "failed_count": {
+      "type": "integer",
+      "description": "Count of failed items (guaranteed to be 0 if no items)"
+    },
+    "total_groups": {
+      "type": "integer"
+    }
+  }
+}

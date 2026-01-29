@@ -68,6 +68,19 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
         None,
     );
 
+    // Generate expected keys initialization code
+    let expected_keys_init = if let Some(ref keys) = step.config.expected_keys {
+        let key_insertions = keys.iter().map(|key| {
+            quote! {
+                #groups_map_var.entry(#key.to_string()).or_default();
+                #counts_map_var.entry(#key.to_string()).or_insert(0);
+            }
+        });
+        quote! { #(#key_insertions)* }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         let #source_var = #build_source;
         let #group_input_var = #array_value_code;
@@ -83,6 +96,9 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
         // Group the array items
         let mut #groups_map_var: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
         let mut #counts_map_var: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        // Pre-initialize expected keys with empty values
+        #expected_keys_init
 
         for #item_var in #group_array_var {
             // Extract key value using JSON pointer
@@ -157,6 +173,7 @@ mod tests {
                     default: None,
                 }),
                 key: key_path.to_string(),
+                expected_keys: None,
             },
         }
     }
@@ -280,6 +297,7 @@ mod tests {
                     ]),
                 }),
                 key: "status".to_string(),
+                expected_keys: None,
             },
         };
 
@@ -303,6 +321,53 @@ mod tests {
         assert!(
             code.contains("steps_context . insert"),
             "Should store result in steps_context"
+        );
+    }
+
+    #[test]
+    fn test_emit_group_by_with_expected_keys() {
+        let mut ctx = EmitContext::new(false);
+        let step = GroupByStep {
+            id: "group-expected".to_string(),
+            name: Some("Expected Keys GroupBy".to_string()),
+            config: GroupByConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                key: "action".to_string(),
+                expected_keys: Some(vec![
+                    "created".to_string(),
+                    "updated".to_string(),
+                    "failed".to_string(),
+                ]),
+            },
+        };
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Should pre-initialize expected keys before the grouping loop
+        assert!(
+            code.contains("\"created\""),
+            "Should initialize 'created' key"
+        );
+        assert!(
+            code.contains("\"updated\""),
+            "Should initialize 'updated' key"
+        );
+        assert!(
+            code.contains("\"failed\""),
+            "Should initialize 'failed' key"
+        );
+        assert!(
+            code.contains("or_default"),
+            "Should use or_default for groups initialization"
+        );
+        assert!(
+            code.contains("or_insert (0)"),
+            "Should use or_insert(0) for counts initialization"
         );
     }
 }

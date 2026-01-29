@@ -791,6 +791,12 @@ pub struct GroupByConfig {
     /// Property path to group by (e.g., "status", "user.role", "data.category").
     /// Supports nested paths with dot notation.
     pub key: String,
+
+    /// Optional list of expected key values.
+    /// These keys are pre-initialized with count=0 and groups=[]
+    /// before grouping, ensuring they always exist in output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_keys: Option<Vec<String>>,
 }
 
 // ============================================================================

@@ -982,6 +982,43 @@ fn test_parse_group_by_in_workflow() {
     }
 }
 
+#[test]
+fn test_parse_group_by_expected_keys() {
+    let workflow_json = include_str!("fixtures/group_by_expected_keys.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse group_by_expected_keys.json");
+
+    assert_eq!(graph.entry_point, "group-results");
+    assert!(graph.steps.contains_key("group-results"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::GroupBy(group_by_step)) = graph.steps.get("group-results") {
+        assert_eq!(
+            group_by_step.name.as_deref(),
+            Some("Group by Action with Expected Keys")
+        );
+
+        // Verify key path
+        assert_eq!(group_by_step.config.key, "action");
+
+        // Verify expected_keys is parsed correctly
+        let expected_keys = group_by_step
+            .config
+            .expected_keys
+            .as_ref()
+            .expect("expected_keys should be present");
+
+        assert_eq!(expected_keys.len(), 5, "Should have 5 expected keys");
+        assert!(expected_keys.contains(&"created".to_string()));
+        assert!(expected_keys.contains(&"updated".to_string()));
+        assert!(expected_keys.contains(&"linked".to_string()));
+        assert!(expected_keys.contains(&"unchanged".to_string()));
+        assert!(expected_keys.contains(&"failed".to_string()));
+    } else {
+        panic!("Expected GroupBy step");
+    }
+}
+
 // ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================
