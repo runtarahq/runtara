@@ -1,0 +1,60 @@
+{
+  "name": "Simple GroupBy Workflow",
+  "description": "A workflow that groups an array by a simple key",
+  "steps": {
+    "group": {
+      "stepType": "GroupBy",
+      "id": "group",
+      "name": "Group by Status",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
+        "key": "status"
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "groups": {
+          "valueType": "reference",
+          "value": "steps.group.outputs.groups"
+        },
+        "counts": {
+          "valueType": "reference",
+          "value": "steps.group.outputs.counts"
+        },
+        "total_groups": {
+          "valueType": "reference",
+          "value": "steps.group.outputs.total_groups"
+        }
+      }
+    }
+  },
+  "entryPoint": "group",
+  "executionPlan": [
+    {
+      "fromStep": "group",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "items": {
+      "type": "array"
+    }
+  },
+  "outputSchema": {
+    "groups": {
+      "type": "object"
+    },
+    "counts": {
+      "type": "object"
+    },
+    "total_groups": {
+      "type": "integer"
+    }
+  }
+}

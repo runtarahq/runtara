@@ -865,6 +865,124 @@ fn test_parse_filter_with_not() {
 }
 
 // ============================================================================
+// GroupBy Step Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_group_by_simple() {
+    let workflow_json = include_str!("fixtures/group_by_simple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse group_by_simple.json");
+
+    assert_eq!(graph.entry_point, "group");
+    assert!(graph.steps.contains_key("group"));
+    assert!(graph.steps.contains_key("finish"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::GroupBy(group_by_step)) = graph.steps.get("group") {
+        assert_eq!(group_by_step.id, "group");
+        assert_eq!(group_by_step.name.as_deref(), Some("Group by Status"));
+
+        // Verify config
+        use runtara_dsl::MappingValue;
+        match &group_by_step.config.value {
+            MappingValue::Reference(r) => assert_eq!(r.value, "data.items"),
+            _ => panic!("Expected reference value for group input"),
+        }
+
+        // Verify key path
+        assert_eq!(group_by_step.config.key, "status");
+    } else {
+        panic!("Expected GroupBy step");
+    }
+
+    // Verify finish step references GroupBy outputs
+    if let Some(Step::Finish(finish_step)) = graph.steps.get("finish") {
+        if let Some(mapping) = &finish_step.input_mapping {
+            assert!(mapping.contains_key("groups"), "Should reference groups");
+            assert!(mapping.contains_key("counts"), "Should reference counts");
+            assert!(
+                mapping.contains_key("total_groups"),
+                "Should reference total_groups"
+            );
+        } else {
+            panic!("Expected input mapping on finish step");
+        }
+    }
+}
+
+#[test]
+fn test_parse_group_by_nested_key() {
+    let workflow_json = include_str!("fixtures/group_by_nested_key.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse group_by_nested_key.json");
+
+    assert_eq!(graph.entry_point, "group");
+    assert!(graph.steps.contains_key("group"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::GroupBy(group_by_step)) = graph.steps.get("group") {
+        assert_eq!(group_by_step.name.as_deref(), Some("Group by User Role"));
+
+        // Verify nested key path
+        assert_eq!(
+            group_by_step.config.key, "profile.role",
+            "Should support nested key paths"
+        );
+
+        // Verify input reference
+        use runtara_dsl::MappingValue;
+        match &group_by_step.config.value {
+            MappingValue::Reference(r) => assert_eq!(r.value, "data.users"),
+            _ => panic!("Expected reference value"),
+        }
+    } else {
+        panic!("Expected GroupBy step");
+    }
+}
+
+#[test]
+fn test_parse_group_by_in_workflow() {
+    let workflow_json = include_str!("fixtures/group_by_in_workflow.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse group_by_in_workflow.json");
+
+    assert_eq!(graph.entry_point, "split-items");
+    assert!(graph.steps.contains_key("split-items"));
+    assert!(graph.steps.contains_key("group-results"));
+    assert!(graph.steps.contains_key("finish"));
+
+    // Verify execution plan: split -> group -> finish
+    assert_eq!(graph.execution_plan.len(), 2);
+    assert_eq!(graph.execution_plan[0].from_step, "split-items");
+    assert_eq!(graph.execution_plan[0].to_step, "group-results");
+    assert_eq!(graph.execution_plan[1].from_step, "group-results");
+    assert_eq!(graph.execution_plan[1].to_step, "finish");
+
+    use runtara_dsl::Step;
+    if let Some(Step::GroupBy(group_by_step)) = graph.steps.get("group-results") {
+        assert_eq!(
+            group_by_step.name.as_deref(),
+            Some("Group Results by Action")
+        );
+
+        // Verify it references the split step output
+        use runtara_dsl::MappingValue;
+        match &group_by_step.config.value {
+            MappingValue::Reference(r) => {
+                assert_eq!(r.value, "steps.split-items.outputs");
+            }
+            _ => panic!("Expected reference to previous step output"),
+        }
+
+        // Verify key is 'action'
+        assert_eq!(group_by_step.config.key, "action");
+    } else {
+        panic!("Expected GroupBy step");
+    }
+}
+
+// ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================
 

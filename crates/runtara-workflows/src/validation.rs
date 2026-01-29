@@ -1082,6 +1082,10 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
             // Filter step has condition expressions, not input mappings
             // The condition references are validated separately
         }
+        Step::GroupBy(_) => {
+            // GroupBy step has config.value which is a MappingValue, not input mappings
+            // The value references are validated separately
+        }
         Step::Conditional(_) | Step::Switch(_) | Step::While(_) | Step::Connection(_) => {}
     }
 
@@ -1690,7 +1694,8 @@ fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
             | Step::Switch(_)
             | Step::StartScenario(_)
             | Step::Connection(_)
-            | Step::Filter(_) => {}
+            | Step::Filter(_)
+            | Step::GroupBy(_) => {}
         }
     }
 }
@@ -1781,6 +1786,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::Connection(s) => s.name.as_ref(),
             Step::Error(s) => s.name.as_ref(),
             Step::Filter(s) => s.name.as_ref(),
+            Step::GroupBy(s) => s.name.as_ref(),
         };
 
         if let Some(name) = name {
@@ -2137,6 +2143,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::Connection(_) => "Connection",
         Step::Error(_) => "Error",
         Step::Filter(_) => "Filter",
+        Step::GroupBy(_) => "GroupBy",
     }
 }
 

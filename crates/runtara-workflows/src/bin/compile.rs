@@ -335,6 +335,7 @@ fn count_steps(
             }
             Step::Error(_) => "Error",
             Step::Filter(_) => "Filter",
+            Step::GroupBy(_) => "GroupBy",
         };
         *step_counts.entry(step_type).or_insert(0) += 1;
     }

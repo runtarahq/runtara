@@ -12,6 +12,7 @@ pub mod connection;
 pub mod error;
 pub mod filter;
 pub mod finish;
+pub mod group_by;
 pub mod log;
 pub mod split;
 pub mod start_scenario;
@@ -57,6 +58,7 @@ impl StepEmitter for Step {
             Step::Connection(s) => connection::emit(s, ctx),
             Step::Error(s) => error::emit(s, ctx),
             Step::Filter(s) => filter::emit(s, ctx),
+            Step::GroupBy(s) => group_by::emit(s, ctx),
         }
     }
 }
@@ -75,6 +77,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::Connection(_) => "Connection",
         Step::Error(_) => "Error",
         Step::Filter(_) => "Filter",
+        Step::GroupBy(_) => "GroupBy",
     }
 }
 
@@ -92,6 +95,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::Connection(s) => &s.id,
         Step::Error(s) => &s.id,
         Step::Filter(s) => &s.id,
+        Step::GroupBy(s) => &s.id,
     }
 }
 
@@ -109,6 +113,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::Connection(s) => s.name.as_deref(),
         Step::Error(s) => s.name.as_deref(),
         Step::Filter(s) => s.name.as_deref(),
+        Step::GroupBy(s) => s.name.as_deref(),
     }
 }
 

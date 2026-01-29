@@ -254,6 +254,9 @@ pub enum Step {
 
     /// Filter an array using a condition expression
     Filter(FilterStep),
+
+    /// Group array items by a key property
+    GroupBy(GroupByStep),
 }
 
 /// Common fields shared by all step types
@@ -741,6 +744,53 @@ pub struct FilterConfig {
     /// Within the condition, `item.*` references resolve to the current element.
     #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     pub condition: ConditionExpression,
+}
+
+/// GroupBy step - groups array items by a key property
+///
+/// Groups items in an array based on the value at a specified property path.
+/// Returns grouped items as a map, counts per group, and total number of groups.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "GroupBy",
+///   "id": "group-by-status",
+///   "config": {
+///     "value": { "valueType": "reference", "value": "steps.get-orders.outputs.items" },
+///     "key": "status"
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "GroupByStep")]
+#[serde(rename_all = "camelCase")]
+pub struct GroupByStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// GroupBy configuration: array to group and key path
+    pub config: GroupByConfig,
+}
+
+/// Configuration for a GroupBy step
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "GroupByConfig")]
+#[serde(rename_all = "camelCase")]
+pub struct GroupByConfig {
+    /// Array to group (MappingValue resolving to array).
+    /// If null or non-array, treated as empty array.
+    pub value: MappingValue,
+
+    /// Property path to group by (e.g., "status", "user.role", "data.category").
+    /// Supports nested paths with dot notation.
+    pub key: String,
 }
 
 // ============================================================================

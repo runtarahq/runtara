@@ -1,0 +1,53 @@
+{
+  "name": "GroupBy with Nested Key",
+  "description": "A workflow that groups items by a nested property path",
+  "steps": {
+    "group": {
+      "stepType": "GroupBy",
+      "id": "group",
+      "name": "Group by User Role",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.users"
+        },
+        "key": "profile.role"
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "groups": {
+          "valueType": "reference",
+          "value": "steps.group.outputs.groups"
+        },
+        "counts": {
+          "valueType": "reference",
+          "value": "steps.group.outputs.counts"
+        }
+      }
+    }
+  },
+  "entryPoint": "group",
+  "executionPlan": [
+    {
+      "fromStep": "group",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "users": {
+      "type": "array"
+    }
+  },
+  "outputSchema": {
+    "groups": {
+      "type": "object"
+    },
+    "counts": {
+      "type": "object"
+    }
+  }
+}
