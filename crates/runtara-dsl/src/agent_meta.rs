@@ -698,6 +698,7 @@ fn rust_to_json_schema_type(rust_type: &str) -> (String, Option<String>, Option<
         "f32" | "f64" => ("number".to_string(), Some("double".to_string()), None),
         "Value" => ("any".to_string(), None, None), // Value can be any JSON type
         "()" => ("null".to_string(), None, None),
+        "ConditionExpression" => ("object".to_string(), None, None), // runtara-dsl ConditionExpression
         t if t.starts_with("Vec<") => {
             let inner = t.trim_start_matches("Vec<").trim_end_matches('>');
             let (inner_type, inner_format, _) = rust_to_json_schema_type(inner);
