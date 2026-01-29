@@ -1,0 +1,66 @@
+{
+  "name": "Simple Filter Workflow",
+  "description": "A workflow that filters an array with a simple equality condition",
+  "steps": {
+    "filter": {
+      "stepType": "Filter",
+      "id": "filter",
+      "name": "Filter Active Items",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
+        "condition": {
+          "type": "operation",
+          "op": "EQ",
+          "arguments": [
+            {
+              "valueType": "reference",
+              "value": "item.status"
+            },
+            {
+              "valueType": "immediate",
+              "value": "active"
+            }
+          ]
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "filtered": {
+          "valueType": "reference",
+          "value": "steps.filter.outputs.items"
+        },
+        "count": {
+          "valueType": "reference",
+          "value": "steps.filter.outputs.count"
+        }
+      }
+    }
+  },
+  "entryPoint": "filter",
+  "executionPlan": [
+    {
+      "fromStep": "filter",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "items": {
+      "type": "array"
+    }
+  },
+  "outputSchema": {
+    "filtered": {
+      "type": "array"
+    },
+    "count": {
+      "type": "number"
+    }
+  }
+}

@@ -334,6 +334,7 @@ fn count_steps(
                 "Connection"
             }
             Step::Error(_) => "Error",
+            Step::Filter(_) => "Filter",
         };
         *step_counts.entry(step_type).or_insert(0) += 1;
     }

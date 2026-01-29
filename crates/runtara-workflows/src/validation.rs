@@ -1078,6 +1078,10 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(m);
             }
         }
+        Step::Filter(_) => {
+            // Filter step has condition expressions, not input mappings
+            // The condition references are validated separately
+        }
         Step::Conditional(_) | Step::Switch(_) | Step::While(_) | Step::Connection(_) => {}
     }
 
@@ -1685,7 +1689,8 @@ fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
             Step::Conditional(_)
             | Step::Switch(_)
             | Step::StartScenario(_)
-            | Step::Connection(_) => {}
+            | Step::Connection(_)
+            | Step::Filter(_) => {}
         }
     }
 }
@@ -1775,6 +1780,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::Log(s) => s.name.as_ref(),
             Step::Connection(s) => s.name.as_ref(),
             Step::Error(s) => s.name.as_ref(),
+            Step::Filter(s) => s.name.as_ref(),
         };
 
         if let Some(name) = name {
@@ -2130,6 +2136,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::Log(_) => "Log",
         Step::Connection(_) => "Connection",
         Step::Error(_) => "Error",
+        Step::Filter(_) => "Filter",
     }
 }
 

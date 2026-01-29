@@ -251,6 +251,9 @@ pub enum Step {
 
     /// Emit a structured error and terminate the workflow
     Error(ErrorStep),
+
+    /// Filter an array using a condition expression
+    Filter(FilterStep),
 }
 
 /// Common fields shared by all step types
@@ -683,6 +686,61 @@ pub enum ErrorSeverity {
     Error,
     /// Critical - system-level failure
     Critical,
+}
+
+/// Filter step - filters an array using a condition expression
+///
+/// The condition is evaluated for each item in the array, with `item.*`
+/// references resolving to the current element being evaluated.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "Filter",
+///   "id": "filter-active",
+///   "config": {
+///     "value": { "valueType": "reference", "path": "steps.get-users.outputs.items" },
+///     "condition": {
+///       "type": "operation",
+///       "op": "eq",
+///       "arguments": [
+///         { "valueType": "reference", "path": "item.status" },
+///         { "valueType": "immediate", "value": "active" }
+///       ]
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "FilterStep")]
+#[serde(rename_all = "camelCase")]
+pub struct FilterStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Filter configuration: array to filter and condition
+    pub config: FilterConfig,
+}
+
+/// Configuration for a Filter step
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "FilterConfig")]
+#[serde(rename_all = "camelCase")]
+pub struct FilterConfig {
+    /// Array to filter (MappingValue resolving to array).
+    /// If null or non-array, treated as empty array.
+    pub value: MappingValue,
+
+    /// Condition expression evaluated for each item.
+    /// Within the condition, `item.*` references resolve to the current element.
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub condition: ConditionExpression,
 }
 
 // ============================================================================

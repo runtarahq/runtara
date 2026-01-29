@@ -719,6 +719,152 @@ fn test_parse_connection_in_loop() {
 }
 
 // ============================================================================
+// Filter Step Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_filter_simple() {
+    let workflow_json = include_str!("fixtures/filter_simple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse filter_simple.json");
+
+    assert_eq!(graph.entry_point, "filter");
+    assert!(graph.steps.contains_key("filter"));
+    assert!(graph.steps.contains_key("finish"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Filter(filter_step)) = graph.steps.get("filter") {
+        assert_eq!(filter_step.id, "filter");
+        assert_eq!(filter_step.name.as_deref(), Some("Filter Active Items"));
+
+        // Verify config exists
+        use runtara_dsl::{ConditionExpression, MappingValue};
+        match &filter_step.config.value {
+            MappingValue::Reference(r) => assert_eq!(r.value, "data.items"),
+            _ => panic!("Expected reference value for filter input"),
+        }
+
+        // Verify condition is an operation
+        match &filter_step.config.condition {
+            ConditionExpression::Operation(op) => {
+                use runtara_dsl::ConditionOperator;
+                assert_eq!(op.op, ConditionOperator::Eq);
+                assert_eq!(op.arguments.len(), 2);
+            }
+            _ => panic!("Expected operation condition"),
+        }
+    } else {
+        panic!("Expected Filter step");
+    }
+}
+
+#[test]
+fn test_parse_filter_complex_condition() {
+    let workflow_json = include_str!("fixtures/filter_complex_condition.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse filter_complex_condition.json");
+
+    assert_eq!(graph.entry_point, "filter");
+    assert!(graph.steps.contains_key("filter"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Filter(filter_step)) = graph.steps.get("filter") {
+        // Verify nested OR condition with AND child
+        use runtara_dsl::{ConditionExpression, ConditionOperator};
+        match &filter_step.config.condition {
+            ConditionExpression::Operation(op) => {
+                assert_eq!(op.op, ConditionOperator::Or);
+                assert_eq!(op.arguments.len(), 2);
+
+                // First argument should be AND operation
+                use runtara_dsl::ConditionArgument;
+                if let ConditionArgument::Expression(inner) = &op.arguments[0] {
+                    if let ConditionExpression::Operation(and_op) = inner.as_ref() {
+                        assert_eq!(and_op.op, ConditionOperator::And);
+                        assert_eq!(and_op.arguments.len(), 2);
+                    } else {
+                        panic!("Expected AND operation inside OR");
+                    }
+                } else {
+                    panic!("Expected expression argument");
+                }
+            }
+            _ => panic!("Expected operation condition"),
+        }
+    } else {
+        panic!("Expected Filter step");
+    }
+}
+
+#[test]
+fn test_parse_filter_in_workflow() {
+    let workflow_json = include_str!("fixtures/filter_in_workflow.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse filter_in_workflow.json");
+
+    assert_eq!(graph.entry_point, "prepare-data");
+    assert!(graph.steps.contains_key("prepare-data"));
+    assert!(graph.steps.contains_key("filter-active"));
+    assert!(graph.steps.contains_key("finish"));
+
+    // Verify execution plan
+    assert_eq!(graph.execution_plan.len(), 2);
+    assert_eq!(graph.execution_plan[0].from_step, "prepare-data");
+    assert_eq!(graph.execution_plan[0].to_step, "filter-active");
+    assert_eq!(graph.execution_plan[1].from_step, "filter-active");
+    assert_eq!(graph.execution_plan[1].to_step, "finish");
+
+    use runtara_dsl::Step;
+    if let Some(Step::Filter(filter_step)) = graph.steps.get("filter-active") {
+        // Verify it references the previous step's output
+        use runtara_dsl::MappingValue;
+        match &filter_step.config.value {
+            MappingValue::Reference(r) => {
+                assert_eq!(r.value, "steps.prepare-data.outputs.value");
+            }
+            _ => panic!("Expected reference to previous step output"),
+        }
+    } else {
+        panic!("Expected Filter step");
+    }
+}
+
+#[test]
+fn test_parse_filter_with_not() {
+    let workflow_json = include_str!("fixtures/filter_with_not.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse filter_with_not.json");
+
+    assert_eq!(graph.entry_point, "filter");
+    assert!(graph.steps.contains_key("filter"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Filter(filter_step)) = graph.steps.get("filter") {
+        // Verify NOT condition
+        use runtara_dsl::{ConditionExpression, ConditionOperator};
+        match &filter_step.config.condition {
+            ConditionExpression::Operation(op) => {
+                assert_eq!(op.op, ConditionOperator::Not);
+                assert_eq!(op.arguments.len(), 1);
+            }
+            _ => panic!("Expected NOT operation condition"),
+        }
+
+        // Verify immediate array value
+        use runtara_dsl::MappingValue;
+        match &filter_step.config.value {
+            MappingValue::Immediate(imm) => {
+                assert!(imm.value.is_array());
+                assert_eq!(imm.value.as_array().unwrap().len(), 4);
+            }
+            _ => panic!("Expected immediate array value"),
+        }
+    } else {
+        panic!("Expected Filter step");
+    }
+}
+
+// ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================
 

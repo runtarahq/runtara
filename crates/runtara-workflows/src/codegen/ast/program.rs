@@ -69,7 +69,8 @@ fn collect_used_agents_recursive(
             | Step::Switch(_)
             | Step::Log(_)
             | Step::Connection(_)
-            | Step::Error(_) => {}
+            | Step::Error(_)
+            | Step::Filter(_) => {}
         }
     }
 }

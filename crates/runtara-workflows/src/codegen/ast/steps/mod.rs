@@ -10,6 +10,7 @@ pub mod branching;
 pub mod conditional;
 pub mod connection;
 pub mod error;
+pub mod filter;
 pub mod finish;
 pub mod log;
 pub mod split;
@@ -55,6 +56,7 @@ impl StepEmitter for Step {
             Step::Log(s) => log::emit(s, ctx),
             Step::Connection(s) => connection::emit(s, ctx),
             Step::Error(s) => error::emit(s, ctx),
+            Step::Filter(s) => filter::emit(s, ctx),
         }
     }
 }
@@ -72,6 +74,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::Log(_) => "Log",
         Step::Connection(_) => "Connection",
         Step::Error(_) => "Error",
+        Step::Filter(_) => "Filter",
     }
 }
 
@@ -88,6 +91,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::Log(s) => &s.id,
         Step::Connection(s) => &s.id,
         Step::Error(s) => &s.id,
+        Step::Filter(s) => &s.id,
     }
 }
 
@@ -104,6 +108,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::Log(s) => s.name.as_deref(),
         Step::Connection(s) => s.name.as_deref(),
         Step::Error(s) => s.name.as_deref(),
+        Step::Filter(s) => s.name.as_deref(),
     }
 }
 

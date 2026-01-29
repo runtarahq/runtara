@@ -1,0 +1,99 @@
+{
+  "name": "Filter in Workflow",
+  "description": "A workflow demonstrating Filter step used after transform to process fetched data",
+  "steps": {
+    "prepare-data": {
+      "stepType": "Agent",
+      "id": "prepare-data",
+      "name": "Prepare Test Data",
+      "agentId": "transform",
+      "capabilityId": "parse-json",
+      "inputMapping": {
+        "value": {
+          "valueType": "immediate",
+          "value": "[{\"id\":1,\"status\":\"active\",\"type\":\"order\"},{\"id\":2,\"status\":\"failed\",\"type\":\"order\"},{\"id\":3,\"status\":\"active\",\"type\":\"refund\"},{\"id\":4,\"status\":\"pending\",\"type\":\"order\"}]"
+        }
+      }
+    },
+    "filter-active": {
+      "stepType": "Filter",
+      "id": "filter-active",
+      "name": "Filter Active Orders",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "steps.prepare-data.outputs.value"
+        },
+        "condition": {
+          "type": "operation",
+          "op": "AND",
+          "arguments": [
+            {
+              "type": "operation",
+              "op": "EQ",
+              "arguments": [
+                {
+                  "valueType": "reference",
+                  "value": "item.status"
+                },
+                {
+                  "valueType": "immediate",
+                  "value": "active"
+                }
+              ]
+            },
+            {
+              "type": "operation",
+              "op": "EQ",
+              "arguments": [
+                {
+                  "valueType": "reference",
+                  "value": "item.type"
+                },
+                {
+                  "valueType": "immediate",
+                  "value": "order"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "activeOrders": {
+          "valueType": "reference",
+          "value": "steps.filter-active.outputs.items"
+        },
+        "totalActive": {
+          "valueType": "reference",
+          "value": "steps.filter-active.outputs.count"
+        }
+      }
+    }
+  },
+  "entryPoint": "prepare-data",
+  "executionPlan": [
+    {
+      "fromStep": "prepare-data",
+      "toStep": "filter-active"
+    },
+    {
+      "fromStep": "filter-active",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {
+    "activeOrders": {
+      "type": "array"
+    },
+    "totalActive": {
+      "type": "number"
+    }
+  }
+}
