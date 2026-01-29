@@ -376,6 +376,10 @@ pub struct CapabilityField {
     pub example: Option<serde_json::Value>,
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
+    /// JSON Schema for complex object types (e.g., ConditionExpression)
+    /// Provides detailed structure hints for strongly-typed objects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
 }
 
 /// API-compatible field type info.
@@ -689,38 +693,148 @@ pub fn find_connection_type(integration_id: &str) -> Option<&'static ConnectionT
 // Conversion Functions (inventory metadata -> API types)
 // ============================================================================
 
-/// Convert Rust type to JSON Schema type
-fn rust_to_json_schema_type(rust_type: &str) -> (String, Option<String>, Option<String>) {
+/// Type conversion result with optional schema
+struct TypeConversionResult {
+    json_type: String,
+    format: Option<String>,
+    items_json: Option<String>,
+    schema: Option<serde_json::Value>,
+}
+
+/// Convert Rust type to JSON Schema type with optional schema hints
+fn rust_to_json_schema_type_with_schema(rust_type: &str) -> TypeConversionResult {
     match rust_type {
-        "String" => ("string".to_string(), None, None),
-        "bool" => ("boolean".to_string(), None, None),
-        "i32" | "i64" | "u32" | "u64" | "usize" => ("integer".to_string(), None, None),
-        "f32" | "f64" => ("number".to_string(), Some("double".to_string()), None),
-        "Value" => ("any".to_string(), None, None), // Value can be any JSON type
-        "()" => ("null".to_string(), None, None),
-        "ConditionExpression" => ("object".to_string(), None, None), // runtara-dsl ConditionExpression
+        "String" => TypeConversionResult {
+            json_type: "string".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
+        "bool" => TypeConversionResult {
+            json_type: "boolean".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
+        "i32" | "i64" | "u32" | "u64" | "usize" => TypeConversionResult {
+            json_type: "integer".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
+        "f32" | "f64" => TypeConversionResult {
+            json_type: "number".to_string(),
+            format: Some("double".to_string()),
+            items_json: None,
+            schema: None,
+        },
+        "Value" => TypeConversionResult {
+            json_type: "any".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
+        "()" => TypeConversionResult {
+            json_type: "null".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
+        "ConditionExpression" => TypeConversionResult {
+            json_type: "object".to_string(),
+            format: None,
+            items_json: None,
+            schema: Some(get_condition_expression_schema()),
+        },
         t if t.starts_with("Vec<") => {
             let inner = t.trim_start_matches("Vec<").trim_end_matches('>');
-            let (inner_type, inner_format, _) = rust_to_json_schema_type(inner);
-            let items_json = if let Some(fmt) = inner_format {
-                format!(r#"{{"type": "{}", "format": "{}"}}"#, inner_type, fmt)
+            let inner_result = rust_to_json_schema_type_with_schema(inner);
+            let items_json = if let Some(fmt) = inner_result.format {
+                format!(
+                    r#"{{"type": "{}", "format": "{}"}}"#,
+                    inner_result.json_type, fmt
+                )
             } else {
-                format!(r#"{{"type": "{}"}}"#, inner_type)
+                format!(r#"{{"type": "{}"}}"#, inner_result.json_type)
             };
-            ("array".to_string(), None, Some(items_json))
+            TypeConversionResult {
+                json_type: "array".to_string(),
+                format: None,
+                items_json: Some(items_json),
+                schema: None,
+            }
         }
-        t if t.starts_with("HashMap<") || t.starts_with("BTreeMap<") => {
-            ("object".to_string(), None, None)
-        }
-        _ => ("string".to_string(), None, None), // Default fallback
+        t if t.starts_with("HashMap<") || t.starts_with("BTreeMap<") => TypeConversionResult {
+            json_type: "object".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
+        _ => TypeConversionResult {
+            json_type: "string".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
     }
+}
+
+/// Legacy function for backwards compatibility
+fn rust_to_json_schema_type(rust_type: &str) -> (String, Option<String>, Option<String>) {
+    let result = rust_to_json_schema_type_with_schema(rust_type);
+    (result.json_type, result.format, result.items_json)
+}
+
+/// Get JSON Schema for ConditionExpression type
+fn get_condition_expression_schema() -> serde_json::Value {
+    use serde_json::json;
+
+    // Generate schema using schemars (types are in crate root via include!)
+    let schema = schemars::schema_for!(crate::ConditionExpression);
+    serde_json::to_value(schema).unwrap_or_else(|_| {
+        // Fallback to manual schema if schemars fails
+        json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "title": "Operation",
+                    "description": "A comparison or logical operation",
+                    "properties": {
+                        "type": { "const": "operation" },
+                        "op": {
+                            "type": "string",
+                            "enum": ["And", "Or", "Not", "Eq", "Ne", "Gt", "Lt", "Gte", "Lte",
+                                     "StartsWith", "EndsWith", "Contains", "In", "NotIn",
+                                     "Length", "IsDefined", "IsEmpty", "IsNotEmpty"]
+                        },
+                        "arguments": {
+                            "type": "array",
+                            "description": "Arguments can be nested expressions or values (reference/immediate)"
+                        }
+                    },
+                    "required": ["type", "op", "arguments"]
+                },
+                {
+                    "type": "object",
+                    "title": "Value",
+                    "description": "A direct value (reference or immediate) - evaluated as truthy/falsy",
+                    "properties": {
+                        "type": { "const": "value" },
+                        "valueType": { "type": "string", "enum": ["reference", "immediate"] },
+                        "value": { "description": "The value content" }
+                    },
+                    "required": ["type", "valueType", "value"]
+                }
+            ]
+        })
+    })
 }
 
 /// Convert InputFieldMeta to CapabilityField
 fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
-    let (json_type, format, items_json) = rust_to_json_schema_type(field.type_name);
+    let type_result = rust_to_json_schema_type_with_schema(field.type_name);
 
-    let items = items_json.map(|items_str| {
+    let items = type_result.items_json.map(|items_str| {
         // Parse items JSON to extract type and format
         let type_match = items_str
             .split("\"type\": \"")
@@ -763,13 +877,14 @@ fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
         name: field.name.to_string(),
         display_name: field.display_name.map(|s| s.to_string()),
         description: field.description.map(|s| s.to_string()),
-        type_name: json_type,
-        format,
+        type_name: type_result.json_type,
+        format: type_result.format,
         items,
         required: !field.is_optional,
         default_value,
         example,
         enum_values,
+        schema: type_result.schema,
     }
 }
 
