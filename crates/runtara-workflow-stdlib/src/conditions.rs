@@ -131,7 +131,7 @@ mod tests {
     fn test_values_equal_string_number_coercion() {
         assert!(values_equal(&json!("42"), &json!(42)));
         assert!(values_equal(&json!(42), &json!("42")));
-        assert!(values_equal(&json!("3.14"), &json!(3.14)));
+        assert!(values_equal(&json!("2.75"), &json!(2.75)));
         assert!(!values_equal(&json!("not a number"), &json!(42)));
     }
 
@@ -173,9 +173,9 @@ mod tests {
     #[test]
     fn test_to_number() {
         assert_eq!(to_number(&json!(42)), Some(42.0));
-        assert_eq!(to_number(&json!(3.14)), Some(3.14));
+        assert_eq!(to_number(&json!(2.75)), Some(2.75));
         assert_eq!(to_number(&json!("42")), Some(42.0));
-        assert_eq!(to_number(&json!("3.14")), Some(3.14));
+        assert_eq!(to_number(&json!("2.75")), Some(2.75));
         assert_eq!(to_number(&json!(true)), Some(1.0));
         assert_eq!(to_number(&json!(false)), Some(0.0));
         assert_eq!(to_number(&json!(null)), None);

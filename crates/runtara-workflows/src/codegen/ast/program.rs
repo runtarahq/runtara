@@ -296,7 +296,17 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 }
             }
 
+            // Run async main with tokio runtime
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(async_main())
+        }
+
+        async fn async_main() -> ExitCode {
             // Initialize tracing subscriber with optional OpenTelemetry layer.
+            // IMPORTANT: This must be inside async_main() so the TelemetryGuard is dropped
+            // while the Tokio runtime is still active. The OTEL batch exporter needs
+            // the runtime for its force_flush() call in the Drop implementation.
+            //
             // The telemetry module handles:
             // - EnvFilter setup (respects RUST_LOG, default: info)
             // - Fmt layer to stderr
@@ -304,12 +314,6 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Returns a guard that flushes telemetry on drop.
             let _telemetry_guard = runtara_workflow_stdlib::telemetry::init_subscriber();
 
-            // Run async main with tokio runtime
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            rt.block_on(async_main())
-        }
-
-        async fn async_main() -> ExitCode {
             // Initialize SDK from environment variables
             // Required env vars: RUNTARA_INSTANCE_ID, RUNTARA_TENANT_ID
             // Optional: RUNTARA_SERVER_ADDR (defaults to 127.0.0.1:8001)

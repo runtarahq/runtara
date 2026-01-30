@@ -552,7 +552,7 @@ fn test_parse_log_no_context() {
     use runtara_dsl::Step;
     if let Some(Step::Log(log)) = graph.steps.get("simple_log") {
         // Context should be None or empty
-        assert!(log.context.is_none() || log.context.as_ref().map_or(true, |c| c.is_empty()));
+        assert!(log.context.as_ref().is_none_or(|c| c.is_empty()));
     } else {
         panic!("Expected Log step");
     }
