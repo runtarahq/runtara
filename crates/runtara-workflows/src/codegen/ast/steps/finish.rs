@@ -10,7 +10,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
 use runtara_dsl::FinishStep;
 
 /// Emit code for a Finish step.
@@ -81,8 +81,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Finish");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Finish");
 
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.
@@ -90,32 +89,35 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         let #source_var = #build_source;
         let #finish_inputs_var = serde_json::json!({"finishing": true});
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        // The async block returns the finish output value
+        let __finish_output: serde_json::Value = async {
+            #debug_start
 
-        let #outputs_var = #outputs;
+            let #outputs_var = #outputs;
 
-        // Extract just the "outputs" field if it exists, otherwise use the whole value
-        let #outputs_var = #outputs_var.get("outputs").cloned().unwrap_or(#outputs_var);
+            // Extract just the "outputs" field if it exists, otherwise use the whole value
+            let #outputs_var = #outputs_var.get("outputs").cloned().unwrap_or(#outputs_var);
 
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Finish",
-            "outputs": &#outputs_var
-        });
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Finish",
+                "outputs": &#outputs_var
+            });
 
-        #debug_end
+            #debug_end
 
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // End tracing span before returning
-        #span_end
+            #outputs_var
+        }.instrument(__step_span).await;
 
         // Return immediately with the outputs
-        return Ok(#outputs_var);
+        return Ok(__finish_output);
     })
 }
 

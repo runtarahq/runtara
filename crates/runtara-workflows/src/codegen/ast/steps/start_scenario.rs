@@ -15,8 +15,8 @@ use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
 use super::{
-    emit_child_scenario_span_end, emit_child_scenario_span_start, emit_step_debug_end,
-    emit_step_debug_start, emit_step_span_end, emit_step_span_start,
+    emit_child_scenario_span_start, emit_step_debug_end, emit_step_debug_start,
+    emit_step_span_start,
 };
 use runtara_dsl::{ExecutionGraph, StartScenarioStep};
 
@@ -134,10 +134,8 @@ fn emit_with_embedded_child(
     );
 
     // Generate tracing spans for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "StartScenario");
-    let span_end = emit_step_span_end();
-    let child_span_start = emit_child_scenario_span_start(step_id, child_scenario_id);
-    let child_span_end = emit_child_scenario_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "StartScenario");
+    let child_span_def = emit_child_scenario_span_start(step_id, child_scenario_id);
 
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("start_scenario::{}", step_id);
@@ -152,12 +150,14 @@ fn emit_with_embedded_child(
         let #source_var = #build_source;
         let #child_inputs_var = #inputs_code;
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        async {
+            #debug_start
 
-        // Build cache key dynamically, including prefix and loop indices
+            // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
             // Get prefix from parent context (set by parent StartScenario)
             let prefix = (*#scenario_inputs_var.variables)
@@ -251,31 +251,31 @@ fn emit_with_embedded_child(
             }
 
             // Create child scenario span for tracing
-            #child_span_start
+            #child_span_def
 
-            // Execute child scenario with cancellation support
-            let child_result = match runtara_sdk::with_cancellation(
-                #child_fn_name(Arc::new(child_scenario_inputs))
-            ).await {
-                Ok(result) => result,
-                Err(interrupt_err) => {
-                    #child_span_end
-                    let structured_error = serde_json::json!({
-                        "stepId": step_id,
-                        "stepName": step_name,
-                        "stepType": "StartScenario",
-                        "code": "STEP_INTERRUPTED",
-                        "message": format!("StartScenario step {} interrupted during execution", step_id),
-                        "category": "transient",
-                        "severity": "info",
-                        "childScenarioId": child_scenario_id,
-                        "interruptionReason": interrupt_err
-                    });
-                    return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                        format!("StartScenario step {} interrupted", step_id)
-                    }));
-                }
-            }.map_err(|e| {
+            // Execute child scenario with cancellation support, instrumented with child span
+            let child_result = async {
+                match runtara_sdk::with_cancellation(
+                    #child_fn_name(Arc::new(child_scenario_inputs))
+                ).await {
+                    Ok(result) => result,
+                    Err(interrupt_err) => {
+                        let structured_error = serde_json::json!({
+                            "stepId": step_id,
+                            "stepName": step_name,
+                            "stepType": "StartScenario",
+                            "code": "STEP_INTERRUPTED",
+                            "message": format!("StartScenario step {} interrupted during execution", step_id),
+                            "category": "transient",
+                            "severity": "info",
+                            "childScenarioId": child_scenario_id,
+                            "interruptionReason": interrupt_err
+                        });
+                        return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                            format!("StartScenario step {} interrupted", step_id)
+                        }));
+                    }
+                }.map_err(|e| {
                     // Try to parse the child error as structured JSON
                     let child_error: serde_json::Value = serde_json::from_str(&e)
                         .unwrap_or_else(|_| serde_json::json!({
@@ -308,10 +308,8 @@ fn emit_with_embedded_child(
                     serde_json::to_string(&structured_error).unwrap_or_else(|_| {
                         format!("Child scenario {} failed: {}", child_scenario_id, e)
                     })
-                })?;
-
-            // End child scenario span
-            #child_span_end
+                })
+            }.instrument(__child_span).await?;
 
             let result = serde_json::json!({
                 "stepId": step_id,
@@ -362,33 +360,33 @@ fn emit_with_embedded_child(
             __loop_indices_suffix,
         ).await?;
 
-        #debug_end
+            #debug_end
 
-        // End tracing span
-        #span_end
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // Check for cancellation or pause after child scenario completes
-        {
-            let mut __sdk = sdk().lock().await;
-            if let Err(e) = __sdk.check_signals().await {
-                let structured_error = serde_json::json!({
-                    "stepId": #step_id,
-                    "stepName": #step_name_display,
-                    "stepType": "StartScenario",
-                    "code": "STEP_INTERRUPTED",
-                    "message": format!("StartScenario step {} interrupted: {}", #step_id, e),
-                    "category": "transient",
-                    "severity": "info",
-                    "childScenarioId": #child_scenario_id,
-                    "reason": e.to_string()
-                });
-                return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                    format!("StartScenario step {}: {}", #step_id, e)
-                }));
+            // Check for cancellation or pause after child scenario completes
+            {
+                let mut __sdk = sdk().lock().await;
+                if let Err(e) = __sdk.check_signals().await {
+                    let structured_error = serde_json::json!({
+                        "stepId": #step_id,
+                        "stepName": #step_name_display,
+                        "stepType": "StartScenario",
+                        "code": "STEP_INTERRUPTED",
+                        "message": format!("StartScenario step {} interrupted: {}", #step_id, e),
+                        "category": "transient",
+                        "severity": "info",
+                        "childScenarioId": #child_scenario_id,
+                        "reason": e.to_string()
+                    });
+                    return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
+                        format!("StartScenario step {}: {}", #step_id, e)
+                    }));
+                }
             }
-        }
+
+            Ok::<_, String>(())
+        }.instrument(__step_span).await?;
     })
 }
 #[cfg(test)]

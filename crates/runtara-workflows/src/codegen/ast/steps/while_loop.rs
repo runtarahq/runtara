@@ -14,7 +14,7 @@ use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
 use runtara_dsl::WhileStep;
 
 /// Emit code for a While step.
@@ -84,163 +84,163 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "While");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "While");
 
     Ok(quote! {
         let #source_var = #build_source;
         let #loop_inputs_var = serde_json::json!({"maxIterations": #max_iterations});
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        async {
+            #debug_start
 
-        // Define the subgraph function
-        #subgraph_code
+            // Define the subgraph function
+            #subgraph_code
 
-        // While loop execution
-        let #step_var = {
-            let mut __loop_index: u32 = 0;
-            let mut __loop_outputs: serde_json::Value = serde_json::Value::Null;
-            let __max_iterations: u32 = #max_iterations;
+            // While loop execution
+            let #step_var = {
+                let mut __loop_index: u32 = 0;
+                let mut __loop_outputs: serde_json::Value = serde_json::Value::Null;
+                let __max_iterations: u32 = #max_iterations;
 
-            loop {
-                // Check max iterations limit
-                if __loop_index >= __max_iterations {
-                    eprintln!("While step '{}' reached max iterations limit ({})", #step_id, __max_iterations);
-                    break;
-                }
-
-                // Create iteration span for tracing
-                let __iter_span = tracing::info_span!(
-                    "while.iteration",
-                    step.id = #step_id,
-                    iteration.index = __loop_index,
-                    otel.kind = "INTERNAL"
-                );
-                let __iter_guard = __iter_span.enter();
-
-                // Build source with loop context for condition evaluation
-                let mut __loop_source = #source_var.clone();
-                if let serde_json::Value::Object(ref mut map) = __loop_source {
-                    let mut loop_ctx = serde_json::Map::new();
-                    loop_ctx.insert("index".to_string(), serde_json::json!(__loop_index));
-                    loop_ctx.insert("outputs".to_string(), __loop_outputs.clone());
-                    map.insert("loop".to_string(), serde_json::Value::Object(loop_ctx));
-                }
-                let #source_var = __loop_source;
-
-                // Evaluate condition
-                let __condition_result: bool = #condition_eval;
-
-                if !__condition_result {
-                    drop(__iter_guard);
-                    break;
-                }
-
-                // Prepare subgraph inputs with loop context
-                let mut __loop_vars = match (*#inputs_var.variables).clone() {
-                    serde_json::Value::Object(m) => m,
-                    _ => serde_json::Map::new(),
-                };
-
-                // Build cumulative loop indices array for cache key uniqueness in nested loops
-                let __parent_indices = __loop_vars.get("_loop_indices")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut __all_indices = __parent_indices;
-                __all_indices.push(serde_json::json!(__loop_index));
-                __loop_vars.insert("_loop_indices".to_string(), serde_json::json!(__all_indices));
-
-                // Inject iteration index as _index for backward compatibility
-                __loop_vars.insert("_index".to_string(), serde_json::json!(__loop_index));
-
-                // Include previous iteration outputs in variables
-                if !__loop_outputs.is_null() {
-                    __loop_vars.insert("_previousOutputs".to_string(), __loop_outputs.clone());
-                }
-
-                // Generate scope ID for this iteration
-                let __iteration_scope_id = {
-                    let parent_scope = __loop_vars.get("_scope_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    if let Some(parent) = parent_scope {
-                        format!("{}_{}_{}", parent, #step_id, __loop_index)
-                    } else {
-                        format!("sc_{}_{}", #step_id, __loop_index)
+                loop {
+                    // Check max iterations limit
+                    if __loop_index >= __max_iterations {
+                        eprintln!("While step '{}' reached max iterations limit ({})", #step_id, __max_iterations);
+                        break;
                     }
-                };
 
-                // Inject _scope_id into subgraph variables (iteration-specific for cache key uniqueness)
-                __loop_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
+                    // Create iteration span for tracing
+                    let __iter_span = tracing::info_span!(
+                        "while.iteration",
+                        step.id = #step_id,
+                        iteration.index = __loop_index,
+                        otel.kind = "INTERNAL"
+                    );
 
-                // Inner steps use the While's scope (sc_{step_id}) as their parent, NOT the iteration scope.
-                // This ensures all iterations share the same parent scope for hierarchy queries,
-                // while still having unique scope_ids for cache key differentiation.
-                let __while_scope_id = format!("sc_{}", #step_id);
-                let __subgraph_inputs = ScenarioInputs {
-                    data: #inputs_var.data.clone(),
-                    variables: Arc::new(serde_json::Value::Object(__loop_vars)),
-                    parent_scope_id: Some(__while_scope_id),
-                };
-
-                // Check for cancellation before executing subgraph
-                if runtara_sdk::is_cancelled() {
-                    drop(__iter_guard);
-                    return Err(format!("While step {} cancelled before iteration {}", #step_id, __loop_index));
-                }
-
-                // Execute subgraph with cancellation support
-                __loop_outputs = match runtara_sdk::with_cancellation(
-                    #subgraph_fn_name(Arc::new(__subgraph_inputs))
-                ).await {
-                    Ok(result) => result?,
-                    Err(cancel_err) => {
-                        drop(__iter_guard);
-                        return Err(format!("While step {} cancelled at iteration {}: {}", #step_id, __loop_index, cancel_err));
+                    // Build source with loop context for condition evaluation (sync, before async block)
+                    let mut __loop_source = #source_var.clone();
+                    if let serde_json::Value::Object(ref mut map) = __loop_source {
+                        let mut loop_ctx = serde_json::Map::new();
+                        loop_ctx.insert("index".to_string(), serde_json::json!(__loop_index));
+                        loop_ctx.insert("outputs".to_string(), __loop_outputs.clone());
+                        map.insert("loop".to_string(), serde_json::Value::Object(loop_ctx));
                     }
-                };
+                    let #source_var = __loop_source;
 
-                __loop_index += 1;
+                    // Evaluate condition (sync)
+                    let __condition_result: bool = #condition_eval;
 
-                // Heartbeat after each iteration to maintain liveness
-                {
-                    let __sdk = sdk().lock().await;
-                    let _ = __sdk.heartbeat().await;
-                }
-
-                // Also check for cancellation or pause after each iteration (belt and suspenders)
-                {
-                    let mut __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.check_signals().await {
-                        drop(__iter_guard);
-                        return Err(format!("While step {} at iteration {}: {}", #step_id, __loop_index, e));
+                    if !__condition_result {
+                        break;
                     }
+
+                    // Wrap iteration body (with async operations) in instrumented async block
+                    let __iter_result: Result<serde_json::Value, String> = async {
+                        // Prepare subgraph inputs with loop context
+                        let mut __loop_vars = match (*#inputs_var.variables).clone() {
+                            serde_json::Value::Object(m) => m,
+                            _ => serde_json::Map::new(),
+                        };
+
+                        // Build cumulative loop indices array for cache key uniqueness in nested loops
+                        let __parent_indices = __loop_vars.get("_loop_indices")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut __all_indices = __parent_indices;
+                        __all_indices.push(serde_json::json!(__loop_index));
+                        __loop_vars.insert("_loop_indices".to_string(), serde_json::json!(__all_indices));
+
+                        // Inject iteration index as _index for backward compatibility
+                        __loop_vars.insert("_index".to_string(), serde_json::json!(__loop_index));
+
+                        // Include previous iteration outputs in variables
+                        if !__loop_outputs.is_null() {
+                            __loop_vars.insert("_previousOutputs".to_string(), __loop_outputs.clone());
+                        }
+
+                        // Generate scope ID for this iteration
+                        let __iteration_scope_id = {
+                            let parent_scope = __loop_vars.get("_scope_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            if let Some(parent) = parent_scope {
+                                format!("{}_{}_{}", parent, #step_id, __loop_index)
+                            } else {
+                                format!("sc_{}_{}", #step_id, __loop_index)
+                            }
+                        };
+
+                        // Inject _scope_id into subgraph variables (iteration-specific for cache key uniqueness)
+                        __loop_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
+
+                        // Inner steps use the While's scope (sc_{step_id}) as their parent, NOT the iteration scope.
+                        // This ensures all iterations share the same parent scope for hierarchy queries,
+                        // while still having unique scope_ids for cache key differentiation.
+                        let __while_scope_id = format!("sc_{}", #step_id);
+                        let __subgraph_inputs = ScenarioInputs {
+                            data: #inputs_var.data.clone(),
+                            variables: Arc::new(serde_json::Value::Object(__loop_vars)),
+                            parent_scope_id: Some(__while_scope_id),
+                        };
+
+                        // Check for cancellation before executing subgraph
+                        if runtara_sdk::is_cancelled() {
+                            return Err(format!("While step {} cancelled before iteration {}", #step_id, __loop_index));
+                        }
+
+                        // Execute subgraph with cancellation support
+                        let __iteration_outputs = match runtara_sdk::with_cancellation(
+                            #subgraph_fn_name(Arc::new(__subgraph_inputs))
+                        ).await {
+                            Ok(result) => result?,
+                            Err(cancel_err) => {
+                                return Err(format!("While step {} cancelled at iteration {}: {}", #step_id, __loop_index, cancel_err));
+                            }
+                        };
+
+                        // Heartbeat after each iteration to maintain liveness
+                        {
+                            let __sdk = sdk().lock().await;
+                            let _ = __sdk.heartbeat().await;
+                        }
+
+                        // Also check for cancellation or pause after each iteration (belt and suspenders)
+                        {
+                            let mut __sdk = sdk().lock().await;
+                            if let Err(e) = __sdk.check_signals().await {
+                                return Err(format!("While step {} at iteration {}: {}", #step_id, __loop_index, e));
+                            }
+                        }
+
+                        Ok(__iteration_outputs)
+                    }.instrument(__iter_span).await;
+
+                    // Handle iteration result
+                    __loop_outputs = __iter_result?;
+                    __loop_index += 1;
                 }
 
-                // End iteration span
-                drop(__iter_guard);
-            }
+                serde_json::json!({
+                    "stepId": #step_id,
+                    "stepName": #step_name_display,
+                    "stepType": "While",
+                    "iterations": __loop_index,
+                    "outputs": __loop_outputs
+                })
+            };
 
-            serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "While",
-                "iterations": __loop_index,
-                "outputs": __loop_outputs
-            })
-        };
+            #debug_end
 
-        #debug_end
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // End tracing span
-        #span_end
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+            Ok::<_, String>(())
+        }.instrument(__step_span).await?;
     })
 }
 

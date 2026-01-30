@@ -13,7 +13,7 @@ use super::super::CodegenError;
 use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
 use runtara_dsl::FilterStep;
 
 /// Emit code for a Filter step.
@@ -72,8 +72,7 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Filter");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Filter");
 
     Ok(quote! {
         let #source_var = #build_source;
@@ -85,45 +84,45 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             None => vec![],
         };
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        async {
+            #debug_start
 
-        // Filter the array
-        let mut #filter_results_var: Vec<serde_json::Value> = Vec::new();
-        for #item_var in #filter_array_var {
-            // Build source with "item" key pointing to current element
-            let mut #item_source_var = #source_var.clone();
-            if let Some(obj) = #item_source_var.as_object_mut() {
-                obj.insert("item".to_string(), #item_var.clone());
+            // Filter the array
+            let mut #filter_results_var: Vec<serde_json::Value> = Vec::new();
+            for #item_var in #filter_array_var {
+                // Build source with "item" key pointing to current element
+                let mut #item_source_var = #source_var.clone();
+                if let Some(obj) = #item_source_var.as_object_mut() {
+                    obj.insert("item".to_string(), #item_var.clone());
+                }
+
+                // Evaluate condition with item-aware source
+                let #matches_var: bool = #condition_eval;
+                if #matches_var {
+                    #filter_results_var.push(#item_var);
+                }
             }
 
-            // Evaluate condition with item-aware source
-            let #matches_var: bool = #condition_eval;
-            if #matches_var {
-                #filter_results_var.push(#item_var);
-            }
-        }
+            let __filter_count = #filter_results_var.len();
 
-        let __filter_count = #filter_results_var.len();
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Filter",
+                "outputs": {
+                    "items": #filter_results_var,
+                    "count": __filter_count
+                }
+            });
 
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Filter",
-            "outputs": {
-                "items": #filter_results_var,
-                "count": __filter_count
-            }
-        });
+            #debug_end
 
-        #debug_end
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // End tracing span
-        #span_end
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+        }.instrument(__step_span).await;
     })
 }
 

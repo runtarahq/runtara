@@ -11,7 +11,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_span_end, emit_step_span_start};
+use super::emit_step_span_start;
 use runtara_dsl::{LogLevel, LogStep};
 
 /// Emit code for a Log step.
@@ -53,49 +53,48 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
     };
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Log");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Log");
 
     Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        // Emit log event via SDK custom_event
-        {
-            let __log_payload = serde_json::json!({
-                "step_id": #step_id,
-                "step_name": #step_name_display,
-                "level": #level_str,
-                "message": #message,
-                "context": #context_var,
-                "timestamp_ms": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
+        // Wrap step execution in async block instrumented with span
+        async {
+            // Emit log event via SDK custom_event
+            {
+                let __log_payload = serde_json::json!({
+                    "step_id": #step_id,
+                    "step_name": #step_name_display,
+                    "level": #level_str,
+                    "message": #message,
+                    "context": #context_var,
+                    "timestamp_ms": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                });
+
+                let __payload_bytes = serde_json::to_vec(&__log_payload).unwrap_or_default();
+                let __sdk_guard = sdk().lock().await;
+                let _ = __sdk_guard.custom_event("workflow_log", __payload_bytes).await;
+            }
+
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Log",
+                "outputs": {
+                    "level": #level_str,
+                    "message": #message
+                }
             });
 
-            let __payload_bytes = serde_json::to_vec(&__log_payload).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event("workflow_log", __payload_bytes).await;
-        }
-
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Log",
-            "outputs": {
-                "level": #level_str,
-                "message": #message
-            }
-        });
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // End tracing span
-        #span_end
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+        }.instrument(__step_span).await;
     })
 }
 

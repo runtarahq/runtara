@@ -11,7 +11,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
 use runtara_dsl::GroupByStep;
 
 /// Emit code for a GroupBy step.
@@ -69,8 +69,7 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "GroupBy");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "GroupBy");
 
     // Generate expected keys initialization code
     let expected_keys_init = if let Some(ref keys) = step.config.expected_keys {
@@ -95,74 +94,74 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
             None => vec![],
         };
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        async {
+            #debug_start
 
-        // Group the array items
-        let mut #groups_map_var: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
-        let mut #counts_map_var: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            // Group the array items
+            let mut #groups_map_var: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
+            let mut #counts_map_var: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-        // Pre-initialize expected keys with empty values
-        #expected_keys_init
+            // Pre-initialize expected keys with empty values
+            #expected_keys_init
 
-        for #item_var in #group_array_var {
-            // Extract key value using JSON pointer
-            let #key_value_var = #item_var.pointer(#key_pointer).cloned().unwrap_or(serde_json::Value::Null);
+            for #item_var in #group_array_var {
+                // Extract key value using JSON pointer
+                let #key_value_var = #item_var.pointer(#key_pointer).cloned().unwrap_or(serde_json::Value::Null);
 
-            // Convert key to string representation
-            let #key_str_var: String = match &#key_value_var {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Null => "_null".to_string(),
-                // For arrays/objects, serialize to JSON string
-                other => serde_json::to_string(other).unwrap_or_else(|_| "_invalid".to_string()),
+                // Convert key to string representation
+                let #key_str_var: String = match &#key_value_var {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => "_null".to_string(),
+                    // For arrays/objects, serialize to JSON string
+                    other => serde_json::to_string(other).unwrap_or_else(|_| "_invalid".to_string()),
+                };
+
+                // Add to groups
+                #groups_map_var.entry(#key_str_var.clone()).or_default().push(#item_var);
+                *#counts_map_var.entry(#key_str_var).or_insert(0) += 1;
+            }
+
+            let __total_groups = #groups_map_var.len();
+
+            // Convert groups HashMap to JSON Value (object)
+            let __groups_json: serde_json::Value = {
+                let mut map = serde_json::Map::new();
+                for (key, items) in #groups_map_var {
+                    map.insert(key, serde_json::Value::Array(items));
+                }
+                serde_json::Value::Object(map)
             };
 
-            // Add to groups
-            #groups_map_var.entry(#key_str_var.clone()).or_default().push(#item_var);
-            *#counts_map_var.entry(#key_str_var).or_insert(0) += 1;
-        }
+            // Convert counts HashMap to JSON Value (object)
+            let __counts_json: serde_json::Value = {
+                let mut map = serde_json::Map::new();
+                for (key, count) in #counts_map_var {
+                    map.insert(key, serde_json::Value::Number(serde_json::Number::from(count)));
+                }
+                serde_json::Value::Object(map)
+            };
 
-        let __total_groups = #groups_map_var.len();
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "GroupBy",
+                "outputs": {
+                    "groups": __groups_json,
+                    "counts": __counts_json,
+                    "total_groups": __total_groups
+                }
+            });
 
-        // Convert groups HashMap to JSON Value (object)
-        let __groups_json: serde_json::Value = {
-            let mut map = serde_json::Map::new();
-            for (key, items) in #groups_map_var {
-                map.insert(key, serde_json::Value::Array(items));
-            }
-            serde_json::Value::Object(map)
-        };
+            #debug_end
 
-        // Convert counts HashMap to JSON Value (object)
-        let __counts_json: serde_json::Value = {
-            let mut map = serde_json::Map::new();
-            for (key, count) in #counts_map_var {
-                map.insert(key, serde_json::Value::Number(serde_json::Number::from(count)));
-            }
-            serde_json::Value::Object(map)
-        };
-
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "GroupBy",
-            "outputs": {
-                "groups": __groups_json,
-                "counts": __counts_json,
-                "total_groups": __total_groups
-            }
-        });
-
-        #debug_end
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // End tracing span
-        #span_end
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+        }.instrument(__step_span).await;
     })
 }
 

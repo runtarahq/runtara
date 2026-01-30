@@ -537,16 +537,28 @@ pub fn emit_set_current_step(step_id: &str) -> TokenStream {
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 ///
 /// # Generated Code Pattern
+/// Emit code to define a step span for OpenTelemetry tracing.
+///
+/// This function only defines the span. Step emitters must wrap their async
+/// body with `.instrument(__step_span).await` to properly propagate the span
+/// across await points.
+///
+/// # Usage Pattern
+///
 /// ```rust,ignore
-/// let __step_span = tracing::info_span!(
-///     "step.agent",
-///     step.id = "step-1",
-///     step.name = "My Step",
-///     step.type = "Agent",
-///     otel.kind = "INTERNAL"
-/// );
-/// let __step_span_guard = __step_span.enter();
+/// let span_def = emit_step_span_start("step-1", Some("My Step"), "Agent");
+/// quote! {
+///     #span_def
+///     async {
+///         // step body with await points
+///     }.instrument(__step_span).await;
+/// }
 /// ```
+///
+/// NOTE: Uses async `.instrument()` pattern instead of sync `enter()`/`drop()`
+/// because step execution contains `.await` points. The sync pattern fails
+/// with async code since span context is stored in thread-local storage
+/// and gets lost when tasks switch threads.
 pub fn emit_step_span_start(
     step_id: &str,
     step_name: Option<&str>,
@@ -563,13 +575,13 @@ pub fn emit_step_span_start(
             step.type = #step_type,
             otel.kind = "INTERNAL"
         );
-        let __step_span_guard = __step_span.enter();
     }
 }
 
 /// Emit code for agent step span with additional agent attributes.
 ///
 /// Similar to `emit_step_span_start` but includes agent.id and capability.id.
+/// Step emitters must wrap their body with `.instrument(__step_span).await`.
 pub fn emit_agent_span_start(
     step_id: &str,
     step_name: Option<&str>,
@@ -588,22 +600,24 @@ pub fn emit_agent_span_start(
             capability.id = #capability_id,
             otel.kind = "INTERNAL"
         );
-        let __step_span_guard = __step_span.enter();
     }
 }
 
-/// Emit code to exit a step span.
+/// Placeholder for backwards compatibility.
 ///
-/// Drops the span guard to end the span.
+/// Step emitters now use `async { ... }.instrument(__step_span).await`
+/// directly, so this function returns empty tokens.
+#[deprecated(
+    note = "Step emitters should use async { ... }.instrument(__step_span).await directly"
+)]
 pub fn emit_step_span_end() -> TokenStream {
-    quote! {
-        drop(__step_span_guard);
-    }
+    quote! {}
 }
 
 /// Emit code for iteration span (Split/While steps).
 ///
-/// Creates a child span for each loop iteration with the iteration index.
+/// Creates a span definition for each loop iteration with the iteration index.
+/// The iteration body should be wrapped with `.instrument(__iter_span).await`.
 ///
 /// # Arguments
 /// * `step_id` - Parent step identifier
@@ -623,20 +637,24 @@ pub fn emit_iteration_span_start(
             iteration.index = #index_var,
             otel.kind = "INTERNAL"
         );
-        let __iter_span_guard = __iter_span.enter();
     }
 }
 
-/// Emit code to exit an iteration span.
+/// Placeholder for backwards compatibility.
+///
+/// Iteration bodies now use `async { ... }.instrument(__iter_span).await`
+/// directly, so this function returns empty tokens.
+#[deprecated(
+    note = "Iteration bodies should use async { ... }.instrument(__iter_span).await directly"
+)]
 pub fn emit_iteration_span_end() -> TokenStream {
-    quote! {
-        drop(__iter_span_guard);
-    }
+    quote! {}
 }
 
 /// Emit code for child scenario span (StartScenario step).
 ///
-/// Creates a span for the child scenario execution.
+/// Creates a span definition for the child scenario execution.
+/// The child scenario call should be wrapped with `.instrument(__child_span).await`.
 ///
 /// # Arguments
 /// * `parent_step_id` - The StartScenario step ID
@@ -652,15 +670,16 @@ pub fn emit_child_scenario_span_start(
             parent_step.id = #parent_step_id,
             otel.kind = "INTERNAL"
         );
-        let __child_span_guard = __child_span.enter();
     }
 }
 
-/// Emit code to exit a child scenario span.
+/// Placeholder for backwards compatibility.
+///
+/// Child scenario calls now use `.instrument(__child_span).await`
+/// directly, so this function returns empty tokens.
+#[deprecated(note = "Child scenario should use .instrument(__child_span).await directly")]
 pub fn emit_child_scenario_span_end() -> TokenStream {
-    quote! {
-        drop(__child_span_guard);
-    }
+    quote! {}
 }
 
 /// Build execution order using BFS traversal from entry point.
@@ -1764,9 +1783,10 @@ mod tests {
             code.contains("\"INTERNAL\""),
             "otel.kind should be INTERNAL"
         );
+        // Note: No guard is created - step body uses .instrument(__step_span).await
         assert!(
-            code.contains("__step_span_guard"),
-            "Should create span guard"
+            !code.contains("__step_span_guard"),
+            "Should NOT create span guard (uses async instrument pattern)"
         );
     }
 
@@ -1787,14 +1807,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_emit_step_span_end() {
         let tokens = emit_step_span_end();
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("drop (__step_span_guard)"),
-            "Should drop the span guard"
-        );
+        // This function now returns empty tokens since step emitters use
+        // async { ... }.instrument(__step_span).await directly
+        assert!(code.is_empty(), "Should return empty tokens (deprecated)");
     }
 
     #[test]
@@ -1839,21 +1859,22 @@ mod tests {
         );
         assert!(code.contains("idx"), "Should reference the index variable");
         assert!(code.contains("__iter_span"), "Should create iteration span");
+        // Note: No guard is created - iteration body uses .instrument(__iter_span).await
         assert!(
-            code.contains("__iter_span_guard"),
-            "Should create iteration span guard"
+            !code.contains("__iter_span_guard"),
+            "Should NOT create iteration span guard (uses async instrument pattern)"
         );
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_emit_iteration_span_end() {
         let tokens = emit_iteration_span_end();
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("drop (__iter_span_guard)"),
-            "Should drop the iteration span guard"
-        );
+        // This function now returns empty tokens since iteration bodies use
+        // async { ... }.instrument(__iter_span).await directly
+        assert!(code.is_empty(), "Should return empty tokens (deprecated)");
     }
 
     #[test]
@@ -1882,14 +1903,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_emit_child_scenario_span_end() {
         let tokens = emit_child_scenario_span_end();
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("drop (__child_span_guard)"),
-            "Should drop the child span guard"
-        );
+        // This function now returns empty tokens since child scenario calls use
+        // .instrument(__child_span).await directly
+        assert!(code.is_empty(), "Should return empty tokens (deprecated)");
     }
 
     #[test]

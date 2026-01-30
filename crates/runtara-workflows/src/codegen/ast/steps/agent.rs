@@ -12,9 +12,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{
-    emit_agent_span_start, emit_step_debug_end, emit_step_debug_start, emit_step_span_end,
-};
+use super::{emit_agent_span_start, emit_step_debug_end, emit_step_debug_start};
 use runtara_dsl::AgentStep;
 use runtara_dsl::agent_meta::get_all_capabilities;
 
@@ -139,41 +137,47 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_agent_span_start(step_id, step_name, agent_id, capability_id);
-    let span_end = emit_step_span_end();
+    let span_def = emit_agent_span_start(step_id, step_name, agent_id, capability_id);
 
     Ok(quote! {
         let #source_var = #build_source;
         let #step_inputs_var = #base_inputs_code;
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        // This ensures proper span propagation across await points
+        let __step_result: Result<(), String> = async {
+            #debug_start
 
-        #execute_capability
+            #execute_capability
 
-        #debug_end
+            #debug_end
 
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Agent",
-            "outputs": #result_var
-        });
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Agent",
+                "outputs": #result_var
+            });
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // Check for cancellation or pause via SDK signal polling
-        {
-            let mut __sdk = sdk().lock().await;
-            if let Err(e) = __sdk.check_signals().await {
-                #span_end
-                return Err(format!("Step {}: {}", #step_id, e));
+            // Check for cancellation or pause via SDK signal polling
+            {
+                let mut __sdk = sdk().lock().await;
+                if let Err(e) = __sdk.check_signals().await {
+                    return Err(format!("Step {}: {}", #step_id, e));
+                }
             }
-        }
 
-        // End tracing span
-        #span_end
+            Ok(())
+        }.instrument(__step_span).await;
+
+        // Propagate any error from the step
+        if let Err(e) = __step_result {
+            return Err(e);
+        }
     })
 }
 

@@ -15,8 +15,7 @@ use super::super::mapping;
 use super::super::{CodegenError, json_to_tokens};
 use super::branching;
 use super::{
-    emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start,
-    find_next_step_for_label,
+    emit_step_debug_end, emit_step_debug_start, emit_step_span_start, find_next_step_for_label,
 };
 use runtara_dsl::{
     ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator, ExecutionGraph,
@@ -125,8 +124,7 @@ fn emit_value_switch(
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Switch");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Switch");
 
     // Compile-time case expansion: convert each case to a condition expression
     // and emit inline match blocks
@@ -167,31 +165,31 @@ fn emit_value_switch(
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        async {
+            #debug_start
 
-        // Compile-time expanded case matching
-        let mut matched_output: Option<serde_json::Value> = None;
+            // Compile-time expanded case matching
+            let mut matched_output: Option<serde_json::Value> = None;
 
-        #(#case_blocks)*
+            #(#case_blocks)*
 
-        let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
+            let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
 
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Switch",
-            "outputs": output
-        });
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Switch",
+                "outputs": output
+            });
 
-        #debug_end
+            #debug_end
 
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // End tracing span
-        #span_end
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+        }.instrument(__step_span).await;
     })
 }
 
@@ -285,8 +283,7 @@ fn emit_routing_switch(
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Switch");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Switch");
 
     // Compile-time case expansion with route tracking
     let case_blocks = if let Some(ref config) = step.config {
@@ -401,40 +398,40 @@ fn emit_routing_switch(
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        async {
+            #debug_start
 
-        // Compile-time expanded case matching with route tracking
-        let mut matched_output: Option<serde_json::Value> = None;
-        let mut matched_route: Option<&str> = None;
+            // Compile-time expanded case matching with route tracking
+            let mut matched_output: Option<serde_json::Value> = None;
+            let mut matched_route: Option<&str> = None;
 
-        #(#case_blocks)*
+            #(#case_blocks)*
 
-        let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
-        let __route: &str = matched_route.unwrap_or("default");
+            let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
+            let __route: &str = matched_route.unwrap_or("default");
 
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Switch",
-            "outputs": output,
-            "route": __route
-        });
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Switch",
+                "outputs": output,
+                "route": __route
+            });
 
-        #debug_end
+            #debug_end
 
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-        // Route dispatch
-        #route_dispatch
+            // Route dispatch
+            #route_dispatch
 
-        // Common suffix after merge point
-        #common_suffix_code
-
-        // End tracing span
-        #span_end
+            // Common suffix after merge point
+            #common_suffix_code
+        }.instrument(__step_span).await;
     })
 }
 

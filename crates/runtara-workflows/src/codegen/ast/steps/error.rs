@@ -12,7 +12,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_span_end, emit_step_span_start};
+use super::emit_step_span_start;
 use runtara_dsl::{ErrorCategory, ErrorSeverity, ErrorStep};
 
 /// Emit code for an Error step.
@@ -61,70 +61,73 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     };
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Error");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Error");
 
     Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        // Emit structured error event via SDK custom_event
-        {
-            let __error_payload = serde_json::json!({
-                "step_id": #step_id,
-                "step_name": #step_name_display,
+        // Wrap step execution in async block instrumented with span
+        // The async block returns the error string to propagate
+        let __error_result: String = async {
+            // Emit structured error event via SDK custom_event
+            {
+                let __error_payload = serde_json::json!({
+                    "step_id": #step_id,
+                    "step_name": #step_name_display,
+                    "category": #category_str,
+                    "code": #error_code,
+                    "message": #error_message,
+                    "severity": #severity_str,
+                    "context": #context_var,
+                    "timestamp_ms": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                });
+
+                let __payload_bytes = serde_json::to_vec(&__error_payload).unwrap_or_default();
+                let __sdk_guard = sdk().lock().await;
+                let _ = __sdk_guard.custom_event("workflow_error", __payload_bytes).await;
+            }
+
+            // Store step result in context (even though we'll fail after)
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Error",
+                "outputs": {
+                    "category": #category_str,
+                    "code": #error_code,
+                    "message": #error_message,
+                    "severity": #severity_str
+                }
+            });
+
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+            // Build structured error message with context for the workflow failure
+            let __error_context = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
                 "category": #category_str,
                 "code": #error_code,
                 "message": #error_message,
                 "severity": #severity_str,
-                "context": #context_var,
-                "timestamp_ms": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
+                "context": #context_var
             });
 
-            let __payload_bytes = serde_json::to_vec(&__error_payload).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event("workflow_error", __payload_bytes).await;
-        }
+            // Return the error string from the async block
+            serde_json::to_string(&__error_context).unwrap_or_else(|_| {
+                format!("[{}] {}", #error_code, #error_message)
+            })
+        }.instrument(__step_span).await;
 
-        // Store step result in context (even though we'll fail after)
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Error",
-            "outputs": {
-                "category": #category_str,
-                "code": #error_code,
-                "message": #error_message,
-                "severity": #severity_str
-            }
-        });
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // Build structured error message with context for the workflow failure
-        let __error_context = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "category": #category_str,
-            "code": #error_code,
-            "message": #error_message,
-            "severity": #severity_str,
-            "context": #context_var
-        });
-
-        // End tracing span before returning error
-        #span_end
-
-        // Terminate workflow with structured error (serialized as JSON string)
-        return Err(serde_json::to_string(&__error_context).unwrap_or_else(|_| {
-            format!("[{}] {}", #error_code, #error_message)
-        }));
+        // Terminate workflow with structured error
+        return Err(__error_result);
     })
 }
 

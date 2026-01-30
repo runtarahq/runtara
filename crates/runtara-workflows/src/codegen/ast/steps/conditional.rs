@@ -14,7 +14,7 @@ use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::steps;
 use super::branching;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
 use runtara_dsl::{ConditionalStep, ExecutionGraph};
 
 /// Emit code for a Conditional step.
@@ -104,44 +104,44 @@ pub fn emit(
     );
 
     // Generate tracing span for OpenTelemetry
-    let span_start = emit_step_span_start(step_id, step_name, "Conditional");
-    let span_end = emit_step_span_end();
+    let span_def = emit_step_span_start(step_id, step_name, "Conditional");
 
     Ok(quote! {
         let #source_var = #build_source;
         let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
 
-        // Start tracing span for this step
-        #span_start
+        // Define tracing span for this step
+        #span_def
 
-        #debug_start
+        // Wrap step execution in async block instrumented with span
+        // Note: Branches are executed inside the span for proper nesting
+        async {
+            #debug_start
 
-        let #condition_var: bool = #condition_eval;
+            let #condition_var: bool = #condition_eval;
 
-        let #step_var = serde_json::json!({
-            "stepId": #step_id,
-            "stepName": #step_name_display,
-            "stepType": "Conditional",
-            "outputs": {
-                "result": #condition_var
+            let #step_var = serde_json::json!({
+                "stepId": #step_id,
+                "stepName": #step_name_display,
+                "stepType": "Conditional",
+                "outputs": {
+                    "result": #condition_var
+                }
+            });
+
+            #debug_end
+
+            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+            // Execute the appropriate branch
+            if #condition_var {
+                #true_branch_code
+            } else {
+                #false_branch_code
             }
-        });
 
-        #debug_end
-
-        #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-        // Execute the appropriate branch
-        if #condition_var {
-            #true_branch_code
-        } else {
-            #false_branch_code
-        }
-
-        // Execute common suffix path after merge point (if any)
-        #common_suffix_code
-
-        // End tracing span
-        #span_end
+            // Execute common suffix path after merge point (if any)
+            #common_suffix_code
+        }.instrument(__step_span).await;
     })
 }
