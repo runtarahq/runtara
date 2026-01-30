@@ -1737,4 +1737,184 @@ mod tests {
             "Should use .cloned() to extract loop_indices value"
         );
     }
+
+    // ── Span helper function tests ───────────────────────────────────
+
+    #[test]
+    fn test_emit_step_span_start_basic() {
+        let tokens = emit_step_span_start("step-1", Some("Test Step"), "Agent");
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("tracing :: info_span !"),
+            "Should create info_span"
+        );
+        assert!(
+            code.contains("\"step.agent\""),
+            "Span name should be step.<type lowercase>"
+        );
+        assert!(code.contains("step . id"), "Should include step.id");
+        assert!(code.contains("step . name"), "Should include step.name");
+        assert!(code.contains("step . type"), "Should include step.type");
+        assert!(
+            code.contains("otel . kind"),
+            "Should include otel.kind attribute"
+        );
+        assert!(
+            code.contains("\"INTERNAL\""),
+            "otel.kind should be INTERNAL"
+        );
+        assert!(
+            code.contains("__step_span_guard"),
+            "Should create span guard"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_span_start_without_name() {
+        let tokens = emit_step_span_start("step-no-name", None, "Conditional");
+        let code = tokens.to_string();
+
+        // When no name provided, step_id is used as display name
+        assert!(
+            code.contains("step-no-name"),
+            "Should use step_id as fallback name"
+        );
+        assert!(
+            code.contains("\"step.conditional\""),
+            "Span name should be lowercase step type"
+        );
+    }
+
+    #[test]
+    fn test_emit_step_span_end() {
+        let tokens = emit_step_span_end();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("drop (__step_span_guard)"),
+            "Should drop the span guard"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_span_start() {
+        let tokens = emit_agent_span_start(
+            "agent-step-1",
+            Some("Fetch Data"),
+            "http-agent",
+            "fetch-json",
+        );
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("\"step.agent\""),
+            "Span name should be step.agent"
+        );
+        assert!(code.contains("agent . id"), "Should include agent.id");
+        assert!(
+            code.contains("capability . id"),
+            "Should include capability.id"
+        );
+        assert!(code.contains("http-agent"), "Should include agent_id value");
+        assert!(
+            code.contains("fetch-json"),
+            "Should include capability_id value"
+        );
+    }
+
+    #[test]
+    fn test_emit_iteration_span_start() {
+        let idx_var = proc_macro2::Ident::new("idx", proc_macro2::Span::call_site());
+        let tokens = emit_iteration_span_start("split-1", "split", &idx_var);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("\"split.iteration\""),
+            "Span name should be <type>.iteration"
+        );
+        assert!(
+            code.contains("iteration . index"),
+            "Should include iteration.index"
+        );
+        assert!(code.contains("idx"), "Should reference the index variable");
+        assert!(code.contains("__iter_span"), "Should create iteration span");
+        assert!(
+            code.contains("__iter_span_guard"),
+            "Should create iteration span guard"
+        );
+    }
+
+    #[test]
+    fn test_emit_iteration_span_end() {
+        let tokens = emit_iteration_span_end();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("drop (__iter_span_guard)"),
+            "Should drop the iteration span guard"
+        );
+    }
+
+    #[test]
+    fn test_emit_child_scenario_span_start() {
+        let tokens = emit_child_scenario_span_start("start-scenario-1", "child-scenario-abc");
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("\"scenario.child\""),
+            "Span name should be scenario.child"
+        );
+        assert!(code.contains("scenario . id"), "Should include scenario.id");
+        assert!(
+            code.contains("parent_step . id"),
+            "Should include parent_step.id"
+        );
+        assert!(
+            code.contains("child-scenario-abc"),
+            "Should include child scenario ID"
+        );
+        assert!(
+            code.contains("start-scenario-1"),
+            "Should include parent step ID"
+        );
+        assert!(code.contains("__child_span"), "Should create child span");
+    }
+
+    #[test]
+    fn test_emit_child_scenario_span_end() {
+        let tokens = emit_child_scenario_span_end();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("drop (__child_span_guard)"),
+            "Should drop the child span guard"
+        );
+    }
+
+    #[test]
+    fn test_span_step_type_lowercase() {
+        // Verify different step types produce correct lowercase span names
+        let types_and_expected = [
+            ("Agent", "step.agent"),
+            ("Conditional", "step.conditional"),
+            ("Switch", "step.switch"),
+            ("Filter", "step.filter"),
+            ("GroupBy", "step.groupby"),
+            ("Finish", "step.finish"),
+            ("Error", "step.error"),
+            ("Log", "step.log"),
+        ];
+
+        for (step_type, expected_name) in types_and_expected {
+            let tokens = emit_step_span_start("test", None, step_type);
+            let code = tokens.to_string();
+            assert!(
+                code.contains(&format!("\"{}\"", expected_name)),
+                "Step type {} should produce span name {}",
+                step_type,
+                expected_name
+            );
+        }
+    }
 }
