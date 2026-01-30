@@ -14,7 +14,7 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
 use runtara_dsl::{MappingValue, SplitStep};
 
 /// Emit code for a Split step.
@@ -132,6 +132,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         Some(&split_scope_id),
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Split");
+    let span_end = emit_step_span_end();
+
     // Cache key for the split step's final result checkpoint
     let cache_key = format!("split::{}", step_id);
 
@@ -142,6 +146,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     Ok(quote! {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -241,8 +248,18 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             if parallelism <= 1 {
                 // Sequential execution (backward compatible)
                 for (idx, item) in split_array.iter().enumerate() {
+                    // Create iteration span for tracing
+                    let __iter_span = tracing::info_span!(
+                        "split.iteration",
+                        step.id = step_id,
+                        iteration.index = idx,
+                        otel.kind = "INTERNAL"
+                    );
+                    let __iter_guard = __iter_span.enter();
+
                     // Check for cancellation before starting each iteration
                     if runtara_sdk::is_cancelled() {
+                        drop(__iter_guard);
                         return Err(format!("Split step {} cancelled before iteration {}", step_id, idx));
                     }
 
@@ -260,11 +277,13 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                 errors.push(serde_json::json!({"error": e, "index": idx}));
                             } else {
                                 eprintln!("ERROR in split iteration {}: {}", idx, e);
+                                drop(__iter_guard);
                                 return Err(format!("Split step failed at index {}: {}", idx, e));
                             }
                         }
                         Err(cancel_err) => {
                             // Cancellation during subgraph execution
+                            drop(__iter_guard);
                             return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, cancel_err));
                         }
                     }
@@ -273,9 +292,13 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     {
                         let mut __sdk = sdk().lock().await;
                         if let Err(e) = __sdk.check_signals().await {
+                            drop(__iter_guard);
                             return Err(format!("Split step {} at iteration {}: {}", step_id, idx, e));
                         }
                     }
+
+                    // End iteration span
+                    drop(__iter_guard);
                 }
             } else {
                 // Parallel execution with bounded concurrency
@@ -304,11 +327,22 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                         let step_id = step_id_owned.clone();
 
                         async move {
+                            // Create iteration span for tracing
+                            let __iter_span = tracing::info_span!(
+                                "split.iteration",
+                                step.id = %step_id,
+                                iteration.index = idx,
+                                otel.kind = "INTERNAL"
+                            );
+                            let __iter_guard = __iter_span.enter();
+
                             // Check if we should skip due to cancellation or error (when dont_stop_on_failed is false)
                             if cancel_token.load(Ordering::Relaxed) || runtara_sdk::is_cancelled() {
+                                drop(__iter_guard);
                                 return (idx, Err("Cancelled".to_string()));
                             }
                             if error_token.load(Ordering::Relaxed) {
+                                drop(__iter_guard);
                                 return (idx, Err("Aborted due to previous error".to_string()));
                             }
 
@@ -362,6 +396,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                 Err(cancel_err) => {
                                     // Global cancellation triggered
                                     cancel_token.store(true, Ordering::Relaxed);
+                                    drop(__iter_guard);
                                     return (idx, Err(cancel_err));
                                 }
                             };
@@ -371,10 +406,13 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                 let mut __sdk = sdk().lock().await;
                                 if let Err(e) = __sdk.check_signals().await {
                                     cancel_token.store(true, Ordering::Relaxed);
+                                    drop(__iter_guard);
                                     return (idx, Err(format!("{}", e)));
                                 }
                             }
 
+                            // End iteration span
+                            drop(__iter_guard);
                             (idx, result)
                         }
                     });
@@ -463,6 +501,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         ).await?;
 
         #debug_end
+
+        // End tracing span
+        #span_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
     })

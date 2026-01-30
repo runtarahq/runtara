@@ -14,7 +14,10 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{
+    emit_child_scenario_span_end, emit_child_scenario_span_start, emit_step_debug_end,
+    emit_step_debug_start, emit_step_span_end, emit_step_span_start,
+};
 use runtara_dsl::{ExecutionGraph, StartScenarioStep};
 
 /// Emit code for a StartScenario step.
@@ -130,6 +133,12 @@ fn emit_with_embedded_child(
         Some(&start_scenario_scope_id),
     );
 
+    // Generate tracing spans for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "StartScenario");
+    let span_end = emit_step_span_end();
+    let child_span_start = emit_child_scenario_span_start(step_id, child_scenario_id);
+    let child_span_end = emit_child_scenario_span_end();
+
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("start_scenario::{}", step_id);
 
@@ -142,6 +151,9 @@ fn emit_with_embedded_child(
 
         let #source_var = #build_source;
         let #child_inputs_var = #inputs_code;
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -238,12 +250,16 @@ fn emit_with_embedded_child(
                 }));
             }
 
+            // Create child scenario span for tracing
+            #child_span_start
+
             // Execute child scenario with cancellation support
             let child_result = match runtara_sdk::with_cancellation(
                 #child_fn_name(Arc::new(child_scenario_inputs))
             ).await {
                 Ok(result) => result,
                 Err(interrupt_err) => {
+                    #child_span_end
                     let structured_error = serde_json::json!({
                         "stepId": step_id,
                         "stepName": step_name,
@@ -293,6 +309,9 @@ fn emit_with_embedded_child(
                         format!("Child scenario {} failed: {}", child_scenario_id, e)
                     })
                 })?;
+
+            // End child scenario span
+            #child_span_end
 
             let result = serde_json::json!({
                 "stepId": step_id,
@@ -344,6 +363,9 @@ fn emit_with_embedded_child(
         ).await?;
 
         #debug_end
+
+        // End tracing span
+        #span_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
 

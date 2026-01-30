@@ -14,7 +14,7 @@ use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::steps;
 use super::branching;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
 use runtara_dsl::{ConditionalStep, ExecutionGraph};
 
 /// Emit code for a Conditional step.
@@ -103,9 +103,16 @@ pub fn emit(
         None,
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Conditional");
+    let span_end = emit_step_span_end();
+
     Ok(quote! {
         let #source_var = #build_source;
         let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -133,5 +140,8 @@ pub fn emit(
 
         // Execute common suffix path after merge point (if any)
         #common_suffix_code
+
+        // End tracing span
+        #span_end
     })
 }

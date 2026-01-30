@@ -10,7 +10,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
 use runtara_dsl::FinishStep;
 
 /// Emit code for a Finish step.
@@ -80,11 +80,18 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         None,
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Finish");
+    let span_end = emit_step_span_end();
+
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.
     Ok(quote! {
         let #source_var = #build_source;
         let #finish_inputs_var = serde_json::json!({"finishing": true});
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -103,6 +110,9 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // End tracing span before returning
+        #span_end
 
         // Return immediately with the outputs
         return Ok(#outputs_var);

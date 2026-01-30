@@ -56,6 +56,12 @@ pub use runtara_sdk;
 pub use tracing;
 pub use tracing_subscriber;
 
+// Re-export tracing::Instrument for async span wrapping in generated code
+pub use tracing::Instrument;
+
+// Telemetry support (OpenTelemetry integration)
+pub mod telemetry;
+
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types

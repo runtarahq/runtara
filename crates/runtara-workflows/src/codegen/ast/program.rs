@@ -208,8 +208,8 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
         use #stdlib_ident::prelude::*;
         use #stdlib_ident::libc;
         use #stdlib_ident::tokio;
-        use #stdlib_ident::tracing_subscriber;
-        use #stdlib_ident::tracing_subscriber::prelude::*;
+        use #stdlib_ident::tracing;
+        use #stdlib_ident::Instrument;
         #hashmap_import
 
         // Import only agents used by this workflow
@@ -296,15 +296,13 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 }
             }
 
-            // Initialize tracing subscriber for structured logging.
-            // Respects RUST_LOG env var (default: info level).
-            // Output goes to stderr (which may be redirected to log file above).
-            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-            tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-                .with(filter)
-                .init();
+            // Initialize tracing subscriber with optional OpenTelemetry layer.
+            // The telemetry module handles:
+            // - EnvFilter setup (respects RUST_LOG, default: info)
+            // - Fmt layer to stderr
+            // - OTEL layer if OTEL_EXPORTER_OTLP_ENDPOINT is set and telemetry feature is enabled
+            // Returns a guard that flushes telemetry on drop.
+            let _telemetry_guard = runtara_workflow_stdlib::telemetry::init_subscriber();
 
             // Run async main with tokio runtime
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -371,8 +369,16 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 parent_scope_id: None, // Top-level has no parent scope
             };
 
-            // Execute the workflow
-            match execute_workflow(Arc::new(scenario_inputs)).await {
+            // Create root span for entire scenario execution
+            let scenario_id = std::env::var("SCENARIO_ID").unwrap_or_else(|_| "unknown".to_string());
+            let __root_span = tracing::info_span!(
+                "scenario.execute",
+                scenario.id = %scenario_id,
+                otel.kind = "INTERNAL"
+            );
+
+            // Execute the workflow within the root span
+            match execute_workflow(Arc::new(scenario_inputs)).instrument(__root_span).await {
                 Ok(output) => {
                     // Report completion to runtara-core
                     let sdk_guard = sdk().lock().await;
@@ -1237,9 +1243,10 @@ mod tests {
         assert!(code.contains("prelude"), "Should import prelude");
         assert!(code.contains("libc"), "Should import libc");
         assert!(code.contains("tokio"), "Should import tokio");
+        assert!(code.contains("tracing"), "Should import tracing");
         assert!(
-            code.contains("tracing_subscriber"),
-            "Should import tracing_subscriber"
+            code.contains("Instrument"),
+            "Should import Instrument trait"
         );
     }
 
@@ -1598,12 +1605,12 @@ mod tests {
             "Should call execute_workflow"
         );
         assert!(
-            code.contains("tracing_subscriber"),
-            "Should initialize tracing subscriber"
+            code.contains("telemetry :: init_subscriber"),
+            "Should initialize telemetry subscriber"
         );
         assert!(
-            code.contains("EnvFilter"),
-            "Should use EnvFilter for RUST_LOG support"
+            code.contains("__root_span"),
+            "Should create root span for scenario execution"
         );
     }
 

@@ -13,6 +13,15 @@ name = "runtara_workflow_stdlib"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+default = []
+telemetry = [
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry-otlp",
+    "tracing-opentelemetry",
+]
+
 [dependencies]
 # Core dependencies
 runtara-agents = { path = "../runtara-agents", version = "1.0" }
@@ -35,3 +44,9 @@ ureq = "2.12"
 # Tracing for structured logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# OpenTelemetry (optional - enabled via telemetry feature)
+opentelemetry = { version = "0.28", features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "trace"], optional = true }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.29", optional = true }

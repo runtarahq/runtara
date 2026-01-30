@@ -13,7 +13,7 @@ use super::super::CodegenError;
 use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
 use runtara_dsl::FilterStep;
 
 /// Emit code for a Filter step.
@@ -71,6 +71,10 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         None,
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Filter");
+    let span_end = emit_step_span_end();
+
     Ok(quote! {
         let #source_var = #build_source;
         let #filter_input_var = #array_value_code;
@@ -80,6 +84,9 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             Some(arr) => arr.clone(),
             None => vec![],
         };
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -114,6 +121,9 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // End tracing span
+        #span_end
     })
 }
 

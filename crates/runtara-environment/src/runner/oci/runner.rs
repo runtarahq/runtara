@@ -87,17 +87,21 @@ fn get_host_ip() -> Option<String> {
 
 /// Transform address for pasta networking
 ///
-/// NOTE: With the current approach of `pasta --config-net -- crun run ...`,
-/// pasta handles localhost translation automatically. When you connect to
-/// 127.0.0.1 inside the container, pasta's network stack routes it to the
-/// host's 127.0.0.1. So we don't need to transform addresses anymore.
+/// IMPORTANT: When using pasta networking (NetworkMode::Pasta), the RUNTARA_CORE_ADDR
+/// must be set to an IP address reachable from inside containers. Localhost addresses
+/// (127.0.0.1) will NOT work because they refer to the container's own loopback, not
+/// the host's.
 ///
-/// This function is kept for backward compatibility but returns the address unchanged.
+/// Correct configuration for pasta networking:
+///   RUNTARA_CORE_ADDR=192.168.1.100:8001  (host's actual IP)
+///
+/// Incorrect (won't work with pasta):
+///   RUNTARA_CORE_ADDR=127.0.0.1:8001      (localhost - unreachable from container)
+///
+/// This function is kept for potential future use but currently returns the address
+/// unchanged. Address configuration is the operator's responsibility.
 #[allow(dead_code)]
 fn transform_addr_for_pasta(addr: &str) -> String {
-    // With pasta --config-net, localhost addresses work correctly without transformation.
-    // Pasta creates a TAP interface that proxies connections from the container's
-    // localhost to the host's localhost automatically.
     addr.to_string()
 }
 

@@ -14,7 +14,7 @@ use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start};
 use runtara_dsl::WhileStep;
 
 /// Emit code for a While step.
@@ -83,9 +83,16 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         Some(&while_scope_id),
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "While");
+    let span_end = emit_step_span_end();
+
     Ok(quote! {
         let #source_var = #build_source;
         let #loop_inputs_var = serde_json::json!({"maxIterations": #max_iterations});
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -105,6 +112,15 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     break;
                 }
 
+                // Create iteration span for tracing
+                let __iter_span = tracing::info_span!(
+                    "while.iteration",
+                    step.id = #step_id,
+                    iteration.index = __loop_index,
+                    otel.kind = "INTERNAL"
+                );
+                let __iter_guard = __iter_span.enter();
+
                 // Build source with loop context for condition evaluation
                 let mut __loop_source = #source_var.clone();
                 if let serde_json::Value::Object(ref mut map) = __loop_source {
@@ -119,6 +135,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 let __condition_result: bool = #condition_eval;
 
                 if !__condition_result {
+                    drop(__iter_guard);
                     break;
                 }
 
@@ -173,6 +190,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
                 // Check for cancellation before executing subgraph
                 if runtara_sdk::is_cancelled() {
+                    drop(__iter_guard);
                     return Err(format!("While step {} cancelled before iteration {}", #step_id, __loop_index));
                 }
 
@@ -182,6 +200,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 ).await {
                     Ok(result) => result?,
                     Err(cancel_err) => {
+                        drop(__iter_guard);
                         return Err(format!("While step {} cancelled at iteration {}: {}", #step_id, __loop_index, cancel_err));
                     }
                 };
@@ -198,9 +217,13 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 {
                     let mut __sdk = sdk().lock().await;
                     if let Err(e) = __sdk.check_signals().await {
+                        drop(__iter_guard);
                         return Err(format!("While step {} at iteration {}: {}", #step_id, __loop_index, e));
                     }
                 }
+
+                // End iteration span
+                drop(__iter_guard);
             }
 
             serde_json::json!({
@@ -213,6 +236,9 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         };
 
         #debug_end
+
+        // End tracing span
+        #span_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
     })

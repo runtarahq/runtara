@@ -11,6 +11,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
+use super::{emit_step_span_end, emit_step_span_start};
 use runtara_dsl::{LogLevel, LogStep};
 
 /// Emit code for a Log step.
@@ -51,9 +52,16 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Log");
+    let span_end = emit_step_span_end();
+
     Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
+
+        // Start tracing span for this step
+        #span_start
 
         // Emit log event via SDK custom_event
         {
@@ -85,6 +93,9 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
         });
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // End tracing span
+        #span_end
     })
 }
 

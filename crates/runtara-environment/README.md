@@ -127,7 +127,7 @@ This enables workflows to sleep for hours/days without holding resources.
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
 | `RUNTARA_ENV_QUIC_PORT` | No | `8002` | Environment QUIC server port |
-| `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address of runtara-core |
+| `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address of runtara-core. For pasta networking, use host's actual IP |
 | `DATA_DIR` | No | `.data` | Data directory for images and bundles |
 | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification (passed to instances) |
 

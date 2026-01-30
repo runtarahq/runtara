@@ -12,7 +12,9 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start};
+use super::{
+    emit_agent_span_start, emit_step_debug_end, emit_step_debug_start, emit_step_span_end,
+};
 use runtara_dsl::AgentStep;
 use runtara_dsl::agent_meta::get_all_capabilities;
 
@@ -136,9 +138,16 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         None,
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_agent_span_start(step_id, step_name, agent_id, capability_id);
+    let span_end = emit_step_span_end();
+
     Ok(quote! {
         let #source_var = #build_source;
         let #step_inputs_var = #base_inputs_code;
+
+        // Start tracing span for this step
+        #span_start
 
         #debug_start
 
@@ -158,9 +167,13 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         {
             let mut __sdk = sdk().lock().await;
             if let Err(e) = __sdk.check_signals().await {
+                #span_end
                 return Err(format!("Step {}: {}", #step_id, e));
             }
         }
+
+        // End tracing span
+        #span_end
     })
 }
 

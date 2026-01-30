@@ -12,6 +12,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
+use super::{emit_step_span_end, emit_step_span_start};
 use runtara_dsl::{ErrorCategory, ErrorSeverity, ErrorStep};
 
 /// Emit code for an Error step.
@@ -59,9 +60,16 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Error");
+    let span_end = emit_step_span_end();
+
     Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
+
+        // Start tracing span for this step
+        #span_start
 
         // Emit structured error event via SDK custom_event
         {
@@ -109,6 +117,9 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             "severity": #severity_str,
             "context": #context_var
         });
+
+        // End tracing span before returning error
+        #span_end
 
         // Terminate workflow with structured error (serialized as JSON string)
         return Err(serde_json::to_string(&__error_context).unwrap_or_else(|_| {

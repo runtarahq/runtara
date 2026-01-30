@@ -14,7 +14,10 @@ use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::{CodegenError, json_to_tokens};
 use super::branching;
-use super::{emit_step_debug_end, emit_step_debug_start, find_next_step_for_label};
+use super::{
+    emit_step_debug_end, emit_step_debug_start, emit_step_span_end, emit_step_span_start,
+    find_next_step_for_label,
+};
 use runtara_dsl::{
     ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator, ExecutionGraph,
     ImmediateValue, MappingValue, SwitchCase, SwitchMatchType, SwitchStep,
@@ -121,6 +124,10 @@ fn emit_value_switch(
         None,
     );
 
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Switch");
+    let span_end = emit_step_span_end();
+
     // Compile-time case expansion: convert each case to a condition expression
     // and emit inline match blocks
     let case_blocks = if let Some(ref config) = step.config {
@@ -160,6 +167,9 @@ fn emit_value_switch(
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
 
+        // Start tracing span for this step
+        #span_start
+
         #debug_start
 
         // Compile-time expanded case matching
@@ -179,6 +189,9 @@ fn emit_value_switch(
         #debug_end
 
         #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // End tracing span
+        #span_end
     })
 }
 
@@ -270,6 +283,10 @@ fn emit_routing_switch(
         Some(&scenario_inputs_var),
         None,
     );
+
+    // Generate tracing span for OpenTelemetry
+    let span_start = emit_step_span_start(step_id, step_name, "Switch");
+    let span_end = emit_step_span_end();
 
     // Compile-time case expansion with route tracking
     let case_blocks = if let Some(ref config) = step.config {
@@ -384,6 +401,9 @@ fn emit_routing_switch(
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
 
+        // Start tracing span for this step
+        #span_start
+
         #debug_start
 
         // Compile-time expanded case matching with route tracking
@@ -412,6 +432,9 @@ fn emit_routing_switch(
 
         // Common suffix after merge point
         #common_suffix_code
+
+        // End tracing span
+        #span_end
     })
 }
 

@@ -522,6 +522,147 @@ pub fn emit_set_current_step(step_id: &str) -> TokenStream {
     }
 }
 
+// ==========================================
+// Tracing span helpers for OpenTelemetry
+// ==========================================
+
+/// Emit code to create and enter a step span.
+///
+/// Creates a tracing span with step metadata. The span is entered synchronously
+/// and must be exited by dropping the guard.
+///
+/// # Arguments
+/// * `step_id` - Unique step identifier
+/// * `step_name` - Optional human-readable step name
+/// * `step_type` - Step type string (e.g., "Agent", "Conditional")
+///
+/// # Generated Code Pattern
+/// ```rust,ignore
+/// let __step_span = tracing::info_span!(
+///     "step.agent",
+///     step.id = "step-1",
+///     step.name = "My Step",
+///     step.type = "Agent",
+///     otel.kind = "INTERNAL"
+/// );
+/// let __step_span_guard = __step_span.enter();
+/// ```
+pub fn emit_step_span_start(
+    step_id: &str,
+    step_name: Option<&str>,
+    step_type: &str,
+) -> TokenStream {
+    let span_name = format!("step.{}", step_type.to_lowercase());
+    let name_display = step_name.unwrap_or(step_id);
+
+    quote! {
+        let __step_span = tracing::info_span!(
+            #span_name,
+            step.id = #step_id,
+            step.name = #name_display,
+            step.type = #step_type,
+            otel.kind = "INTERNAL"
+        );
+        let __step_span_guard = __step_span.enter();
+    }
+}
+
+/// Emit code for agent step span with additional agent attributes.
+///
+/// Similar to `emit_step_span_start` but includes agent.id and capability.id.
+pub fn emit_agent_span_start(
+    step_id: &str,
+    step_name: Option<&str>,
+    agent_id: &str,
+    capability_id: &str,
+) -> TokenStream {
+    let name_display = step_name.unwrap_or(step_id);
+
+    quote! {
+        let __step_span = tracing::info_span!(
+            "step.agent",
+            step.id = #step_id,
+            step.name = #name_display,
+            step.type = "Agent",
+            agent.id = #agent_id,
+            capability.id = #capability_id,
+            otel.kind = "INTERNAL"
+        );
+        let __step_span_guard = __step_span.enter();
+    }
+}
+
+/// Emit code to exit a step span.
+///
+/// Drops the span guard to end the span.
+pub fn emit_step_span_end() -> TokenStream {
+    quote! {
+        drop(__step_span_guard);
+    }
+}
+
+/// Emit code for iteration span (Split/While steps).
+///
+/// Creates a child span for each loop iteration with the iteration index.
+///
+/// # Arguments
+/// * `step_id` - Parent step identifier
+/// * `step_type` - Step type ("split" or "while")
+/// * `index_var` - Variable holding the current iteration index
+pub fn emit_iteration_span_start(
+    step_id: &str,
+    step_type: &str,
+    index_var: &proc_macro2::Ident,
+) -> TokenStream {
+    let span_name = format!("{}.iteration", step_type.to_lowercase());
+
+    quote! {
+        let __iter_span = tracing::info_span!(
+            #span_name,
+            step.id = #step_id,
+            iteration.index = #index_var,
+            otel.kind = "INTERNAL"
+        );
+        let __iter_span_guard = __iter_span.enter();
+    }
+}
+
+/// Emit code to exit an iteration span.
+pub fn emit_iteration_span_end() -> TokenStream {
+    quote! {
+        drop(__iter_span_guard);
+    }
+}
+
+/// Emit code for child scenario span (StartScenario step).
+///
+/// Creates a span for the child scenario execution.
+///
+/// # Arguments
+/// * `parent_step_id` - The StartScenario step ID
+/// * `child_scenario_id` - The child scenario ID
+pub fn emit_child_scenario_span_start(
+    parent_step_id: &str,
+    child_scenario_id: &str,
+) -> TokenStream {
+    quote! {
+        let __child_span = tracing::info_span!(
+            "scenario.child",
+            scenario.id = #child_scenario_id,
+            parent_step.id = #parent_step_id,
+            otel.kind = "INTERNAL"
+        );
+        let __child_span_guard = __child_span.enter();
+    }
+}
+
+/// Emit code to exit a child scenario span.
+pub fn emit_child_scenario_span_end() -> TokenStream {
+    quote! {
+        drop(__child_span_guard);
+    }
+}
+
 /// Build execution order using BFS traversal from entry point.
 /// Stops at Conditional steps (branches handled separately).
 pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
