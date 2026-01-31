@@ -148,7 +148,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
         // Wrap step execution in async block instrumented with span
         // This ensures proper span propagation across await points
-        let __step_result: Result<(), String> = async {
+        let __step_result: std::result::Result<(), String> = async {
             #debug_start
 
             #execute_capability

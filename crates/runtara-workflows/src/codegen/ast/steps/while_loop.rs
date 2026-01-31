@@ -139,7 +139,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     }
 
                     // Wrap iteration body (with async operations) in instrumented async block
-                    let __iter_result: Result<serde_json::Value, String> = async {
+                    let __iter_result: std::result::Result<serde_json::Value, String> = async {
                         // Prepare subgraph inputs with loop context
                         let mut __loop_vars = match (*#inputs_var.variables).clone() {
                             serde_json::Value::Object(m) => m,
