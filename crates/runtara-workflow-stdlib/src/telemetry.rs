@@ -24,11 +24,13 @@
 
 /// Guard that ensures telemetry is flushed on drop.
 ///
-/// When OpenTelemetry is enabled, this guard holds the tracer provider
-/// and flushes all pending spans when dropped.
+/// When OpenTelemetry is enabled, this guard holds the tracer and logger providers
+/// and flushes all pending spans and logs when dropped.
 pub struct TelemetryGuard {
     #[cfg(feature = "telemetry")]
-    provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    trace_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    #[cfg(feature = "telemetry")]
+    log_provider: Option<opentelemetry_sdk::logs::SdkLoggerProvider>,
     #[cfg(not(feature = "telemetry"))]
     _phantom: std::marker::PhantomData<()>,
 }
@@ -36,10 +38,18 @@ pub struct TelemetryGuard {
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
         #[cfg(feature = "telemetry")]
-        if let Some(ref provider) = self.provider {
+        {
             // Flush all pending spans before shutdown
-            if let Err(e) = provider.force_flush() {
-                eprintln!("OTEL flush error: {:?}", e);
+            if let Some(ref provider) = self.trace_provider
+                && let Err(e) = provider.force_flush()
+            {
+                eprintln!("OTEL trace flush error: {:?}", e);
+            }
+            // Flush all pending logs before shutdown
+            if let Some(ref provider) = self.log_provider
+                && let Err(e) = provider.force_flush()
+            {
+                eprintln!("OTEL log flush error: {:?}", e);
             }
         }
     }
@@ -76,24 +86,26 @@ pub fn init_subscriber() -> TelemetryGuard {
 
     #[cfg(feature = "telemetry")]
     {
-        if let Some((otel_layer, provider)) = maybe_init_otel() {
-            // Build subscriber with OTEL layer using the registry directly
-            // Create separate fmt layer for this subscriber
+        if let Some((trace_layer, log_layer, trace_provider, log_provider)) = maybe_init_otel() {
+            // Build subscriber with OTEL layers using the registry directly
+            // Create separate fmt layer for this subscriber (stderr output for local debugging)
             let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
                 .with_ansi(false)
                 .with_target(true);
 
             let subscriber = tracing_subscriber::Registry::default()
-                .with(otel_layer)
-                .with(fmt_layer)
+                .with(trace_layer) // Traces to OTLP
+                .with(log_layer) // Logs to OTLP (with trace context for correlation)
+                .with(fmt_layer) // Also print to stderr
                 .with(filter);
 
             tracing::subscriber::set_global_default(subscriber)
                 .expect("Failed to set global subscriber");
 
             return TelemetryGuard {
-                provider: Some(provider),
+                trace_provider: Some(trace_provider),
+                log_provider: Some(log_provider),
             };
         }
     }
@@ -107,26 +119,41 @@ pub fn init_subscriber() -> TelemetryGuard {
 
     TelemetryGuard {
         #[cfg(feature = "telemetry")]
-        provider: None,
+        trace_provider: None,
+        #[cfg(feature = "telemetry")]
+        log_provider: None,
         #[cfg(not(feature = "telemetry"))]
         _phantom: std::marker::PhantomData,
     }
 }
 
 #[cfg(feature = "telemetry")]
-type OtelLayer = tracing_opentelemetry::OpenTelemetryLayer<
+type OtelTraceLayer = tracing_opentelemetry::OpenTelemetryLayer<
     tracing_subscriber::Registry,
     opentelemetry_sdk::trace::SdkTracer,
 >;
 
+#[cfg(feature = "telemetry")]
+type OtelLogLayer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge<
+    opentelemetry_sdk::logs::SdkLoggerProvider,
+    opentelemetry_sdk::logs::SdkLogger,
+>;
+
 /// Try to initialize OpenTelemetry if endpoint is configured.
 ///
-/// Returns `Some((layer, provider))` if OTEL is configured, `None` otherwise.
+/// Returns `Some((trace_layer, log_layer, trace_provider, log_provider))` if OTEL is configured, `None` otherwise.
 #[cfg(feature = "telemetry")]
-fn maybe_init_otel() -> Option<(OtelLayer, opentelemetry_sdk::trace::SdkTracerProvider)> {
+fn maybe_init_otel() -> Option<(
+    OtelTraceLayer,
+    OtelLogLayer,
+    opentelemetry_sdk::trace::SdkTracerProvider,
+    opentelemetry_sdk::logs::SdkLoggerProvider,
+)> {
     use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+    use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
     use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
     use opentelemetry_sdk::trace::SdkTracerProvider;
 
     // Check if OTEL endpoint is configured
@@ -175,36 +202,57 @@ fn maybe_init_otel() -> Option<(OtelLayer, opentelemetry_sdk::trace::SdkTracerPr
         .with_attributes(additional_attrs)
         .build();
 
-    // Build OTLP exporter
-    let exporter = SpanExporter::builder()
+    // Build OTLP span exporter
+    let span_exporter = SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
         .build()
         .map_err(|e| {
-            eprintln!("Failed to create OTLP exporter: {:?}", e);
+            eprintln!("Failed to create OTLP span exporter: {:?}", e);
+            e
+        })
+        .ok()?;
+
+    // Build OTLP log exporter
+    let log_exporter = LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()
+        .map_err(|e| {
+            eprintln!("Failed to create OTLP log exporter: {:?}", e);
             e
         })
         .ok()?;
 
     // Build tracer provider with batch exporter
-    let provider = SdkTracerProvider::builder()
-        .with_resource(resource)
-        .with_batch_exporter(exporter)
+    let trace_provider = SdkTracerProvider::builder()
+        .with_resource(resource.clone())
+        .with_batch_exporter(span_exporter)
         .build();
 
-    // Set as global provider
-    opentelemetry::global::set_tracer_provider(provider.clone());
+    // Build logger provider with batch exporter
+    let log_provider = SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(log_exporter)
+        .build();
 
-    // Create tracer and layer
-    let tracer = provider.tracer(service_name);
-    let layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    // Set tracer as global provider (logs don't need global registration -
+    // the bridge holds a direct reference to the log provider)
+    opentelemetry::global::set_tracer_provider(trace_provider.clone());
+
+    // Create tracer and trace layer
+    let tracer = trace_provider.tracer(service_name);
+    let trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // Create log layer (bridges tracing events to OTEL logs with trace context)
+    let log_layer = OpenTelemetryTracingBridge::new(&log_provider);
 
     // Parse and apply TRACEPARENT for parent context linking
     if let Ok(traceparent) = std::env::var("TRACEPARENT") {
         apply_traceparent(&traceparent);
     }
 
-    Some((layer, provider))
+    Some((trace_layer, log_layer, trace_provider, log_provider))
 }
 
 /// Apply W3C TRACEPARENT header to set up parent context.

@@ -20,6 +20,7 @@ telemetry = [
     "opentelemetry_sdk",
     "opentelemetry-otlp",
     "tracing-opentelemetry",
+    "opentelemetry-appender-tracing",
 ]
 
 [dependencies]
@@ -46,7 +47,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # OpenTelemetry (optional - enabled via telemetry feature)
-opentelemetry = { version = "0.28", features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "trace"], optional = true }
-opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry = { version = "0.28", features = ["trace", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "trace", "logs"], optional = true }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "trace", "logs"], optional = true }
 tracing-opentelemetry = { version = "0.29", optional = true }
+opentelemetry-appender-tracing = { version = "0.28", optional = true }
