@@ -198,6 +198,7 @@ fn emit_with_embedded_child(
             parent_scope_id: Option<String>,
             parent_cache_prefix: Option<String>,
             loop_indices_suffix: String,
+            parent_scenario_id: Option<String>,
         ) -> std::result::Result<serde_json::Value, String> {
             // Generate scope ID for this child scenario execution
             let __child_scope_id = if let Some(ref parent) = parent_scope_id {
@@ -215,11 +216,19 @@ fn emit_with_embedded_child(
             __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
 
             // Build cache key prefix for child scenario
-            // Inherits parent's prefix (if any) and appends this step's identity + loop indices
+            // Inherits parent's prefix (if any) and appends this step's identity + loop indices.
+            // When there's no parent prefix (top-level scenario), we include the parent's
+            // _scenario_id to prevent cache collisions between independent scenarios that
+            // happen to use the same step_id for their StartScenario steps.
             let __child_cache_prefix = {
                 match &parent_cache_prefix {
                     Some(p) if !p.is_empty() => format!("{}__{}{}",  p, step_id, loop_indices_suffix),
-                    _ => format!("{}{}", step_id, loop_indices_suffix),
+                    _ => {
+                        // No parent prefix - this is a top-level StartScenario.
+                        // Include the scenario's unique ID to prevent cache collisions.
+                        let scenario_id = parent_scenario_id.as_deref().unwrap_or("root");
+                        format!("{}::{}{}",  scenario_id, step_id, loop_indices_suffix)
+                    }
                 }
             };
             __child_vars.insert("_cache_key_prefix".to_string(), serde_json::json!(__child_cache_prefix));
@@ -348,6 +357,14 @@ fn emit_with_embedded_child(
             })
             .unwrap_or_default();
 
+        // Get parent's scenario ID for cache key uniqueness (prevents collision
+        // between independent top-level scenarios with same step IDs)
+        let __parent_scenario_id = (*#scenario_inputs_var.variables)
+            .as_object()
+            .and_then(|vars| vars.get("_scenario_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         // Execute the durable child scenario function
         let #step_var = #durable_fn_name(
             &__durable_cache_key,
@@ -358,6 +375,7 @@ fn emit_with_embedded_child(
             __parent_scope_id,
             __parent_cache_prefix,
             __loop_indices_suffix,
+            __parent_scenario_id,
         ).await?;
 
             #debug_end

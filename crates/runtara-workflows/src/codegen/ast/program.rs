@@ -367,14 +367,27 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 }
             }
 
+            // Create root span for entire scenario execution
+            let scenario_id = std::env::var("SCENARIO_ID").unwrap_or_else(|_| "unknown".to_string());
+            let instance_id = std::env::var("RUNTARA_INSTANCE_ID").unwrap_or_else(|_| "unknown".to_string());
+
+            // Inject _scenario_id into variables for cache key prefix uniqueness.
+            // This ensures that when independent top-level scenarios call the same child scenario
+            // with identical step IDs, their cache keys don't collide.
+            // Format: "scenario_id::instance_id" to be unique per execution.
+            if let Some(vars_obj) = variables.as_object_mut() {
+                vars_obj.insert(
+                    "_scenario_id".to_string(),
+                    serde_json::json!(format!("{}::{}", scenario_id, instance_id))
+                );
+            }
+
             let scenario_inputs = ScenarioInputs {
                 data: Arc::new(data),
                 variables: Arc::new(variables),
                 parent_scope_id: None, // Top-level has no parent scope
             };
 
-            // Create root span for entire scenario execution
-            let scenario_id = std::env::var("SCENARIO_ID").unwrap_or_else(|_| "unknown".to_string());
             let __root_span = tracing::info_span!(
                 "scenario.execute",
                 scenario.id = %scenario_id,
