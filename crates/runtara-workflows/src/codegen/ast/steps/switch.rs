@@ -394,44 +394,53 @@ fn emit_routing_switch(
         }
     };
 
+    // Note: Routing Switch does NOT use async block wrapping because:
+    // 1. Case matching and route determination are synchronous
+    // 2. Branch steps have their own async instrumentation
+    // 3. Branches may contain Finish steps with `return Ok(...)` that must
+    //    return from execute_workflow, not from an enclosing async block
+    //
+    // We use sync span entry (.entered()) which properly propagates to child spans.
     Ok(quote! {
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
 
-        // Define tracing span for this step
+        // Define and enter tracing span for this step (sync pattern for control flow)
         #span_def
+        let __step_span_guard = __step_span.entered();
 
-        // Wrap step execution in async block instrumented with span
-        async {
-            #debug_start
+        #debug_start
 
-            // Compile-time expanded case matching with route tracking
-            let mut matched_output: Option<serde_json::Value> = None;
-            let mut matched_route: Option<&str> = None;
+        // Compile-time expanded case matching with route tracking
+        let mut matched_output: Option<serde_json::Value> = None;
+        let mut matched_route: Option<&str> = None;
 
-            #(#case_blocks)*
+        #(#case_blocks)*
 
-            let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
-            let __route: &str = matched_route.unwrap_or("default");
+        let output = matched_output.unwrap_or_else(|| process_switch_output(&#default_tokens, &#source_var));
+        let __route: &str = matched_route.unwrap_or("default");
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Switch",
-                "outputs": output,
-                "route": __route
-            });
+        let #step_var = serde_json::json!({
+            "stepId": #step_id,
+            "stepName": #step_name_display,
+            "stepType": "Switch",
+            "outputs": output,
+            "route": __route
+        });
 
-            #debug_end
+        #debug_end
 
-            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+        #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
-            // Route dispatch
-            #route_dispatch
+        // Drop the span guard before executing branches
+        // Each branch step has its own instrumentation that will create child spans
+        drop(__step_span_guard);
 
-            // Common suffix after merge point
-            #common_suffix_code
-        }.instrument(__step_span).await;
+        // Route dispatch
+        #route_dispatch
+
+        // Common suffix after merge point
+        #common_suffix_code
     })
 }
 

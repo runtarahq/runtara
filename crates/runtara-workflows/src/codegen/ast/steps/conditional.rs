@@ -106,42 +106,51 @@ pub fn emit(
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Conditional");
 
+    // Note: Conditional does NOT use async block wrapping because:
+    // 1. Condition evaluation is synchronous (no await points)
+    // 2. Branch steps have their own async instrumentation
+    // 3. Branches may contain Finish steps with `return Ok(...)` that must
+    //    return from execute_workflow, not from an enclosing async block
+    //
+    // We use sync span entry (.entered()) which properly propagates to child spans
+    // created by branch steps via their .instrument() calls.
     Ok(quote! {
         let #source_var = #build_source;
         let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
 
-        // Define tracing span for this step
+        // Define and enter tracing span for this step (sync pattern for control flow)
         #span_def
+        let __step_span_guard = __step_span.entered();
 
-        // Wrap step execution in async block instrumented with span
-        // Note: Branches are executed inside the span for proper nesting
-        async {
-            #debug_start
+        #debug_start
 
-            let #condition_var: bool = #condition_eval;
+        let #condition_var: bool = #condition_eval;
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Conditional",
-                "outputs": {
-                    "result": #condition_var
-                }
-            });
-
-            #debug_end
-
-            #steps_context.insert(#step_id.to_string(), #step_var.clone());
-
-            // Execute the appropriate branch
-            if #condition_var {
-                #true_branch_code
-            } else {
-                #false_branch_code
+        let #step_var = serde_json::json!({
+            "stepId": #step_id,
+            "stepName": #step_name_display,
+            "stepType": "Conditional",
+            "outputs": {
+                "result": #condition_var
             }
+        });
 
-            // Execute common suffix path after merge point (if any)
-            #common_suffix_code
-        }.instrument(__step_span).await;
+        #debug_end
+
+        #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+        // Drop the span guard before executing branches
+        // Each branch step has its own instrumentation that will create child spans
+        drop(__step_span_guard);
+
+        // Execute the appropriate branch
+        if #condition_var {
+            #true_branch_code
+        } else {
+            #false_branch_code
+        }
+
+        // Execute common suffix path after merge point (if any)
+        #common_suffix_code
     })
 }
