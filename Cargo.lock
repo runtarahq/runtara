@@ -2399,6 +2399,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "syn",
  "tempfile",
  "tracing",
  "tracing-subscriber",

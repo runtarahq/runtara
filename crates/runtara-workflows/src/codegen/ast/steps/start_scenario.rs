@@ -317,7 +317,7 @@ fn emit_with_embedded_child(
                             format!("StartScenario step {} interrupted", step_id)
                         }));
                     }
-                }.map_err(|e| {
+                }.map_err(|e: String| {
                     // Try to parse the child error as structured JSON
                     let child_error: serde_json::Value = serde_json::from_str(&e)
                         .unwrap_or_else(|_| serde_json::json!({
@@ -1489,5 +1489,95 @@ mod tests {
         assert!(code1.contains("child_shared_1"));
         assert!(code2.contains("child_shared_1"));
         assert!(code3.contains("child_shared_1"));
+    }
+
+    // =============================================================================
+    // Generated code validation tests
+    // These tests verify the generated code is valid Rust that will compile.
+    // =============================================================================
+
+    /// Validates that generated TokenStream is valid Rust syntax using syn.
+    /// This catches syntax errors early but won't catch type inference issues.
+    fn validate_syntax(tokens: &TokenStream) -> Result<(), String> {
+        let code = tokens.to_string();
+        // Parse as a statement sequence (what we generate for step code)
+        syn::parse_str::<syn::File>(&format!("fn __validate() {{ {} }}", code))
+            .map(|_| ())
+            .map_err(|e| format!("Syntax error in generated code: {}", e))
+    }
+
+    #[test]
+    fn test_generated_code_is_valid_syntax() {
+        let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+
+        validate_syntax(&tokens).expect("Generated code should be valid Rust syntax");
+    }
+
+    #[test]
+    fn test_generated_code_with_input_mapping_is_valid_syntax() {
+        let mut step = create_basic_step("start-child", "child-scenario-id");
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "param1".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("test"),
+            }),
+        );
+        step.input_mapping = Some(mapping);
+
+        let child_graph = create_child_graph("Child");
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+
+        validate_syntax(&tokens).expect("Generated code with input mapping should be valid syntax");
+    }
+
+    /// Regression test: Ensure map_err closure has explicit String type annotation.
+    /// Without this, the compiler may infer `str` instead of `String`, causing:
+    /// "error[E0277]: the size for values of type `str` cannot be known at compilation time"
+    #[test]
+    fn test_map_err_closure_has_explicit_type() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+        let child_graph = create_child_graph("Child");
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+        let code = tokens.to_string();
+
+        // The map_err closure MUST have explicit String type to avoid type inference issues
+        // Pattern: .map_err(|e: String| { ... })
+        assert!(
+            code.contains("map_err (| e : String |")
+                || code.contains("map_err(|e: String|")
+                || code.contains("map_err (| e : String |"),
+            "map_err closure must have explicit |e: String| type annotation to avoid type inference errors. \
+             Found code: {}",
+            // Show a snippet around map_err for debugging
+            code.find("map_err")
+                .map(|i| &code[i.saturating_sub(20)..code.len().min(i + 100)])
+                .unwrap_or("map_err not found")
+        );
+    }
+
+    /// Regression test: Ensure no turbofish syntax in json! macro calls.
+    /// The serde_json::json! macro doesn't support turbofish on null.
+    #[test]
+    fn test_no_turbofish_in_json_macro() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+        let child_graph = create_child_graph("Child");
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+        let code = tokens.to_string();
+
+        assert!(
+            !code.contains("null::<") && !code.contains("null :: <"),
+            "Generated code must not contain null::<Type> - json! macro doesn't support turbofish"
+        );
     }
 }
