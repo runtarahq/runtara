@@ -614,6 +614,45 @@ pub struct ToJsonStringOutput {
     pub length: usize,
 }
 
+/// Input for ensure-array operation
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Ensure Array Input")]
+pub struct EnsureArrayInput {
+    /// The value to ensure is an array
+    #[field(
+        display_name = "Value",
+        description = "Value to wrap in an array if not already an array. Arrays pass through unchanged, null becomes empty array.",
+        example = r#"{"name": "Alice"}"#
+    )]
+    pub value: Value,
+}
+
+/// Output from ensure-array operation
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "Ensure Array Output")]
+pub struct EnsureArrayOutput {
+    /// The value as an array
+    #[field(
+        display_name = "Items",
+        description = "The input wrapped as an array (or the original array if already an array)"
+    )]
+    pub items: Vec<Value>,
+
+    /// Number of items in the array
+    #[field(
+        display_name = "Count",
+        description = "Number of items in the resulting array"
+    )]
+    pub count: usize,
+
+    /// Whether the input was already an array
+    #[field(
+        display_name = "Was Array",
+        description = "True if the input was already an array, false if it was wrapped"
+    )]
+    pub was_array: bool,
+}
+
 // ============================================================================
 // Operations
 // ============================================================================
@@ -1160,6 +1199,27 @@ pub fn array_length(input: ArrayLengthInput) -> Result<ArrayLengthOutput, String
     };
 
     Ok(ArrayLengthOutput { length, is_array })
+}
+
+/// Ensures a value is an array, wrapping non-array values in a single-element array
+#[capability(
+    module = "transform",
+    display_name = "Ensure Array",
+    description = "Ensure a value is an array. Arrays pass through unchanged, null becomes empty array, other values are wrapped in a single-element array."
+)]
+pub fn ensure_array(input: EnsureArrayInput) -> Result<EnsureArrayOutput, String> {
+    let (items, was_array) = match input.value {
+        Value::Array(arr) => (arr, true),
+        Value::Null => (vec![], false),
+        other => (vec![other], false),
+    };
+
+    let count = items.len();
+    Ok(EnsureArrayOutput {
+        items,
+        count,
+        was_array,
+    })
 }
 
 // ============================================================================
@@ -2066,5 +2126,83 @@ mod tests {
 
         let result = coalesce(input).unwrap();
         assert_eq!(result, json!(1.5));
+    }
+
+    // ==================== Ensure Array Tests ====================
+
+    #[test]
+    fn test_ensure_array_with_array() {
+        let input = EnsureArrayInput {
+            value: json!([1, 2, 3]),
+        };
+
+        let result = ensure_array(input).unwrap();
+        assert_eq!(result.items, vec![json!(1), json!(2), json!(3)]);
+        assert_eq!(result.count, 3);
+        assert!(result.was_array);
+    }
+
+    #[test]
+    fn test_ensure_array_with_single_object() {
+        let input = EnsureArrayInput {
+            value: json!({"name": "Alice", "age": 30}),
+        };
+
+        let result = ensure_array(input).unwrap();
+        assert_eq!(result.items, vec![json!({"name": "Alice", "age": 30})]);
+        assert_eq!(result.count, 1);
+        assert!(!result.was_array);
+    }
+
+    #[test]
+    fn test_ensure_array_with_single_string() {
+        let input = EnsureArrayInput {
+            value: json!("hello"),
+        };
+
+        let result = ensure_array(input).unwrap();
+        assert_eq!(result.items, vec![json!("hello")]);
+        assert_eq!(result.count, 1);
+        assert!(!result.was_array);
+    }
+
+    #[test]
+    fn test_ensure_array_with_single_number() {
+        let input = EnsureArrayInput { value: json!(42) };
+
+        let result = ensure_array(input).unwrap();
+        assert_eq!(result.items, vec![json!(42)]);
+        assert_eq!(result.count, 1);
+        assert!(!result.was_array);
+    }
+
+    #[test]
+    fn test_ensure_array_with_null() {
+        let input = EnsureArrayInput { value: json!(null) };
+
+        let result = ensure_array(input).unwrap();
+        assert!(result.items.is_empty());
+        assert_eq!(result.count, 0);
+        assert!(!result.was_array);
+    }
+
+    #[test]
+    fn test_ensure_array_with_boolean() {
+        let input = EnsureArrayInput { value: json!(true) };
+
+        let result = ensure_array(input).unwrap();
+        assert_eq!(result.items, vec![json!(true)]);
+        assert_eq!(result.count, 1);
+        assert!(!result.was_array);
+    }
+
+    #[test]
+    fn test_ensure_array_with_empty_array() {
+        let input = EnsureArrayInput { value: json!([]) };
+
+        let result = ensure_array(input).unwrap();
+        assert!(result.items.is_empty());
+        assert_eq!(result.count, 0);
+        assert!(result.was_array);
     }
 }
