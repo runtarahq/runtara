@@ -210,10 +210,16 @@ fn emit_with_embedded_child(
             // Prepare child scenario inputs
             // All mapped inputs become child's data (myParam1 -> data.myParam1)
             // Child variables are always isolated - never inherited from parent
-            // BUT we inject _scope_id and _cache_key_prefix so scope tracking and
+            // BUT we inject _scope_id, _cache_key_prefix, and _scenario_id so scope tracking and
             // checkpoint cache keys work correctly within child
             let mut __child_vars = serde_json::Map::new();
             __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
+
+            // Propagate _scenario_id to child so it's available at all nesting levels
+            // This ensures Agent steps in deeply nested scenarios can access the root scenario identity
+            if let Some(ref sid) = parent_scenario_id {
+                __child_vars.insert("_scenario_id".to_string(), serde_json::json!(sid));
+            }
 
             // Build cache key prefix for child scenario
             // Inherits parent's prefix (if any) and appends this step's identity + loop indices.
@@ -1086,6 +1092,173 @@ mod tests {
         assert!(
             code.contains("_cache_key_prefix") && code.contains("__durable_cache_key"),
             "StartScenario's own cache key must include parent prefix"
+        );
+    }
+
+    // =============================================================================
+    // Cache key collision prevention tests (scenario_id propagation)
+    // =============================================================================
+
+    #[test]
+    fn test_emit_extracts_parent_scenario_id() {
+        // Verifies that _scenario_id is extracted from parent's variables
+        let step = create_named_step("call-child", "Call Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // Should extract __parent_scenario_id from parent's variables
+        assert!(
+            code.contains("__parent_scenario_id"),
+            "Should extract __parent_scenario_id from parent variables"
+        );
+        assert!(
+            code.contains("_scenario_id"),
+            "Should read _scenario_id from variables"
+        );
+    }
+
+    #[test]
+    fn test_emit_propagates_scenario_id_to_child() {
+        // Verifies that _scenario_id is propagated to child's variables
+        let step = create_named_step("call-child", "Call Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // Should propagate _scenario_id to __child_vars
+        assert!(
+            code.contains("__child_vars . insert (\"_scenario_id\""),
+            "Should propagate _scenario_id to child variables"
+        );
+    }
+
+    #[test]
+    fn test_emit_uses_scenario_id_in_fallback_prefix() {
+        // Verifies that when there's no parent prefix, _scenario_id is used
+        let step = create_named_step("call-child", "Call Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // When no parent prefix, should use parent_scenario_id for unique cache key
+        assert!(
+            code.contains("parent_scenario_id . as_deref ()"),
+            "Should use parent_scenario_id when no parent prefix"
+        );
+        // Should have fallback to "root" if no scenario_id
+        assert!(
+            code.contains("unwrap_or (\"root\")"),
+            "Should fallback to 'root' if no scenario_id"
+        );
+    }
+
+    #[test]
+    fn test_emit_passes_scenario_id_to_durable_function() {
+        // Verifies that parent_scenario_id is passed as a parameter to the durable function
+        let step = create_named_step("call-child", "Call Child", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // Durable function should have parent_scenario_id parameter
+        assert!(
+            code.contains("parent_scenario_id : Option < String >"),
+            "Durable function should have parent_scenario_id parameter"
+        );
+        // Should pass __parent_scenario_id when calling durable function
+        assert!(
+            code.contains("__parent_scenario_id"),
+            "Should pass __parent_scenario_id to durable function"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_prefix_format_with_scenario_id() {
+        // Verifies the cache prefix format includes scenario_id when no parent prefix
+        let step = create_named_step("process-files", "Process Files", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // The format should be: format!("{}::{}{}", scenario_id, step_id, loop_indices_suffix)
+        // This ensures different parent scenarios produce different prefixes
+        assert!(
+            code.contains("\"{}::{}{}\"") && code.contains("scenario_id"),
+            "Fallback prefix format should use scenario_id::step_id::indices pattern"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_prefix_format_with_parent_prefix() {
+        // Verifies the cache prefix format when parent prefix exists
+        let step = create_named_step("nested-call", "Nested Call", "child-scenario-id");
+        let child_graph = create_child_graph("Child Graph");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // When parent prefix exists, format is: format!("{}__{}{}",  p, step_id, loop_indices_suffix)
+        assert!(
+            code.contains("\"{}__{}{}\""),
+            "Nested prefix format should use parent__step_id__indices pattern"
+        );
+    }
+
+    #[test]
+    fn test_scenario_collision_prevention_complete_chain() {
+        // This test verifies the complete chain of scenario_id handling:
+        // 1. Root scenario injects _scenario_id
+        // 2. StartScenario reads parent's _scenario_id
+        // 3. StartScenario propagates _scenario_id to child
+        // 4. Child uses _scenario_id for cache key prefix when no parent prefix
+        //
+        // This prevents collisions like:
+        //   Orchestrator -> A -> D (cache key includes "A's path")
+        //   Orchestrator -> B -> D (cache key includes "B's path")
+
+        let step = create_named_step("call-shared-child", "Call Shared Child", "shared-child");
+        let child_graph = create_child_graph("Shared Child");
+        let mut ctx = EmitContext::new(false);
+
+        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let code = tokens.to_string();
+
+        // All required elements for collision prevention must be present:
+
+        // 1. Extract parent's scenario_id
+        assert!(
+            code.contains("vars . get (\"_scenario_id\")"),
+            "Must read _scenario_id from parent variables"
+        );
+
+        // 2. Propagate to child
+        assert!(
+            code.contains("__child_vars . insert (\"_scenario_id\""),
+            "Must propagate _scenario_id to child"
+        );
+
+        // 3. Use in cache prefix fallback
+        assert!(
+            code.contains("parent_scenario_id . as_deref ()"),
+            "Must use parent_scenario_id in fallback"
+        );
+
+        // 4. Different format for nested (with prefix) vs top-level (without prefix)
+        assert!(
+            code.contains("Some (p) if ! p . is_empty ()"),
+            "Must check for existing parent prefix"
         );
     }
 }

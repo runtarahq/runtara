@@ -135,8 +135,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Split");
 
-    // Cache key for the split step's final result checkpoint
-    let cache_key = format!("split::{}", step_id);
+    // Static base for cache key - will be combined with prefix/scenario_id at runtime
+    let cache_key_base = format!("split::{}", step_id);
 
     // Generate the durable function with configurable retry settings
     let max_retries_lit = max_retries;
@@ -145,6 +145,43 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     Ok(quote! {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
+
+        // Build cache key dynamically, including prefix and loop indices
+        let __split_cache_key = {
+            // Get prefix from parent context (set by StartScenario)
+            let prefix = (*#inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_cache_key_prefix"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let base = #cache_key_base;
+            let indices_suffix = (*#inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    let indices: Vec<String> = arr.iter()
+                        .map(|v| v.to_string())
+                        .collect();
+                    format!("::[{}]", indices.join(","))
+                })
+                .unwrap_or_default();
+
+            if prefix.is_empty() {
+                // No cache prefix - use _scenario_id to prevent collisions between
+                // independent scenarios running the same split steps
+                let scenario_id = (*#inputs_var.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("root");
+                format!("{}::{}{}", scenario_id, base, indices_suffix)
+            } else {
+                format!("{}::{}{}", prefix, base, indices_suffix)
+            }
+        };
 
         // Define tracing span for this step
         #span_def
@@ -481,7 +518,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Execute the durable split function
         let variables_base = (*#inputs_var.variables).clone();
         let #step_var = #durable_fn_name(
-            #cache_key,
+            &__split_cache_key,
             split_array,
             variables_base,
             extra_variables,
@@ -1205,6 +1242,140 @@ mod tests {
         assert!(
             code.contains("if parallelism <= 1"),
             "Should treat parallelism 0 and 1 as sequential execution"
+        );
+    }
+
+    // ==========================================================================
+    // Cache Key Collision Prevention Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_emit_split_uses_scenario_id_when_prefix_empty() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-cache-test".to_string(),
+            name: Some("Cache Test Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify the generated code checks for _scenario_id when prefix is empty
+        assert!(
+            code.contains("_scenario_id"),
+            "Should check for _scenario_id in variables"
+        );
+
+        // Verify the fallback logic: use scenario_id when prefix is empty
+        assert!(
+            code.contains("if prefix . is_empty ()"),
+            "Should have condition to check if prefix is empty"
+        );
+
+        // Verify it uses scenario_id in cache key format
+        assert!(
+            code.contains(r#"unwrap_or ("root")"#),
+            "Should fallback to 'root' if _scenario_id not found"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_cache_key_includes_loop_indices() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-indices".to_string(),
+            name: Some("Loop Indices Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify loop indices are extracted from variables
+        assert!(
+            code.contains("_loop_indices"),
+            "Should check for _loop_indices in variables"
+        );
+
+        // Verify loop indices suffix format
+        assert!(
+            code.contains("indices_suffix"),
+            "Should build indices_suffix from _loop_indices"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_cache_key_uses_prefix_when_available() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-prefix".to_string(),
+            name: Some("Prefix Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify the code extracts _cache_key_prefix
+        assert!(
+            code.contains("_cache_key_prefix"),
+            "Should check for _cache_key_prefix in variables"
+        );
+
+        // Verify both prefix and scenario_id paths exist in the format! calls
+        // The else branch uses prefix when it's not empty
+        assert!(
+            code.contains(r#"format ! ("{}::{}{}""#),
+            "Should use format with prefix/scenario_id, base, and indices_suffix"
         );
     }
 }

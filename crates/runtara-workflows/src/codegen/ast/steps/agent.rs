@@ -238,7 +238,14 @@ fn emit_durable_call(
                 .unwrap_or_default();
 
             if prefix.is_empty() {
-                format!("{}{}", base, indices_suffix)
+                // No cache prefix - use _scenario_id to prevent collisions between
+                // independent scenarios running the same agent steps
+                let scenario_id = (*#scenario_inputs_var.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("root");
+                format!("{}::{}{}", scenario_id, base, indices_suffix)
             } else {
                 format!("{}::{}{}", prefix, base, indices_suffix)
             }
@@ -333,7 +340,14 @@ fn emit_durable_rate_limited_call(
                 .unwrap_or_default();
 
             if prefix.is_empty() {
-                format!("{}{}", base, indices_suffix)
+                // No cache prefix - use _scenario_id to prevent collisions between
+                // independent scenarios running the same agent steps
+                let scenario_id = (*#scenario_inputs_var.variables)
+                    .as_object()
+                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("root");
+                format!("{}::{}{}", scenario_id, base, indices_suffix)
             } else {
                 format!("{}::{}{}", prefix, base, indices_suffix)
             }
@@ -923,6 +937,85 @@ mod tests {
         assert!(
             code.contains("\"{}::{}{}\""),
             "Should format with prefix when present"
+        );
+    }
+
+    // =============================================================================
+    // Cache key collision prevention tests (scenario_id usage)
+    // =============================================================================
+
+    #[test]
+    fn test_emit_agent_uses_scenario_id_when_no_prefix() {
+        // Verifies that Agent step uses _scenario_id when _cache_key_prefix is empty
+        // This prevents cache collisions between independent scenarios
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("check-file", "sftp", "exists");
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // When prefix is empty, should read _scenario_id
+        assert!(
+            code.contains("_scenario_id"),
+            "Should read _scenario_id when prefix is empty"
+        );
+        // Should fallback to "root" if _scenario_id is not set
+        assert!(
+            code.contains("unwrap_or (\"root\")"),
+            "Should fallback to 'root' if no scenario_id"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_cache_key_format_with_scenario_id() {
+        // Verifies the cache key format uses scenario_id when no prefix
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("my-step", "http", "request");
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // The format should be: format!("{}::{}{}", scenario_id, base, indices_suffix)
+        // This appears in the prefix.is_empty() branch
+        assert!(
+            code.contains("scenario_id")
+                && code.contains("base")
+                && code.contains("indices_suffix"),
+            "Cache key should combine scenario_id, base, and indices_suffix"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_collision_prevention_structure() {
+        // This test verifies all elements needed for collision prevention:
+        // 1. Check for existing _cache_key_prefix
+        // 2. If empty, use _scenario_id
+        // 3. Format cache key with proper uniqueness
+        let mut ctx = EmitContext::new(false);
+        let step = create_agent_step("process-data", "transform", "flatten");
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // 1. Must check for prefix
+        assert!(
+            code.contains("_cache_key_prefix"),
+            "Must check for _cache_key_prefix"
+        );
+
+        // 2. Must handle empty prefix case with scenario_id
+        assert!(
+            code.contains("prefix . is_empty ()") && code.contains("_scenario_id"),
+            "Must use _scenario_id when prefix is empty"
+        );
+
+        // 3. Both branches should produce unique keys
+        // - With prefix: "prefix::base::indices"
+        // - Without prefix: "scenario_id::base::indices"
+        let has_both_formats = code.contains("\"{}::{}{}\"");
+        assert!(
+            has_both_formats,
+            "Should have proper format for cache key with scenario_id"
         );
     }
 }
