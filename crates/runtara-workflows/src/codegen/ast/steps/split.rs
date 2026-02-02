@@ -79,6 +79,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         let parallelism = config.parallelism.unwrap_or(0);
         let sequential = config.sequential.unwrap_or(false);
         let dont_stop_on_failed = config.dont_stop_on_failed.unwrap_or(false);
+        let allow_null = config.allow_null.unwrap_or(false);
+        let convert_single_value = config.convert_single_value.unwrap_or(false);
 
         quote! {
             {
@@ -87,6 +89,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     map.insert("parallelism".to_string(), serde_json::json!(#parallelism));
                     map.insert("sequential".to_string(), serde_json::json!(#sequential));
                     map.insert("dontStopOnFailed".to_string(), serde_json::json!(#dont_stop_on_failed));
+                    map.insert("allowNull".to_string(), serde_json::json!(#allow_null));
+                    map.insert("convertSingleValue".to_string(), serde_json::json!(#convert_single_value));
                 }
                 #variables_code
                 inputs
@@ -191,14 +195,43 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             #debug_start
 
             // Extract split configuration
-        let split_array = #split_inputs_var.get("value")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_else(|| {
-                eprintln!("ERROR: Split step 'value' must be an array. Got: {}",
-                    #split_inputs_var.get("value").unwrap_or(&serde_json::Value::Null));
-                vec![]
-            });
+        let allow_null = #split_inputs_var.get("allowNull")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let convert_single_value = #split_inputs_var.get("convertSingleValue")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let split_array = match #split_inputs_var.get("value") {
+            Some(serde_json::Value::Array(arr)) => arr.clone(),
+            Some(serde_json::Value::Null) | None => {
+                if allow_null {
+                    vec![]
+                } else {
+                    return Err(format!(
+                        "Split step '{}' received null value. Set 'allowNull: true' to allow empty iterations, or use 'transform/ensure-array' agent.",
+                        #step_id
+                    ));
+                }
+            }
+            Some(other) => {
+                if convert_single_value {
+                    vec![other.clone()]
+                } else {
+                    return Err(format!(
+                        "Split step '{}' expected array, got {}. Set 'convertSingleValue: true' to auto-wrap, or use 'transform/ensure-array' agent.",
+                        #step_id,
+                        match other {
+                            serde_json::Value::Object(_) => "object",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::Bool(_) => "boolean",
+                            _ => "unknown",
+                        }
+                    ));
+                }
+            }
+        };
 
         let parallelism = #split_inputs_var.get("parallelism")
             .and_then(|v| v.as_i64())
@@ -591,6 +624,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -653,6 +688,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -705,6 +742,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -740,6 +779,8 @@ mod tests {
                 max_retries: Some(5),
                 retry_delay: Some(2000),
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -838,6 +879,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -945,6 +988,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -995,6 +1040,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1030,6 +1077,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1077,6 +1126,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1112,6 +1163,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1155,6 +1208,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1190,6 +1245,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1229,6 +1286,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1268,6 +1327,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1315,6 +1376,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1356,6 +1419,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1376,6 +1441,196 @@ mod tests {
         assert!(
             code.contains(r#"format ! ("{}::{}{}""#),
             "Should use format with prefix/scenario_id, base, and indices_suffix"
+        );
+    }
+
+    // ==========================================================================
+    // Allow Null and Convert Single Value Config Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_emit_split_allow_null_default_false() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-null-default", "data.items");
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify allowNull is set to false by default
+        assert!(
+            code.contains(r#""allowNull""#),
+            "Should include allowNull config"
+        );
+        // Default should be false - error path should exist
+        assert!(
+            code.contains("allow_null"),
+            "Should have allow_null variable"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_allow_null_enabled() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-allow-null".to_string(),
+            name: Some("Allow Null Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: Some(true),
+                convert_single_value: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify allowNull is set to true
+        assert!(
+            code.contains(r#""allowNull" . to_string () , serde_json :: json ! (true)"#),
+            "Should set allowNull to true in generated code"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_convert_single_value_default_false() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-convert-default", "data.items");
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify convertSingleValue is included
+        assert!(
+            code.contains(r#""convertSingleValue""#),
+            "Should include convertSingleValue config"
+        );
+        assert!(
+            code.contains("convert_single_value"),
+            "Should have convert_single_value variable"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_convert_single_value_enabled() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-convert".to_string(),
+            name: Some("Convert Single Value Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.singleItem".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: None,
+                convert_single_value: Some(true),
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify convertSingleValue is set to true
+        assert!(
+            code.contains(r#""convertSingleValue" . to_string () , serde_json :: json ! (true)"#),
+            "Should set convertSingleValue to true in generated code"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_both_allow_null_and_convert_enabled() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-both".to_string(),
+            name: Some("Both Options Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.maybeArray".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: Some(true),
+                convert_single_value: Some(true),
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify both options are set to true
+        assert!(
+            code.contains(r#""allowNull" . to_string () , serde_json :: json ! (true)"#),
+            "Should set allowNull to true"
+        );
+        assert!(
+            code.contains(r#""convertSingleValue" . to_string () , serde_json :: json ! (true)"#),
+            "Should set convertSingleValue to true"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_null_handling_code_structure() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-null-check", "data.items");
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify the null handling code is generated
+        assert!(code.contains("Null"), "Should have null handling code");
+        // Verify error message references ensure-array
+        assert!(
+            code.contains("ensure-array"),
+            "Error message should reference ensure-array agent"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_single_value_handling_code_structure() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-single-check", "data.items");
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify single value handling mentions type name
+        assert!(
+            code.contains("object") || code.contains("string") || code.contains("number"),
+            "Should detect value type in error handling"
         );
     }
 }

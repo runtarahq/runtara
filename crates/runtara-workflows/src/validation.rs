@@ -5039,6 +5039,8 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            allow_null: None,
+            convert_single_value: None,
         };
 
         let mut steps = HashMap::new();
@@ -5136,6 +5138,8 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            allow_null: None,
+            convert_single_value: None,
         };
 
         let mut steps = HashMap::new();
@@ -5245,6 +5249,8 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            allow_null: None,
+            convert_single_value: None,
         };
 
         let mut steps = HashMap::new();

@@ -1332,4 +1332,17 @@ pub struct SplitConfig {
     /// Step timeout in milliseconds. If exceeded, step fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+
+    /// Allow null values as input (default: false).
+    /// When true, null input is treated as an empty array (zero iterations).
+    /// When false, null input raises an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_null: Option<bool>,
+
+    /// Convert single values to a single-element array (default: false).
+    /// When true, non-array values are wrapped in an array.
+    /// When false, non-array values raise an error.
+    /// Use `transform/ensure-array` agent for explicit conversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convert_single_value: Option<bool>,
 }

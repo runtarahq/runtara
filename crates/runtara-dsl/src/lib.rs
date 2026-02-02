@@ -608,6 +608,8 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            allow_null: None,
+            convert_single_value: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -615,6 +617,68 @@ mod tests {
         assert_eq!(json.get("parallelism").unwrap(), 5);
         assert_eq!(json.get("sequential").unwrap(), false);
         assert_eq!(json.get("dontStopOnFailed").unwrap(), true);
+    }
+
+    #[test]
+    fn test_split_config_with_allow_null_and_convert_single_value() {
+        let config = SplitConfig {
+            value: MappingValue::Reference(ReferenceValue {
+                value: "data.maybeArray".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+            parallelism: None,
+            sequential: None,
+            dont_stop_on_failed: None,
+            variables: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            allow_null: Some(true),
+            convert_single_value: Some(true),
+        };
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("value").is_some());
+        assert_eq!(json.get("allowNull").unwrap(), true);
+        assert_eq!(json.get("convertSingleValue").unwrap(), true);
+
+        // Test deserialization round-trip
+        let json_str = serde_json::to_string(&config).unwrap();
+        let parsed: SplitConfig = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed.allow_null, Some(true));
+        assert_eq!(parsed.convert_single_value, Some(true));
+    }
+
+    #[test]
+    fn test_split_config_none_values_not_serialized() {
+        let config = SplitConfig {
+            value: MappingValue::Reference(ReferenceValue {
+                value: "data.items".to_string(),
+                type_hint: None,
+                default: None,
+            }),
+            parallelism: None,
+            sequential: None,
+            dont_stop_on_failed: None,
+            variables: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            allow_null: None,
+            convert_single_value: None,
+        };
+
+        let json = serde_json::to_value(&config).unwrap();
+        // None values should be skipped during serialization
+        assert!(
+            json.get("allowNull").is_none(),
+            "None allowNull should not be serialized"
+        );
+        assert!(
+            json.get("convertSingleValue").is_none(),
+            "None convertSingleValue should not be serialized"
+        );
     }
 
     #[test]
@@ -667,6 +731,8 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                allow_null: None,
+                convert_single_value: None,
             }),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
