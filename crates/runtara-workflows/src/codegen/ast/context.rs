@@ -37,6 +37,11 @@ pub struct EmitContext {
     /// Used by StartScenario emitter to find the child scenario's resolved version.
     pub(crate) step_to_child_ref: HashMap<String, (String, i32)>,
 
+    /// Tracks which child scenarios have been emitted as shared functions.
+    /// Key format: "{scenario_id}::{version}", Value: generated function Ident.
+    /// This enables deduplication - same child scenario emitted once, called many times.
+    pub(crate) emitted_child_functions: HashMap<String, Ident>,
+
     /// URL for fetching connections at runtime (None = no connection support)
     pub connection_service_url: Option<String>,
 
@@ -55,6 +60,7 @@ impl EmitContext {
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios: HashMap::new(),
             step_to_child_ref: HashMap::new(),
+            emitted_child_functions: HashMap::new(),
             connection_service_url: None,
             tenant_id: None,
         }
@@ -83,6 +89,7 @@ impl EmitContext {
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios,
             step_to_child_ref,
+            emitted_child_functions: HashMap::new(),
             connection_service_url,
             tenant_id,
         }
@@ -104,6 +111,24 @@ impl EmitContext {
     pub fn get_child_scenario_by_step_id(&self, step_id: &str) -> Option<&ExecutionGraph> {
         let (scenario_id, version) = self.step_to_child_ref.get(step_id)?;
         self.get_child_scenario(scenario_id, *version)
+    }
+
+    /// Get the shared function name for a child scenario, creating it if needed.
+    ///
+    /// Returns `(function_ident, already_emitted)`:
+    /// - `already_emitted = false`: First reference, caller should emit the function
+    /// - `already_emitted = true`: Already emitted, caller should only call it
+    pub fn get_or_create_child_fn(&mut self, scenario_id: &str, version: i32) -> (Ident, bool) {
+        let key = format!("{}::{}", scenario_id, version);
+        if let Some(ident) = self.emitted_child_functions.get(&key) {
+            (ident.clone(), true)
+        } else {
+            // Generate deterministic name based on scenario_id and version
+            let sanitized = Self::sanitize_ident(&format!("child_{}_{}", scenario_id, version));
+            let ident = Ident::new(&sanitized, Span::call_site());
+            self.emitted_child_functions.insert(key, ident.clone());
+            (ident, false)
+        }
     }
 
     /// Sanitize a string to be a valid Rust identifier.
@@ -550,5 +575,69 @@ mod tests {
         let ident2 = ctx2.step_ident("test-step");
 
         assert_eq!(ident1.to_string(), ident2.to_string());
+    }
+
+    // =============================================================================
+    // get_or_create_child_fn tests (deduplication)
+    // =============================================================================
+
+    #[test]
+    fn test_get_or_create_child_fn_first_call() {
+        let mut ctx = EmitContext::new(false);
+        let (ident, already_emitted) = ctx.get_or_create_child_fn("my-scenario", 1);
+
+        assert!(
+            !already_emitted,
+            "First call should return already_emitted=false"
+        );
+        assert_eq!(ident.to_string(), "child_my_scenario_1");
+    }
+
+    #[test]
+    fn test_get_or_create_child_fn_second_call_same_scenario() {
+        let mut ctx = EmitContext::new(false);
+
+        let (ident1, emitted1) = ctx.get_or_create_child_fn("my-scenario", 1);
+        let (ident2, emitted2) = ctx.get_or_create_child_fn("my-scenario", 1);
+
+        assert!(!emitted1, "First call should return already_emitted=false");
+        assert!(emitted2, "Second call should return already_emitted=true");
+        assert_eq!(
+            ident1.to_string(),
+            ident2.to_string(),
+            "Should return same ident"
+        );
+    }
+
+    #[test]
+    fn test_get_or_create_child_fn_different_versions() {
+        let mut ctx = EmitContext::new(false);
+
+        let (ident_v1, emitted_v1) = ctx.get_or_create_child_fn("my-scenario", 1);
+        let (ident_v2, emitted_v2) = ctx.get_or_create_child_fn("my-scenario", 2);
+
+        assert!(!emitted_v1);
+        assert!(!emitted_v2, "Different version should be separate function");
+        assert_ne!(ident_v1.to_string(), ident_v2.to_string());
+        assert_eq!(ident_v1.to_string(), "child_my_scenario_1");
+        assert_eq!(ident_v2.to_string(), "child_my_scenario_2");
+    }
+
+    #[test]
+    fn test_get_or_create_child_fn_different_scenarios() {
+        let mut ctx = EmitContext::new(false);
+
+        let (ident_a, _) = ctx.get_or_create_child_fn("scenario-a", 1);
+        let (ident_b, _) = ctx.get_or_create_child_fn("scenario-b", 1);
+
+        assert_ne!(ident_a.to_string(), ident_b.to_string());
+    }
+
+    #[test]
+    fn test_get_or_create_child_fn_sanitizes_name() {
+        let mut ctx = EmitContext::new(false);
+
+        let (ident, _) = ctx.get_or_create_child_fn("my-scenario.with.dots", 3);
+        assert_eq!(ident.to_string(), "child_my_scenario_with_dots_3");
     }
 }

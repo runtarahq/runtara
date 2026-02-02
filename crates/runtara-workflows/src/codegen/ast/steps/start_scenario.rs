@@ -7,7 +7,7 @@
 //! it will be recursively emitted and embedded into the parent scenario.
 //! The entire child scenario result uses #[durable] macro for checkpoint-based recovery.
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
 use super::super::CodegenError;
@@ -39,26 +39,49 @@ pub fn emit(step: &StartScenarioStep, ctx: &mut EmitContext) -> Result<TokenStre
     let max_retries = step.max_retries.unwrap_or(3);
     let retry_delay = step.retry_delay.unwrap_or(1000);
 
-    // Check if we have the child scenario's graph
-    if let Some(child_graph) = ctx.get_child_scenario_by_step_id(step_id).cloned() {
-        // We have the child graph - emit embedded version
-        emit_with_embedded_child(step, &child_graph, ctx, max_retries, retry_delay)
-    } else {
-        // No child graph available - fail compilation
-        Err(CodegenError::MissingChildScenario {
+    // Look up the child scenario reference (scenario_id, version)
+    let (scenario_id, version) = ctx.step_to_child_ref.get(step_id).cloned().ok_or_else(|| {
+        CodegenError::MissingChildScenario {
             step_id: step_id.clone(),
             child_scenario_id: child_scenario_id.clone(),
-        })
-    }
+        }
+    })?;
+
+    // Check if we have the child scenario's graph
+    let child_graph = ctx
+        .get_child_scenario(&scenario_id, version)
+        .cloned()
+        .ok_or_else(|| CodegenError::MissingChildScenario {
+            step_id: step_id.clone(),
+            child_scenario_id: child_scenario_id.clone(),
+        })?;
+
+    // Get or create shared function name (tracks deduplication)
+    let (shared_fn_name, already_emitted) = ctx.get_or_create_child_fn(&scenario_id, version);
+
+    emit_with_embedded_child(
+        step,
+        &child_graph,
+        ctx,
+        max_retries,
+        retry_delay,
+        &shared_fn_name,
+        already_emitted,
+    )
 }
 
 /// Emit a StartScenario step with an embedded child scenario.
+///
+/// If `already_emitted` is true, the shared child function was already emitted by
+/// a previous StartScenario step, so we only emit the call-site-specific wrapper.
 fn emit_with_embedded_child(
     step: &StartScenarioStep,
     child_graph: &ExecutionGraph,
     ctx: &mut EmitContext,
     max_retries: u32,
     retry_delay: u64,
+    shared_fn_name: &Ident,
+    already_emitted: bool,
 ) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let step_name = step.name.as_deref();
@@ -69,10 +92,8 @@ fn emit_with_embedded_child(
     let step_var = ctx.declare_step(step_id);
     let source_var = ctx.temp_var("source");
     let child_inputs_var = ctx.temp_var("child_inputs");
-    let child_fn_name = ctx.temp_var(&format!(
-        "execute_child_{}",
-        EmitContext::sanitize_ident(step_id)
-    ));
+    // Use the shared function name for deduplication
+    let child_fn_name = shared_fn_name.clone();
     let durable_fn_name =
         ctx.temp_var(&format!("{}_durable", EmitContext::sanitize_ident(step_id)));
 
@@ -103,8 +124,14 @@ fn emit_with_embedded_child(
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    // Generate the embedded child scenario function using shared recursive emitter
-    let child_fn_code = program::emit_graph_as_function(&child_fn_name, child_graph, ctx)?;
+    // Only emit the shared child function if this is the first reference
+    let child_fn_code = if already_emitted {
+        // Function already emitted by a previous StartScenario step - just reference it
+        quote! {}
+    } else {
+        // First reference - emit the shared function definition
+        program::emit_graph_as_function(&child_fn_name, child_graph, ctx)?
+    };
 
     // Get the scenario inputs variable to access _loop_indices at runtime
     let scenario_inputs_var = ctx.inputs_var.clone();
@@ -474,6 +501,33 @@ mod tests {
         }
     }
 
+    /// Helper to create a context with child scenarios properly configured.
+    /// This allows tests to use the public `emit()` function which handles deduplication.
+    fn create_ctx_with_child(
+        step_id: &str,
+        child_scenario_id: &str,
+        child_graph: ExecutionGraph,
+        debug_mode: bool,
+    ) -> EmitContext {
+        let version = 1;
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert(format!("{}::{}", child_scenario_id, version), child_graph);
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            step_id.to_string(),
+            (child_scenario_id.to_string(), version),
+        );
+
+        EmitContext::with_child_scenarios(
+            debug_mode,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        )
+    }
+
     // =============================================================================
     // emit tests (main entry point)
     // =============================================================================
@@ -531,7 +585,8 @@ mod tests {
 
         // Should emit embedded version with durable wrapper
         assert!(code.contains("durable"));
-        assert!(code.contains("execute_child"));
+        // Child function name is now deterministic: child_{scenario_id}_{version}
+        assert!(code.contains("child_child_scenario_id_1"));
         assert!(code.contains("child_scenario_inputs"));
 
         // Should include cache key handling for loop indices
@@ -607,21 +662,21 @@ mod tests {
     }
 
     // =============================================================================
-    // emit_with_embedded_child tests
+    // emit_with_embedded_child tests (via emit())
     // =============================================================================
 
     #[test]
     fn test_emit_with_embedded_child_structure() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Check structure of generated code
         // 1. Child function definition
-        assert!(code.contains("execute_child"));
+        assert!(code.contains("child_child_scenario_id"));
 
         // 2. Durable wrapper function
         assert!(code.contains("durable"));
@@ -656,9 +711,9 @@ mod tests {
         step.input_mapping = Some(mapping);
 
         let child_graph = create_child_graph("Child");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Input mapping should be processed
@@ -672,9 +727,9 @@ mod tests {
         step.input_mapping = Some(HashMap::new()); // Empty mapping
 
         let child_graph = create_child_graph("Child");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should use empty object for inputs
@@ -686,9 +741,9 @@ mod tests {
     fn test_emit_with_embedded_child_result_structure() {
         let step = create_named_step("start-child", "Test Step", "child-scenario-id");
         let child_graph = create_child_graph("Child");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Result JSON should have expected structure
@@ -704,9 +759,9 @@ mod tests {
     fn test_emit_with_embedded_child_signal_check() {
         let step = create_basic_step("start-child", "child-scenario-id");
         let child_graph = create_child_graph("Child");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should check for signals (cancel/pause) after child completes
@@ -896,9 +951,9 @@ mod tests {
     fn test_emit_with_embedded_child_structured_error() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should emit structured error for child scenario failures
@@ -922,9 +977,9 @@ mod tests {
     fn test_emit_with_embedded_child_structured_cancellation() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should emit structured error for interruption (cancel or pause)
@@ -996,9 +1051,9 @@ mod tests {
         // without being wrapped in CHILD_SCENARIO_FAILED
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should check for stepType: "Error" to identify Error step errors
@@ -1024,9 +1079,9 @@ mod tests {
         // "error: no rules expected `::` in macro call"
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Ensure no turbofish null syntax appears in generated code
@@ -1044,9 +1099,9 @@ mod tests {
     fn test_emit_with_embedded_child_sets_cache_key_prefix() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify _cache_key_prefix is set in child vars
@@ -1066,9 +1121,9 @@ mod tests {
     fn test_emit_with_embedded_child_reads_parent_prefix() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify parent prefix is read from variables
@@ -1082,9 +1137,9 @@ mod tests {
     fn test_emit_own_cache_key_includes_prefix() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify StartScenario's own cache key reads _cache_key_prefix
@@ -1104,9 +1159,9 @@ mod tests {
         // Verifies that _scenario_id is extracted from parent's variables
         let step = create_named_step("call-child", "Call Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("call-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should extract __parent_scenario_id from parent's variables
@@ -1125,9 +1180,9 @@ mod tests {
         // Verifies that _scenario_id is propagated to child's variables
         let step = create_named_step("call-child", "Call Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("call-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Should propagate _scenario_id to __child_vars
@@ -1142,9 +1197,9 @@ mod tests {
         // Verifies that when there's no parent prefix, _scenario_id is used
         let step = create_named_step("call-child", "Call Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("call-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // When no parent prefix, should use parent_scenario_id for unique cache key
@@ -1164,9 +1219,9 @@ mod tests {
         // Verifies that parent_scenario_id is passed as a parameter to the durable function
         let step = create_named_step("call-child", "Call Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("call-child", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Durable function should have parent_scenario_id parameter
@@ -1186,9 +1241,10 @@ mod tests {
         // Verifies the cache prefix format includes scenario_id when no parent prefix
         let step = create_named_step("process-files", "Process Files", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx =
+            create_ctx_with_child("process-files", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // The format should be: format!("{}::{}{}", scenario_id, step_id, loop_indices_suffix)
@@ -1204,9 +1260,9 @@ mod tests {
         // Verifies the cache prefix format when parent prefix exists
         let step = create_named_step("nested-call", "Nested Call", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx = create_ctx_with_child("nested-call", "child-scenario-id", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // When parent prefix exists, format is: format!("{}__{}{}",  p, step_id, loop_indices_suffix)
@@ -1230,9 +1286,10 @@ mod tests {
 
         let step = create_named_step("call-shared-child", "Call Shared Child", "shared-child");
         let child_graph = create_child_graph("Shared Child");
-        let mut ctx = EmitContext::new(false);
+        let mut ctx =
+            create_ctx_with_child("call-shared-child", "shared-child", child_graph, false);
 
-        let tokens = emit_with_embedded_child(&step, &child_graph, &mut ctx, 3, 1000).unwrap();
+        let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // All required elements for collision prevention must be present:
@@ -1260,5 +1317,177 @@ mod tests {
             code.contains("Some (p) if ! p . is_empty ()"),
             "Must check for existing parent prefix"
         );
+    }
+
+    // =============================================================================
+    // Deduplication tests - verify same child scenario emitted once
+    // =============================================================================
+
+    #[test]
+    fn test_deduplication_same_child_called_twice() {
+        // Two StartScenario steps calling the same child scenario
+        let step1 = create_basic_step("call-child-1", "shared-child");
+        let step2 = create_basic_step("call-child-2", "shared-child");
+
+        // Create child scenario graph
+        let child_graph = create_child_graph("Shared Child");
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("shared-child::1".to_string(), child_graph);
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert("call-child-1".to_string(), ("shared-child".to_string(), 1));
+        step_to_child_ref.insert("call-child-2".to_string(), ("shared-child".to_string(), 1));
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        // Emit first step
+        let code1 = emit(&step1, &mut ctx).expect("Should emit step 1");
+        let code1_str = code1.to_string();
+
+        // Emit second step
+        let code2 = emit(&step2, &mut ctx).expect("Should emit step 2");
+        let code2_str = code2.to_string();
+
+        // First emission should contain the function definition
+        assert!(
+            code1_str.contains("async fn child_shared_child_1"),
+            "First step should define the shared function"
+        );
+
+        // Second emission should NOT contain the function definition
+        assert!(
+            !code2_str.contains("async fn child_shared_child_1"),
+            "Second step should NOT redefine the shared function"
+        );
+
+        // Both should reference the same function name in their durable wrappers
+        assert!(
+            code1_str.contains("child_shared_child_1"),
+            "First step should call the shared function"
+        );
+        assert!(
+            code2_str.contains("child_shared_child_1"),
+            "Second step should call the shared function"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_different_children_both_emitted() {
+        let step1 = create_basic_step("call-child-a", "child-a");
+        let step2 = create_basic_step("call-child-b", "child-b");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("child-a::1".to_string(), create_child_graph("Child A"));
+        child_scenarios.insert("child-b::1".to_string(), create_child_graph("Child B"));
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert("call-child-a".to_string(), ("child-a".to_string(), 1));
+        step_to_child_ref.insert("call-child-b".to_string(), ("child-b".to_string(), 1));
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let code1 = emit(&step1, &mut ctx).expect("Should emit step 1");
+        let code2 = emit(&step2, &mut ctx).expect("Should emit step 2");
+
+        // Both should emit their respective functions (different children)
+        assert!(
+            code1.to_string().contains("async fn child_child_a_1"),
+            "First step should define child_a function"
+        );
+        assert!(
+            code2.to_string().contains("async fn child_child_b_1"),
+            "Second step should define child_b function"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_different_versions_both_emitted() {
+        let step1 = create_basic_step("call-v1", "my-child");
+        let step2 = create_basic_step("call-v2", "my-child");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("my-child::1".to_string(), create_child_graph("Child v1"));
+        child_scenarios.insert("my-child::2".to_string(), create_child_graph("Child v2"));
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert("call-v1".to_string(), ("my-child".to_string(), 1));
+        step_to_child_ref.insert("call-v2".to_string(), ("my-child".to_string(), 2));
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let code1 = emit(&step1, &mut ctx).expect("Should emit step 1");
+        let code2 = emit(&step2, &mut ctx).expect("Should emit step 2");
+
+        // Different versions = different functions
+        assert!(
+            code1.to_string().contains("async fn child_my_child_1"),
+            "First step should define version 1 function"
+        );
+        assert!(
+            code2.to_string().contains("async fn child_my_child_2"),
+            "Second step should define version 2 function"
+        );
+    }
+
+    #[test]
+    fn test_deduplication_three_calls_same_child() {
+        // Three steps calling the same child - function should be emitted only once
+        let step1 = create_basic_step("call-1", "shared");
+        let step2 = create_basic_step("call-2", "shared");
+        let step3 = create_basic_step("call-3", "shared");
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("shared::1".to_string(), create_child_graph("Shared"));
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert("call-1".to_string(), ("shared".to_string(), 1));
+        step_to_child_ref.insert("call-2".to_string(), ("shared".to_string(), 1));
+        step_to_child_ref.insert("call-3".to_string(), ("shared".to_string(), 1));
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let code1 = emit(&step1, &mut ctx)
+            .expect("Should emit step 1")
+            .to_string();
+        let code2 = emit(&step2, &mut ctx)
+            .expect("Should emit step 2")
+            .to_string();
+        let code3 = emit(&step3, &mut ctx)
+            .expect("Should emit step 3")
+            .to_string();
+
+        // Only first should have the function definition
+        assert!(code1.contains("async fn child_shared_1"));
+        assert!(!code2.contains("async fn child_shared_1"));
+        assert!(!code3.contains("async fn child_shared_1"));
+
+        // All should call it
+        assert!(code1.contains("child_shared_1"));
+        assert!(code2.contains("child_shared_1"));
+        assert!(code3.contains("child_shared_1"));
     }
 }

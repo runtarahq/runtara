@@ -793,6 +793,8 @@ pub fn emit_graph_as_function(
     ctx.tenant_id = parent_ctx.tenant_id.clone();
     ctx.child_scenarios = parent_ctx.child_scenarios.clone();
     ctx.step_to_child_ref = parent_ctx.step_to_child_ref.clone();
+    // Inherit emitted child functions for deduplication across nested scenarios
+    ctx.emitted_child_functions = parent_ctx.emitted_child_functions.clone();
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
