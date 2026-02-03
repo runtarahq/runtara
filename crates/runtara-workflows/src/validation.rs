@@ -1090,7 +1090,8 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
         | Step::Switch(_)
         | Step::While(_)
         | Step::Connection(_)
-        | Step::Delay(_) => {}
+        | Step::Delay(_)
+        | Step::WaitForSignal(_) => {}
     }
 
     mappings
@@ -1700,7 +1701,8 @@ fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
             | Step::Connection(_)
             | Step::Filter(_)
             | Step::GroupBy(_)
-            | Step::Delay(_) => {}
+            | Step::Delay(_)
+            | Step::WaitForSignal(_) => {}
         }
     }
 }
@@ -1793,6 +1795,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::Filter(s) => s.name.as_ref(),
             Step::GroupBy(s) => s.name.as_ref(),
             Step::Delay(s) => s.name.as_ref(),
+            Step::WaitForSignal(s) => s.name.as_ref(),
         };
 
         if let Some(name) = name {
@@ -2151,6 +2154,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::Filter(_) => "Filter",
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
+        Step::WaitForSignal(_) => "WaitForSignal",
     }
 }
 

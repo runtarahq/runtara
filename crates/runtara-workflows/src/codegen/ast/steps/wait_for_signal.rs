@@ -73,10 +73,8 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
 
     // Generate on_wait subgraph if present
     let on_wait_code = if let Some(ref on_wait) = step.on_wait {
-        let on_wait_fn_name = ctx.temp_var(&format!(
-            "{}_on_wait",
-            EmitContext::sanitize_ident(step_id)
-        ));
+        let on_wait_fn_name =
+            ctx.temp_var(&format!("{}_on_wait", EmitContext::sanitize_ident(step_id)));
         let on_wait_fn = program::emit_graph_as_function(&on_wait_fn_name, on_wait, ctx)?;
 
         quote! {

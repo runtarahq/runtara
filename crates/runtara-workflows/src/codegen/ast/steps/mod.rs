@@ -18,6 +18,7 @@ pub mod log;
 pub mod split;
 pub mod start_scenario;
 pub mod switch;
+pub mod wait_for_signal;
 pub mod while_loop;
 
 use proc_macro2::TokenStream;
@@ -61,6 +62,7 @@ impl StepEmitter for Step {
             Step::Filter(s) => filter::emit(s, ctx),
             Step::GroupBy(s) => group_by::emit(s, ctx),
             Step::Delay(s) => delay::emit(s, ctx),
+            Step::WaitForSignal(s) => wait_for_signal::emit(s, ctx),
         }
     }
 }
@@ -81,6 +83,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::Filter(_) => "Filter",
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
+        Step::WaitForSignal(_) => "WaitForSignal",
     }
 }
 
@@ -100,6 +103,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::Filter(s) => &s.id,
         Step::GroupBy(s) => &s.id,
         Step::Delay(s) => &s.id,
+        Step::WaitForSignal(s) => &s.id,
     }
 }
 
@@ -119,6 +123,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::Filter(s) => s.name.as_deref(),
         Step::GroupBy(s) => s.name.as_deref(),
         Step::Delay(s) => s.name.as_deref(),
+        Step::WaitForSignal(s) => s.name.as_deref(),
     }
 }
 

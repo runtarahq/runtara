@@ -72,7 +72,8 @@ fn collect_used_agents_recursive(
             | Step::Error(_)
             | Step::Filter(_)
             | Step::GroupBy(_)
-            | Step::Delay(_) => {}
+            | Step::Delay(_)
+            | Step::WaitForSignal(_) => {}
         }
     }
 }

@@ -337,6 +337,7 @@ fn count_steps(
             Step::Filter(_) => "Filter",
             Step::GroupBy(_) => "GroupBy",
             Step::Delay(_) => "Delay",
+            Step::WaitForSignal(_) => "WaitForSignal",
         };
         *step_counts.entry(step_type).or_insert(0) += 1;
     }
