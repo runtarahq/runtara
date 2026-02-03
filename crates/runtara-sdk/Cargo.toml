@@ -18,6 +18,14 @@ quic = ["dep:runtara-protocol"]
 # Note: This feature is only available when building from source (runtara-core is not published)
 embedded = ["dep:runtara-core"]
 
+# WASI target - HTTP-based communication (wasm32-wasip2)
+# Uses wasi-http for checkpointing, blocking I/O for sequential workflows
+wasi = []
+
+# Browser/Node.js target - JS interop via wasm-bindgen (wasm32-unknown-unknown)
+# Uses fetch API for HTTP, localStorage/IndexedDB for local state
+wasm-js = []
+
 [dependencies]
 # Protocol layer (optional, for QUIC mode)
 runtara-protocol = { path = "../runtara-protocol", version = "1.0", optional = true }

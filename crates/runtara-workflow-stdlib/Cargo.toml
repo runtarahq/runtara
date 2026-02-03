@@ -14,8 +14,32 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = []
+default = ["native"]
+
+# Native platform - full async runtime with QUIC transport
+native = [
+    "dep:tokio",
+    "dep:libc",
+    "dep:ureq",
+    "runtara-sdk/quic",
+    "runtara-agents/native",
+]
+
+# WASI target (wasm32-wasip2) - blocking I/O, HTTP transport
+wasi = [
+    "runtara-sdk/wasi",
+    "runtara-agents/wasi",
+]
+
+# Browser/Node.js target - JS interop
+wasm-js = [
+    "runtara-sdk/wasm-js",
+    "runtara-agents/wasm-js",
+]
+
+# OpenTelemetry (native only)
 telemetry = [
+    "native",
     "opentelemetry",
     "opentelemetry_sdk",
     "opentelemetry-otlp",
@@ -25,22 +49,22 @@ telemetry = [
 
 [dependencies]
 # Core dependencies
-runtara-agents = { path = "../runtara-agents", version = "1.0" }
-runtara-sdk = { path = "../runtara-sdk", version = "1.0" }
+runtara-agents = { path = "../runtara-agents", version = "1.0", default-features = false }
+runtara-sdk = { path = "../runtara-sdk", version = "1.0", default-features = false }
 
 # Re-exported for workflows
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Async runtime (native only)
+tokio = { version = "1", features = ["full"], optional = true }
 futures = "0.3"
 
-# For stderr redirection in generated workflows
-libc = "0.2"
+# For stderr redirection in generated workflows (native/unix only)
+libc = { version = "0.2", optional = true }
 
-# HTTP client for connection fetching
-ureq = "2.12"
+# HTTP client for connection fetching (native only)
+ureq = { version = "2.12", optional = true }
 
 # Tracing for structured logging
 tracing = "0.1"

@@ -17,6 +17,23 @@ crate-type = ["rlib"]
 name = "generate_dsl_spec"
 path = "src/bin/generate_dsl_spec.rs"
 
+[features]
+default = ["native"]
+
+# Native platform - full agent support with all dependencies
+native = [
+    "dep:reqwest",
+    "dep:ssh2",
+    "dep:openssl",
+    "dep:tokio",
+]
+
+# WASI target (wasm32-wasip2) - HTTP via wasi-http, no SFTP
+wasi = []
+
+# Browser/Node.js target - HTTP via fetch, no SFTP
+wasm-js = []
+
 [dependencies]
 runtara-dsl = { path = "../runtara-dsl", version = "1.0" }
 runtara-agent-macro = { path = "../runtara-agent-macro", version = "1.0" }
@@ -36,15 +53,15 @@ md-5 = "0.10"
 hmac = "0.12"
 regex = "1"
 strum = { version = "0.26", features = ["derive"] }
-# Runtime support for spawn_blocking in sync capabilities
-tokio = { version = "1", features = ["rt"] }
+# Runtime support for spawn_blocking in sync capabilities (native only)
+tokio = { version = "1", features = ["rt"], optional = true }
 # Native implementations
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 urlencoding = "2.1"
-ssh2 = "0.9"
+ssh2 = { version = "0.9", optional = true }
 # Vendored OpenSSL for musl static builds (required by ssh2/libssh2-sys)
-openssl = { workspace = true }
+openssl = { workspace = true, optional = true }
 # Glob pattern matching for file listing
 glob = "0.3"
 # ZIP archive support
