@@ -1104,6 +1104,51 @@ fn test_parse_delay_in_loop() {
 }
 
 // ============================================================================
+// WaitForSignal Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_wait_for_signal() {
+    let workflow_json = include_str!("fixtures/wait_for_signal.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse wait_for_signal workflow");
+
+    assert_eq!(graph.entry_point, "wait");
+    assert!(graph.steps.contains_key("wait"));
+    assert!(graph.steps.contains_key("finish"));
+
+    // Verify it's a WaitForSignal step
+    use runtara_dsl::Step;
+    match graph.steps.get("wait") {
+        Some(Step::WaitForSignal(step)) => {
+            assert_eq!(step.id, "wait");
+            assert!(step.timeout_ms.is_some());
+        }
+        _ => panic!("Expected WaitForSignal step"),
+    }
+}
+
+#[test]
+fn test_parse_wait_for_signal_with_callback() {
+    let workflow_json = include_str!("fixtures/wait_for_signal_with_callback.json");
+    let graph: ExecutionGraph = serde_json::from_str(workflow_json)
+        .expect("Failed to parse wait_for_signal_with_callback workflow");
+
+    assert_eq!(graph.entry_point, "wait");
+
+    // Verify on_wait subgraph is present
+    use runtara_dsl::Step;
+    match graph.steps.get("wait") {
+        Some(Step::WaitForSignal(step)) => {
+            assert!(step.on_wait.is_some());
+            let on_wait = step.on_wait.as_ref().unwrap();
+            assert_eq!(on_wait.entry_point, "log");
+        }
+        _ => panic!("Expected WaitForSignal step with on_wait"),
+    }
+}
+
+// ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================
 

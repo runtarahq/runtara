@@ -14,14 +14,7 @@
             "stepType": "Log",
             "id": "log",
             "level": "info",
-            "message": {
-              "valueType": "composite",
-              "value": {
-                "event": { "valueType": "immediate", "value": "waiting_for_signal" },
-                "signal_id": { "valueType": "reference", "value": "variables._signal_id" },
-                "instance_id": { "valueType": "reference", "value": "variables._instance_id" }
-              }
-            }
+            "message": "Waiting for external signal"
           },
           "finish": {
             "stepType": "Finish",
@@ -30,8 +23,7 @@
         },
         "executionPlan": [
           { "fromStep": "log", "toStep": "finish" }
-        ],
-        "variables": {}
+        ]
       },
       "timeoutMs": {
         "valueType": "immediate",
