@@ -1,0 +1,59 @@
+{
+  "name": "Wait for Signal with Callback",
+  "description": "Test workflow that notifies external system when waiting",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Wait for approval with callback",
+      "onWait": {
+        "name": "Notify callback",
+        "entryPoint": "log",
+        "steps": {
+          "log": {
+            "stepType": "Log",
+            "id": "log",
+            "level": "info",
+            "message": {
+              "valueType": "composite",
+              "value": {
+                "event": { "valueType": "immediate", "value": "waiting_for_signal" },
+                "signal_id": { "valueType": "reference", "value": "variables._signal_id" },
+                "instance_id": { "valueType": "reference", "value": "variables._instance_id" }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish"
+          }
+        },
+        "executionPlan": [
+          { "fromStep": "log", "toStep": "finish" }
+        ],
+        "variables": {}
+      },
+      "timeoutMs": {
+        "valueType": "immediate",
+        "value": 60000
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.wait.payload"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    { "fromStep": "wait", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

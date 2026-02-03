@@ -1,0 +1,37 @@
+{
+  "name": "Wait for Signal Workflow",
+  "description": "Test workflow that waits for an external signal",
+  "steps": {
+    "wait": {
+      "stepType": "WaitForSignal",
+      "id": "wait",
+      "name": "Wait for approval",
+      "timeoutMs": {
+        "valueType": "immediate",
+        "value": 30000
+      },
+      "pollIntervalMs": 500
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "signal_id": {
+          "valueType": "reference",
+          "value": "steps.wait.signal_id"
+        },
+        "payload": {
+          "valueType": "reference",
+          "value": "steps.wait.payload"
+        }
+      }
+    }
+  },
+  "entryPoint": "wait",
+  "executionPlan": [
+    { "fromStep": "wait", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
