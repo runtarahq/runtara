@@ -260,6 +260,9 @@ pub enum Step {
 
     /// Pause workflow execution for a specified duration (durable)
     Delay(DelayStep),
+
+    /// Wait for an external signal before continuing
+    WaitForSignal(WaitForSignalStep),
 }
 
 /// Common fields shared by all step types
@@ -843,6 +846,80 @@ pub struct DelayStep {
     /// Duration to delay in milliseconds.
     /// Can be an immediate value or a reference to data/variables.
     pub duration_ms: MappingValue,
+}
+
+/// Wait for an external signal before continuing execution.
+///
+/// This step pauses workflow execution until an external system sends a signal
+/// with the matching signal_id. The signal_id is auto-generated based on the
+/// step's position in the workflow (instance_id + scenario context + step_id + loop indices).
+///
+/// The `on_wait` subgraph executes immediately when the step starts waiting,
+/// allowing the workflow to notify external systems of the signal_id they should
+/// use to resume execution.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "WaitForSignal",
+///   "id": "approval",
+///   "name": "Wait for manager approval",
+///   "onWait": {
+///     "name": "Notify approver",
+///     "entryPoint": "send_notification",
+///     "steps": {
+///       "send_notification": {
+///         "stepType": "Agent",
+///         "id": "send_notification",
+///         "agentId": "http",
+///         "capabilityId": "http-request",
+///         "inputMapping": {
+///           "url": { "valueType": "immediate", "value": "https://approval-system/request" },
+///           "body": {
+///             "valueType": "composite",
+///             "value": {
+///               "signal_id": { "valueType": "reference", "value": "variables._signal_id" },
+///               "instance_id": { "valueType": "reference", "value": "variables._instance_id" }
+///             }
+///           }
+///         }
+///       },
+///       "finish": { "stepType": "Finish", "id": "finish" }
+///     },
+///     "executionPlan": [{ "fromStep": "send_notification", "toStep": "finish" }]
+///   },
+///   "timeoutMs": 86400000
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "WaitForSignalStep")]
+#[serde(rename_all = "camelCase")]
+pub struct WaitForSignalStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Subgraph to execute when starting to wait.
+    /// This runs before suspending and is typically used to notify
+    /// external systems of the signal_id they should use.
+    /// The subgraph has access to `variables._signal_id` and `variables._instance_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub on_wait: Option<Box<ExecutionGraph>>,
+
+    /// Optional timeout in milliseconds.
+    /// If the signal is not received within this duration, the step fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<MappingValue>,
+
+    /// Polling interval in milliseconds for checking signal (default: 1000).
+    /// Lower values mean faster response but more server load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poll_interval_ms: Option<u64>,
 }
 
 // ============================================================================
