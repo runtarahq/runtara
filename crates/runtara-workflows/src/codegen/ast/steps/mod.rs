@@ -9,6 +9,7 @@ pub mod agent;
 pub mod branching;
 pub mod conditional;
 pub mod connection;
+pub mod delay;
 pub mod error;
 pub mod filter;
 pub mod finish;
@@ -59,6 +60,7 @@ impl StepEmitter for Step {
             Step::Error(s) => error::emit(s, ctx),
             Step::Filter(s) => filter::emit(s, ctx),
             Step::GroupBy(s) => group_by::emit(s, ctx),
+            Step::Delay(s) => delay::emit(s, ctx),
         }
     }
 }
@@ -78,6 +80,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::Error(_) => "Error",
         Step::Filter(_) => "Filter",
         Step::GroupBy(_) => "GroupBy",
+        Step::Delay(_) => "Delay",
     }
 }
 
@@ -96,6 +99,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::Error(s) => &s.id,
         Step::Filter(s) => &s.id,
         Step::GroupBy(s) => &s.id,
+        Step::Delay(s) => &s.id,
     }
 }
 
@@ -114,6 +118,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::Error(s) => s.name.as_deref(),
         Step::Filter(s) => s.name.as_deref(),
         Step::GroupBy(s) => s.name.as_deref(),
+        Step::Delay(s) => s.name.as_deref(),
     }
 }
 

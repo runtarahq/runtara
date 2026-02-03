@@ -1,0 +1,32 @@
+{
+  "name": "Simple Delay Workflow",
+  "description": "A workflow that demonstrates the Delay step with immediate duration",
+  "steps": {
+    "delay": {
+      "stepType": "Delay",
+      "id": "delay",
+      "name": "Wait 1 second",
+      "durationMs": {
+        "valueType": "immediate",
+        "value": 1000
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "delayedFor": {
+          "valueType": "reference",
+          "value": "steps.delay.duration_ms"
+        }
+      }
+    }
+  },
+  "entryPoint": "delay",
+  "executionPlan": [
+    { "fromStep": "delay", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

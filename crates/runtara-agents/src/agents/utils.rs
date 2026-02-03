@@ -274,11 +274,14 @@ pub fn do_nothing(_input: DoNothingInput) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
-/// Delays for specified amount of milliseconds, returns the requested delay value
+/// Delays for specified amount of milliseconds, returns the requested delay value.
+///
+/// Note: For durable delays that survive crashes, consider using the Delay step type.
+/// This capability uses tokio sleep.
 #[capability(
     module = "utils",
     display_name = "Delay",
-    description = "Pause execution for specified milliseconds"
+    description = "Delays execution for the specified number of milliseconds. For durable delays that survive crashes, use the Delay step type instead."
 )]
 pub async fn delay_in_ms(input: DelayInMsInput) -> Result<u64, String> {
     tokio::time::sleep(Duration::from_millis(input.delay_value)).await;

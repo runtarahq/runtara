@@ -1020,6 +1020,90 @@ fn test_parse_group_by_expected_keys() {
 }
 
 // ============================================================================
+// Delay Step Tests
+// ============================================================================
+
+#[test]
+fn test_parse_delay_simple() {
+    let workflow_json = include_str!("fixtures/delay_simple.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "delay");
+    assert!(graph.steps.contains_key("delay"));
+    assert!(graph.steps.contains_key("finish"));
+
+    // Verify the Delay step has correct structure
+    use runtara_dsl::Step;
+    if let Some(Step::Delay(delay_step)) = graph.steps.get("delay") {
+        assert_eq!(delay_step.id, "delay");
+        assert_eq!(delay_step.name.as_deref(), Some("Wait 1 second"));
+        // Duration should be an immediate value of 1000ms
+        if let runtara_dsl::MappingValue::Immediate(imm) = &delay_step.duration_ms {
+            assert_eq!(imm.value, serde_json::json!(1000));
+        } else {
+            panic!("Expected immediate duration value");
+        }
+    } else {
+        panic!("Expected Delay step");
+    }
+}
+
+#[test]
+fn test_parse_delay_dynamic() {
+    let workflow_json = include_str!("fixtures/delay_dynamic.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "delay");
+
+    // Verify the Delay step has reference duration
+    use runtara_dsl::Step;
+    if let Some(Step::Delay(delay_step)) = graph.steps.get("delay") {
+        // Duration should be a reference to data.waitTime
+        if let runtara_dsl::MappingValue::Reference(ref_val) = &delay_step.duration_ms {
+            assert_eq!(ref_val.value, "data.waitTime");
+        } else {
+            panic!("Expected reference duration value");
+        }
+    } else {
+        panic!("Expected Delay step");
+    }
+}
+
+#[test]
+fn test_parse_delay_in_loop() {
+    let workflow_json = include_str!("fixtures/delay_in_loop.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    assert_eq!(graph.entry_point, "split");
+
+    // Verify the Split step contains a Delay in its subgraph
+    use runtara_dsl::Step;
+    if let Some(Step::Split(split_step)) = graph.steps.get("split") {
+        assert!(
+            split_step.subgraph.steps.contains_key("delay"),
+            "Subgraph should contain delay step"
+        );
+
+        // Verify delay step in subgraph
+        if let Some(Step::Delay(delay_step)) = split_step.subgraph.steps.get("delay") {
+            assert_eq!(delay_step.name.as_deref(), Some("Rate limit delay"));
+            if let runtara_dsl::MappingValue::Immediate(imm) = &delay_step.duration_ms {
+                assert_eq!(imm.value, serde_json::json!(100));
+            } else {
+                panic!("Expected immediate duration value");
+            }
+        } else {
+            panic!("Expected Delay step in subgraph");
+        }
+    } else {
+        panic!("Expected Split step");
+    }
+}
+
+// ============================================================================
 // Compilation Tests (require pre-built native library)
 // ============================================================================
 

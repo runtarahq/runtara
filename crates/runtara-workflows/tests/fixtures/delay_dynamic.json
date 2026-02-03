@@ -1,0 +1,37 @@
+{
+  "name": "Dynamic Delay Workflow",
+  "description": "A workflow that demonstrates the Delay step with duration from input",
+  "steps": {
+    "delay": {
+      "stepType": "Delay",
+      "id": "delay",
+      "name": "Wait for specified duration",
+      "durationMs": {
+        "valueType": "reference",
+        "value": "data.waitTime"
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "waited": {
+          "valueType": "reference",
+          "value": "steps.delay.duration_ms"
+        }
+      }
+    }
+  },
+  "entryPoint": "delay",
+  "executionPlan": [
+    { "fromStep": "delay", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "waitTime": {
+      "type": "integer",
+      "description": "Duration to wait in milliseconds"
+    }
+  },
+  "outputSchema": {}
+}

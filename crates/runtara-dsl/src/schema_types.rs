@@ -257,6 +257,9 @@ pub enum Step {
 
     /// Group array items by a key property
     GroupBy(GroupByStep),
+
+    /// Pause workflow execution for a specified duration (durable)
+    Delay(DelayStep),
 }
 
 /// Common fields shared by all step types
@@ -797,6 +800,49 @@ pub struct GroupByConfig {
     /// before grouping, ensuring they always exist in output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_keys: Option<Vec<String>>,
+}
+
+/// Delay step - pause workflow execution for a specified duration.
+///
+/// This is a **durable** delay: if the workflow crashes during the delay,
+/// it will resume from where it left off rather than restarting the delay.
+///
+/// For native platforms, this uses `sdk.durable_sleep()` which stores
+/// the wake time in the database. For WASI/embedded, it uses blocking sleep.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "Delay",
+///   "id": "wait-for-cooldown",
+///   "name": "Wait 5 seconds",
+///   "duration_ms": { "valueType": "immediate", "value": 5000 }
+/// }
+/// ```
+///
+/// Duration can also be dynamic:
+/// ```json
+/// {
+///   "stepType": "Delay",
+///   "id": "dynamic-wait",
+///   "duration_ms": { "valueType": "reference", "value": "data.waitTimeMs" }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[schemars(title = "DelayStep")]
+#[serde(rename_all = "camelCase")]
+pub struct DelayStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Duration to delay in milliseconds.
+    /// Can be an immediate value or a reference to data/variables.
+    pub duration_ms: MappingValue,
 }
 
 // ============================================================================

@@ -1,0 +1,87 @@
+{
+  "name": "Delay in Loop Workflow",
+  "description": "A workflow that demonstrates Delay step inside a Split loop for rate limiting",
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "name": "Process items with delay",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.items"
+        },
+        "sequential": true
+      },
+      "subgraph": {
+        "entryPoint": "process",
+        "steps": {
+          "process": {
+            "stepType": "Agent",
+            "id": "process",
+            "agentId": "transform",
+            "capabilityId": "extract",
+            "inputMapping": {
+              "source": {
+                "valueType": "reference",
+                "value": "data.item"
+              },
+              "path": {
+                "valueType": "immediate",
+                "value": "$.value"
+              }
+            }
+          },
+          "delay": {
+            "stepType": "Delay",
+            "id": "delay",
+            "name": "Rate limit delay",
+            "durationMs": {
+              "valueType": "immediate",
+              "value": 100
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "processed": {
+                "valueType": "reference",
+                "value": "steps.process.outputs"
+              }
+            }
+          }
+        },
+        "executionPlan": [
+          { "fromStep": "process", "toStep": "delay" },
+          { "fromStep": "delay", "toStep": "finish" }
+        ],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": {
+          "valueType": "reference",
+          "value": "steps.split.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {
+    "items": {
+      "type": "array",
+      "description": "Items to process with rate limiting"
+    }
+  },
+  "outputSchema": {}
+}
