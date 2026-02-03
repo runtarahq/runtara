@@ -11,9 +11,9 @@ use runtara_protocol::environment_proto::{
     GetInstanceStatusRequest, GetScopeAncestorsRequest, GetTenantMetricsRequest,
     HealthCheckRequest, ListAgentsRequest, ListCheckpointsRequest, ListEventsRequest,
     ListImagesRequest, ListInstancesRequest, ListStepSummariesRequest, RegisterImageRequest,
-    RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse, SendSignalRequest,
-    StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, rpc_request::Request,
-    rpc_response::Response,
+    RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse,
+    SendCustomSignalRequest, SendSignalRequest, StartInstanceRequest, StopInstanceRequest,
+    TestCapabilityRequest, rpc_request::Request, rpc_response::Response,
 };
 use runtara_protocol::frame::{Frame, write_frame};
 use tokio::io::AsyncRead;
@@ -688,6 +688,61 @@ impl ManagementSdk {
     /// Send a pause signal to an instance.
     pub async fn pause_instance(&self, instance_id: &str) -> Result<()> {
         self.send_signal(instance_id, SignalType::Pause, None).await
+    }
+
+    /// Send a custom signal to a specific checkpoint/signal ID.
+    ///
+    /// This is used to resume WaitForSignal steps in workflows.
+    /// The signal_id must match exactly what the workflow is waiting for.
+    ///
+    /// # Arguments
+    /// * `instance_id` - The instance waiting for the signal
+    /// * `signal_id` - The checkpoint/signal ID (from on_wait callback)
+    /// * `payload` - Optional payload data (typically JSON)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Approve a workflow waiting for manager approval
+    /// sdk.send_custom_signal(
+    ///     "inst-abc123",
+    ///     "inst-abc123/root/approval_step/",
+    ///     Some(r#"{"approved": true, "approver": "manager@example.com"}"#.as_bytes()),
+    /// ).await?;
+    /// ```
+    #[instrument(skip(self, payload), fields(instance_id = %instance_id, signal_id = %signal_id))]
+    pub async fn send_custom_signal(
+        &self,
+        instance_id: &str,
+        signal_id: &str,
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        info!("Sending custom signal to instance");
+
+        let response = self
+            .send_request(Request::SendCustomSignal(SendCustomSignalRequest {
+                instance_id: instance_id.to_string(),
+                checkpoint_id: signal_id.to_string(),
+                payload: payload.unwrap_or(&[]).to_vec(),
+            }))
+            .await?;
+
+        match response {
+            Response::SendCustomSignal(resp) => {
+                if !resp.success {
+                    if resp.error.contains("not found") {
+                        return Err(SdkError::InstanceNotFound(instance_id.to_string()));
+                    }
+                    return Err(SdkError::Server {
+                        code: "CUSTOM_SIGNAL_FAILED".to_string(),
+                        message: resp.error,
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected SendCustomSignalResponse".to_string(),
+            )),
+        }
     }
 
     // =========================================================================
