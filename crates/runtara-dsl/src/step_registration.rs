@@ -12,7 +12,7 @@
 use crate::agent_meta::StepTypeMeta;
 use crate::{
     AgentStep, ConditionalStep, ConnectionStep, ErrorStep, FilterStep, FinishStep, GroupByStep,
-    LogStep, SplitStep, StartScenarioStep, SwitchStep, WhileStep,
+    LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep, WhileStep,
 };
 
 // ============================================================================
@@ -65,6 +65,10 @@ fn schema_filter_step() -> schemars::schema::RootSchema {
 
 fn schema_group_by_step() -> schemars::schema::RootSchema {
     schemars::schema_for!(GroupByStep)
+}
+
+fn schema_wait_for_signal_step() -> schemars::schema::RootSchema {
+    schemars::schema_for!(WaitForSignalStep)
 }
 
 // ============================================================================
@@ -167,6 +171,14 @@ static GROUP_BY_STEP_META: StepTypeMeta = StepTypeMeta {
     schema_fn: schema_group_by_step,
 };
 
+static WAIT_FOR_SIGNAL_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "WaitForSignal",
+    display_name: "Wait for Signal",
+    description: "Wait for an external signal before continuing execution",
+    category: "control",
+    schema_fn: schema_wait_for_signal_step,
+};
+
 // Register all step types with inventory
 inventory::submit! { &FINISH_STEP_META }
 inventory::submit! { &AGENT_STEP_META }
@@ -180,3 +192,4 @@ inventory::submit! { &CONNECTION_STEP_META }
 inventory::submit! { &ERROR_STEP_META }
 inventory::submit! { &FILTER_STEP_META }
 inventory::submit! { &GROUP_BY_STEP_META }
+inventory::submit! { &WAIT_FOR_SIGNAL_STEP_META }
