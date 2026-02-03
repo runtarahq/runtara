@@ -202,11 +202,8 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
 
         use std::sync::Arc;
         use std::process::ExitCode;
-        use std::fs::OpenOptions;
-        use std::os::unix::io::AsRawFd;
         // prelude includes: RuntimeContext, Deserialize, Serialize, serde_json, registry, SDK types
         use #stdlib_ident::prelude::*;
-        use #stdlib_ident::libc;
         use #stdlib_ident::tokio;
         use #stdlib_ident::tracing;
         use #stdlib_ident::Instrument;
@@ -264,38 +261,18 @@ fn emit_scenario_variables(graph: &ExecutionGraph) -> TokenStream {
 /// Emit the main function for native binary.
 ///
 /// Generates a main function that:
-/// 1. Redirects stderr to log file (if STDERR_LOG_PATH is set)
-/// 2. Creates and connects RuntaraSdk
-/// 3. Registers SDK globally for #[durable] functions
-/// 4. Loads inputs from environment
-/// 5. Executes the workflow asynchronously
-/// 6. Reports completion/failure/cancellation status to Core
-/// 7. Writes output.json for Environment to read
+/// 1. Creates and connects RuntaraSdk
+/// 2. Registers SDK globally for #[durable] functions
+/// 3. Loads inputs from environment
+/// 4. Executes the workflow asynchronously
+/// 5. Reports completion/failure/cancellation status to Core
+/// 6. Writes output.json for Environment to read
 fn emit_main(graph: &ExecutionGraph) -> TokenStream {
     // Generate variables as compile-time constants from graph.variables
     let variables_init = emit_scenario_variables(graph);
 
     quote! {
         fn main() -> ExitCode {
-            // Redirect stderr to log file if STDERR_LOG_PATH is set.
-            // This must happen FIRST, before any eprintln! calls.
-            // Using unsafe libc::dup2 to redirect fd 2 (stderr) to the log file.
-            if let Ok(log_path) = std::env::var("STDERR_LOG_PATH") {
-                if let Ok(file) = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                {
-                    let fd = file.as_raw_fd();
-                    unsafe {
-                        // Duplicate the file descriptor to stderr (fd 2)
-                        libc::dup2(fd, 2);
-                    }
-                    // Don't close the file - let it remain open as stderr
-                    std::mem::forget(file);
-                }
-            }
-
             // Run async main with tokio runtime
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             rt.block_on(async_main())
@@ -320,7 +297,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             let mut sdk_instance = match RuntaraSdk::from_env() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Failed to initialize SDK: {}", e);
+                    tracing::error!("Failed to initialize SDK: {}", e);
                     // Write failure output for Environment
                     let _ = write_failed(format!("SDK initialization failed: {}", e));
                     return ExitCode::FAILURE;
@@ -329,7 +306,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 
             // Connect to runtara-core
             if let Err(e) = sdk_instance.connect().await {
-                eprintln!("Failed to connect to runtara-core: {}", e);
+                tracing::error!("Failed to connect to runtara-core: {}", e);
                 // Write failure output for Environment
                 let _ = write_failed(format!("Failed to connect to runtara-core: {}", e));
                 return ExitCode::FAILURE;
@@ -337,7 +314,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 
             // Register the instance
             if let Err(e) = sdk_instance.register(None).await {
-                eprintln!("Failed to register instance: {}", e);
+                tracing::error!("Failed to register instance: {}", e);
                 // Write failure output for Environment
                 let _ = write_failed(format!("Failed to register instance: {}", e));
                 return ExitCode::FAILURE;
@@ -401,7 +378,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                     let sdk_guard = sdk().lock().await;
                     let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
                     if let Err(e) = sdk_guard.completed(&output_bytes).await {
-                        eprintln!("Failed to report completion: {}", e);
+                        tracing::error!("Failed to report completion: {}", e);
                         let _ = write_failed(format!("Failed to report completion: {}", e));
                         return ExitCode::FAILURE;
                     }
@@ -417,7 +394,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         runtara_sdk::acknowledge_cancellation().await;
                         // Write cancelled output for Environment
                         let _ = write_cancelled();
-                        eprintln!("Workflow execution was cancelled");
+                        tracing::info!("Workflow execution was cancelled");
                         return ExitCode::SUCCESS;
                     }
 
@@ -431,7 +408,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         // Write suspended output for Environment
                         // Note: checkpoint_id is the last successful checkpoint; using "paused" as fallback
                         let _ = write_suspended("paused");
-                        eprintln!("Workflow execution was paused");
+                        tracing::info!("Workflow execution was paused");
                         return ExitCode::SUCCESS;
                     }
 
@@ -440,7 +417,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                     let _ = sdk_guard.failed(&e).await;
                     // Write failed output for Environment
                     let _ = write_failed(&e);
-                    eprintln!("Workflow execution failed: {}", e);
+                    tracing::error!("Workflow execution failed: {}", e);
                     ExitCode::FAILURE
                 }
             }
@@ -1262,7 +1239,6 @@ mod tests {
             "Should import ExitCode"
         );
         assert!(code.contains("prelude"), "Should import prelude");
-        assert!(code.contains("libc"), "Should import libc");
         assert!(code.contains("tokio"), "Should import tokio");
         assert!(code.contains("tracing"), "Should import tracing");
         assert!(
@@ -1638,16 +1614,20 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_main_handles_stderr_redirect() {
+    fn test_emit_main_uses_tracing_for_errors() {
         let graph = create_minimal_finish_graph("finish");
         let tokens = emit_main(&graph);
         let code = tokens.to_string();
 
+        // Should use tracing for error logging instead of eprintln!
         assert!(
-            code.contains("STDERR_LOG_PATH"),
-            "Should check for stderr log path"
+            code.contains("tracing :: error"),
+            "Should use tracing::error for error logging"
         );
-        assert!(code.contains("dup2"), "Should use dup2 for redirection");
+        assert!(
+            !code.contains("eprintln"),
+            "Should not use eprintln (use tracing instead)"
+        );
     }
 
     #[test]

@@ -19,7 +19,6 @@ default = ["native"]
 # Native platform - full async runtime with QUIC transport
 native = [
     "dep:tokio",
-    "dep:libc",
     "dep:ureq",
     "runtara-sdk/quic",
     "runtara-agents/native",
@@ -59,9 +58,6 @@ serde_json = { workspace = true }
 # Async runtime (native only)
 tokio = { version = "1", features = ["full"], optional = true }
 futures = "0.3"
-
-# For stderr redirection in generated workflows (native/unix only)
-libc = { version = "0.2", optional = true }
 
 # HTTP client for connection fetching (native only)
 ureq = { version = "2.12", optional = true }

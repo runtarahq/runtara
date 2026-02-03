@@ -109,7 +109,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 loop {
                     // Check max iterations limit
                     if __loop_index >= __max_iterations {
-                        eprintln!("While step '{}' reached max iterations limit ({})", #step_id, __max_iterations);
+                        tracing::warn!("While step '{}' reached max iterations limit ({})", #step_id, __max_iterations);
                         break;
                     }
 

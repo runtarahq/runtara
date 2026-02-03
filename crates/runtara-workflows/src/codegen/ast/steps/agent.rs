@@ -417,7 +417,7 @@ fn emit_connection_fetch(
             if let Some(ref rl) = __conn_response.rate_limit {
                 if rl.is_limited {
                     let wait_duration = rl.wait_duration();
-                    eprintln!("DEBUG: Step {} connection {} is rate limited, waiting {:?}",
+                    tracing::debug!("Step {} connection {} is rate limited, waiting {:?}",
                         #step_id, #conn_id, wait_duration);
 
                     // Use durable sleep so we survive crashes while waiting

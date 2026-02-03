@@ -40,9 +40,6 @@ pub mod instance_output;
 pub use serde;
 pub use serde_json;
 
-// Re-export libc for stderr redirection in generated workflows
-pub use libc;
-
 // Re-export tokio for async runtime in generated workflows
 pub use tokio;
 

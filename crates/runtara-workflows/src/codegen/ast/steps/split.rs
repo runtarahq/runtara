@@ -347,7 +347,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                 if dont_stop_on_failed {
                                     errors.push(serde_json::json!({"error": e, "index": idx}));
                                 } else {
-                                    eprintln!("ERROR in split iteration {}: {}", idx, e);
+                                    tracing::error!("Split iteration {} failed: {}", idx, e);
                                     return Err(format!("Split step failed at index {}: {}", idx, e));
                                 }
                             }
@@ -506,7 +506,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             } else {
                                 // Signal to skip remaining iterations
                                 error_token.store(true, Ordering::Relaxed);
-                                eprintln!("ERROR in split iteration {}: {}", idx, e);
+                                tracing::error!("Split iteration {} failed: {}", idx, e);
                                 return Err(format!("Split step failed at index {}: {}", idx, e));
                             }
                         }
