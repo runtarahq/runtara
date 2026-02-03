@@ -480,6 +480,54 @@ impl RuntaraSdk {
         }
     }
 
+    /// Poll for a custom signal scoped to a specific checkpoint/signal ID.
+    ///
+    /// This is used by WaitForSignal steps to wait for external signals.
+    /// Returns the signal payload if a signal is pending, None otherwise.
+    ///
+    /// Note: Only available with QUIC backend.
+    #[cfg(feature = "quic")]
+    #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id))]
+    pub async fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
+        use crate::backend::quic::QuicBackend;
+
+        let backend = self
+            .backend
+            .as_any()
+            .downcast_ref::<QuicBackend>()
+            .ok_or_else(|| {
+                SdkError::Internal("poll_custom_signal() requires QUIC backend".to_string())
+            })?;
+
+        let request = PollSignalsRequest {
+            instance_id: self.backend.instance_id().to_string(),
+            checkpoint_id: Some(signal_id.to_string()),
+        };
+
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::PollSignals(request)),
+        };
+
+        let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
+
+        match rpc_response.response {
+            Some(rpc_response::Response::PollSignals(resp)) => {
+                if let Some(custom) = resp.custom_signal {
+                    debug!(signal_id = %signal_id, "Custom signal received");
+                    return Ok(Some(custom.payload));
+                }
+                Ok(None)
+            }
+            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected PollSignalsResponse".to_string(),
+            )),
+        }
+    }
+
     /// Acknowledge a received signal.
     ///
     /// Note: Only available with QUIC backend.
