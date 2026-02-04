@@ -2381,6 +2381,64 @@ fn format_duration(ms: u64) -> String {
 }
 
 // ============================================================================
+// Reference Extraction Utilities
+// ============================================================================
+
+/// Parse a reference string and return (root, field_name) if it's a data or variables reference.
+/// Returns None for steps.* or other reference types.
+#[allow(dead_code)] // Will be used in Task 3
+fn parse_reference(reference: &str) -> Option<(&str, &str)> {
+    let parts: Vec<&str> = reference.splitn(3, '.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let root = parts[0];
+    if root != "data" && root != "variables" {
+        return None;
+    }
+
+    Some((root, parts[1]))
+}
+
+/// Extract all reference strings from a MappingValue.
+fn extract_references_from_mapping_value(value: &MappingValue, refs: &mut Vec<String>) {
+    match value {
+        MappingValue::Reference(ref_val) => {
+            refs.push(ref_val.value.clone());
+        }
+        MappingValue::Immediate(_) => {}
+        MappingValue::Composite(composite) => {
+            extract_references_from_composite(&composite.value, refs);
+        }
+    }
+}
+
+/// Extract references from a CompositeInner value recursively.
+fn extract_references_from_composite(inner: &CompositeInner, refs: &mut Vec<String>) {
+    match inner {
+        CompositeInner::Object(map) => {
+            for value in map.values() {
+                extract_references_from_mapping_value(value, refs);
+            }
+        }
+        CompositeInner::Array(arr) => {
+            for value in arr {
+                extract_references_from_mapping_value(value, refs);
+            }
+        }
+    }
+}
+
+/// Extract all references from an InputMapping.
+#[allow(dead_code)] // Will be used in Task 3
+fn extract_references_from_input_mapping(mapping: &InputMapping, refs: &mut Vec<String>) {
+    for value in mapping.values() {
+        extract_references_from_mapping_value(value, refs);
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -5991,5 +6049,56 @@ mod tests {
             display2.contains("At most one"),
             "Should mention single default"
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_extraction_tests {
+    use super::*;
+    use runtara_dsl::{ImmediateValue, MappingValue, ReferenceValue};
+
+    #[test]
+    fn test_extract_references_from_mapping_value() {
+        let mut refs = Vec::new();
+
+        // Reference value
+        let ref_val = MappingValue::Reference(ReferenceValue {
+            value: "data.customer_id".to_string(),
+            type_hint: None,
+            default: None,
+        });
+        extract_references_from_mapping_value(&ref_val, &mut refs);
+        assert_eq!(refs, vec!["data.customer_id"]);
+
+        refs.clear();
+
+        // Immediate value (no references)
+        let imm_val = MappingValue::Immediate(ImmediateValue {
+            value: serde_json::json!("test"),
+        });
+        extract_references_from_mapping_value(&imm_val, &mut refs);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_reference_parts() {
+        // data reference
+        let (root, field) = parse_reference("data.customer_id").unwrap();
+        assert_eq!(root, "data");
+        assert_eq!(field, "customer_id");
+
+        // variables reference
+        let (root, field) = parse_reference("variables.counter").unwrap();
+        assert_eq!(root, "variables");
+        assert_eq!(field, "counter");
+
+        // nested reference - extract top-level field
+        let (root, field) = parse_reference("data.order.items").unwrap();
+        assert_eq!(root, "data");
+        assert_eq!(field, "order");
+
+        // steps reference (not data or variables)
+        let result = parse_reference("steps.fetch.outputs");
+        assert!(result.is_none());
     }
 }
