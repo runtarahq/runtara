@@ -124,6 +124,54 @@ fn emit_with_embedded_child(
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
+    // Generate embedded schema for runtime validation (if child has required fields)
+    let runtime_validation_code = {
+        let required_fields: Vec<_> = child_graph
+            .input_schema
+            .iter()
+            .filter(|(_, field)| field.required)
+            .map(|(name, field)| {
+                let name_str = name.as_str();
+                let type_str = format!("{:?}", field.field_type);
+                let desc = field.description.as_deref();
+                let desc_token = if let Some(d) = desc {
+                    quote! { Some(#d) }
+                } else {
+                    quote! { None }
+                };
+                quote! {
+                    runtara_workflow_stdlib::RequiredField {
+                        name: #name_str,
+                        field_type: #type_str,
+                        description: #desc_token,
+                    }
+                }
+            })
+            .collect();
+
+        if required_fields.is_empty() {
+            quote! {}
+        } else {
+            let step_id_str = step_id.as_str();
+            let child_id_str = child_scenario_id.as_str();
+            quote! {
+                // Runtime validation of child inputs
+                {
+                    static CHILD_SCHEMA: runtara_workflow_stdlib::ChildInputSchema =
+                        runtara_workflow_stdlib::ChildInputSchema {
+                            required_fields: &[#(#required_fields),*],
+                        };
+                    runtara_workflow_stdlib::validate_child_inputs(
+                        #step_id_str,
+                        #child_id_str,
+                        &child_inputs,
+                        &CHILD_SCHEMA,
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    };
+
     // Only emit the shared child function if this is the first reference
     let child_fn_code = if already_emitted {
         // Function already emitted by a previous StartScenario step - just reference it
@@ -265,6 +313,9 @@ fn emit_with_embedded_child(
                 }
             };
             __child_vars.insert("_cache_key_prefix".to_string(), serde_json::json!(__child_cache_prefix));
+
+            // Runtime validation of child inputs against schema
+            #runtime_validation_code
 
             // Inner steps use the child scenario scope as their parent.
             // This ensures `root_scopes_only` filter correctly excludes them
@@ -443,7 +494,9 @@ fn emit_with_embedded_child(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtara_dsl::{ChildVersion, FinishStep, ImmediateValue, MappingValue, Step};
+    use runtara_dsl::{
+        ChildVersion, FinishStep, ImmediateValue, MappingValue, SchemaField, SchemaFieldType, Step,
+    };
     use std::collections::HashMap;
 
     // =============================================================================
@@ -1579,5 +1632,319 @@ mod tests {
             !code.contains("null::<") && !code.contains("null :: <"),
             "Generated code must not contain null::<Type> - json! macro doesn't support turbofish"
         );
+    }
+
+    // =============================================================================
+    // Runtime validation tests
+    // =============================================================================
+
+    fn create_child_graph_with_schema(
+        name: &str,
+        input_schema: HashMap<String, SchemaField>,
+    ) -> ExecutionGraph {
+        let mut steps = HashMap::new();
+        steps.insert(
+            "finish".to_string(),
+            Step::Finish(FinishStep {
+                id: "finish".to_string(),
+                name: Some("Finish".to_string()),
+                input_mapping: None,
+            }),
+        );
+        ExecutionGraph {
+            name: Some(name.to_string()),
+            description: None,
+            steps,
+            entry_point: "finish".to_string(),
+            execution_plan: vec![],
+            variables: HashMap::new(),
+            input_schema,
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        }
+    }
+
+    #[test]
+    fn test_emit_no_validation_when_no_required_fields() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+        // Child graph has no input schema (no required fields)
+        let child_graph = create_child_graph("Child");
+        let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+        let code = tokens.to_string();
+
+        // Should NOT contain validation code when no required fields
+        assert!(
+            !code.contains("validate_child_inputs"),
+            "Should not generate validation when no required fields"
+        );
+        assert!(
+            !code.contains("ChildInputSchema"),
+            "Should not generate schema when no required fields"
+        );
+    }
+
+    #[test]
+    fn test_emit_validation_when_required_fields_exist() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+
+        // Create child graph with required fields
+        let mut input_schema = HashMap::new();
+        input_schema.insert(
+            "orderId".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::String,
+                description: Some("The order ID".to_string()),
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+        input_schema.insert(
+            "amount".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::Number,
+                description: None,
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+        input_schema.insert(
+            "optionalField".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::String,
+                description: Some("Optional field".to_string()),
+                required: false,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+
+        let child_graph = create_child_graph_with_schema("Child", input_schema);
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("child-scenario-id::1".to_string(), child_graph);
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+        let code = tokens.to_string();
+
+        // Should contain validation code
+        assert!(
+            code.contains("validate_child_inputs"),
+            "Should generate validate_child_inputs call"
+        );
+        assert!(
+            code.contains("ChildInputSchema"),
+            "Should generate ChildInputSchema"
+        );
+        assert!(
+            code.contains("RequiredField"),
+            "Should generate RequiredField entries"
+        );
+
+        // Should include required fields (orderId and amount) but not optional field
+        assert!(
+            code.contains("orderId"),
+            "Should include required field orderId"
+        );
+        assert!(
+            code.contains("amount"),
+            "Should include required field amount"
+        );
+        // optionalField should NOT appear in validation schema
+        assert!(
+            !code.contains("optionalField"),
+            "Should not include optional field"
+        );
+    }
+
+    #[test]
+    fn test_emit_validation_includes_field_metadata() {
+        let step = create_basic_step("validate-step", "child-with-schema");
+
+        let mut input_schema = HashMap::new();
+        input_schema.insert(
+            "userId".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::Integer,
+                description: Some("User identifier".to_string()),
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+
+        let child_graph = create_child_graph_with_schema("Child With Schema", input_schema);
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("child-with-schema::1".to_string(), child_graph);
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "validate-step".to_string(),
+            ("child-with-schema".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+        let code = tokens.to_string();
+
+        // Should include the step ID and child scenario ID for error messages
+        assert!(
+            code.contains("\"validate-step\""),
+            "Should include step ID for error messages"
+        );
+        assert!(
+            code.contains("\"child-with-schema\""),
+            "Should include child scenario ID for error messages"
+        );
+
+        // Should include field type
+        assert!(
+            code.contains("Integer"),
+            "Should include field type in generated schema"
+        );
+
+        // Should include description
+        assert!(
+            code.contains("User identifier"),
+            "Should include field description in generated schema"
+        );
+    }
+
+    #[test]
+    fn test_emit_validation_with_no_description() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+
+        let mut input_schema = HashMap::new();
+        input_schema.insert(
+            "fieldNoDesc".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::Boolean,
+                description: None,
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+
+        let child_graph = create_child_graph_with_schema("Child", input_schema);
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("child-scenario-id::1".to_string(), child_graph);
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+        let code = tokens.to_string();
+
+        // Should handle None description properly
+        assert!(
+            code.contains("description : None"),
+            "Should generate None for missing description"
+        );
+    }
+
+    #[test]
+    fn test_emit_validation_generated_code_is_valid_syntax() {
+        let step = create_basic_step("start-child", "child-scenario-id");
+
+        let mut input_schema = HashMap::new();
+        input_schema.insert(
+            "name".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::String,
+                description: Some("Name field".to_string()),
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+        input_schema.insert(
+            "count".to_string(),
+            SchemaField {
+                field_type: SchemaFieldType::Integer,
+                description: None,
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+            },
+        );
+
+        let child_graph = create_child_graph_with_schema("Child", input_schema);
+
+        let mut child_scenarios = HashMap::new();
+        child_scenarios.insert("child-scenario-id::1".to_string(), child_graph);
+
+        let mut step_to_child_ref = HashMap::new();
+        step_to_child_ref.insert(
+            "start-child".to_string(),
+            ("child-scenario-id".to_string(), 1),
+        );
+
+        let mut ctx = EmitContext::with_child_scenarios(
+            false,
+            child_scenarios,
+            step_to_child_ref,
+            None,
+            None,
+        );
+
+        let tokens = emit(&step, &mut ctx).expect("Should emit step");
+
+        // Validate syntax using syn parser
+        validate_syntax(&tokens)
+            .expect("Generated code with validation should be valid Rust syntax");
     }
 }
