@@ -2222,6 +2222,7 @@ dependencies = [
  "strum",
  "tempfile",
  "tokio",
+ "tracing",
  "urlencoding",
  "wiremock",
  "zip",

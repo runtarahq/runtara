@@ -256,6 +256,21 @@ impl std::error::Error for AgentError {}
 /// so we need this conversion to use `?` with `Result<T, AgentError>` functions.
 impl From<AgentError> for String {
     fn from(err: AgentError) -> Self {
+        // Log structured error details before converting to string
+        // Extract common attributes for OTEL filtering
+        let status_code = err.attributes.get("status_code").map(|s| s.as_str());
+        let url = err.attributes.get("url").map(|s| s.as_str());
+
+        tracing::error!(
+            error.code = %err.code,
+            error.message = %err.message,
+            error.category = ?err.category,
+            error.severity = ?err.severity,
+            http.status_code = status_code,
+            http.url = url,
+            "Agent error"
+        );
+
         // Serialize the full AgentError to JSON for rich error information
         serde_json::to_string(&err).unwrap_or_else(|_| format!("[{}] {}", err.code, err.message))
     }
