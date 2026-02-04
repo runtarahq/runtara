@@ -8,6 +8,65 @@
 //! - Agents and capabilities exist
 //! - Connection data doesn't leak to non-secure agents
 //! - Configuration values are reasonable
+//! - Data and variable references are properly defined
+//! - Child scenario inputs match their schemas
+//!
+//! # Validation Phases
+//!
+//! The validator runs multiple phases in sequence:
+//!
+//! | Phase | Description |
+//! |-------|-------------|
+//! | 1 | Graph structure (entry point, reachability) |
+//! | 2 | Step reference validation |
+//! | 2.5 | Execution order validation |
+//! | 3 | Agent/capability validation |
+//! | 4 | Configuration warnings |
+//! | 5 | Connection validation |
+//! | 6 | Security validation (connection leakage) |
+//! | 7 | Child scenario validation (version format) |
+//! | 7.5 | Data and variable reference validation |
+//! | 8 | Step name validation (duplicates) |
+//! | 9 | Compensation validation (warnings) |
+//! | 10 | Edge condition validation (priorities) |
+//!
+//! # Cross-Scenario Validation
+//!
+//! Use [`validate_workflow_with_children`] to validate a parent workflow along with
+//! its child scenarios. This enables additional validation:
+//! - Verifying StartScenario inputs match child inputSchema
+//! - Detecting circular dependencies between scenarios
+//!
+//! # Error Codes
+//!
+//! | Code | Variant | Description |
+//! |------|---------|-------------|
+//! | E001 | EntryPointNotFound | Entry point step doesn't exist |
+//! | E002 | UnreachableStep | Step not reachable from entry |
+//! | E003 | EmptyWorkflow | No steps defined |
+//! | E010 | InvalidStepReference | Reference to non-existent step |
+//! | E011 | InvalidReferencePath | Malformed reference path |
+//! | E020 | UnknownAgent | Agent doesn't exist |
+//! | E021 | UnknownCapability | Capability doesn't exist |
+//! | E022 | MissingRequiredInput | Required agent input missing |
+//! | E030 | UnknownIntegration | Connection integration unknown |
+//! | E040 | ConnectionLeakToNonSecureAgent | Connection data exposed to non-secure agent |
+//! | E041 | ConnectionLeakToFinish | Connection data exposed in Finish step |
+//! | E042 | ConnectionLeakToLog | Connection data exposed in Log step |
+//! | E043 | InvalidChildVersion | Invalid child scenario version format |
+//! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
+//! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
+//! | E053 | UndefinedVariableReference | `variables.*` field not in variables |
+//! | E054 | ChildMissingInputSchema | StartScenario provides inputs but child has no schema |
+//! | E055 | MissingChildRequiredInputs | StartScenario missing required child inputs |
+//! | E056 | CircularDependency | Circular dependency between scenarios |
+//! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
+//! | E070 | UnknownVariable | Variable doesn't exist |
+//! | E080 | TypeMismatch | Value type doesn't match expected |
+//! | E081 | InvalidEnumValue | Enum value not in allowed set |
+//! | E090 | DuplicateStepName | Multiple steps with same name |
+//! | E100 | DuplicateEdgePriority | Edges with duplicate priority |
+//! | E101 | MultipleDefaultEdges | Multiple unconditional edges |
 
 use crate::dependency_analysis::{DependencyGraph, ScenarioReference};
 use runtara_dsl::{CompositeInner, ExecutionGraph, InputMapping, MappingValue, Step};
