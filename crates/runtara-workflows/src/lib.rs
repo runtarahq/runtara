@@ -100,7 +100,10 @@ pub use compile::{
 };
 pub use dependency_analysis::{DependencyGraph, ScenarioReference};
 pub use paths::{get_data_dir, get_scenario_dir, get_scenario_json_path};
-pub use validation::{ValidationError, validate_workflow};
+pub use validation::{
+    MissingInputField, ValidationError, ValidationResult, validate_workflow,
+    validate_workflow_with_children,
+};
 
 // Re-export DSL types for convenience
 pub use runtara_dsl::{ExecutionGraph, Scenario};

@@ -935,6 +935,32 @@ pub fn validate_workflow_errors(graph: &ExecutionGraph) -> Vec<ValidationError> 
     validate_workflow(graph).errors
 }
 
+/// Validate a workflow with access to child scenario definitions.
+///
+/// This extended validation function can check StartScenario input mappings
+/// against child scenario inputSchemas.
+pub fn validate_workflow_with_children(
+    graph: &ExecutionGraph,
+    child_scenarios: &HashMap<String, ExecutionGraph>,
+) -> ValidationResult {
+    // First run standard validation
+    let mut result = validate_workflow(graph);
+
+    // Then run child-aware validation (placeholder for now - implemented in Task 5)
+    validate_start_scenario_inputs(graph, child_scenarios, &mut result);
+
+    result
+}
+
+// Placeholder for Task 5 - will be implemented there
+fn validate_start_scenario_inputs(
+    _graph: &ExecutionGraph,
+    _child_scenarios: &HashMap<String, ExecutionGraph>,
+    _result: &mut ValidationResult,
+) {
+    // Will be implemented in Task 5
+}
+
 // ============================================================================
 // Phase 1: Graph Structure Validation
 // ============================================================================
@@ -6219,6 +6245,54 @@ mod tests {
             display2.contains("At most one"),
             "Should mention single default"
         );
+    }
+
+    #[test]
+    fn test_validate_with_children_detects_missing_inputs() {
+        // Parent scenario with StartScenario step
+        let parent_json = r#"{
+            "steps": {
+                "start": {
+                    "stepType": "StartScenario",
+                    "id": "start",
+                    "childScenarioId": "child-1",
+                    "childVersion": "latest",
+                    "inputMapping": {
+                        "provided_field": { "valueType": "immediate", "value": "test" }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+            },
+            "entryPoint": "start",
+            "executionPlan": [{ "fromStep": "start", "toStep": "finish" }]
+        }"#;
+
+        // Child scenario with required fields
+        let child_json = r#"{
+            "steps": {
+                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+            },
+            "entryPoint": "finish",
+            "inputSchema": {
+                "required_field": { "type": "string", "required": true },
+                "provided_field": { "type": "string", "required": true }
+            }
+        }"#;
+
+        let parent: ExecutionGraph = serde_json::from_str(parent_json).unwrap();
+        let child: ExecutionGraph = serde_json::from_str(child_json).unwrap();
+
+        let mut children = HashMap::new();
+        children.insert("child-1".to_string(), child);
+
+        let result = validate_workflow_with_children(&parent, &children);
+
+        assert!(result.has_errors());
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::MissingChildRequiredInputs { missing_fields, .. }
+                if missing_fields.iter().any(|f| f.name == "required_field")
+        )));
     }
 }
 
