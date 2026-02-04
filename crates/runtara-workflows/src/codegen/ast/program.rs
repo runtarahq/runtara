@@ -117,6 +117,7 @@ fn emit_constants(ctx: &EmitContext) -> TokenStream {
                     std::env::var("CONNECTION_SERVICE_URL").ok()
                 }).as_deref().or(Some(#url))
             }
+            #[allow(dead_code)]
             const CONNECTION_SERVICE_URL: Option<&str> = Some(#url);
         }
     } else {
