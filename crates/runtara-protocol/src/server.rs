@@ -46,6 +46,12 @@ pub struct RuntaraServerConfig {
     /// Maximum concurrent unidirectional streams per connection
     pub max_uni_streams: u32,
     /// Idle timeout in milliseconds
+    ///
+    /// **Design consideration**: This timeout must be **longer** than the heartbeat monitor timeout
+    /// (default: 600s vs 120s heartbeat). This ensures:
+    /// - Crashed instances are detected via heartbeat (2 min) before QUIC timeout (10 min)
+    /// - Long-running workflows can run up to 10 minutes between checkpoints
+    /// - Healthy instances sending periodic checkpoints/events never time out
     pub idle_timeout_ms: u64,
     /// Server-side keep-alive interval in milliseconds (0 to disable)
     pub keep_alive_interval_ms: u64,
@@ -66,7 +72,7 @@ impl Default for RuntaraServerConfig {
             max_incoming: 10_000,
             max_bi_streams: 1_000,
             max_uni_streams: 100,
-            idle_timeout_ms: 120_000,
+            idle_timeout_ms: 600_000, // 10 minutes - long enough for scenarios with extended computation
             keep_alive_interval_ms: 15_000,
             udp_receive_buffer_size: 2 * 1024 * 1024, // 2MB
             udp_send_buffer_size: 2 * 1024 * 1024,    // 2MB
@@ -575,7 +581,7 @@ mod tests {
         assert_eq!(config.max_incoming, 10_000);
         assert_eq!(config.max_bi_streams, 1_000);
         assert_eq!(config.max_uni_streams, 100);
-        assert_eq!(config.idle_timeout_ms, 120_000);
+        assert_eq!(config.idle_timeout_ms, 600_000); // 10 minutes
         assert_eq!(config.keep_alive_interval_ms, 15_000);
         assert_eq!(config.udp_receive_buffer_size, 2 * 1024 * 1024);
         assert_eq!(config.udp_send_buffer_size, 2 * 1024 * 1024);

@@ -74,7 +74,7 @@ impl Default for RuntaraClientConfig {
             enable_0rtt: true,
             dangerous_skip_cert_verification: false,
             keep_alive_interval_ms: 10_000,
-            idle_timeout_ms: 30_000,
+            idle_timeout_ms: 600_000, // 10 minutes - match server timeout for long-running workflows
             connect_timeout_ms: 10_000,
         }
     }
@@ -345,7 +345,7 @@ mod tests {
         assert!(config.enable_0rtt);
         assert!(!config.dangerous_skip_cert_verification);
         assert_eq!(config.keep_alive_interval_ms, 10_000);
-        assert_eq!(config.idle_timeout_ms, 30_000);
+        assert_eq!(config.idle_timeout_ms, 600_000); // 10 minutes
         assert_eq!(config.connect_timeout_ms, 10_000);
     }
 

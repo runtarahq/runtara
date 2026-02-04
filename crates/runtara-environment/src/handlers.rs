@@ -496,10 +496,17 @@ pub async fn handle_start_instance(
             }
 
             // Update instance status to running via Persistence trait
-            let _ = state
+            if let Err(e) = state
                 .persistence
                 .update_instance_status(&instance_id, "running", Some(chrono::Utc::now()))
-                .await;
+                .await
+            {
+                error!(
+                    error = %e,
+                    instance_id = %instance_id,
+                    "Failed to update instance status to running (instance launched but status may be incorrect)"
+                );
+            }
 
             // Spawn background task to monitor container and process output when done
             spawn_container_monitor(
