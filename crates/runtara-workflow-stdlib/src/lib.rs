@@ -59,6 +59,9 @@ pub use tracing::Instrument;
 // Telemetry support (OpenTelemetry integration)
 pub mod telemetry;
 
+// Child scenario input validation (runtime)
+pub mod child_input_validation;
+
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types
@@ -90,8 +93,18 @@ pub mod prelude {
 
     // Agent registry
     pub use runtara_agents::registry;
+
+    // Child input validation for StartScenario steps
+    pub use crate::child_input_validation::{
+        ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
+    };
 }
 
 // Direct access to commonly used modules
 pub use runtara_agents::registry;
 pub use runtime::{Error, Result};
+
+// Re-export child input validation for generated code
+pub use child_input_validation::{
+    ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
+};
