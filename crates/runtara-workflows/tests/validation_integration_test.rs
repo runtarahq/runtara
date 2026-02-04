@@ -5,7 +5,10 @@
 //! These tests validate workflows from JSON files in the examples/validation directory.
 
 use runtara_dsl::ExecutionGraph;
-use runtara_workflows::validation::{ValidationError, ValidationWarning, validate_workflow};
+use runtara_workflows::validation::{
+    ValidationError, ValidationWarning, validate_workflow, validate_workflow_with_children,
+};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -245,6 +248,52 @@ fn test_error_invalid_child_version() {
         .unwrap();
     let display = format!("{}", error);
     assert!(display.contains("[E050]"), "Error should have code E050");
+}
+
+#[test]
+fn test_compile_time_validation_missing_child_input() {
+    // Load parent and child scenarios
+    let parent_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/parent_missing_child_input.json");
+    let child_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/child_with_schema.json");
+
+    let parent_content = fs::read_to_string(&parent_path)
+        .unwrap_or_else(|e| panic!("Failed to read parent fixture: {}", e));
+    let child_content = fs::read_to_string(&child_path)
+        .unwrap_or_else(|e| panic!("Failed to read child fixture: {}", e));
+
+    let parent: runtara_dsl::Scenario = serde_json::from_str(&parent_content)
+        .unwrap_or_else(|e| panic!("Failed to parse parent fixture: {}", e));
+    let child: runtara_dsl::Scenario = serde_json::from_str(&child_content)
+        .unwrap_or_else(|e| panic!("Failed to parse child fixture: {}", e));
+
+    let mut children = HashMap::new();
+    children.insert("child-with-schema".to_string(), child.execution_graph);
+
+    // Validate with children
+    let result = validate_workflow_with_children(&parent.execution_graph, &children);
+
+    // Should fail with missing required input
+    assert!(result.has_errors(), "Should have validation errors");
+
+    let error = result
+        .errors
+        .iter()
+        .find(|e| matches!(e, ValidationError::MissingChildRequiredInputs { .. }))
+        .expect("Should have MissingChildRequiredInputs error");
+
+    let display = format!("{}", error);
+    assert!(
+        display.contains("required_field"),
+        "Error should mention missing field 'required_field': {}",
+        display
+    );
+    assert!(
+        display.contains("[E055]"),
+        "Error should have code E055: {}",
+        display
+    );
 }
 
 // ============================================================================

@@ -1,0 +1,25 @@
+{
+  "executionGraph": {
+    "name": "Parent missing child input",
+    "steps": {
+      "call_child": {
+        "stepType": "StartScenario",
+        "id": "call_child",
+        "childScenarioId": "child-with-schema",
+        "childVersion": "latest",
+        "inputMapping": {
+          "optional_field": { "valueType": "immediate", "value": "optional" }
+        }
+      },
+      "finish": {
+        "stepType": "Finish",
+        "id": "finish",
+        "outputs": {}
+      }
+    },
+    "entryPoint": "call_child",
+    "executionPlan": [
+      { "fromStep": "call_child", "toStep": "finish" }
+    ]
+  }
+}

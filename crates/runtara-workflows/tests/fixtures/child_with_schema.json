@@ -1,0 +1,26 @@
+{
+  "executionGraph": {
+    "name": "Child with required inputs",
+    "steps": {
+      "finish": {
+        "stepType": "Finish",
+        "id": "finish",
+        "outputs": {
+          "received": { "valueType": "reference", "value": "data.required_field" }
+        }
+      }
+    },
+    "entryPoint": "finish",
+    "inputSchema": {
+      "required_field": {
+        "type": "string",
+        "required": true,
+        "description": "A required field for testing"
+      },
+      "optional_field": {
+        "type": "string",
+        "required": false
+      }
+    }
+  }
+}
