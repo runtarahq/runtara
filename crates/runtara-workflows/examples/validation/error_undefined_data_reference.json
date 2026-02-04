@@ -1,0 +1,27 @@
+{
+  "name": "Test undefined data reference",
+  "steps": {
+    "start": {
+      "stepType": "Agent",
+      "id": "start",
+      "name": "Fetch data",
+      "agentId": "http",
+      "capabilityId": "request",
+      "inputMapping": {
+        "url": { "valueType": "reference", "value": "data.undefined_field" }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {}
+    }
+  },
+  "entryPoint": "start",
+  "executionPlan": [
+    { "fromStep": "start", "toStep": "finish" }
+  ],
+  "inputSchema": {
+    "customer_id": { "type": "string", "required": true }
+  }
+}

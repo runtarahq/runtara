@@ -914,6 +914,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 7: Child scenario validation
     validate_child_scenarios(graph, &mut result);
 
+    // Phase 7.5: Reference validation (data.* and variables.* definitions)
+    validate_data_and_variable_references(graph, &mut result);
+
     // Phase 8: Step name validation
     validate_step_names(graph, &mut result);
 
@@ -2386,7 +2389,6 @@ fn format_duration(ms: u64) -> String {
 
 /// Parse a reference string and return (root, field_name) if it's a data or variables reference.
 /// Returns None for steps.* or other reference types.
-#[allow(dead_code)] // Will be used in Task 3
 fn parse_reference(reference: &str) -> Option<(&str, &str)> {
     let parts: Vec<&str> = reference.splitn(3, '.').collect();
     if parts.len() < 2 {
@@ -2431,10 +2433,178 @@ fn extract_references_from_composite(inner: &CompositeInner, refs: &mut Vec<Stri
 }
 
 /// Extract all references from an InputMapping.
-#[allow(dead_code)] // Will be used in Task 3
 fn extract_references_from_input_mapping(mapping: &InputMapping, refs: &mut Vec<String>) {
     for value in mapping.values() {
         extract_references_from_mapping_value(value, refs);
+    }
+}
+
+// ============================================================================
+// Phase 7.5: Data and Variable Reference Validation
+// ============================================================================
+
+/// Validate that all data.* and variables.* references are defined.
+fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let available_data_fields: Vec<String> = graph.input_schema.keys().cloned().collect();
+    let available_variables: Vec<String> = graph.variables.keys().cloned().collect();
+
+    // Check each step for references
+    for (step_id, step) in &graph.steps {
+        let refs = collect_references_from_step(step);
+
+        for reference in refs {
+            if let Some((root, field_name)) = parse_reference(&reference) {
+                match root {
+                    "data" => {
+                        if graph.input_schema.is_empty() {
+                            result.errors.push(ValidationError::MissingInputSchema {
+                                step_id: step_id.clone(),
+                                reference: reference.clone(),
+                            });
+                        } else if !graph.input_schema.contains_key(field_name) {
+                            result.errors.push(ValidationError::UndefinedDataReference {
+                                step_id: step_id.clone(),
+                                reference: reference.clone(),
+                                field_name: field_name.to_string(),
+                                available_fields: available_data_fields.clone(),
+                            });
+                        }
+                    }
+                    "variables" => {
+                        if !graph.variables.contains_key(field_name) {
+                            result
+                                .errors
+                                .push(ValidationError::UndefinedVariableReference {
+                                    step_id: step_id.clone(),
+                                    reference: reference.clone(),
+                                    variable_name: field_name.to_string(),
+                                    available_variables: available_variables.clone(),
+                                });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Recursively validate subgraphs
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_data_and_variable_references(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_data_and_variable_references(&while_step.subgraph, result);
+            }
+            Step::WaitForSignal(wait_step) => {
+                if let Some(ref on_wait) = wait_step.on_wait {
+                    validate_data_and_variable_references(on_wait, result);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect all reference strings from a step's inputs/mappings.
+fn collect_references_from_step(step: &Step) -> Vec<String> {
+    let mut refs = Vec::new();
+
+    match step {
+        Step::Agent(agent_step) => {
+            if let Some(ref inputs) = agent_step.input_mapping {
+                extract_references_from_input_mapping(inputs, &mut refs);
+            }
+        }
+        Step::StartScenario(start_step) => {
+            if let Some(ref mapping) = start_step.input_mapping {
+                extract_references_from_input_mapping(mapping, &mut refs);
+            }
+        }
+        Step::Finish(finish_step) => {
+            if let Some(ref outputs) = finish_step.input_mapping {
+                extract_references_from_input_mapping(outputs, &mut refs);
+            }
+        }
+        Step::Log(log_step) => {
+            if let Some(ref context) = log_step.context {
+                extract_references_from_input_mapping(context, &mut refs);
+            }
+        }
+        Step::Conditional(cond_step) => {
+            extract_references_from_condition(&cond_step.condition, &mut refs);
+        }
+        Step::Switch(switch_step) => {
+            if let Some(ref config) = switch_step.config {
+                extract_references_from_mapping_value(&config.value, &mut refs);
+            }
+        }
+        Step::Filter(filter_step) => {
+            extract_references_from_mapping_value(&filter_step.config.value, &mut refs);
+            extract_references_from_condition(&filter_step.config.condition, &mut refs);
+        }
+        Step::GroupBy(group_step) => {
+            extract_references_from_mapping_value(&group_step.config.value, &mut refs);
+        }
+        Step::Split(split_step) => {
+            if let Some(ref config) = split_step.config {
+                extract_references_from_mapping_value(&config.value, &mut refs);
+            }
+        }
+        Step::While(while_step) => {
+            extract_references_from_condition(&while_step.condition, &mut refs);
+        }
+        Step::Delay(delay_step) => {
+            extract_references_from_mapping_value(&delay_step.duration_ms, &mut refs);
+        }
+        Step::WaitForSignal(wait_step) => {
+            if let Some(ref timeout) = wait_step.timeout_ms {
+                extract_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
+        Step::Error(error_step) => {
+            if let Some(ref context) = error_step.context {
+                extract_references_from_input_mapping(context, &mut refs);
+            }
+        }
+        Step::Connection(_) => {
+            // Connection steps don't have user-provided references to validate
+        }
+    }
+
+    refs
+}
+
+/// Extract references from a ConditionExpression.
+fn extract_references_from_condition(
+    condition: &runtara_dsl::ConditionExpression,
+    refs: &mut Vec<String>,
+) {
+    match condition {
+        runtara_dsl::ConditionExpression::Operation(op) => {
+            for arg in &op.arguments {
+                extract_references_from_condition_argument(arg, refs);
+            }
+        }
+        runtara_dsl::ConditionExpression::Value(val) => {
+            extract_references_from_mapping_value(val, refs);
+        }
+    }
+}
+
+/// Extract references from a ConditionArgument.
+fn extract_references_from_condition_argument(
+    arg: &runtara_dsl::ConditionArgument,
+    refs: &mut Vec<String>,
+) {
+    match arg {
+        runtara_dsl::ConditionArgument::Expression(expr) => {
+            extract_references_from_condition(expr, refs);
+        }
+        runtara_dsl::ConditionArgument::Value(val) => {
+            extract_references_from_mapping_value(val, refs);
+        }
     }
 }
 

@@ -371,3 +371,34 @@ fn test_multiple_errors_in_single_workflow() {
     let error_count = result.errors.len();
     assert!(error_count >= 1, "Should have at least one error");
 }
+
+// ============================================================================
+// Data and Variable Reference Error Tests
+// ============================================================================
+
+#[test]
+fn test_error_undefined_data_reference() {
+    let graph = load_workflow("error_undefined_data_reference.json");
+    let result = validate_workflow(&graph);
+
+    assert!(result.has_errors(), "Should have errors");
+    assert!(
+        result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::UndefinedDataReference { field_name, .. } if field_name == "undefined_field"
+        )),
+        "Should have E051 UndefinedDataReference error"
+    );
+
+    let error = result
+        .errors
+        .iter()
+        .find(|e| matches!(e, ValidationError::UndefinedDataReference { .. }))
+        .unwrap();
+    let display = format!("{}", error);
+    assert!(display.contains("[E051]"), "Error should have code E051");
+    assert!(
+        display.contains("customer_id"),
+        "Should suggest available fields"
+    );
+}
