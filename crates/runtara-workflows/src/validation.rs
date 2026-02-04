@@ -139,6 +139,44 @@ pub enum ValidationError {
         reason: String,
     },
 
+    // === Reference Validation Errors ===
+    /// A data reference is used but not defined in inputSchema.
+    UndefinedDataReference {
+        step_id: String,
+        reference: String,
+        field_name: String,
+        available_fields: Vec<String>,
+    },
+
+    /// A data reference is used but no inputSchema is defined.
+    MissingInputSchema { step_id: String, reference: String },
+
+    /// A variable reference is used but not defined in variables.
+    UndefinedVariableReference {
+        step_id: String,
+        reference: String,
+        variable_name: String,
+        available_variables: Vec<String>,
+    },
+
+    // === StartScenario Input Validation Errors ===
+    /// StartScenario provides inputs but child has no inputSchema.
+    ChildMissingInputSchema {
+        step_id: String,
+        child_scenario_id: String,
+    },
+
+    /// StartScenario is missing required inputs for child scenario.
+    MissingChildRequiredInputs {
+        step_id: String,
+        child_scenario_id: String,
+        missing_fields: Vec<MissingInputField>,
+        provided_fields: Vec<String>,
+    },
+
+    /// Circular dependency detected between scenarios.
+    CircularDependency { cycle_path: Vec<String> },
+
     // === Execution Order Errors ===
     /// A step references another step that hasn't executed yet.
     StepNotYetExecuted {
@@ -188,6 +226,17 @@ pub enum ValidationError {
         label: Option<String>,
         targets: Vec<String>,
     },
+}
+
+/// Information about a missing required input field.
+#[derive(Debug, Clone)]
+pub struct MissingInputField {
+    /// Field name
+    pub name: String,
+    /// Field type (String, Integer, etc.)
+    pub field_type: String,
+    /// Optional description from schema
+    pub description: Option<String>,
 }
 
 impl std::fmt::Display for ValidationError {
@@ -373,6 +422,114 @@ impl std::fmt::Display for ValidationError {
                     "[E050] Step '{}': child scenario '{}' has invalid version '{}': {}",
                     step_id, child_scenario_id, version, reason
                 )
+            }
+
+            // Reference Validation Errors
+            ValidationError::UndefinedDataReference {
+                step_id,
+                reference,
+                field_name,
+                available_fields,
+            } => {
+                let suggestion = find_similar_name(field_name, available_fields);
+                let suggestion_text = suggestion
+                    .map(|s| format!(". Did you mean '{}'?", s))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "[E051] Step '{}' references '{}' but field '{}' is not defined in inputSchema{}\n       Available fields: {}",
+                    step_id,
+                    reference,
+                    field_name,
+                    suggestion_text,
+                    if available_fields.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available_fields.join(", ")
+                    }
+                )
+            }
+            ValidationError::MissingInputSchema { step_id, reference } => {
+                write!(
+                    f,
+                    "[E052] Step '{}' references '{}' but no inputSchema is defined.\n       Add an inputSchema to define expected input fields.",
+                    step_id, reference
+                )
+            }
+            ValidationError::UndefinedVariableReference {
+                step_id,
+                reference,
+                variable_name,
+                available_variables,
+            } => {
+                let suggestion = find_similar_name(variable_name, available_variables);
+                let suggestion_text = suggestion
+                    .map(|s| format!(". Did you mean '{}'?", s))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "[E053] Step '{}' references '{}' but variable '{}' is not defined{}\n       Available variables: {}",
+                    step_id,
+                    reference,
+                    variable_name,
+                    suggestion_text,
+                    if available_variables.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available_variables.join(", ")
+                    }
+                )
+            }
+            ValidationError::ChildMissingInputSchema {
+                step_id,
+                child_scenario_id,
+            } => {
+                write!(
+                    f,
+                    "[E054] StartScenario step '{}' provides inputs to child '{}' but child has no inputSchema defined.\n       Add inputSchema to the child scenario or remove inputMapping.",
+                    step_id, child_scenario_id
+                )
+            }
+            ValidationError::MissingChildRequiredInputs {
+                step_id,
+                child_scenario_id,
+                missing_fields,
+                provided_fields,
+            } => {
+                let mut msg = format!(
+                    "[E055] StartScenario step '{}' is missing required inputs for child scenario '{}':\n",
+                    step_id, child_scenario_id
+                );
+                msg.push_str("       Missing fields:\n");
+                for field in missing_fields {
+                    msg.push_str(&format!("         - {} ({})", field.name, field.field_type));
+                    if let Some(ref desc) = field.description {
+                        msg.push_str(&format!(": {}", desc));
+                    }
+                    msg.push('\n');
+                }
+                if !provided_fields.is_empty() {
+                    msg.push_str("       Provided fields:\n");
+                    for field in provided_fields {
+                        msg.push_str(&format!("         - {} ✓\n", field));
+                    }
+                }
+                write!(f, "{}", msg.trim_end())
+            }
+            ValidationError::CircularDependency { cycle_path } => {
+                let mut msg =
+                    String::from("[E056] Circular dependency detected in scenario graph:\n");
+                for (i, scenario) in cycle_path.iter().enumerate() {
+                    if i == 0 {
+                        msg.push_str(&format!("         {}\n", scenario));
+                    } else if i == cycle_path.len() - 1 {
+                        msg.push_str(&format!("       → {} ← cycle\n", scenario));
+                    } else {
+                        msg.push_str(&format!("       → {}\n", scenario));
+                    }
+                }
+                msg.push_str("\n       Remove the StartScenario step that creates this cycle.");
+                write!(f, "{}", msg)
             }
 
             // Execution Order Errors
