@@ -9,6 +9,7 @@
 //! - Connection data doesn't leak to non-secure agents
 //! - Configuration values are reasonable
 
+use crate::dependency_analysis::{DependencyGraph, ScenarioReference};
 use runtara_dsl::{CompositeInner, ExecutionGraph, InputMapping, MappingValue, Step};
 use std::collections::{HashMap, HashSet};
 
@@ -943,13 +944,115 @@ pub fn validate_workflow_with_children(
     graph: &ExecutionGraph,
     child_scenarios: &HashMap<String, ExecutionGraph>,
 ) -> ValidationResult {
-    // First run standard validation
     let mut result = validate_workflow(graph);
 
-    // Then run child-aware validation (placeholder for now - implemented in Task 5)
-    validate_start_scenario_inputs(graph, child_scenarios, &mut result);
+    // Check for circular dependencies first
+    validate_circular_dependencies(graph, child_scenarios, &mut result);
+
+    // Then validate inputs (skip if cycles detected)
+    if !result
+        .errors
+        .iter()
+        .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
+    {
+        validate_start_scenario_inputs(graph, child_scenarios, &mut result);
+    }
 
     result
+}
+
+// ============================================================================
+// Circular Dependency Detection
+// ============================================================================
+
+/// Check for circular dependencies in the scenario graph.
+fn validate_circular_dependencies(
+    graph: &ExecutionGraph,
+    child_scenarios: &HashMap<String, ExecutionGraph>,
+    result: &mut ValidationResult,
+) {
+    let mut dep_graph = DependencyGraph::new();
+    let mut visited = HashSet::new();
+
+    // Build dependency graph recursively
+    let root = ScenarioReference {
+        scenario_id: "root".to_string(),
+        version: 1,
+    };
+
+    build_dependency_graph(graph, &root, child_scenarios, &mut dep_graph, &mut visited);
+
+    // Check for cycles
+    if let Err(cycle) = dep_graph.detect_cycles(&root) {
+        let cycle_path: Vec<String> = cycle
+            .iter()
+            .skip(1) // Skip "root" placeholder
+            .map(|r| format!("{} (v{})", r.scenario_id, r.version))
+            .collect();
+
+        if !cycle_path.is_empty() {
+            result
+                .errors
+                .push(ValidationError::CircularDependency { cycle_path });
+        }
+    }
+}
+
+/// Recursively build the dependency graph from a scenario.
+fn build_dependency_graph(
+    graph: &ExecutionGraph,
+    parent_ref: &ScenarioReference,
+    child_scenarios: &HashMap<String, ExecutionGraph>,
+    dep_graph: &mut DependencyGraph,
+    visited: &mut HashSet<String>,
+) {
+    for step in graph.steps.values() {
+        if let Step::StartScenario(start_step) = step {
+            let child_ref = ScenarioReference {
+                scenario_id: start_step.child_scenario_id.clone(),
+                version: 1, // Simplified - use version 1 for detection
+            };
+
+            dep_graph.add_edge(parent_ref.clone(), child_ref.clone());
+
+            // Recursively add child's dependencies (only if not already visited)
+            if !visited.contains(&start_step.child_scenario_id) {
+                visited.insert(start_step.child_scenario_id.clone());
+                if let Some(child_graph) = child_scenarios.get(&start_step.child_scenario_id) {
+                    build_dependency_graph(
+                        child_graph,
+                        &child_ref,
+                        child_scenarios,
+                        dep_graph,
+                        visited,
+                    );
+                }
+            }
+        }
+
+        // Check subgraphs
+        match step {
+            Step::Split(split_step) => {
+                build_dependency_graph(
+                    &split_step.subgraph,
+                    parent_ref,
+                    child_scenarios,
+                    dep_graph,
+                    visited,
+                );
+            }
+            Step::While(while_step) => {
+                build_dependency_graph(
+                    &while_step.subgraph,
+                    parent_ref,
+                    child_scenarios,
+                    dep_graph,
+                    visited,
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 // ============================================================================
@@ -6374,6 +6477,55 @@ mod tests {
             ValidationError::MissingChildRequiredInputs { missing_fields, .. }
                 if missing_fields.iter().any(|f| f.name == "required_field")
         )));
+    }
+
+    #[test]
+    fn test_validate_with_children_detects_cycles() {
+        // Scenario A calls B, B calls A
+        let scenario_a_json = r#"{
+            "steps": {
+                "call_b": {
+                    "stepType": "StartScenario",
+                    "id": "call_b",
+                    "childScenarioId": "scenario-b",
+                    "childVersion": "latest"
+                },
+                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+            },
+            "entryPoint": "call_b",
+            "executionPlan": [{ "fromStep": "call_b", "toStep": "finish" }]
+        }"#;
+
+        let scenario_b_json = r#"{
+            "steps": {
+                "call_a": {
+                    "stepType": "StartScenario",
+                    "id": "call_a",
+                    "childScenarioId": "scenario-a",
+                    "childVersion": "latest"
+                },
+                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+            },
+            "entryPoint": "call_a",
+            "executionPlan": [{ "fromStep": "call_a", "toStep": "finish" }]
+        }"#;
+
+        let scenario_a: ExecutionGraph = serde_json::from_str(scenario_a_json).unwrap();
+        let scenario_b: ExecutionGraph = serde_json::from_str(scenario_b_json).unwrap();
+
+        let mut children = HashMap::new();
+        children.insert("scenario-a".to_string(), scenario_a.clone());
+        children.insert("scenario-b".to_string(), scenario_b);
+
+        let result = validate_workflow_with_children(&scenario_a, &children);
+
+        assert!(result.has_errors());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
+        );
     }
 }
 
