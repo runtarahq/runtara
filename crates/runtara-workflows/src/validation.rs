@@ -952,13 +952,94 @@ pub fn validate_workflow_with_children(
     result
 }
 
-// Placeholder for Task 5 - will be implemented there
+// ============================================================================
+// StartScenario Input Validation (requires child scenarios)
+// ============================================================================
+
+/// Validate StartScenario input mappings against child scenario inputSchemas.
 fn validate_start_scenario_inputs(
-    _graph: &ExecutionGraph,
-    _child_scenarios: &HashMap<String, ExecutionGraph>,
-    _result: &mut ValidationResult,
+    graph: &ExecutionGraph,
+    child_scenarios: &HashMap<String, ExecutionGraph>,
+    result: &mut ValidationResult,
 ) {
-    // Will be implemented in Task 5
+    for (step_id, step) in &graph.steps {
+        if let Step::StartScenario(start_step) = step {
+            let child_id = &start_step.child_scenario_id;
+
+            // Skip if we don't have the child scenario
+            let Some(child_graph) = child_scenarios.get(child_id) else {
+                continue;
+            };
+
+            let has_input_mapping = start_step
+                .input_mapping
+                .as_ref()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false);
+
+            let child_has_schema = !child_graph.input_schema.is_empty();
+            let child_required_fields: Vec<(&String, &runtara_dsl::SchemaField)> = child_graph
+                .input_schema
+                .iter()
+                .filter(|(_, field)| field.required)
+                .collect();
+
+            // Case 1: Parent provides inputs but child has no schema
+            if has_input_mapping && !child_has_schema {
+                result
+                    .errors
+                    .push(ValidationError::ChildMissingInputSchema {
+                        step_id: step_id.clone(),
+                        child_scenario_id: child_id.clone(),
+                    });
+                continue;
+            }
+
+            // Case 2: Child has required fields - check they're all provided
+            if !child_required_fields.is_empty() {
+                let provided_keys: HashSet<&String> = start_step
+                    .input_mapping
+                    .as_ref()
+                    .map(|m| m.keys().collect())
+                    .unwrap_or_default();
+
+                let mut missing_fields = Vec::new();
+                for (field_name, field_def) in &child_required_fields {
+                    if !provided_keys.contains(field_name) {
+                        missing_fields.push(MissingInputField {
+                            name: (*field_name).clone(),
+                            field_type: format!("{:?}", field_def.field_type),
+                            description: field_def.description.clone(),
+                        });
+                    }
+                }
+
+                if !missing_fields.is_empty() {
+                    result
+                        .errors
+                        .push(ValidationError::MissingChildRequiredInputs {
+                            step_id: step_id.clone(),
+                            child_scenario_id: child_id.clone(),
+                            missing_fields,
+                            provided_fields: provided_keys.into_iter().cloned().collect(),
+                        });
+                }
+            }
+        }
+    }
+
+    // Recursively validate subgraphs
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_start_scenario_inputs(&split_step.subgraph, child_scenarios, result);
+            }
+            Step::While(while_step) => {
+                validate_start_scenario_inputs(&while_step.subgraph, child_scenarios, result);
+            }
+            _ => {}
+        }
+    }
 }
 
 // ============================================================================
