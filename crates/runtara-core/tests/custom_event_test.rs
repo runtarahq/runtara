@@ -146,11 +146,10 @@ async fn test_multiple_custom_events_with_different_subtypes() {
     // Give the server time to process the events
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Verify both events were stored
+    // Verify both events were stored (order not guaranteed for fire-and-forget)
     let rows: Vec<(String,)> = sqlx::query_as(
         r#"SELECT subtype FROM instance_events
-           WHERE instance_id = $1 AND event_type = 'custom'
-           ORDER BY created_at, id"#,
+           WHERE instance_id = $1 AND event_type = 'custom'"#,
     )
     .bind(instance_id.to_string())
     .fetch_all(&ctx.pool)
@@ -158,8 +157,9 @@ async fn test_multiple_custom_events_with_different_subtypes() {
     .expect("Failed to query events");
 
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0, "step_debug_start");
-    assert_eq!(rows[1].0, "step_debug_end");
+    let subtypes: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert!(subtypes.contains(&"step_debug_start"));
+    assert!(subtypes.contains(&"step_debug_end"));
 
     ctx.cleanup_instance(&instance_id).await;
 }
