@@ -7,12 +7,12 @@
 //! - Instance lifecycle via Management SDK protocol
 //! - Signal delivery through the protocol
 //!
-//! Requirements:
-//! - TEST_RUNTARA_DATABASE_URL: PostgreSQL connection string
+//! Tests automatically spin up a PostgreSQL container using testcontainers.
+//! Optionally set TEST_RUNTARA_DATABASE_URL to use an external database.
 //!
 //! Run with:
 //! ```bash
-//! TEST_RUNTARA_DATABASE_URL=postgres://user:pass@localhost/test cargo test -p runtara-environment --test full_stack_e2e_test
+//! cargo test -p runtara-environment --test full_stack_e2e_test
 //! ```
 
 mod common;
@@ -22,17 +22,6 @@ use runtara_protocol::environment_proto::*;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// Asserts that the test database is available.
-fn require_database() {
-    if std::env::var("TEST_RUNTARA_DATABASE_URL").is_err() {
-        panic!(
-            "TEST_RUNTARA_DATABASE_URL is required for this test.\n\
-             Set it to a PostgreSQL connection string, e.g.:\n\
-             TEST_RUNTARA_DATABASE_URL=postgres://user:pass@localhost/runtara_test"
-        );
-    }
-}
-
 // ============================================================================
 // Server Startup Tests
 // ============================================================================
@@ -40,8 +29,6 @@ fn require_database() {
 /// Verifies that the environment server starts and accepts connections.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_environment_server_starts_and_responds() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context - is the database running?");
@@ -77,8 +64,6 @@ async fn test_environment_server_starts_and_responds() {
 /// Tests image registration via the QUIC protocol.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_register_image_via_protocol() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -141,8 +126,6 @@ async fn test_register_image_via_protocol() {
 /// Tests listing images with tenant filtering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_list_images_by_tenant() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -222,8 +205,6 @@ async fn test_list_images_by_tenant() {
 /// Tests image deletion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_delete_image() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -301,8 +282,6 @@ async fn test_delete_image() {
 /// Tests starting an instance via the protocol.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_start_instance_via_protocol() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -351,8 +330,6 @@ async fn test_start_instance_via_protocol() {
 /// Tests starting an instance with custom ID.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_start_instance_with_custom_id() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -398,8 +375,6 @@ async fn test_start_instance_with_custom_id() {
 /// Tests listing instances.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_list_instances() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -481,8 +456,6 @@ async fn test_list_instances() {
 /// Tests getting instance status via protocol.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_get_instance_status_via_protocol() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -536,8 +509,6 @@ async fn test_get_instance_status_via_protocol() {
 /// Tests stopping an instance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_stop_instance() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -597,8 +568,6 @@ async fn test_stop_instance() {
 /// Tests error handling for non-existent image.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_start_with_nonexistent_image() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -632,8 +601,6 @@ async fn test_start_with_nonexistent_image() {
 /// Tests error handling for non-existent instance status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_get_status_of_nonexistent_instance() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -665,8 +632,6 @@ async fn test_get_status_of_nonexistent_instance() {
 /// Tests that tenants cannot access each other's images.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_tenant_image_isolation() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -742,8 +707,6 @@ async fn test_tenant_image_isolation() {
 /// Tests that connection can be re-established.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_reconnection_to_environment_server() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");

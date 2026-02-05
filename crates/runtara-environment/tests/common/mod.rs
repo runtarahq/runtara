@@ -3,6 +3,8 @@
 //! Common test infrastructure for runtara-environment E2E tests.
 //!
 //! Provides TestContext for setting up database, server, and client connections.
+//! Automatically spins up a PostgreSQL container using testcontainers when
+//! TEST_RUNTARA_DATABASE_URL is not set.
 
 #![allow(dead_code)]
 
@@ -13,6 +15,9 @@ use std::time::Duration;
 
 use runtara_core::persistence::PostgresPersistence;
 use sqlx::PgPool;
+use testcontainers::ContainerAsync;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 use runtara_environment::handlers::EnvironmentHandlerState;
@@ -29,19 +34,27 @@ pub struct TestContext {
     _temp_dir: tempfile::TempDir,
     /// Tenant IDs used by this test context (for isolated cleanup).
     tenant_ids: std::sync::Mutex<Vec<String>>,
+    /// Container handle - keeps the container alive for the duration of the test.
+    /// When this is dropped, the container is automatically stopped and removed.
+    _container: Option<ContainerAsync<Postgres>>,
 }
 
 impl TestContext {
     /// Create a new test context.
     pub async fn new() -> Result<Self, String> {
-        // Get database URL from environment
-        let database_url = std::env::var("TEST_RUNTARA_DATABASE_URL")
-            .map_err(|_| "TEST_RUNTARA_DATABASE_URL not set")?;
+        // Get database URL - either from env or start a container
+        let (database_url, container) = get_database_url().await?;
 
         // Connect to test database
         let pool = PgPool::connect(&database_url)
             .await
             .map_err(|e| format!("Failed to connect to database: {}", e))?;
+
+        // Enable pgcrypto extension (required for gen_random_uuid())
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Failed to create pgcrypto extension: {}", e))?;
 
         // Run migrations (core + environment)
         runtara_environment::migrations::run(&pool)
@@ -106,6 +119,7 @@ impl TestContext {
             data_dir,
             _temp_dir: temp_dir,
             tenant_ids: std::sync::Mutex::new(Vec::new()),
+            _container: container,
         })
     }
 
@@ -303,14 +317,40 @@ impl TestContext {
     }
 }
 
+/// Get database URL - either from environment or by starting a testcontainer.
+async fn get_database_url() -> Result<(String, Option<ContainerAsync<Postgres>>), String> {
+    // First, check if TEST_RUNTARA_DATABASE_URL is set
+    if let Ok(url) = std::env::var("TEST_RUNTARA_DATABASE_URL") {
+        return Ok((url, None));
+    }
+
+    // Otherwise, start a PostgreSQL container
+    let container = Postgres::default()
+        .start()
+        .await
+        .map_err(|e| format!("Failed to start PostgreSQL container: {}", e))?;
+
+    let host = container
+        .get_host()
+        .await
+        .map_err(|e| format!("Failed to get container host: {}", e))?;
+
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .map_err(|e| format!("Failed to get container port: {}", e))?;
+
+    let url = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
+
+    Ok((url, Some(container)))
+}
+
 /// Helper macro to skip tests if database URL is not set.
+/// Note: This is kept for backward compatibility, but tests now auto-start containers.
 #[macro_export]
 macro_rules! skip_if_no_env_db {
     () => {
-        if std::env::var("TEST_RUNTARA_DATABASE_URL").is_err() {
-            eprintln!("Skipping test: TEST_RUNTARA_DATABASE_URL not set");
-            return;
-        }
+        // No-op: tests now auto-start containers if no DB URL is set
     };
 }
 

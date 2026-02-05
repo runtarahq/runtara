@@ -11,12 +11,12 @@
 //!
 //! Unlike unit tests, these tests verify the actual server behavior.
 //!
-//! Requirements:
-//! - TEST_RUNTARA_DATABASE_URL environment variable pointing to a PostgreSQL database
+//! Tests automatically spin up a PostgreSQL container using testcontainers.
+//! Optionally set TEST_RUNTARA_DATABASE_URL to use an external database.
 //!
 //! Run with:
 //! ```bash
-//! TEST_RUNTARA_DATABASE_URL=postgres://user:pass@localhost/test cargo test -p runtara-core --test full_stack_e2e_test
+//! cargo test -p runtara-core --test full_stack_e2e_test
 //! ```
 
 mod common;
@@ -29,18 +29,6 @@ use uuid::Uuid;
 // Re-export for easier use in tests
 use runtara_protocol::instance_proto::InstanceEventType;
 
-/// Asserts that the test database is available.
-/// Unlike skip macros, this FAILS the test if the database isn't configured.
-fn require_database() {
-    if std::env::var("TEST_RUNTARA_DATABASE_URL").is_err() {
-        panic!(
-            "TEST_RUNTARA_DATABASE_URL is required for this test.\n\
-             Set it to a PostgreSQL connection string, e.g.:\n\
-             TEST_RUNTARA_DATABASE_URL=postgres://user:pass@localhost/runtara_test"
-        );
-    }
-}
-
 // ============================================================================
 // Server Startup Tests
 // ============================================================================
@@ -49,8 +37,6 @@ fn require_database() {
 /// and establish a client connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_server_starts_and_accepts_connections() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context - is the database running?");
@@ -97,8 +83,6 @@ async fn test_server_starts_and_accepts_connections() {
 /// Tests that a new instance can register and transitions to running state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_instance_registration_sets_running_status() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -152,8 +136,6 @@ async fn test_instance_registration_sets_running_status() {
 /// Tests that re-registration with a checkpoint_id succeeds (crash recovery).
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_instance_re_registration_with_checkpoint() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -235,8 +217,6 @@ async fn test_instance_re_registration_with_checkpoint() {
 /// Tests the complete checkpoint workflow: save new, retrieve existing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_save_and_retrieve_flow() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -332,8 +312,6 @@ async fn test_checkpoint_save_and_retrieve_flow() {
 /// Tests that checkpoint order is preserved (append-only semantics).
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_checkpoint_append_only_ordering() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -396,8 +374,6 @@ async fn test_checkpoint_append_only_ordering() {
 /// Tests pause signal delivery and acknowledgement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_pause_signal_delivery_and_ack() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -467,8 +443,6 @@ async fn test_pause_signal_delivery_and_ack() {
 /// Tests cancel signal causes instance to be cancelled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_cancel_signal_terminates_instance() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -530,8 +504,6 @@ async fn test_cancel_signal_terminates_instance() {
 /// Tests that no signal returns None from poll.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_poll_signals_returns_none_when_empty() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -573,8 +545,6 @@ async fn test_poll_signals_returns_none_when_empty() {
 /// Tests that sleep completes and saves checkpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_sleep_saves_checkpoint() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -633,8 +603,6 @@ async fn test_sleep_saves_checkpoint() {
 /// Tests short sleep completes inline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_short_sleep_completes_inline() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -682,8 +650,6 @@ async fn test_short_sleep_completes_inline() {
 /// Tests sending a completed event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_instance_completed_event() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -731,8 +697,6 @@ async fn test_instance_completed_event() {
 /// Tests sending a failed event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_instance_failed_event() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -783,8 +747,6 @@ async fn test_instance_failed_event() {
 /// Tests multiple clients can access the same server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multiple_concurrent_clients() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -860,8 +822,6 @@ async fn test_multiple_concurrent_clients() {
 /// Tests operations on non-existent instances return appropriate responses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_operations_on_nonexistent_instance() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");
@@ -924,8 +884,6 @@ async fn test_operations_on_nonexistent_instance() {
 /// Tests that connection can be re-established after close.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_reconnection_after_close() {
-    require_database();
-
     let ctx = TestContext::new()
         .await
         .expect("Failed to create test context");

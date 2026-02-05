@@ -69,3 +69,6 @@ runtara-dsl = { path = "../runtara-dsl", version = "1.0" }
 futures = "0.3"
 # Needed for agent capability validation in tests (inventory metadata)
 runtara-agents = { path = "../runtara-agents", version = "1.0" }
+# Testcontainers for automatic PostgreSQL setup in tests
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
