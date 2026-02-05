@@ -198,6 +198,8 @@ impl MockPersistence {
             output: None,
             error: None,
             sleep_until: None,
+            termination_reason: None,
+            exit_code: None,
         };
         self.instances
             .lock()
@@ -968,6 +970,8 @@ async fn test_completed_instance_in_core_not_flagged() {
             output: None,
             error: None,
             sleep_until: None,
+            termination_reason: Some("completed".to_string()),
+            exit_code: None,
         };
         persistence
             .instances

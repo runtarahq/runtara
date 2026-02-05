@@ -384,8 +384,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_creation() {
-        let mut config = RuntaraClientConfig::default();
-        config.dangerous_skip_cert_verification = true;
+        let config = RuntaraClientConfig {
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
         let client = RuntaraClient::new(config);
         assert!(
             client.is_ok(),

@@ -707,6 +707,9 @@ async fn handle_get_instance_status(
             // Execution metrics (available for terminal states)
             memory_peak_bytes: inst.memory_peak_bytes.map(|v| v as u64),
             cpu_usage_usec: inst.cpu_usage_usec.map(|v| v as u64),
+            // Termination tracking
+            termination_reason: inst.termination_reason,
+            exit_code: inst.exit_code,
         }),
         None => Ok(environment_proto::GetInstanceStatusResponse {
             found: false,
@@ -730,6 +733,9 @@ async fn handle_get_instance_status(
             // Execution metrics - not available for not found
             memory_peak_bytes: None,
             cpu_usage_usec: None,
+            // Termination tracking - not available for not found
+            termination_reason: None,
+            exit_code: None,
         }),
     }
 }

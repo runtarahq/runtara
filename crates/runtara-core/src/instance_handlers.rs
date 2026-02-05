@@ -479,11 +479,67 @@ pub async fn handle_instance_event(
             warn!(error = %error, "Instance failed");
         }
         InstanceEventType::EventSuspended => {
-            state
-                .persistence
-                .update_instance_status(&event.instance_id, "suspended", None)
-                .await?;
-            info!("Instance suspended");
+            // Check if this is a suspended-with-sleep event (has sleep data in payload)
+            if !event.payload.is_empty() && event.checkpoint_id.is_some() {
+                if let Some(sleep_data) = parse_sleep_payload(&event.payload) {
+                    let checkpoint_id = event.checkpoint_id.as_ref().unwrap();
+
+                    // Save checkpoint with state from payload
+                    state
+                        .persistence
+                        .save_checkpoint(&event.instance_id, checkpoint_id, &sleep_data.state)
+                        .await?;
+
+                    // Update instance checkpoint reference
+                    state
+                        .persistence
+                        .update_instance_checkpoint(&event.instance_id, checkpoint_id)
+                        .await?;
+
+                    // Set sleep_until for wake scheduler
+                    if let Some(wake_at) = sleep_data.wake_at {
+                        state
+                            .persistence
+                            .set_instance_sleep(&event.instance_id, wake_at)
+                            .await?;
+                    }
+
+                    // Mark as suspended with termination_reason "sleeping"
+                    state
+                        .persistence
+                        .complete_instance_with_termination(
+                            &event.instance_id,
+                            "suspended",
+                            Some("sleeping"),
+                            None, // exit_code
+                            None, // output
+                            None, // error
+                            None, // stderr
+                            Some(checkpoint_id),
+                        )
+                        .await?;
+
+                    info!(
+                        checkpoint_id = %checkpoint_id,
+                        wake_at = ?sleep_data.wake_at,
+                        "Instance sleeping until scheduled wake"
+                    );
+                } else {
+                    // Payload present but not valid sleep data - just suspend
+                    state
+                        .persistence
+                        .update_instance_status(&event.instance_id, "suspended", None)
+                        .await?;
+                    info!("Instance suspended (with payload but no valid sleep data)");
+                }
+            } else {
+                // No payload or no checkpoint_id - simple suspend
+                state
+                    .persistence
+                    .update_instance_status(&event.instance_id, "suspended", None)
+                    .await?;
+                info!("Instance suspended");
+            }
         }
         InstanceEventType::EventCustom => {
             // Custom events are just stored for telemetry - no state changes needed
@@ -744,6 +800,36 @@ pub fn map_signal_type(signal_type: SignalType) -> &'static str {
     }
 }
 
+/// Parsed sleep data from a suspended event payload.
+struct SleepPayload {
+    wake_at: Option<DateTime<Utc>>,
+    state: Vec<u8>,
+}
+
+/// Parse sleep data from a suspended event payload.
+///
+/// The SDK sends JSON with:
+/// - `wake_at_ms`: Unix timestamp in milliseconds for when to wake
+/// - `state`: Base64-encoded checkpoint state
+fn parse_sleep_payload(payload: &[u8]) -> Option<SleepPayload> {
+    use base64::Engine;
+
+    // Try to parse as JSON
+    let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
+
+    // Extract wake_at_ms
+    let wake_at_ms = json.get("wake_at_ms")?.as_i64()?;
+    let wake_at = DateTime::from_timestamp_millis(wake_at_ms);
+
+    // Extract and decode state
+    let state_b64 = json.get("state")?.as_str()?;
+    let state = base64::engine::general_purpose::STANDARD
+        .decode(state_b64)
+        .ok()?;
+
+    Some(SleepPayload { wake_at, state })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,6 +930,8 @@ mod tests {
             output: None,
             error: None,
             sleep_until: None,
+            termination_reason: None,
+            exit_code: None,
         }
     }
 
@@ -947,6 +1035,60 @@ mod tests {
                 inst.finished_at = Some(Utc::now());
             }
             Ok(())
+        }
+
+        async fn complete_instance_with_termination(
+            &self,
+            instance_id: &str,
+            status: &str,
+            termination_reason: Option<&str>,
+            exit_code: Option<i32>,
+            output: Option<&[u8]>,
+            error: Option<&str>,
+            _stderr: Option<&str>,
+            checkpoint_id: Option<&str>,
+        ) -> std::result::Result<(), CoreError> {
+            if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+                inst.status = status.to_string();
+                inst.termination_reason = termination_reason.map(|s| s.to_string());
+                inst.exit_code = exit_code;
+                inst.output = output.map(|o| o.to_vec());
+                inst.error = error.map(|e| e.to_string());
+                inst.checkpoint_id = checkpoint_id.map(|s| s.to_string());
+                if status == "completed" || status == "failed" || status == "cancelled" {
+                    inst.finished_at = Some(Utc::now());
+                }
+            }
+            Ok(())
+        }
+
+        async fn complete_instance_with_termination_if_running(
+            &self,
+            instance_id: &str,
+            status: &str,
+            termination_reason: Option<&str>,
+            exit_code: Option<i32>,
+            output: Option<&[u8]>,
+            error: Option<&str>,
+            _stderr: Option<&str>,
+            checkpoint_id: Option<&str>,
+        ) -> std::result::Result<bool, CoreError> {
+            let mut instances = self.instances.lock().unwrap();
+            if let Some(inst) = instances.get_mut(instance_id)
+                && inst.status == "running"
+            {
+                inst.status = status.to_string();
+                inst.termination_reason = termination_reason.map(|s| s.to_string());
+                inst.exit_code = exit_code;
+                inst.output = output.map(|o| o.to_vec());
+                inst.error = error.map(|e| e.to_string());
+                inst.checkpoint_id = checkpoint_id.map(|s| s.to_string());
+                if status == "completed" || status == "failed" || status == "cancelled" {
+                    inst.finished_at = Some(Utc::now());
+                }
+                return Ok(true);
+            }
+            Ok(false)
         }
 
         async fn save_checkpoint(
@@ -1083,9 +1225,12 @@ mod tests {
 
         async fn set_instance_sleep(
             &self,
-            _instance_id: &str,
-            _sleep_until: DateTime<Utc>,
+            instance_id: &str,
+            sleep_until: DateTime<Utc>,
         ) -> std::result::Result<(), CoreError> {
+            if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
+                inst.sleep_until = Some(sleep_until);
+            }
             Ok(())
         }
 
@@ -1667,5 +1812,86 @@ mod tests {
         assert!(!events.is_empty());
         assert_eq!(events[0].event_type, "custom");
         assert_eq!(events[0].subtype.as_deref(), Some("my_custom_type"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_suspended_with_sleep() {
+        use base64::Engine;
+
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        // Create sleep payload like SDK does
+        let wake_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let checkpoint_state = b"test checkpoint state";
+        let payload = serde_json::json!({
+            "wake_at_ms": wake_at.timestamp_millis(),
+            "state": base64::engine::general_purpose::STANDARD.encode(checkpoint_state),
+        });
+
+        let event = InstanceEvent {
+            instance_id: "inst-1".to_string(),
+            event_type: InstanceEventType::EventSuspended as i32,
+            checkpoint_id: Some("sleep-cp-1".to_string()),
+            payload: payload.to_string().into_bytes(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            subtype: None,
+        };
+
+        let result = handle_instance_event(&state, event).await.unwrap();
+        assert!(result.success);
+
+        // Verify instance was suspended with sleep data
+        let inst = persistence.get_instance("inst-1").await.unwrap().unwrap();
+        assert_eq!(inst.status, "suspended");
+        assert_eq!(inst.termination_reason.as_deref(), Some("sleeping"));
+        assert_eq!(inst.checkpoint_id.as_deref(), Some("sleep-cp-1"));
+        assert!(inst.sleep_until.is_some());
+
+        // Verify checkpoint was saved
+        let cp = persistence
+            .load_checkpoint("inst-1", "sleep-cp-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cp.state, checkpoint_state);
+    }
+
+    #[test]
+    fn test_parse_sleep_payload_valid() {
+        use base64::Engine;
+
+        let state = b"test state";
+        let wake_at_ms = 1750000000000i64; // Some future timestamp
+        let payload = serde_json::json!({
+            "wake_at_ms": wake_at_ms,
+            "state": base64::engine::general_purpose::STANDARD.encode(state),
+        });
+
+        let result = parse_sleep_payload(&payload.to_string().into_bytes());
+        assert!(result.is_some());
+
+        let sleep_data = result.unwrap();
+        assert_eq!(sleep_data.state, state);
+        assert!(sleep_data.wake_at.is_some());
+        assert_eq!(sleep_data.wake_at.unwrap().timestamp_millis(), wake_at_ms);
+    }
+
+    #[test]
+    fn test_parse_sleep_payload_invalid_json() {
+        let result = parse_sleep_payload(b"not json");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sleep_payload_missing_fields() {
+        let payload = serde_json::json!({
+            "wake_at_ms": 1750000000000i64,
+            // missing "state"
+        });
+        let result = parse_sleep_payload(&payload.to_string().into_bytes());
+        assert!(result.is_none());
     }
 }

@@ -372,10 +372,37 @@ impl RuntaraSdk {
         self.backend.failed(error).await
     }
 
-    /// Send a suspended event.
+    /// Send a suspended event (for pause signals).
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn suspended(&self) -> Result<()> {
         self.backend.suspended().await
+    }
+
+    /// Suspend with durable sleep - saves checkpoint and schedules wake.
+    ///
+    /// This method:
+    /// 1. Saves checkpoint state for resume
+    /// 2. Sends SUSPENDED event with sleep data
+    /// 3. Core sets sleep_until for wake scheduler
+    ///
+    /// After calling this, the instance should exit. The environment will
+    /// relaunch the instance when the wake time arrives.
+    ///
+    /// # Arguments
+    ///
+    /// * `checkpoint_id` - Checkpoint ID for resume
+    /// * `wake_at` - When to wake the instance
+    /// * `state` - State to restore on wake
+    #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
+    pub async fn sleep_until(
+        &self,
+        checkpoint_id: &str,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        state: &[u8],
+    ) -> Result<()> {
+        self.backend
+            .sleep_until(checkpoint_id, wake_at, state)
+            .await
     }
 
     /// Send a custom event with arbitrary subtype and payload.

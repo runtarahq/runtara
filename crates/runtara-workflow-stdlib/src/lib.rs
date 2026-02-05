@@ -81,11 +81,8 @@ pub mod prelude {
         ConnectionError, ConnectionResponse, RateLimitState, fetch_connection,
     };
 
-    // Instance output types (for Environment communication)
-    pub use crate::instance_output::{
-        InstanceOutput, InstanceOutputStatus, write_cancelled, write_completed, write_failed,
-        write_sleeping, write_suspended,
-    };
+    // Note: instance_output removed from prelude - SDK events are now the single source
+    // of truth for instance state. Test harness can import directly if needed.
 
     // Serde types
     pub use serde::{Deserialize, Serialize};

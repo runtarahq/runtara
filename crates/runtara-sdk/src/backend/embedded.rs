@@ -246,6 +246,57 @@ impl SdkBackend for EmbeddedBackend {
         Ok(())
     }
 
+    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id))]
+    async fn sleep_until(
+        &self,
+        checkpoint_id: &str,
+        wake_at: DateTime<Utc>,
+        state: &[u8],
+    ) -> Result<()> {
+        // Save checkpoint first
+        self.persistence
+            .save_checkpoint(&self.instance_id, checkpoint_id, state)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        // Update checkpoint reference
+        self.persistence
+            .update_instance_checkpoint(&self.instance_id, checkpoint_id)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        // Set sleep_until for wake scheduler
+        self.persistence
+            .set_instance_sleep(&self.instance_id, wake_at)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        // Mark as suspended
+        self.persistence
+            .update_instance_status(&self.instance_id, "suspended", None)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        // Record the event
+        let event = EventRecord {
+            id: None,
+            instance_id: self.instance_id.clone(),
+            event_type: "suspended".to_string(),
+            checkpoint_id: Some(checkpoint_id.to_string()),
+            payload: None,
+            created_at: Utc::now(),
+            subtype: Some("sleeping".to_string()),
+        };
+
+        self.persistence
+            .insert_event(&event)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        info!(wake_at = %wake_at, "Instance sleeping until wake time");
+        Ok(())
+    }
+
     #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
     async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let event = EventRecord {

@@ -243,6 +243,25 @@ impl SdkBackend for QuicBackend {
         Ok(())
     }
 
+    #[instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id))]
+    async fn sleep_until(
+        &self,
+        checkpoint_id: &str,
+        wake_at: DateTime<Utc>,
+        state: &[u8],
+    ) -> Result<()> {
+        use crate::events::build_suspended_with_sleep_event;
+
+        debug!(wake_at = %wake_at, "Sending suspended event with sleep data");
+
+        let event =
+            build_suspended_with_sleep_event(&self.instance_id, checkpoint_id, wake_at, state);
+        self.send_acknowledged_event(event).await?;
+
+        info!(wake_at = %wake_at, "Sleep until acknowledged - instance should exit now");
+        Ok(())
+    }
+
     #[instrument(skip(self, payload), fields(instance_id = %self.instance_id, subtype = %subtype, payload_size = payload.len()))]
     async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let event = build_custom_event(&self.instance_id, subtype, payload);

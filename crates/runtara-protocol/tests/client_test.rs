@@ -13,14 +13,16 @@ fn test_default_config() {
     assert!(config.enable_0rtt);
     assert!(!config.dangerous_skip_cert_verification);
     assert_eq!(config.keep_alive_interval_ms, 10_000);
-    assert_eq!(config.idle_timeout_ms, 30_000);
+    assert_eq!(config.idle_timeout_ms, 600_000); // 10 minutes
     assert_eq!(config.connect_timeout_ms, 10_000);
 }
 
 #[tokio::test]
 async fn test_client_creation_with_config() {
-    let mut config = RuntaraClientConfig::default();
-    config.dangerous_skip_cert_verification = true;
+    let config = RuntaraClientConfig {
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
 
     let client = RuntaraClient::new(config);
     assert!(client.is_ok());
@@ -34,9 +36,11 @@ async fn test_localhost_client() {
 
 #[tokio::test]
 async fn test_custom_server_address() {
-    let mut config = RuntaraClientConfig::default();
-    config.server_addr = "192.168.1.100:8000".parse().unwrap();
-    config.dangerous_skip_cert_verification = true;
+    let config = RuntaraClientConfig {
+        server_addr: "192.168.1.100:8000".parse().unwrap(),
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
 
     let client = RuntaraClient::new(config);
     assert!(client.is_ok());
@@ -74,9 +78,11 @@ async fn test_client_close_without_connect() {
 
 #[tokio::test]
 async fn test_config_with_disabled_keepalive() {
-    let mut config = RuntaraClientConfig::default();
-    config.keep_alive_interval_ms = 0;
-    config.dangerous_skip_cert_verification = true;
+    let config = RuntaraClientConfig {
+        keep_alive_interval_ms: 0,
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
 
     let client = RuntaraClient::new(config);
     assert!(client.is_ok());
@@ -84,10 +90,12 @@ async fn test_config_with_disabled_keepalive() {
 
 #[tokio::test]
 async fn test_config_with_custom_timeouts() {
-    let mut config = RuntaraClientConfig::default();
-    config.idle_timeout_ms = 60_000;
-    config.connect_timeout_ms = 5_000;
-    config.dangerous_skip_cert_verification = true;
+    let config = RuntaraClientConfig {
+        idle_timeout_ms: 60_000,
+        connect_timeout_ms: 5_000,
+        dangerous_skip_cert_verification: true,
+        ..Default::default()
+    };
 
     let client = RuntaraClient::new(config);
     assert!(client.is_ok());
@@ -97,9 +105,11 @@ async fn test_config_with_custom_timeouts() {
 #[tokio::test]
 async fn test_config_server_name_variations() {
     for server_name in &["localhost", "example.com", "192.168.1.1", "test-server"] {
-        let mut config = RuntaraClientConfig::default();
-        config.server_name = server_name.to_string();
-        config.dangerous_skip_cert_verification = true;
+        let config = RuntaraClientConfig {
+            server_name: server_name.to_string(),
+            dangerous_skip_cert_verification: true,
+            ..Default::default()
+        };
 
         let client = RuntaraClient::new(config);
         assert!(

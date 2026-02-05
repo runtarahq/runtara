@@ -1173,6 +1173,10 @@ impl Runner for OciRunner {
         // by the container monitor's process_output function.
         (output, error, metrics)
     }
+
+    async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {
+        self.get_container_pid(&handle.handle_id).await
+    }
 }
 
 #[cfg(test)]

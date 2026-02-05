@@ -34,6 +34,8 @@
 //! Same format as workflow instances (`InstanceOutput`).
 
 use runtara_workflow_stdlib::prelude::*;
+// Test harness uses output.json for communication (no SDK connection)
+use runtara_workflow_stdlib::instance_output::{write_completed, write_failed};
 use serde::{Deserialize, Serialize};
 use std::process::ExitCode;
 

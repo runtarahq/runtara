@@ -1293,6 +1293,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_millis(100),
+        None, // No PID for test
     );
 
     // Wait for the timeout to trigger (100ms timeout + some buffer for processing)
@@ -1319,7 +1320,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         instance
             .error
             .as_ref()
-            .map_or(false, |e| e.contains("timed out")),
+            .is_some_and(|e| e.contains("timed out")),
         "Error should mention timeout, got: {:?}",
         instance.error
     );
@@ -1385,6 +1386,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_secs(10),
+        None, // No PID for test
     );
 
     // Wait for the container to complete (10ms delay + buffer)
@@ -1412,7 +1414,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             !instance
                 .error
                 .as_ref()
-                .map_or(false, |e| e.contains("timed out")),
+                .is_some_and(|e| e.contains("timed out")),
             "Should not have timeout error on quick completion"
         );
     }
@@ -1477,6 +1479,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         temp_dir.path().to_path_buf(),
         persistence.clone(),
         Duration::from_millis(200),
+        None, // No PID for test
     );
 
     // Simulate Core marking instance as "completed" BEFORE timeout fires

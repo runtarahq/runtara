@@ -39,6 +39,12 @@ pub struct InstanceRecord {
     pub error: Option<String>,
     /// When a sleeping instance should be woken.
     pub sleep_until: Option<DateTime<Utc>>,
+    /// How/why the instance reached its terminal state.
+    #[sqlx(default)]
+    pub termination_reason: Option<String>,
+    /// Process exit code if available.
+    #[sqlx(default)]
+    pub exit_code: Option<i32>,
 }
 
 /// Checkpoint record from the persistence layer.
@@ -360,6 +366,63 @@ pub trait Persistence: Send + Sync {
         // Default: always apply (returns true)
         self.complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
             .await?;
+        Ok(true)
+    }
+
+    /// Complete an instance with termination tracking metadata.
+    ///
+    /// This version includes `termination_reason` and `exit_code` for unambiguous
+    /// identification of how/why the instance terminated.
+    ///
+    /// Default implementation delegates to `complete_instance_extended`, ignoring
+    /// the termination fields.
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_instance_with_termination(
+        &self,
+        instance_id: &str,
+        status: &str,
+        termination_reason: Option<&str>,
+        exit_code: Option<i32>,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        // Default: delegate to extended, ignoring termination fields
+        let _ = termination_reason;
+        let _ = exit_code;
+        self.complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
+            .await
+    }
+
+    /// Complete an instance with termination tracking, only if status is 'running'.
+    ///
+    /// Returns true if the update was applied, false if skipped (instance already
+    /// has a terminal status).
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_instance_with_termination_if_running(
+        &self,
+        instance_id: &str,
+        status: &str,
+        termination_reason: Option<&str>,
+        exit_code: Option<i32>,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        // Default: always apply (returns true)
+        self.complete_instance_with_termination(
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
+        )
+        .await?;
         Ok(true)
     }
 

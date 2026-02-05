@@ -91,6 +91,7 @@ pub mod management_proto {
 }
 
 // Re-export generated protobuf types for environment protocol (main management API)
+#[allow(clippy::large_enum_variant)]
 pub mod environment_proto {
     include!(concat!(env!("OUT_DIR"), "/runtara.environment.rs"));
 }

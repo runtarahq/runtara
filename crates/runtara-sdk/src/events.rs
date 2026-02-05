@@ -65,6 +65,32 @@ pub(crate) fn build_suspended_event(instance_id: &str) -> InstanceEvent {
     build_event(instance_id, InstanceEventType::EventSuspended, None, vec![])
 }
 
+/// Build a suspended event with sleep data for durable sleep.
+///
+/// The payload contains JSON with wake_at_ms and base64-encoded state.
+/// Core will parse this and set sleep_until for the wake scheduler.
+pub(crate) fn build_suspended_with_sleep_event(
+    instance_id: &str,
+    checkpoint_id: &str,
+    wake_at: chrono::DateTime<chrono::Utc>,
+    state: &[u8],
+) -> InstanceEvent {
+    use base64::Engine;
+
+    // Encode payload as JSON with wake time and state
+    let payload = serde_json::json!({
+        "wake_at_ms": wake_at.timestamp_millis(),
+        "state": base64::engine::general_purpose::STANDARD.encode(state),
+    });
+
+    build_event(
+        instance_id,
+        InstanceEventType::EventSuspended,
+        Some(checkpoint_id.to_string()),
+        payload.to_string().into_bytes(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +124,26 @@ mod tests {
         assert_eq!(event.event_type, InstanceEventType::EventCustom as i32);
         assert_eq!(event.subtype, Some("step_debug_start".to_string()));
         assert_eq!(event.payload, b"payload".to_vec());
+    }
+
+    #[test]
+    fn test_build_suspended_with_sleep_event() {
+        use chrono::TimeZone;
+
+        let wake_at = chrono::Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let state = b"test state data";
+
+        let event =
+            build_suspended_with_sleep_event("test-instance", "checkpoint-1", wake_at, state);
+
+        assert_eq!(event.instance_id, "test-instance");
+        assert_eq!(event.event_type, InstanceEventType::EventSuspended as i32);
+        assert_eq!(event.checkpoint_id, Some("checkpoint-1".to_string()));
+
+        // Verify payload is valid JSON with expected fields
+        let payload_str = String::from_utf8(event.payload).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        assert_eq!(payload["wake_at_ms"], wake_at.timestamp_millis());
+        assert!(payload["state"].as_str().is_some()); // base64 encoded
     }
 }

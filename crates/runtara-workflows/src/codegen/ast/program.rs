@@ -301,8 +301,6 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to initialize SDK: {}", e);
-                    // Write failure output for Environment
-                    let _ = write_failed(format!("SDK initialization failed: {}", e));
                     return ExitCode::FAILURE;
                 }
             };
@@ -310,16 +308,12 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Connect to runtara-core
             if let Err(e) = sdk_instance.connect().await {
                 tracing::error!("Failed to connect to runtara-core: {}", e);
-                // Write failure output for Environment
-                let _ = write_failed(format!("Failed to connect to runtara-core: {}", e));
                 return ExitCode::FAILURE;
             }
 
             // Register the instance
             if let Err(e) = sdk_instance.register(None).await {
                 tracing::error!("Failed to register instance: {}", e);
-                // Write failure output for Environment
-                let _ = write_failed(format!("Failed to register instance: {}", e));
                 return ExitCode::FAILURE;
             }
 
@@ -377,16 +371,13 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Execute the workflow within the root span
             match execute_workflow(Arc::new(scenario_inputs)).instrument(__root_span).await {
                 Ok(output) => {
-                    // Report completion to runtara-core
+                    // Report completion to runtara-core via SDK
                     let sdk_guard = sdk().lock().await;
                     let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
                     if let Err(e) = sdk_guard.completed(&output_bytes).await {
                         tracing::error!("Failed to report completion: {}", e);
-                        let _ = write_failed(format!("Failed to report completion: {}", e));
                         return ExitCode::FAILURE;
                     }
-                    // Write completed output for Environment
-                    let _ = write_completed(output);
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -395,8 +386,6 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         // Acknowledge cancellation to runtara-core (sends SignalAck)
                         // This updates instance status to "cancelled" in the database
                         runtara_sdk::acknowledge_cancellation().await;
-                        // Write cancelled output for Environment
-                        let _ = write_cancelled();
                         tracing::info!("Workflow execution was cancelled");
                         return ExitCode::SUCCESS;
                     }
@@ -408,18 +397,13 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                         runtara_sdk::acknowledge_pause().await;
                         let sdk_guard = sdk().lock().await;
                         let _ = sdk_guard.suspended().await;
-                        // Write suspended output for Environment
-                        // Note: checkpoint_id is the last successful checkpoint; using "paused" as fallback
-                        let _ = write_suspended("paused");
                         tracing::info!("Workflow execution was paused");
                         return ExitCode::SUCCESS;
                     }
 
-                    // Report failure to runtara-core
+                    // Report failure to runtara-core via SDK
                     let sdk_guard = sdk().lock().await;
                     let _ = sdk_guard.failed(&e).await;
-                    // Write failed output for Environment
-                    let _ = write_failed(&e);
                     tracing::error!("Workflow execution failed: {}", e);
                     ExitCode::FAILURE
                 }
@@ -1643,10 +1627,7 @@ mod tests {
             code.contains("completed"),
             "Should call sdk.completed on success"
         );
-        assert!(
-            code.contains("write_completed"),
-            "Should write completed output"
-        );
+        // Note: write_completed removed - SDK events are now the single source of truth
     }
 
     #[test]
@@ -1656,10 +1637,7 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(code.contains("cancelled"), "Should check for cancellation");
-        assert!(
-            code.contains("write_cancelled"),
-            "Should write cancelled output"
-        );
+        // Note: write_cancelled removed - SDK events are now the single source of truth
         assert!(
             code.contains("suspended"),
             "Should call suspended for cancellation"
@@ -1673,10 +1651,7 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(code.contains("paused"), "Should check for pause");
-        assert!(
-            code.contains("write_suspended"),
-            "Should write suspended output"
-        );
+        // Note: write_suspended removed - SDK events are now the single source of truth
     }
 
     #[test]
@@ -1686,7 +1661,7 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(code.contains("failed"), "Should call sdk.failed on error");
-        assert!(code.contains("write_failed"), "Should write failed output");
+        // Note: write_failed removed - SDK events are now the single source of truth
         assert!(code.contains("FAILURE"), "Should return FAILURE exit code");
     }
 

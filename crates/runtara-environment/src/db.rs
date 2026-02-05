@@ -109,6 +109,10 @@ pub struct InstanceFull {
     pub memory_peak_bytes: Option<i64>,
     /// Total CPU time consumed during execution (in microseconds).
     pub cpu_usage_usec: Option<i64>,
+    /// How the instance terminated (completed, application_error, crashed, timeout, etc.).
+    pub termination_reason: Option<String>,
+    /// Process exit code (if available).
+    pub exit_code: Option<i32>,
 }
 
 /// Get an instance by ID.
@@ -141,7 +145,8 @@ pub async fn get_instance_full(
                i.status::TEXT as status, i.input, i.output, i.error, i.stderr, i.checkpoint_id,
                i.created_at, i.started_at, i.finished_at,
                ch.last_heartbeat as heartbeat_at, i.attempt, i.max_attempts,
-               i.memory_peak_bytes, i.cpu_usage_usec
+               i.memory_peak_bytes, i.cpu_usage_usec,
+               i.termination_reason::TEXT as termination_reason, i.exit_code
         FROM instances i
         LEFT JOIN instance_images ii ON i.instance_id = ii.instance_id
         LEFT JOIN images img ON ii.image_id = img.image_id
@@ -847,6 +852,8 @@ mod tests {
             max_attempts: 3,
             memory_peak_bytes: Some(536_870_912), // 512 MB
             cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
+            termination_reason: None,
+            exit_code: None,
         };
 
         let debug_str = format!("{:?}", instance);
@@ -878,6 +885,8 @@ mod tests {
             max_attempts: 3,
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
             cpu_usage_usec: Some(5_000_000),        // 5 seconds
+            termination_reason: None,
+            exit_code: None,
         };
 
         let cloned = instance.clone();
@@ -910,6 +919,8 @@ mod tests {
             max_attempts: 3,
             memory_peak_bytes: None,
             cpu_usage_usec: None,
+            termination_reason: None,
+            exit_code: None,
         };
 
         assert!(instance.heartbeat_at.is_none());
@@ -939,6 +950,8 @@ mod tests {
             max_attempts: 1,
             memory_peak_bytes: Some(2_147_483_648), // 2 GB
             cpu_usage_usec: Some(120_000_000),      // 2 minutes
+            termination_reason: Some("completed".to_string()),
+            exit_code: Some(0),
         };
 
         assert_eq!(instance.memory_peak_bytes, Some(2_147_483_648));
@@ -968,6 +981,8 @@ mod tests {
             max_attempts: 1,
             memory_peak_bytes: None,
             cpu_usage_usec: None,
+            termination_reason: None,
+            exit_code: None,
         };
 
         assert!(instance.memory_peak_bytes.is_none());

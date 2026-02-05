@@ -65,6 +65,22 @@ pub trait SdkBackend: Send + Sync {
     /// Send a suspended event.
     async fn suspended(&self) -> Result<()>;
 
+    /// Suspend with durable sleep - saves checkpoint and schedules wake.
+    ///
+    /// This method:
+    /// 1. Saves checkpoint state for resume
+    /// 2. Sets sleep_until for wake scheduler
+    /// 3. Marks instance as suspended with termination_reason "sleeping"
+    ///
+    /// After calling this, the instance should exit. The environment will
+    /// relaunch the instance when the wake time arrives.
+    async fn sleep_until(
+        &self,
+        checkpoint_id: &str,
+        wake_at: DateTime<Utc>,
+        state: &[u8],
+    ) -> Result<()>;
+
     /// Send a custom event with arbitrary subtype and payload.
     ///
     /// This is a fire-and-forget operation - the event is stored by core

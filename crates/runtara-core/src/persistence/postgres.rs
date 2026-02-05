@@ -281,6 +281,100 @@ pub async fn complete_instance_if_running(
     Ok(result.rows_affected() > 0)
 }
 
+/// Complete an instance with termination tracking metadata.
+///
+/// This version includes `termination_reason` and `exit_code` for unambiguous
+/// identification of how/why the instance terminated.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_instance_with_termination(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    termination_reason: Option<&str>,
+    exit_code: Option<i32>,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    stderr: Option<&str>,
+    checkpoint_id: Option<&str>,
+) -> Result<(), CoreError> {
+    sqlx::query(
+        r#"
+        UPDATE instances
+        SET status = $2::instance_status,
+            termination_reason = COALESCE($3::termination_reason, termination_reason),
+            exit_code = COALESCE($4, exit_code),
+            output = $5,
+            error = $6,
+            stderr = COALESCE($7, stderr),
+            checkpoint_id = COALESCE($8, checkpoint_id),
+            finished_at = CASE
+                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
+                ELSE finished_at
+            END
+        WHERE instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .bind(status)
+    .bind(termination_reason)
+    .bind(exit_code)
+    .bind(output)
+    .bind(error)
+    .bind(stderr)
+    .bind(checkpoint_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Complete an instance with termination tracking, only if status is 'running'.
+///
+/// Returns true if the update was applied, false if skipped (instance already
+/// has a terminal status).
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_instance_with_termination_if_running(
+    pool: &PgPool,
+    instance_id: &str,
+    status: &str,
+    termination_reason: Option<&str>,
+    exit_code: Option<i32>,
+    output: Option<&[u8]>,
+    error: Option<&str>,
+    stderr: Option<&str>,
+    checkpoint_id: Option<&str>,
+) -> Result<bool, CoreError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE instances
+        SET status = $2::instance_status,
+            termination_reason = COALESCE($3::termination_reason, termination_reason),
+            exit_code = COALESCE($4, exit_code),
+            output = $5,
+            error = $6,
+            stderr = COALESCE($7, stderr),
+            checkpoint_id = COALESCE($8, checkpoint_id),
+            finished_at = CASE
+                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
+                ELSE finished_at
+            END
+        WHERE instance_id = $1 AND status = 'running'
+        "#,
+    )
+    .bind(instance_id)
+    .bind(status)
+    .bind(termination_reason)
+    .bind(exit_code)
+    .bind(output)
+    .bind(error)
+    .bind(stderr)
+    .bind(checkpoint_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 /// Update execution metrics for an instance.
 ///
 /// Stores cgroup-collected resource usage metrics (memory, CPU) after container execution.
@@ -1468,6 +1562,56 @@ impl Persistence for PostgresPersistence {
             &self.pool,
             instance_id,
             status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
+        )
+        .await
+    }
+
+    async fn complete_instance_with_termination(
+        &self,
+        instance_id: &str,
+        status: &str,
+        termination_reason: Option<&str>,
+        exit_code: Option<i32>,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        complete_instance_with_termination(
+            &self.pool,
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
+        )
+        .await
+    }
+
+    async fn complete_instance_with_termination_if_running(
+        &self,
+        instance_id: &str,
+        status: &str,
+        termination_reason: Option<&str>,
+        exit_code: Option<i32>,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        complete_instance_with_termination_if_running(
+            &self.pool,
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
             output,
             error,
             stderr,

@@ -270,6 +270,85 @@ impl Persistence for SqlitePersistence {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn complete_instance_with_termination(
+        &self,
+        instance_id: &str,
+        status: &str,
+        termination_reason: Option<&str>,
+        exit_code: Option<i32>,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = ?1,
+                finished_at = CURRENT_TIMESTAMP,
+                termination_reason = COALESCE(?2, termination_reason),
+                exit_code = COALESCE(?3, exit_code),
+                output = ?4,
+                error = ?5,
+                stderr = ?6,
+                checkpoint_id = COALESCE(?7, checkpoint_id)
+            WHERE instance_id = ?8
+            "#,
+        )
+        .bind(status)
+        .bind(termination_reason)
+        .bind(exit_code)
+        .bind(output)
+        .bind(error)
+        .bind(stderr)
+        .bind(checkpoint_id)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn complete_instance_with_termination_if_running(
+        &self,
+        instance_id: &str,
+        status: &str,
+        termination_reason: Option<&str>,
+        exit_code: Option<i32>,
+        output: Option<&[u8]>,
+        error: Option<&str>,
+        stderr: Option<&str>,
+        checkpoint_id: Option<&str>,
+    ) -> Result<bool, CoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = ?1,
+                finished_at = CURRENT_TIMESTAMP,
+                termination_reason = COALESCE(?2, termination_reason),
+                exit_code = COALESCE(?3, exit_code),
+                output = ?4,
+                error = ?5,
+                stderr = ?6,
+                checkpoint_id = COALESCE(?7, checkpoint_id)
+            WHERE instance_id = ?8
+              AND status = 'running'
+            "#,
+        )
+        .bind(status)
+        .bind(termination_reason)
+        .bind(exit_code)
+        .bind(output)
+        .bind(error)
+        .bind(stderr)
+        .bind(checkpoint_id)
+        .bind(instance_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn update_instance_metrics(
         &self,
         instance_id: &str,

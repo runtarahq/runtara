@@ -82,9 +82,10 @@ use runtara_core::runtime::CoreRuntime;
 use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::cleanup_worker::{CleanupWorker, CleanupWorkerConfig};
+use crate::container_registry::ContainerRegistry;
 use crate::handlers::EnvironmentHandlerState;
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::runner::Runner;
@@ -340,6 +341,12 @@ impl EnvironmentRuntimeConfig {
             .with_request_timeout(self.request_timeout),
         );
 
+        // Recover orphaned containers from previous Environment run
+        // This handles containers that were running when Environment restarted
+        if let Err(e) = recover_orphaned_containers(&self.pool, self.persistence.as_ref()).await {
+            warn!(error = %e, "Failed to recover orphaned containers");
+        }
+
         // Create wake scheduler
         let wake_config = WakeSchedulerConfig {
             poll_interval: self.wake_poll_interval,
@@ -594,6 +601,124 @@ async fn run_environment_server_with_shutdown(
     }
 
     info!("Environment QUIC server stopped");
+    Ok(())
+}
+
+/// Check if a process is alive by checking /proc/<pid> existence.
+fn is_process_alive(pid: i32) -> bool {
+    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+/// Recover orphaned containers on startup.
+///
+/// When the Environment restarts, there may be containers in the registry
+/// that were running before the restart. This function checks each one:
+///
+/// - If PID exists → the container is still running (will be handled by heartbeat monitor)
+/// - If PID is gone + Core shows terminal status → clean up registry
+/// - If PID is gone + Core shows "running" → mark as crashed and clean up
+///
+/// This prevents "zombie" entries in the registry and ensures crashed instances
+/// are properly marked.
+async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistence) -> Result<()> {
+    let registry = ContainerRegistry::new(pool.clone());
+    let containers = registry.list_all_registered().await?;
+
+    if containers.is_empty() {
+        debug!("No containers in registry to recover");
+        return Ok(());
+    }
+
+    info!(
+        count = containers.len(),
+        "Checking registered containers for recovery"
+    );
+
+    for container in containers {
+        let instance_id = &container.instance_id;
+
+        // Check if process is still alive
+        let is_alive = if let Some(pid) = container.pid {
+            is_process_alive(pid)
+        } else {
+            // No PID recorded - can't check, assume dead
+            false
+        };
+
+        if is_alive {
+            // Process is still running - heartbeat monitor will handle it
+            debug!(
+                instance_id = %instance_id,
+                pid = ?container.pid,
+                "Container process still alive, leaving for heartbeat monitor"
+            );
+            continue;
+        }
+
+        // Process is gone - check Core status
+        match persistence.get_instance(instance_id).await {
+            Ok(Some(inst)) => {
+                let status = inst.status.as_str();
+                if matches!(status, "completed" | "failed" | "cancelled" | "suspended") {
+                    // Already terminal - just clean up registry
+                    info!(
+                        instance_id = %instance_id,
+                        status = %status,
+                        "Cleaning up terminated container from registry"
+                    );
+                    let _ = registry.cleanup(instance_id).await;
+                } else {
+                    // Still shows "running" but process is gone - crashed
+                    warn!(
+                        instance_id = %instance_id,
+                        status = %status,
+                        pid = ?container.pid,
+                        "Found orphaned container (process gone, Core shows running) - marking as crashed"
+                    );
+
+                    // Mark as crashed in Core
+                    if let Err(e) = persistence
+                        .complete_instance_with_termination_if_running(
+                            instance_id,
+                            "failed",
+                            Some("crashed"),
+                            None,
+                            None,
+                            Some("Process terminated during Environment restart"),
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        error!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to mark orphaned instance as crashed"
+                        );
+                    }
+
+                    // Clean up registry
+                    let _ = registry.cleanup(instance_id).await;
+                }
+            }
+            Ok(None) => {
+                // Instance not in Core - just clean up registry
+                warn!(
+                    instance_id = %instance_id,
+                    "Container in registry but not in Core - cleaning up"
+                );
+                let _ = registry.cleanup(instance_id).await;
+            }
+            Err(e) => {
+                error!(
+                    instance_id = %instance_id,
+                    error = %e,
+                    "Failed to check instance status during recovery"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 

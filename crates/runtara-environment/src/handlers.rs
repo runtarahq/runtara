@@ -479,7 +479,17 @@ pub async fn handle_start_instance(
             let tenant_id_for_monitor = request.tenant_id.clone();
             let handle_id_for_registry = handle.handle_id.clone();
 
-            // Register in container registry
+            // Get PID from runner (for PID-based termination detection)
+            let pid = state.runner.get_pid(&handle).await.map(|p| p as i32);
+            if pid.is_some() {
+                debug!(
+                    instance_id = %instance_id,
+                    pid = ?pid,
+                    "Captured container PID for monitoring"
+                );
+            }
+
+            // Register in container registry (with PID if available)
             let container_registry = ContainerRegistry::new(state.pool.clone());
             let container_info = ContainerInfo {
                 container_id: handle_id_for_registry,
@@ -488,7 +498,7 @@ pub async fn handle_start_instance(
                 binary_path: image.binary_path,
                 bundle_path: image.bundle_path,
                 started_at: handle.started_at,
-                pid: None,
+                pid,
                 timeout_seconds: Some(timeout.as_secs() as i64),
             };
             if let Err(e) = container_registry.register(&container_info).await {
@@ -517,6 +527,7 @@ pub async fn handle_start_instance(
                 state.data_dir.clone(),
                 state.persistence.clone(),
                 timeout,
+                pid,
             );
 
             Ok(StartInstanceResponse {
@@ -767,7 +778,17 @@ pub async fn handle_resume_instance(
             let tenant_id_for_monitor = instance.tenant_id.clone();
             let handle_id_for_registry = handle.handle_id.clone();
 
-            // Register in container registry
+            // Get PID from runner (for PID-based termination detection)
+            let pid = state.runner.get_pid(&handle).await.map(|p| p as i32);
+            if pid.is_some() {
+                debug!(
+                    instance_id = %request.instance_id,
+                    pid = ?pid,
+                    "Captured container PID for monitoring (resume)"
+                );
+            }
+
+            // Register in container registry (with PID if available)
             let container_registry = ContainerRegistry::new(state.pool.clone());
             let container_info = ContainerInfo {
                 container_id: handle_id_for_registry,
@@ -776,7 +797,7 @@ pub async fn handle_resume_instance(
                 binary_path: image.binary_path,
                 bundle_path: image.bundle_path,
                 started_at: handle.started_at,
-                pid: None,
+                pid,
                 timeout_seconds: Some(300),
             };
             if let Err(e) = container_registry.register(&container_info).await {
@@ -809,6 +830,7 @@ pub async fn handle_resume_instance(
                 state.data_dir.clone(),
                 state.persistence.clone(),
                 options.timeout,
+                pid,
             );
 
             Ok(ResumeInstanceResponse {
@@ -830,11 +852,9 @@ pub async fn handle_resume_instance(
 // Container Monitor
 // ============================================================================
 
-/// State needed to process instance output (subset of EnvironmentHandlerState)
-struct OutputProcessorState {
-    pool: PgPool,
-    data_dir: PathBuf,
-    persistence: Arc<dyn Persistence>,
+/// Check if a process is alive by checking /proc/<pid> existence.
+fn is_process_alive(pid: i32) -> bool {
+    std::path::Path::new(&format!("/proc/{}", pid)).exists()
 }
 
 /// Spawn a background task that monitors the container and processes output when done.
@@ -842,14 +862,26 @@ struct OutputProcessorState {
 /// This function should be called after launching an instance to monitor its lifecycle
 /// and process output when the container finishes. The timeout is enforced here - if the
 /// container runs longer than the specified timeout, it will be killed.
+///
+/// ## PID-based Monitoring
+///
+/// When a PID is provided, we use `/proc/<pid>` to detect process termination.
+/// This is more reliable than querying crun state. When the process terminates:
+///
+/// - If Core already has a terminal status (completed/failed/cancelled/suspended) → normal exit
+/// - If Core still shows "running" → process crashed without sending SDK event
+///
+/// Falls back to `runner.is_running()` if no PID is available.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_container_monitor(
     pool: PgPool,
     runner: Arc<dyn Runner>,
     handle: RunnerHandle,
-    tenant_id: String,
-    data_dir: PathBuf,
+    _tenant_id: String,
+    _data_dir: PathBuf,
     persistence: Arc<dyn Persistence>,
     timeout: Duration,
+    pid: Option<i32>,
 ) {
     let instance_id = handle.instance_id.clone();
 
@@ -871,15 +903,17 @@ pub fn spawn_container_monitor(
                 );
                 let _ = runner.stop(&handle).await;
 
-                // Update instance status to failed (only if still running)
+                // Update instance status to failed with termination_reason = "timeout"
                 if let Err(e) = persistence
-                    .complete_instance_if_running(
+                    .complete_instance_with_termination_if_running(
                         &instance_id,
                         "failed",
-                        None,
-                        Some("Execution timed out"),
-                        None,
-                        None,
+                        Some("timeout"),             // termination_reason
+                        None,                        // exit_code
+                        None,                        // output
+                        Some("Execution timed out"), // error
+                        None,                        // stderr
+                        None,                        // checkpoint_id
                     )
                     .await
                 {
@@ -897,10 +931,19 @@ pub fn spawn_container_monitor(
                 return;
             }
 
-            if !runner.is_running(&handle).await {
+            // Check if process is still running
+            // Use PID-based checking if available (faster and more reliable)
+            let is_alive = if let Some(p) = pid {
+                is_process_alive(p)
+            } else {
+                runner.is_running(&handle).await
+            };
+
+            if !is_alive {
                 info!(
                     instance_id = %instance_id,
-                    "Container finished, processing output"
+                    pid = ?pid,
+                    "Process terminated, checking Core status"
                 );
 
                 // Collect metrics and stderr from cgroup before container cleanup
@@ -951,22 +994,61 @@ pub fn spawn_container_monitor(
                     }
                 }
 
-                // Create minimal state for processing output
-                let output_state = OutputProcessorState {
-                    pool: pool.clone(),
-                    data_dir: data_dir.clone(),
-                    persistence: persistence.clone(),
-                };
-
-                if let Err(e) = process_output(&output_state, &instance_id, &tenant_id).await {
-                    // Log error but don't mark as failed - defer to Core for authoritative status.
-                    // This prevents race conditions where monitor sets "failed" before Core
-                    // has processed the SDK completion event.
-                    error!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to process instance output, deferring to Core for status"
-                    );
+                // Check Core status to determine if this is a crash or normal termination
+                // This replaces the output.json processing - SDK events are the single source of truth
+                match db::get_instance(&pool, &instance_id).await {
+                    Ok(Some(inst)) => {
+                        let status = inst.status.as_str();
+                        if matches!(status, "completed" | "failed" | "cancelled" | "suspended") {
+                            // Core already has terminal status - normal termination via SDK
+                            info!(
+                                instance_id = %instance_id,
+                                status = %status,
+                                "Instance completed normally (SDK reported)"
+                            );
+                        } else {
+                            // Core still shows "running" but PID is gone - process crashed
+                            // without sending SDK completion event
+                            warn!(
+                                instance_id = %instance_id,
+                                status = %status,
+                                pid = ?pid,
+                                "Process terminated without SDK event - marking as crashed"
+                            );
+                            if let Err(e) = persistence
+                                .complete_instance_with_termination_if_running(
+                                    &instance_id,
+                                    "failed",
+                                    Some("crashed"), // termination_reason
+                                    None,            // exit_code
+                                    None,            // output
+                                    Some("Process terminated without SDK event"), // error
+                                    stderr.as_deref(), // stderr
+                                    None,            // checkpoint_id
+                                )
+                                .await
+                            {
+                                error!(
+                                    instance_id = %instance_id,
+                                    error = %e,
+                                    "Failed to mark instance as crashed"
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        warn!(
+                            instance_id = %instance_id,
+                            "Instance not found in database after termination"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "Failed to check instance status after termination"
+                        );
+                    }
                 }
 
                 // Clean up container registry
@@ -980,232 +1062,6 @@ pub fn spawn_container_monitor(
             tokio::time::sleep(poll_interval).await;
         }
     });
-}
-
-/// Process instance output (simpler version that doesn't need full state).
-///
-/// Uses conditional updates (only if status = 'running') to avoid overwriting
-/// status updates that were already set by runtara-core via SDK events.
-///
-/// IMPORTANT: When output.json cannot be read, this function does NOT mark the instance
-/// as failed. Instead, it relies on Core (via SDK events) to be the authoritative source
-/// for status updates. This prevents race conditions where the container monitor detects
-/// process exit before Core has processed the SDK completion event.
-async fn process_output(
-    state: &OutputProcessorState,
-    instance_id: &str,
-    tenant_id: &str,
-) -> Result<()> {
-    let output_path = output_file_path(&state.data_dir, tenant_id, instance_id);
-
-    // Retry reading output.json with delays to handle race conditions.
-    // The SDK sends completion events via QUIC which Core processes, but the container
-    // monitor may detect the container exit before Core has updated the database.
-    // By retrying, we give Core time to process the event first.
-    const MAX_RETRIES: u32 = 10;
-    const RETRY_DELAY_MS: u64 = 100;
-
-    for attempt in 0..MAX_RETRIES {
-        // First check if Core has already set a terminal status
-        if let Ok(Some(inst)) = db::get_instance(&state.pool, instance_id).await
-            && matches!(
-                inst.status.as_str(),
-                "completed" | "failed" | "cancelled" | "suspended"
-            )
-        {
-            debug!(
-                instance_id = %instance_id,
-                status = %inst.status,
-                "Instance already has terminal status from Core, skipping output processing"
-            );
-            return Ok(());
-        }
-
-        match InstanceOutput::read_from_file(&output_path).await {
-            Ok(o) => {
-                // Successfully read output, process it
-                return process_output_inner(state, instance_id, o).await;
-            }
-            Err(e) => {
-                if attempt < MAX_RETRIES - 1 {
-                    debug!(
-                        instance_id = %instance_id,
-                        attempt = attempt + 1,
-                        error = %e,
-                        "Failed to read output.json, retrying..."
-                    );
-                    tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                } else {
-                    // All retries exhausted - but do NOT mark as failed.
-                    // Core is the authoritative source for status updates via SDK events.
-                    // If output.json doesn't exist, Core should have already received
-                    // the completion/failure event from the SDK.
-                    warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to read instance output after {} retries, deferring to Core for status",
-                        MAX_RETRIES
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Inner function to process the output once we have it.
-///
-/// Uses `complete_instance_if_running` from Persistence trait which only updates
-/// if status is 'running' - this prevents race conditions with Core's SDK events.
-async fn process_output_inner(
-    state: &OutputProcessorState,
-    instance_id: &str,
-    output: InstanceOutput,
-) -> Result<()> {
-    info!(
-        instance_id = %instance_id,
-        status = ?output.status,
-        "Processing instance output"
-    );
-
-    // Use conditional updates via Persistence trait to avoid overwriting status set by Core
-    match output.status {
-        InstanceOutputStatus::Completed => {
-            let result_bytes = output
-                .result
-                .as_ref()
-                .and_then(|v| serde_json::to_vec(v).ok());
-            let updated = state
-                .persistence
-                .complete_instance_if_running(
-                    instance_id,
-                    "completed",
-                    result_bytes.as_deref(),
-                    None,
-                    None, // stderr - not available from output.json
-                    None,
-                )
-                .await?;
-            if !updated {
-                debug!(
-                    instance_id = %instance_id,
-                    "Skipped status update - already set by Core"
-                );
-            }
-        }
-        InstanceOutputStatus::Failed => {
-            let updated = state
-                .persistence
-                .complete_instance_if_running(
-                    instance_id,
-                    "failed",
-                    None,
-                    output.error.as_deref(),
-                    None, // stderr - not available from output.json
-                    None,
-                )
-                .await?;
-            if !updated {
-                debug!(
-                    instance_id = %instance_id,
-                    "Skipped status update - already set by Core"
-                );
-            }
-        }
-        InstanceOutputStatus::Suspended => {
-            let updated = state
-                .persistence
-                .complete_instance_if_running(
-                    instance_id,
-                    "suspended",
-                    None,
-                    None,
-                    None, // stderr
-                    output.checkpoint_id.as_deref(),
-                )
-                .await?;
-            if !updated {
-                debug!(
-                    instance_id = %instance_id,
-                    "Skipped status update - already set by Core"
-                );
-            }
-        }
-        InstanceOutputStatus::Sleeping => {
-            // For sleeping, we need to schedule a wake via Core's sleep_until column
-            if let (Some(wake_after_ms), Some(checkpoint_id)) =
-                (output.wake_after_ms, output.checkpoint_id)
-            {
-                let wake_at =
-                    chrono::Utc::now() + chrono::Duration::milliseconds(wake_after_ms as i64);
-
-                let updated = state
-                    .persistence
-                    .complete_instance_if_running(
-                        instance_id,
-                        "suspended",
-                        None,
-                        None,
-                        None, // stderr
-                        Some(&checkpoint_id),
-                    )
-                    .await?;
-
-                // Only schedule wake if we actually updated the status
-                if updated {
-                    // Set sleep_until via Persistence trait for wake scheduler
-                    if let Err(e) = state
-                        .persistence
-                        .set_instance_sleep(instance_id, wake_at)
-                        .await
-                    {
-                        error!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to set sleep_until"
-                        );
-                    } else {
-                        info!(
-                            instance_id = %instance_id,
-                            wake_at = %wake_at,
-                            checkpoint_id = %checkpoint_id,
-                            "Scheduled wake for sleeping instance"
-                        );
-                    }
-                } else {
-                    debug!(
-                        instance_id = %instance_id,
-                        "Skipped sleep scheduling - status already set by Core"
-                    );
-                }
-            } else {
-                warn!(
-                    instance_id = %instance_id,
-                    "Sleeping output missing wake_after_ms or checkpoint_id"
-                );
-                let _ = state
-                    .persistence
-                    .complete_instance_if_running(
-                        instance_id,
-                        "failed",
-                        None,
-                        Some("Invalid sleep output"),
-                        None, // stderr
-                        None,
-                    )
-                    .await?;
-            }
-        }
-        InstanceOutputStatus::Cancelled => {
-            let _ = state
-                .persistence
-                .complete_instance_if_running(instance_id, "cancelled", None, None, None, None)
-                .await?;
-        }
-    }
-
-    Ok(())
 }
 
 // ============================================================================

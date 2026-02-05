@@ -183,4 +183,13 @@ pub trait Runner: Send + Sync {
         &self,
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics);
+
+    /// Get the process ID for a running instance.
+    ///
+    /// Returns None if the PID cannot be determined (e.g., process not running,
+    /// or runner type doesn't support PID tracking).
+    async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {
+        let _ = handle;
+        None
+    }
 }

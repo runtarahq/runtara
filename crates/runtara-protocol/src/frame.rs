@@ -353,10 +353,11 @@ mod tests {
     #[test]
     fn test_message_type_clone_and_copy() {
         let mt = MessageType::Request;
-        let cloned = mt.clone();
+        // MessageType is Copy, so we can just copy it directly
         let copied: MessageType = mt;
-        assert_eq!(mt, cloned);
+        let copied2: MessageType = mt;
         assert_eq!(mt, copied);
+        assert_eq!(mt, copied2);
     }
 
     #[test]
@@ -386,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_frame_error_display_io() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test error");
+        let io_err = std::io::Error::other("test error");
         let err = FrameError::Io(io_err);
         let msg = format!("{}", err);
         assert!(msg.contains("IO error"));
