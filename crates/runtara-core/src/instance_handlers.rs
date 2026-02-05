@@ -480,10 +480,8 @@ pub async fn handle_instance_event(
         }
         InstanceEventType::EventSuspended => {
             // Check if this is a suspended-with-sleep event (has sleep data in payload)
-            if !event.payload.is_empty() && event.checkpoint_id.is_some() {
+            if let (false, Some(checkpoint_id)) = (event.payload.is_empty(), &event.checkpoint_id) {
                 if let Some(sleep_data) = parse_sleep_payload(&event.payload) {
-                    let checkpoint_id = event.checkpoint_id.as_ref().unwrap();
-
                     // Save checkpoint with state from payload
                     state
                         .persistence
