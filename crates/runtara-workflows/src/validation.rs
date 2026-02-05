@@ -2714,8 +2714,34 @@ fn extract_references_from_input_mapping(mapping: &InputMapping, refs: &mut Vec<
 
 /// Validate that all data.* and variables.* references are defined.
 fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    // Start validation with no inherited variables and require inputSchema for data references
+    validate_data_and_variable_references_with_context(
+        graph,
+        &HashSet::new(), // No inherited variables at top level
+        false,           // Top level requires inputSchema for data references
+        result,
+    );
+}
+
+/// Internal validation function that supports inherited variables and data context.
+///
+/// # Arguments
+/// * `graph` - The execution graph to validate
+/// * `inherited_variables` - Variable names inherited from parent scope (e.g., Split config.variables)
+/// * `has_implicit_data` - If true, data.* references don't require inputSchema (e.g., in Split subgraphs)
+/// * `result` - Accumulator for validation errors
+fn validate_data_and_variable_references_with_context(
+    graph: &ExecutionGraph,
+    inherited_variables: &HashSet<String>,
+    has_implicit_data: bool,
+    result: &mut ValidationResult,
+) {
     let available_data_fields: Vec<String> = graph.input_schema.keys().cloned().collect();
-    let available_variables: Vec<String> = graph.variables.keys().cloned().collect();
+
+    // Merge inherited variables with graph's own variables
+    let mut all_variables: HashSet<String> = graph.variables.keys().cloned().collect();
+    all_variables.extend(inherited_variables.iter().cloned());
+    let available_variables: Vec<String> = all_variables.iter().cloned().collect();
 
     // Check each step for references
     for (step_id, step) in &graph.steps {
@@ -2725,22 +2751,27 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
             if let Some((root, field_name)) = parse_reference(&reference) {
                 match root {
                     "data" => {
-                        if graph.input_schema.is_empty() {
-                            result.errors.push(ValidationError::MissingInputSchema {
-                                step_id: step_id.clone(),
-                                reference: reference.clone(),
-                            });
-                        } else if !graph.input_schema.contains_key(field_name) {
-                            result.errors.push(ValidationError::UndefinedDataReference {
-                                step_id: step_id.clone(),
-                                reference: reference.clone(),
-                                field_name: field_name.to_string(),
-                                available_fields: available_data_fields.clone(),
-                            });
+                        // If this is a Split/While subgraph, data.* references are implicitly valid
+                        // (they refer to the current iteration item)
+                        if !has_implicit_data {
+                            if graph.input_schema.is_empty() {
+                                result.errors.push(ValidationError::MissingInputSchema {
+                                    step_id: step_id.clone(),
+                                    reference: reference.clone(),
+                                });
+                            } else if !graph.input_schema.contains_key(field_name) {
+                                result.errors.push(ValidationError::UndefinedDataReference {
+                                    step_id: step_id.clone(),
+                                    reference: reference.clone(),
+                                    field_name: field_name.to_string(),
+                                    available_fields: available_data_fields.clone(),
+                                });
+                            }
                         }
+                        // If has_implicit_data is true, any data.* reference is valid
                     }
                     "variables" => {
-                        if !graph.variables.contains_key(field_name) {
+                        if !all_variables.contains(field_name) {
                             result
                                 .errors
                                 .push(ValidationError::UndefinedVariableReference {
@@ -2761,14 +2792,42 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_data_and_variable_references(&split_step.subgraph, result);
+                // Split subgraphs:
+                // 1. Inherit config.variables as available variables
+                // 2. Have implicit data access (data.* refers to iteration item)
+                let injected_vars: HashSet<String> = split_step
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.variables.as_ref())
+                    .map(|v| v.keys().cloned().collect())
+                    .unwrap_or_default();
+                validate_data_and_variable_references_with_context(
+                    &split_step.subgraph,
+                    &injected_vars,
+                    true, // Split subgraphs have implicit data access
+                    result,
+                );
             }
             Step::While(while_step) => {
-                validate_data_and_variable_references(&while_step.subgraph, result);
+                // While subgraphs:
+                // 1. Have implicit data access (data.* refers to iteration item)
+                // 2. While loops don't have config.variables, so pass empty set
+                validate_data_and_variable_references_with_context(
+                    &while_step.subgraph,
+                    &HashSet::new(),
+                    true, // While subgraphs have implicit data access
+                    result,
+                );
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    validate_data_and_variable_references(on_wait, result);
+                    // WaitForSignal on_wait handlers don't have inherited variables or implicit data
+                    validate_data_and_variable_references_with_context(
+                        on_wait,
+                        &HashSet::new(),
+                        false,
+                        result,
+                    );
                 }
             }
             _ => {}
@@ -5953,6 +6012,226 @@ mod tests {
             unknown_var_errors.is_empty(),
             "Both config.variables and subgraph.variables should be available; got errors: {:?}",
             unknown_var_errors
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_data_reference_valid() {
+        use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep};
+
+        // Create a subgraph that references data.* (iteration item) - this should be valid
+        // because Split subgraphs receive the current item as 'data'
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("item_id".to_string(), ref_value("data.id"));
+        mapping.insert("item_name".to_string(), ref_value("data.name"));
+        mapping.insert("nested".to_string(), ref_value("data.nested.property"));
+        subgraph_steps.insert(
+            "sub_agent".to_string(),
+            create_agent_step("sub_agent", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert(
+            "sub_finish".to_string(),
+            create_finish_step("sub_finish", None),
+        );
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "sub_agent".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "sub_agent".to_string(),
+                to_step: "sub_finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(), // Note: no inputSchema defined
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        let config = SplitConfig {
+            value: MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!([{"id": 1, "name": "item1"}]),
+            }),
+            parallelism: None,
+            sequential: None,
+            dont_stop_on_failed: None,
+            variables: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            allow_null: None,
+            convert_single_value: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split".to_string(),
+            Step::Split(SplitStep {
+                id: "split".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: Some(config),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+        steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let mut graph = create_basic_graph(steps, "split");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "split".to_string(),
+            to_step: "finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have any MissingInputSchema or UndefinedDataReference errors
+        // because Split subgraphs have implicit data access
+        let data_ref_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| {
+                matches!(e, ValidationError::MissingInputSchema { .. })
+                    || matches!(e, ValidationError::UndefinedDataReference { .. })
+            })
+            .collect();
+        assert!(
+            data_ref_errors.is_empty(),
+            "Split subgraph should allow data.* references without inputSchema; got errors: {:?}",
+            data_ref_errors
+        );
+    }
+
+    #[test]
+    fn test_split_subgraph_combined_data_and_config_variables() {
+        use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep};
+
+        // Create a subgraph that references BOTH data.* (iteration item) AND config.variables
+        // This tests the exact scenario from the user's bug report
+        let mut subgraph_steps = HashMap::new();
+        let mut mapping = HashMap::new();
+        mapping.insert("item".to_string(), ref_value("data.node"));
+        mapping.insert("dry_run".to_string(), ref_value("variables.dry_run"));
+        mapping.insert("location".to_string(), ref_value("variables.location_id"));
+        mapping.insert(
+            "cutoff".to_string(),
+            ref_value("variables.sync_cutoff_date"),
+        );
+        subgraph_steps.insert(
+            "process".to_string(),
+            create_agent_step("process", "transform", Some(mapping)),
+        );
+        subgraph_steps.insert("finish".to_string(), create_finish_step("finish", None));
+
+        let subgraph = ExecutionGraph {
+            name: None,
+            description: None,
+            steps: subgraph_steps,
+            entry_point: "process".to_string(),
+            execution_plan: vec![runtara_dsl::ExecutionPlanEdge {
+                from_step: "process".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            }],
+            variables: HashMap::new(),
+            input_schema: HashMap::new(), // No inputSchema - data comes from iteration
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+        };
+
+        // Define config.variables that inject variables into the subgraph
+        let mut config_variables = HashMap::new();
+        config_variables.insert(
+            "dry_run".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(false),
+            }),
+        );
+        config_variables.insert(
+            "location_id".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("loc-123"),
+            }),
+        );
+        config_variables.insert(
+            "sync_cutoff_date".to_string(),
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!("2024-01-01"),
+            }),
+        );
+
+        let config = SplitConfig {
+            value: MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!([{"node": {"id": 1}}]),
+            }),
+            parallelism: Some(5),
+            sequential: None,
+            dont_stop_on_failed: Some(true),
+            variables: Some(config_variables),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            allow_null: None,
+            convert_single_value: None,
+        };
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "split".to_string(),
+            Step::Split(SplitStep {
+                id: "split".to_string(),
+                name: Some("Process Each Product".to_string()),
+                subgraph: Box::new(subgraph),
+                config: Some(config),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+            }),
+        );
+        steps.insert(
+            "main_finish".to_string(),
+            create_finish_step("main_finish", None),
+        );
+
+        let mut graph = create_basic_graph(steps, "split");
+        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
+            from_step: "split".to_string(),
+            to_step: "main_finish".to_string(),
+            label: None,
+            condition: None,
+            priority: None,
+        }];
+
+        let result = validate_workflow(&graph);
+
+        // Should NOT have any errors - both data.* and variables.* should be valid
+        let relevant_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| {
+                matches!(e, ValidationError::MissingInputSchema { .. })
+                    || matches!(e, ValidationError::UndefinedDataReference { .. })
+                    || matches!(e, ValidationError::UndefinedVariableReference { .. })
+                    || matches!(e, ValidationError::UnknownVariable { .. })
+            })
+            .collect();
+        assert!(
+            relevant_errors.is_empty(),
+            "Split subgraph should allow data.* and config.variables; got errors: {:?}",
+            relevant_errors
         );
     }
 
