@@ -202,6 +202,10 @@ impl ManagementSdk {
                     max_retries: resp.max_retries,
                     memory_peak_bytes: resp.memory_peak_bytes,
                     cpu_usage_usec: resp.cpu_usage_usec,
+                    termination_reason: resp
+                        .termination_reason
+                        .and_then(|s| crate::types::TerminationReason::from_str(&s)),
+                    exit_code: resp.exit_code,
                 })
             }
             _ => Err(SdkError::UnexpectedResponse(

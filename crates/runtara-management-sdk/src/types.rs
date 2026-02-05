@@ -85,6 +85,61 @@ impl From<SignalType> for i32 {
     }
 }
 
+/// How an instance terminated.
+///
+/// Provides more detail than `InstanceStatus` about WHY the instance ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationReason {
+    /// Normal successful completion (SDK reported via `completed()` event).
+    Completed,
+    /// Application error (SDK reported via `failed()` event).
+    ApplicationError,
+    /// Process crashed without sending SDK terminal event.
+    Crashed,
+    /// Execution exceeded timeout limit.
+    Timeout,
+    /// No heartbeat received within timeout window.
+    HeartbeatTimeout,
+    /// User requested cancellation.
+    Cancelled,
+    /// Paused by pause signal.
+    Paused,
+    /// Suspended for durable sleep.
+    Sleeping,
+}
+
+impl TerminationReason {
+    /// Parse from string (protocol uses string representation).
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "completed" => Some(Self::Completed),
+            "application_error" => Some(Self::ApplicationError),
+            "crashed" => Some(Self::Crashed),
+            "timeout" => Some(Self::Timeout),
+            "heartbeat_timeout" => Some(Self::HeartbeatTimeout),
+            "cancelled" => Some(Self::Cancelled),
+            "paused" => Some(Self::Paused),
+            "sleeping" => Some(Self::Sleeping),
+            _ => None,
+        }
+    }
+
+    /// Convert to string for protocol.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::ApplicationError => "application_error",
+            Self::Crashed => "crashed",
+            Self::Timeout => "timeout",
+            Self::HeartbeatTimeout => "heartbeat_timeout",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+            Self::Sleeping => "sleeping",
+        }
+    }
+}
+
 /// Health status of runtara-core.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthStatus {
@@ -149,6 +204,12 @@ pub struct InstanceInfo {
     pub memory_peak_bytes: Option<u64>,
     /// Total CPU time consumed during execution (in microseconds).
     pub cpu_usage_usec: Option<u64>,
+
+    // Termination tracking (available for terminal states)
+    /// How the instance terminated.
+    pub termination_reason: Option<TerminationReason>,
+    /// Process exit code (if available).
+    pub exit_code: Option<i32>,
 }
 
 /// Summary of an instance (used in list results).
@@ -1388,6 +1449,95 @@ mod tests {
     }
 
     // ========================================================================
+    // TerminationReason tests
+    // ========================================================================
+
+    #[test]
+    fn test_termination_reason_from_str() {
+        assert_eq!(
+            TerminationReason::from_str("completed"),
+            Some(TerminationReason::Completed)
+        );
+        assert_eq!(
+            TerminationReason::from_str("application_error"),
+            Some(TerminationReason::ApplicationError)
+        );
+        assert_eq!(
+            TerminationReason::from_str("crashed"),
+            Some(TerminationReason::Crashed)
+        );
+        assert_eq!(
+            TerminationReason::from_str("timeout"),
+            Some(TerminationReason::Timeout)
+        );
+        assert_eq!(
+            TerminationReason::from_str("heartbeat_timeout"),
+            Some(TerminationReason::HeartbeatTimeout)
+        );
+        assert_eq!(
+            TerminationReason::from_str("cancelled"),
+            Some(TerminationReason::Cancelled)
+        );
+        assert_eq!(
+            TerminationReason::from_str("paused"),
+            Some(TerminationReason::Paused)
+        );
+        assert_eq!(
+            TerminationReason::from_str("sleeping"),
+            Some(TerminationReason::Sleeping)
+        );
+        assert_eq!(TerminationReason::from_str("unknown"), None);
+        assert_eq!(TerminationReason::from_str(""), None);
+    }
+
+    #[test]
+    fn test_termination_reason_as_str() {
+        assert_eq!(TerminationReason::Completed.as_str(), "completed");
+        assert_eq!(
+            TerminationReason::ApplicationError.as_str(),
+            "application_error"
+        );
+        assert_eq!(TerminationReason::Crashed.as_str(), "crashed");
+        assert_eq!(TerminationReason::Timeout.as_str(), "timeout");
+        assert_eq!(
+            TerminationReason::HeartbeatTimeout.as_str(),
+            "heartbeat_timeout"
+        );
+        assert_eq!(TerminationReason::Cancelled.as_str(), "cancelled");
+        assert_eq!(TerminationReason::Paused.as_str(), "paused");
+        assert_eq!(TerminationReason::Sleeping.as_str(), "sleeping");
+    }
+
+    #[test]
+    fn test_termination_reason_serde() {
+        let reason = TerminationReason::ApplicationError;
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, "\"application_error\"");
+
+        let deserialized: TerminationReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, TerminationReason::ApplicationError);
+    }
+
+    #[test]
+    fn test_termination_reason_roundtrip() {
+        // Verify from_str and as_str are consistent
+        for reason in [
+            TerminationReason::Completed,
+            TerminationReason::ApplicationError,
+            TerminationReason::Crashed,
+            TerminationReason::Timeout,
+            TerminationReason::HeartbeatTimeout,
+            TerminationReason::Cancelled,
+            TerminationReason::Paused,
+            TerminationReason::Sleeping,
+        ] {
+            let s = reason.as_str();
+            let parsed = TerminationReason::from_str(s);
+            assert_eq!(parsed, Some(reason));
+        }
+    }
+
+    // ========================================================================
     // RunnerType tests
     // ========================================================================
 
@@ -1849,10 +1999,14 @@ mod tests {
             max_retries: 3,
             memory_peak_bytes: Some(536_870_912), // 512 MB
             cpu_usage_usec: Some(1_500_000),      // 1.5 seconds
+            termination_reason: Some(TerminationReason::Completed),
+            exit_code: Some(0),
         };
 
         assert_eq!(info.memory_peak_bytes, Some(536_870_912));
         assert_eq!(info.cpu_usage_usec, Some(1_500_000));
+        assert_eq!(info.termination_reason, Some(TerminationReason::Completed));
+        assert_eq!(info.exit_code, Some(0));
     }
 
     #[test]
@@ -1876,10 +2030,14 @@ mod tests {
             max_retries: 3,
             memory_peak_bytes: None,
             cpu_usage_usec: None,
+            termination_reason: None, // Running, no termination yet
+            exit_code: None,
         };
 
         assert!(info.memory_peak_bytes.is_none());
         assert!(info.cpu_usage_usec.is_none());
+        assert!(info.termination_reason.is_none());
+        assert!(info.exit_code.is_none());
     }
 
     #[test]
@@ -1903,6 +2061,8 @@ mod tests {
             max_retries: 3,
             memory_peak_bytes: Some(1_073_741_824), // 1 GB
             cpu_usage_usec: Some(5_000_000),        // 5 seconds
+            termination_reason: Some(TerminationReason::Completed),
+            exit_code: Some(0),
         };
 
         let json_str = serde_json::to_string(&info).unwrap();
@@ -1911,6 +2071,11 @@ mod tests {
         assert_eq!(deserialized.instance_id, "inst-123");
         assert_eq!(deserialized.memory_peak_bytes, Some(1_073_741_824));
         assert_eq!(deserialized.cpu_usage_usec, Some(5_000_000));
+        assert_eq!(
+            deserialized.termination_reason,
+            Some(TerminationReason::Completed)
+        );
+        assert_eq!(deserialized.exit_code, Some(0));
     }
 
     #[test]
@@ -1934,6 +2099,8 @@ mod tests {
             max_retries: 3,
             memory_peak_bytes: None,
             cpu_usage_usec: None,
+            termination_reason: Some(TerminationReason::ApplicationError),
+            exit_code: Some(1),
         };
 
         assert_eq!(info.error, Some("Connection refused".to_string()));
@@ -1941,6 +2108,11 @@ mod tests {
             info.stderr,
             Some("thread 'main' panicked at 'assertion failed'".to_string())
         );
+        assert_eq!(
+            info.termination_reason,
+            Some(TerminationReason::ApplicationError)
+        );
+        assert_eq!(info.exit_code, Some(1));
     }
 
     // ========================================================================

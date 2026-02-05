@@ -96,8 +96,7 @@ fn test_error_debug() {
 // Test From implementations
 #[test]
 fn test_from_serde_json_error() {
-    let json_err: Result<(), serde_json::Error> =
-        serde_json::from_str::<()>("invalid").map_err(|e| e);
+    let json_err: Result<(), serde_json::Error> = serde_json::from_str::<()>("invalid");
 
     let sdk_err: SdkError = json_err.unwrap_err().into();
     assert!(matches!(sdk_err, SdkError::Serialization(_)));
