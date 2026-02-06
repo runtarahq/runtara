@@ -460,11 +460,25 @@ pub async fn handle_instance_event(
             } else {
                 Some(event.payload.as_slice())
             };
-            state
+            // Use _if_running to prevent race condition with PID monitor:
+            // If process crashed and PID monitor already set status to "failed",
+            // we should not overwrite it with "completed" from queued SDK event.
+            let applied = state
                 .persistence
-                .complete_instance(&event.instance_id, output, None)
+                .complete_instance_if_running(
+                    &event.instance_id,
+                    "completed",
+                    output,
+                    None,
+                    None,
+                    None,
+                )
                 .await?;
-            info!("Instance completed successfully");
+            if applied {
+                info!("Instance completed successfully");
+            } else {
+                warn!("Instance completion skipped (already in terminal state)");
+            }
         }
         InstanceEventType::EventFailed => {
             let error = if event.payload.is_empty() {
@@ -472,11 +486,24 @@ pub async fn handle_instance_event(
             } else {
                 std::str::from_utf8(&event.payload).unwrap_or("Unknown error (binary payload)")
             };
-            state
+            // Use _if_running to prevent race condition with PID monitor:
+            // If PID monitor already set status to "failed", don't overwrite with SDK event.
+            let applied = state
                 .persistence
-                .complete_instance(&event.instance_id, None, Some(error))
+                .complete_instance_if_running(
+                    &event.instance_id,
+                    "failed",
+                    None,
+                    Some(error),
+                    None,
+                    None,
+                )
                 .await?;
-            warn!(error = %error, "Instance failed");
+            if applied {
+                warn!(error = %error, "Instance failed");
+            } else {
+                warn!(error = %error, "Instance failure event skipped (already in terminal state)");
+            }
         }
         InstanceEventType::EventSuspended => {
             // Check if this is a suspended-with-sleep event (has sleep data in payload)
@@ -503,9 +530,10 @@ pub async fn handle_instance_event(
                     }
 
                     // Mark as suspended with termination_reason "sleeping"
-                    state
+                    // Use _if_running to prevent race condition with PID monitor.
+                    let applied = state
                         .persistence
-                        .complete_instance_with_termination(
+                        .complete_instance_with_termination_if_running(
                             &event.instance_id,
                             "suspended",
                             Some("sleeping"),
@@ -517,26 +545,57 @@ pub async fn handle_instance_event(
                         )
                         .await?;
 
-                    info!(
-                        checkpoint_id = %checkpoint_id,
-                        wake_at = ?sleep_data.wake_at,
-                        "Instance sleeping until scheduled wake"
-                    );
+                    if applied {
+                        info!(
+                            checkpoint_id = %checkpoint_id,
+                            wake_at = ?sleep_data.wake_at,
+                            "Instance sleeping until scheduled wake"
+                        );
+                    } else {
+                        warn!(
+                            checkpoint_id = %checkpoint_id,
+                            "Instance sleep event skipped (already in terminal state)"
+                        );
+                    }
                 } else {
                     // Payload present but not valid sleep data - just suspend
-                    state
+                    // Use _if_running to prevent race condition with PID monitor.
+                    let applied = state
                         .persistence
-                        .update_instance_status(&event.instance_id, "suspended", None)
+                        .complete_instance_if_running(
+                            &event.instance_id,
+                            "suspended",
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
                         .await?;
-                    info!("Instance suspended (with payload but no valid sleep data)");
+                    if applied {
+                        info!("Instance suspended (with payload but no valid sleep data)");
+                    } else {
+                        warn!("Instance suspend event skipped (already in terminal state)");
+                    }
                 }
             } else {
                 // No payload or no checkpoint_id - simple suspend
-                state
+                // Use _if_running to prevent race condition with PID monitor.
+                let applied = state
                     .persistence
-                    .update_instance_status(&event.instance_id, "suspended", None)
+                    .complete_instance_if_running(
+                        &event.instance_id,
+                        "suspended",
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
                     .await?;
-                info!("Instance suspended");
+                if applied {
+                    info!("Instance suspended");
+                } else {
+                    warn!("Instance suspend event skipped (already in terminal state)");
+                }
             }
         }
         InstanceEventType::EventCustom => {
@@ -1033,6 +1092,35 @@ mod tests {
                 inst.finished_at = Some(Utc::now());
             }
             Ok(())
+        }
+
+        async fn complete_instance_if_running(
+            &self,
+            instance_id: &str,
+            status: &str,
+            output: Option<&[u8]>,
+            error: Option<&str>,
+            _stderr: Option<&str>,
+            checkpoint_id: Option<&str>,
+        ) -> std::result::Result<bool, CoreError> {
+            let mut instances = self.instances.lock().unwrap();
+            if let Some(inst) = instances.get_mut(instance_id)
+                && inst.status == "running"
+            {
+                inst.status = status.to_string();
+                inst.output = output.map(|o| o.to_vec());
+                inst.error = error.map(|e| e.to_string());
+                inst.checkpoint_id = checkpoint_id.map(|s| s.to_string());
+                if status == "completed"
+                    || status == "failed"
+                    || status == "cancelled"
+                    || status == "suspended"
+                {
+                    inst.finished_at = Some(Utc::now());
+                }
+                return Ok(true);
+            }
+            Ok(false)
         }
 
         async fn complete_instance_with_termination(

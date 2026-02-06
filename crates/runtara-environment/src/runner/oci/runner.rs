@@ -957,6 +957,10 @@ impl Runner for OciRunner {
                 .to_string()
         };
 
+        // Track the spawned process PID for reliable termination detection.
+        // This is the wrapper process (pasta or crun) PID, available immediately from child.id().
+        let spawned_pid: Option<u32>;
+
         // For pasta mode: pasta wraps crun (creates namespace, then crun runs inside)
         // For other modes: just run crun directly
         if use_pasta {
@@ -1010,6 +1014,9 @@ impl Runner for OciRunner {
                     }
                 }
             };
+
+            // Capture the spawned process PID immediately (before it might exit)
+            spawned_pid = child.id();
 
             // Check for immediate startup failures
             match child.try_wait() {
@@ -1084,6 +1091,9 @@ impl Runner for OciRunner {
                 }
             };
 
+            // Capture the spawned process PID immediately (before it might exit)
+            spawned_pid = child.id();
+
             // Check for immediate startup failures (no delay needed)
             match child.try_wait() {
                 Ok(Some(status)) if !status.success() => {
@@ -1141,6 +1151,7 @@ impl Runner for OciRunner {
             instance_id: options.instance_id.clone(),
             tenant_id: options.tenant_id.clone(),
             started_at: now,
+            spawned_pid,
         })
     }
 

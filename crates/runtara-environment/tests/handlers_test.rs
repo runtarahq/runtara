@@ -1261,6 +1261,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         instance_id: instance_id.clone(),
         tenant_id: tenant_id.to_string(),
         started_at: Utc::now(),
+        spawned_pid: None,
     };
 
     // Register the mock instance in the runner

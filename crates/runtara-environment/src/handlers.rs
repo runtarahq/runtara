@@ -479,13 +479,13 @@ pub async fn handle_start_instance(
             let tenant_id_for_monitor = request.tenant_id.clone();
             let handle_id_for_registry = handle.handle_id.clone();
 
-            // Get PID from runner (for PID-based termination detection)
-            let pid = state.runner.get_pid(&handle).await.map(|p| p as i32);
+            // Use the PID captured at spawn time (more reliable than querying crun state)
+            let pid = handle.spawned_pid.map(|p| p as i32);
             if pid.is_some() {
                 debug!(
                     instance_id = %instance_id,
                     pid = ?pid,
-                    "Captured container PID for monitoring"
+                    "Using spawned process PID for monitoring"
                 );
             }
 
@@ -622,6 +622,7 @@ pub async fn handle_stop_instance(
         instance_id: request.instance_id.clone(),
         tenant_id: container.tenant_id,
         started_at: container.started_at,
+        spawned_pid: container.pid.map(|p| p as u32),
     };
 
     if let Err(e) = state.runner.stop(&handle).await {
@@ -886,12 +887,15 @@ pub fn spawn_container_monitor(
     let instance_id = handle.instance_id.clone();
 
     tokio::spawn(async move {
-        // Brief delay to let crun register the container before first check
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Brief initial delay to let the process start
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Poll to check if container is still running
         let poll_interval = Duration::from_millis(50);
         let start = std::time::Instant::now();
+
+        // Note: pid comes from child.id() at spawn time, so it's reliable.
+        // If pid is None (shouldn't happen normally), fall back to runner.is_running().
 
         loop {
             // Check timeout first
