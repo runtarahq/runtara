@@ -86,6 +86,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::cleanup_worker::{CleanupWorker, CleanupWorkerConfig};
 use crate::container_registry::ContainerRegistry;
+use crate::db_cleanup_worker::{DbCleanupWorker, DbCleanupWorkerConfig};
 use crate::handlers::EnvironmentHandlerState;
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::runner::Runner;
@@ -107,6 +108,7 @@ pub struct EnvironmentRuntimeBuilder {
     cleanup_max_age: Duration,
     heartbeat_poll_interval: Duration,
     heartbeat_timeout: Duration,
+    db_cleanup_config: DbCleanupWorkerConfig,
 }
 
 impl Default for EnvironmentRuntimeBuilder {
@@ -126,6 +128,7 @@ impl Default for EnvironmentRuntimeBuilder {
             cleanup_max_age: Duration::from_secs(24 * 3600),  // 24 hours
             heartbeat_poll_interval: Duration::from_secs(30), // 30 seconds
             heartbeat_timeout: Duration::from_secs(120),      // 2 minutes
+            db_cleanup_config: DbCleanupWorkerConfig::from_env(),
         }
     }
 }
@@ -252,6 +255,14 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
+    /// Set the database cleanup worker configuration.
+    ///
+    /// Default: Loaded from environment variables via [`DbCleanupWorkerConfig::from_env()`].
+    pub fn db_cleanup_config(mut self, config: DbCleanupWorkerConfig) -> Self {
+        self.db_cleanup_config = config;
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -281,6 +292,7 @@ impl EnvironmentRuntimeBuilder {
             cleanup_max_age: self.cleanup_max_age,
             heartbeat_poll_interval: self.heartbeat_poll_interval,
             heartbeat_timeout: self.heartbeat_timeout,
+            db_cleanup_config: self.db_cleanup_config,
         })
     }
 }
@@ -301,6 +313,7 @@ pub struct EnvironmentRuntimeConfig {
     cleanup_max_age: Duration,
     heartbeat_poll_interval: Duration,
     heartbeat_timeout: Duration,
+    db_cleanup_config: DbCleanupWorkerConfig,
 }
 
 impl EnvironmentRuntimeConfig {
@@ -398,6 +411,18 @@ impl EnvironmentRuntimeConfig {
             heartbeat_monitor.run().await;
         });
 
+        // Create database cleanup worker
+        let db_cleanup_worker = DbCleanupWorker::new(
+            self.pool.clone(),
+            self.persistence.clone(),
+            self.db_cleanup_config,
+        );
+        let db_cleanup_shutdown = db_cleanup_worker.shutdown_handle();
+
+        let db_cleanup_handle = tokio::spawn(async move {
+            db_cleanup_worker.run().await;
+        });
+
         // Start QUIC server task
         let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
         let bind_addr = self.bind_addr;
@@ -421,11 +446,13 @@ impl EnvironmentRuntimeConfig {
             wake_handle,
             cleanup_handle,
             heartbeat_handle,
+            db_cleanup_handle,
             core_runtime,
             server_shutdown_tx,
             wake_shutdown,
             cleanup_shutdown,
             heartbeat_shutdown,
+            db_cleanup_shutdown,
             state,
             bind_addr,
         })
@@ -438,6 +465,7 @@ impl EnvironmentRuntimeConfig {
 /// - QUIC server for management SDK connections (images, instances, signals)
 /// - Wake scheduler for durable sleep wake-ups
 /// - Cleanup worker for removing old run directories
+/// - Database cleanup worker for removing old database records
 /// - Heartbeat monitor for detecting and failing stale instances
 /// - Embedded runtara-core (optional, when `core_bind_addr` is configured)
 ///
@@ -447,11 +475,13 @@ pub struct EnvironmentRuntime {
     wake_handle: JoinHandle<()>,
     cleanup_handle: JoinHandle<()>,
     heartbeat_handle: JoinHandle<()>,
+    db_cleanup_handle: JoinHandle<()>,
     core_runtime: Option<CoreRuntime>,
     server_shutdown_tx: watch::Sender<bool>,
     wake_shutdown: Arc<Notify>,
     cleanup_shutdown: Arc<Notify>,
     heartbeat_shutdown: Arc<Notify>,
+    db_cleanup_shutdown: Arc<Notify>,
     state: Arc<EnvironmentHandlerState>,
     bind_addr: SocketAddr,
 }
@@ -474,9 +504,9 @@ impl EnvironmentRuntime {
 
     /// Gracefully shut down the runtime.
     ///
-    /// This signals the QUIC server, wake scheduler, cleanup worker, heartbeat
-    /// monitor, and embedded CoreRuntime (if present) to stop, then waits for
-    /// them to complete.
+    /// This signals the QUIC server, wake scheduler, cleanup worker, database
+    /// cleanup worker, heartbeat monitor, and embedded CoreRuntime (if present)
+    /// to stop, then waits for them to complete.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
@@ -492,6 +522,9 @@ impl EnvironmentRuntime {
         // Signal heartbeat monitor shutdown
         self.heartbeat_shutdown.notify_one();
 
+        // Signal database cleanup worker shutdown
+        self.db_cleanup_shutdown.notify_one();
+
         // Wait for wake scheduler
         if let Err(e) = self.wake_handle.await {
             error!("Wake scheduler task panicked: {}", e);
@@ -505,6 +538,11 @@ impl EnvironmentRuntime {
         // Wait for heartbeat monitor
         if let Err(e) = self.heartbeat_handle.await {
             error!("Heartbeat monitor task panicked: {}", e);
+        }
+
+        // Wait for database cleanup worker
+        if let Err(e) = self.db_cleanup_handle.await {
+            error!("Database cleanup worker task panicked: {}", e);
         }
 
         // Shutdown embedded CoreRuntime (if running)
@@ -539,6 +577,7 @@ impl EnvironmentRuntime {
             && !self.wake_handle.is_finished()
             && !self.cleanup_handle.is_finished()
             && !self.heartbeat_handle.is_finished()
+            && !self.db_cleanup_handle.is_finished()
             && core_running
     }
 

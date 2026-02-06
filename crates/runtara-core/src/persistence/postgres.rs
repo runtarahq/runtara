@@ -1640,12 +1640,74 @@ impl Persistence for PostgresPersistence {
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
         store_instance_input(&self.pool, instance_id, input).await
     }
+
+    async fn get_terminal_instances_older_than(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<String>, CoreError> {
+        get_terminal_instances_older_than(&self.pool, older_than, limit).await
+    }
+
+    async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
+        delete_instances_batch(&self.pool, instance_ids).await
+    }
 }
 
 /// Check database health.
 pub async fn health_check_db(pool: &PgPool) -> Result<bool, CoreError> {
     let result: Result<(i32,), _> = sqlx::query_as("SELECT 1").fetch_one(pool).await;
     Ok(result.is_ok())
+}
+
+/// Get terminal instance IDs older than the specified timestamp.
+///
+/// Only returns instances with terminal status: completed, failed, cancelled.
+/// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
+pub async fn get_terminal_instances_older_than(
+    pool: &PgPool,
+    older_than: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<String>, CoreError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT instance_id
+        FROM instances
+        WHERE status IN ('completed', 'failed', 'cancelled')
+          AND finished_at IS NOT NULL
+          AND finished_at < $1
+        ORDER BY finished_at ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(older_than)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Delete instances by their IDs.
+///
+/// This deletes from the instances table; child tables with ON DELETE CASCADE
+/// are automatically cleaned up by the database.
+///
+/// Returns the count of deleted instances.
+pub async fn delete_instances_batch(
+    pool: &PgPool,
+    instance_ids: &[String],
+) -> Result<u64, CoreError> {
+    if instance_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let result = sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1)")
+        .bind(instance_ids)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
 }
 
 /// List instances with optional filtering.

@@ -722,4 +722,35 @@ pub trait Persistence: Send + Sync {
         // Default: true (no compensations = all succeeded)
         Ok(true)
     }
+
+    // ========================================================================
+    // Data Retention / Cleanup (optional - default implementations no-op)
+    // ========================================================================
+
+    /// Get terminal instance IDs older than the specified timestamp.
+    ///
+    /// Only returns instances with terminal status: completed, failed, cancelled.
+    /// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
+    async fn get_terminal_instances_older_than(
+        &self,
+        _older_than: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<Vec<String>, CoreError> {
+        // Default: empty list (no cleanup supported)
+        Ok(vec![])
+    }
+
+    /// Delete instances by their IDs.
+    ///
+    /// This deletes from the instances table; child tables with ON DELETE CASCADE
+    /// (checkpoints, events, signals, etc.) are automatically cleaned up.
+    ///
+    /// Environment implementations should override this to clean up environment-specific
+    /// tables (container_registry, container_status, etc.) before calling the parent.
+    ///
+    /// Returns the count of deleted instances.
+    async fn delete_instances_batch(&self, _instance_ids: &[String]) -> Result<u64, CoreError> {
+        // Default: no-op (no deletion supported)
+        Ok(0)
+    }
 }
