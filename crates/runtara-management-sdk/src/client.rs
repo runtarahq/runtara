@@ -76,10 +76,10 @@ impl ManagementSdk {
     }
 
     /// Connect to runtara-environment.
-    #[instrument(skip(self))]
+    #[instrument(skip(self), level = "debug")]
     pub async fn connect(&self) -> Result<()> {
         self.client.connect().await?;
-        info!("Connected to runtara-environment");
+        debug!("Connected to runtara-environment");
         Ok(())
     }
 
@@ -127,7 +127,7 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Check health of runtara-environment.
-    #[instrument(skip(self))]
+    #[instrument(skip(self), level = "debug")]
     pub async fn health_check(&self) -> Result<HealthStatus> {
         debug!("Performing health check");
 
@@ -153,7 +153,7 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Get status of a specific instance.
-    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    #[instrument(skip(self), fields(instance_id = %instance_id), level = "debug")]
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<InstanceInfo> {
         debug!("Getting instance status");
 
@@ -215,7 +215,7 @@ impl ManagementSdk {
     }
 
     /// List instances with optional filtering.
-    #[instrument(skip(self))]
+    #[instrument(skip(self, options), level = "debug")]
     pub async fn list_instances(
         &self,
         options: ListInstancesOptions,
@@ -523,7 +523,7 @@ impl ManagementSdk {
     }
 
     /// List images with optional filtering.
-    #[instrument(skip(self))]
+    #[instrument(skip(self, options), level = "debug")]
     pub async fn list_images(&self, options: ListImagesOptions) -> Result<ListImagesResult> {
         debug!("Listing images");
 
@@ -565,7 +565,7 @@ impl ManagementSdk {
     }
 
     /// Get information about a specific image.
-    #[instrument(skip(self), fields(image_id = %image_id, tenant_id = %tenant_id))]
+    #[instrument(skip(self), fields(image_id = %image_id, tenant_id = %tenant_id), level = "debug")]
     pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
 
@@ -770,7 +770,7 @@ impl ManagementSdk {
     ///     println!("{}: {} bytes", checkpoint.checkpoint_id, checkpoint.data_size_bytes);
     /// }
     /// ```
-    #[instrument(skip(self, options), fields(instance_id = %instance_id))]
+    #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_checkpoints(
         &self,
         instance_id: &str,
@@ -829,7 +829,7 @@ impl ManagementSdk {
     ///     println!("Checkpoint data: {:?}", checkpoint.data);
     /// }
     /// ```
-    #[instrument(skip(self), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id))]
+    #[instrument(skip(self), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id), level = "debug")]
     pub async fn get_checkpoint(
         &self,
         instance_id: &str,
@@ -910,7 +910,7 @@ impl ManagementSdk {
     ///         .with_payload_contains("error")
     /// ).await?;
     /// ```
-    #[instrument(skip(self, options), fields(instance_id = %instance_id))]
+    #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_events(
         &self,
         instance_id: &str,
@@ -995,7 +995,7 @@ impl ManagementSdk {
     /// // While:while-retry (index Some(2))
     /// // Split:split-orders (index Some(0))
     /// ```
-    #[instrument(skip(self), fields(instance_id = %instance_id, scope_id = %scope_id))]
+    #[instrument(skip(self), fields(instance_id = %instance_id, scope_id = %scope_id), level = "debug")]
     pub async fn get_scope_ancestors(
         &self,
         instance_id: &str,
@@ -1064,7 +1064,7 @@ impl ManagementSdk {
     ///     println!("{}: {:?} ({}ms)", step.step_id, step.status, step.duration_ms.unwrap_or(0));
     /// }
     /// ```
-    #[instrument(skip(self, options), fields(instance_id = %instance_id))]
+    #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_step_summaries(
         &self,
         instance_id: &str,
@@ -1227,7 +1227,7 @@ impl ManagementSdk {
     ///
     /// Returns metadata about all registered agents, including their capabilities
     /// and input schemas. This runs in-process (no OCI container needed).
-    #[instrument(skip(self))]
+    #[instrument(skip(self), level = "debug")]
     pub async fn list_agents(&self) -> Result<Vec<AgentInfo>> {
         debug!("Listing agents");
 
@@ -1253,7 +1253,7 @@ impl ManagementSdk {
     ///
     /// Returns the input field definitions for the specified capability,
     /// or None if the capability is not found.
-    #[instrument(skip(self), fields(agent_id = %agent_id, capability_id = %capability_id))]
+    #[instrument(skip(self), fields(agent_id = %agent_id, capability_id = %capability_id), level = "debug")]
     pub async fn get_capability(
         &self,
         agent_id: &str,
@@ -1318,7 +1318,7 @@ impl ManagementSdk {
     ///     );
     /// }
     /// ```
-    #[instrument(skip(self), fields(tenant_id = %options.tenant_id))]
+    #[instrument(skip(self, options), fields(tenant_id = %options.tenant_id), level = "debug")]
     pub async fn get_tenant_metrics(
         &self,
         options: GetTenantMetricsOptions,
@@ -1391,7 +1391,7 @@ impl ManagementSdk {
     /// Wait for an instance to reach a terminal state.
     ///
     /// Returns the final instance info once it reaches Completed, Failed, or Cancelled.
-    #[instrument(skip(self), fields(instance_id = %instance_id))]
+    #[instrument(skip(self), fields(instance_id = %instance_id), level = "debug")]
     pub async fn wait_for_completion(
         &self,
         instance_id: &str,

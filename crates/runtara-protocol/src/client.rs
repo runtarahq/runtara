@@ -9,7 +9,7 @@ use std::time::Duration;
 use quinn::{ClientConfig, Connection, Endpoint, TransportConfig};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument};
+use tracing::{debug, instrument};
 
 use crate::frame::{Frame, FrameError, FramedStream};
 
@@ -145,7 +145,7 @@ impl RuntaraClient {
     }
 
     /// Connect to the server
-    #[instrument(skip(self))]
+    #[instrument(skip(self), level = "debug")]
     pub async fn connect(&self) -> Result<(), ClientError> {
         let mut conn_guard = self.connection.lock().await;
 
@@ -157,7 +157,7 @@ impl RuntaraClient {
             return Ok(());
         }
 
-        info!(addr = %self.config.server_addr, "connecting to runtara-core");
+        debug!(addr = %self.config.server_addr, "connecting to runtara-core");
 
         let timeout = Duration::from_millis(self.config.connect_timeout_ms);
         let connecting = self
@@ -168,7 +168,7 @@ impl RuntaraClient {
             .await
             .map_err(|_| ClientError::Timeout(self.config.connect_timeout_ms))??;
 
-        info!("connected to runtara-core");
+        debug!("connected to runtara-core");
         *conn_guard = Some(connection);
         Ok(())
     }
@@ -197,7 +197,7 @@ impl RuntaraClient {
     }
 
     /// Send a request and receive a response using a new stream
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request), level = "debug")]
     pub async fn request<Req: prost::Message, Resp: prost::Message + Default>(
         &self,
         request: &Req,
@@ -218,7 +218,7 @@ impl RuntaraClient {
     /// Send a fire-and-forget request (no response expected).
     ///
     /// Use this for events that don't require acknowledgement.
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request), level = "debug")]
     pub async fn send_fire_and_forget<Req: prost::Message>(
         &self,
         request: &Req,

@@ -527,8 +527,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // Scenarios are glue code calling pre-compiled agents, so aggressive optimization
     // of the generated code provides negligible runtime benefit.
     let opt_level = std::env::var("RUNTARA_OPT_LEVEL").unwrap_or_else(|_| "1".to_string());
-    let codegen_units =
-        std::env::var("RUNTARA_CODEGEN_UNITS").unwrap_or_else(|_| "16".to_string());
+    let codegen_units = std::env::var("RUNTARA_CODEGEN_UNITS").unwrap_or_else(|_| "16".to_string());
 
     cmd.arg(format!("--target={}", target))
         .arg("--crate-type=bin")
