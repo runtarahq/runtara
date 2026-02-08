@@ -523,18 +523,33 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // (some production environments may have -D warnings set globally)
     cmd.env_remove("RUSTFLAGS");
 
+    // Compilation optimization settings (configurable via environment)
+    // Scenarios are glue code calling pre-compiled agents, so aggressive optimization
+    // of the generated code provides negligible runtime benefit.
+    let opt_level = std::env::var("RUNTARA_OPT_LEVEL").unwrap_or_else(|_| "1".to_string());
+    let codegen_units =
+        std::env::var("RUNTARA_CODEGEN_UNITS").unwrap_or_else(|_| "16".to_string());
+
     cmd.arg(format!("--target={}", target))
         .arg("--crate-type=bin")
         .arg("--edition=2024")
         .arg("-C")
-        .arg("opt-level=2")
+        .arg(format!("opt-level={}", opt_level))
         .arg("-C")
-        .arg("codegen-units=1");
+        .arg(format!("codegen-units={}", codegen_units));
+
+    // Strip symbols to reduce binary size (skip in debug mode for stack traces)
+    if !debug_mode {
+        cmd.arg("-C").arg("strip=symbols");
+    }
 
     // Use static CRT linking on Linux (musl) for fully static binaries
     #[cfg(target_os = "linux")]
     {
         cmd.arg("-C").arg("target-feature=+crt-static");
+        // Use mold linker for faster linking (5-10x faster than GNU ld)
+        cmd.arg("-C").arg("linker=clang");
+        cmd.arg("-C").arg("link-arg=-fuse-ld=mold");
     }
 
     // Add library search paths
