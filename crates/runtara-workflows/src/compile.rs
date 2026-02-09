@@ -331,12 +331,18 @@ pub struct NativeCompilationResult {
 /// Get the rustc compilation directory for scenarios
 fn get_rustc_compile_dir(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
-    PathBuf::from(data_dir)
+    let path = PathBuf::from(data_dir)
         .join(tenant_id)
         .join("scenarios")
         .join(workflow_id)
         .join("native_build")
-        .join(format!("version_{}", version))
+        .join(format!("version_{}", version));
+    // Canonicalize to absolute path to avoid CWD-related issues with the linker.
+    // The parent directory might not exist yet, so canonicalize the DATA_DIR portion
+    // and append the rest.
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&path))
+        .unwrap_or(path)
 }
 
 /// Get the native library information (runtime, agents, deps)
@@ -508,16 +514,24 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 
     // Compile with rustc to native binary
     let compilation_start = std::time::Instant::now();
+
+    // Log the CWD for debugging path resolution issues
+    let cwd = std::env::current_dir().unwrap_or_default();
     info!(
         scenario_id = %scenario_id,
         version = version,
         mode = "native",
+        cwd = %cwd.display(),
+        build_dir = %build_dir.display(),
         "Starting scenario compilation"
     );
 
     // Build rustc command for native binary
     let target = get_host_target();
     let mut cmd = Command::new("rustc");
+
+    // Set explicit working directory to avoid CWD issues in async contexts
+    cmd.current_dir(&cwd);
 
     // Clear RUSTFLAGS to ensure consistent behavior across environments
     // (some production environments may have -D warnings set globally)
