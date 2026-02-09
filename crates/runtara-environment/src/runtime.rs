@@ -403,6 +403,7 @@ impl EnvironmentRuntimeConfig {
         let heartbeat_monitor = HeartbeatMonitor::new(
             self.pool.clone(),
             self.persistence.clone(),
+            self.runner.clone(),
             heartbeat_config,
         );
         let heartbeat_shutdown = heartbeat_monitor.shutdown_handle();

@@ -31,6 +31,8 @@ pub struct ContainerInfo {
     pub pid: Option<i32>,
     /// Execution timeout in seconds
     pub timeout_seconds: Option<i64>,
+    /// Whether the process has been confirmed killed
+    pub process_killed: bool,
 }
 
 /// Cancellation request stored in PostgreSQL
@@ -128,15 +130,16 @@ impl ContainerRegistry {
             r#"
             INSERT INTO container_registry (
                 container_id, instance_id, tenant_id, binary_path, bundle_path,
-                started_at, pid, timeout_seconds
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                started_at, pid, timeout_seconds, process_killed
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
             ON CONFLICT (instance_id) DO UPDATE SET
                 container_id = EXCLUDED.container_id,
                 binary_path = EXCLUDED.binary_path,
                 bundle_path = EXCLUDED.bundle_path,
                 started_at = EXCLUDED.started_at,
                 pid = EXCLUDED.pid,
-                timeout_seconds = EXCLUDED.timeout_seconds
+                timeout_seconds = EXCLUDED.timeout_seconds,
+                process_killed = FALSE
             "#,
         )
         .bind(&info.container_id)
@@ -392,6 +395,29 @@ impl ContainerRegistry {
             .await?;
 
         Ok(())
+    }
+
+    // ===== Process Kill Tracking =====
+
+    /// Mark a container's process as confirmed killed.
+    pub async fn mark_process_killed(&self, instance_id: &str) -> Result<()> {
+        sqlx::query("UPDATE container_registry SET process_killed = TRUE WHERE instance_id = $1")
+            .bind(instance_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get all containers with unconfirmed process kills (pid set, not confirmed dead).
+    pub async fn get_unkilled_containers(&self) -> Result<Vec<ContainerInfo>> {
+        let containers = sqlx::query_as::<_, ContainerInfo>(
+            "SELECT * FROM container_registry WHERE pid IS NOT NULL AND process_killed = FALSE",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(containers)
     }
 
     // ===== Cleanup =====

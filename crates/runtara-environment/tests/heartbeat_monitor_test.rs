@@ -12,11 +12,58 @@ use runtara_core::persistence::{
     ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
 };
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
+use runtara_environment::runner::{
+    CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Runner, RunnerHandle,
+};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
+
+// ============================================================================
+// Mock Runner for Testing
+// ============================================================================
+
+/// No-op runner that does nothing. Used to satisfy HeartbeatMonitor's runner parameter.
+struct MockRunner;
+
+#[async_trait]
+impl Runner for MockRunner {
+    fn runner_type(&self) -> &'static str {
+        "mock"
+    }
+
+    async fn run(
+        &self,
+        _options: &LaunchOptions,
+        _cancel_token: Option<CancelToken>,
+    ) -> runtara_environment::runner::Result<LaunchResult> {
+        unimplemented!("MockRunner::run not needed for heartbeat monitor tests")
+    }
+
+    async fn launch_detached(
+        &self,
+        _options: &LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        unimplemented!("MockRunner::launch_detached not needed for heartbeat monitor tests")
+    }
+
+    async fn is_running(&self, _handle: &RunnerHandle) -> bool {
+        false
+    }
+
+    async fn stop(&self, _handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        Ok(())
+    }
+
+    async fn collect_result(
+        &self,
+        _handle: &RunnerHandle,
+    ) -> (Option<serde_json::Value>, Option<String>, ContainerMetrics) {
+        (None, None, ContainerMetrics::default())
+    }
+}
 
 /// Helper macro to skip tests if database URL is not set.
 macro_rules! skip_if_no_db {
@@ -87,16 +134,17 @@ async fn create_env_instance(
 }
 
 /// Register a container in container_registry
-async fn register_container(pool: &PgPool, instance_id: &str, tenant_id: &str, image_id: &str) {
+async fn register_container(pool: &PgPool, instance_id: &str, tenant_id: &str, _image_id: &str) {
+    let container_id = format!("runtara_{}", &instance_id[..8.min(instance_id.len())]);
     sqlx::query(
         r#"
-        INSERT INTO container_registry (instance_id, tenant_id, image_id, started_at)
-        VALUES ($1, $2, $3, NOW() - INTERVAL '30 minutes')
+        INSERT INTO container_registry (container_id, instance_id, tenant_id, binary_path, started_at)
+        VALUES ($1, $2, $3, '/usr/bin/test', NOW() - INTERVAL '30 minutes')
         "#,
     )
+    .bind(&container_id)
     .bind(instance_id)
     .bind(tenant_id)
-    .bind(image_id)
     .execute(pool)
     .await
     .expect("Failed to register container");
@@ -486,7 +534,7 @@ async fn test_heartbeat_monitor_creation() {
     let persistence = Arc::new(MockPersistence::new());
     let config = HeartbeatMonitorConfig::default();
 
-    let monitor = HeartbeatMonitor::new(pool, persistence, config);
+    let monitor = HeartbeatMonitor::new(pool, persistence, Arc::new(MockRunner), config);
     let _shutdown = monitor.shutdown_handle();
     // Monitor created successfully
 }
@@ -505,7 +553,7 @@ async fn test_heartbeat_monitor_shutdown() {
         heartbeat_timeout: Duration::from_secs(120),
     };
 
-    let monitor = HeartbeatMonitor::new(pool, persistence, config);
+    let monitor = HeartbeatMonitor::new(pool, persistence, Arc::new(MockRunner), config);
     let shutdown = monitor.shutdown_handle();
 
     // Start the monitor in a task
@@ -550,7 +598,12 @@ async fn test_stale_container_no_heartbeat() {
         heartbeat_timeout: Duration::from_secs(60), // 1 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -601,7 +654,12 @@ async fn test_stale_container_old_heartbeat() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -652,7 +710,12 @@ async fn test_container_with_recent_heartbeat_not_stale() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -706,7 +769,12 @@ async fn test_orphaned_instance_detected() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -761,7 +829,12 @@ async fn test_tracked_instance_not_orphaned() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -811,7 +884,12 @@ async fn test_recent_instance_not_immediately_orphaned() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -863,7 +941,12 @@ async fn test_multiple_orphaned_instances() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -919,7 +1002,12 @@ async fn test_no_instances_to_check() {
         heartbeat_timeout: Duration::from_secs(120),
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -985,7 +1073,12 @@ async fn test_completed_instance_in_core_not_flagged() {
         heartbeat_timeout: Duration::from_secs(120),
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     // Start monitor
@@ -1050,7 +1143,12 @@ async fn test_checkpoint_event_counts_as_activity() {
         heartbeat_timeout: Duration::from_secs(120),
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -1109,7 +1207,12 @@ async fn test_any_event_type_counts_as_activity() {
         heartbeat_timeout: Duration::from_secs(120),
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     let handle = tokio::spawn(async move {
@@ -1158,7 +1261,12 @@ async fn test_multiple_events_uses_most_recent() {
         heartbeat_timeout: Duration::from_secs(120), // 2 minute timeout
     };
 
-    let monitor = HeartbeatMonitor::new(pool.clone(), persistence.clone(), config);
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
     let shutdown = monitor.shutdown_handle();
 
     let handle = tokio::spawn(async move {

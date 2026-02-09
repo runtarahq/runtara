@@ -47,6 +47,7 @@ fn create_test_container_info(instance_id: &str, tenant_id: &str) -> ContainerIn
         started_at: Utc::now(),
         pid: None,
         timeout_seconds: Some(300),
+        process_killed: false,
     }
 }
 
@@ -221,6 +222,7 @@ fn test_container_info_creation() {
         started_at: Utc::now(),
         pid: Some(12345),
         timeout_seconds: Some(300),
+        process_killed: false,
     };
 
     assert_eq!(info.container_id, "container-123");
@@ -243,6 +245,7 @@ fn test_container_info_optional_fields() {
         started_at: Utc::now(),
         pid: None,
         timeout_seconds: None,
+        process_killed: false,
     };
 
     assert!(info.bundle_path.is_none());
@@ -1088,6 +1091,7 @@ async fn test_container_with_no_optional_fields() {
         started_at: Utc::now(),
         pid: None,
         timeout_seconds: None,
+        process_killed: false,
     };
 
     registry.register(&info).await.unwrap();

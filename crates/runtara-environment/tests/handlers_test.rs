@@ -551,6 +551,7 @@ async fn test_stop_instance_with_registered_container() {
         started_at: Utc::now(),
         pid: None,
         timeout_seconds: Some(300),
+        process_killed: false,
     };
     container_registry.register(&container_info).await.unwrap();
 

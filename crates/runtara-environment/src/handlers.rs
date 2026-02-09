@@ -500,6 +500,7 @@ pub async fn handle_start_instance(
                 started_at: handle.started_at,
                 pid,
                 timeout_seconds: Some(timeout.as_secs() as i64),
+                process_killed: false,
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container (instance still running)");
@@ -800,6 +801,7 @@ pub async fn handle_resume_instance(
                 started_at: handle.started_at,
                 pid,
                 timeout_seconds: Some(300),
+                process_killed: false,
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container");
