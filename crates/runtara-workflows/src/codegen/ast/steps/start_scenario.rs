@@ -227,8 +227,8 @@ fn emit_with_embedded_child(
             .iter()
             .filter(|(name, _)| !name.starts_with('_'))
             .map(|(name, var)| {
-                let value_json = serde_json::to_string(&var.value)
-                    .unwrap_or_else(|_| "null".to_string());
+                let value_json =
+                    serde_json::to_string(&var.value).unwrap_or_else(|_| "null".to_string());
                 let name_str = name.as_str();
                 quote! {
                     __child_vars.entry(#name_str.to_string()).or_insert_with(|| {
