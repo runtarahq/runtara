@@ -218,6 +218,28 @@ fn emit_with_embedded_child(
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
 
+    // Generate code to inject child scenario's default variables into __child_vars.
+    // Without this, child variables like "source", "fixed_fee" etc. defined in the
+    // child scenario's ExecutionGraph would be lost when embedded via StartScenario.
+    let child_default_vars_code = {
+        let inserts: Vec<_> = child_graph
+            .variables
+            .iter()
+            .filter(|(name, _)| !name.starts_with('_'))
+            .map(|(name, var)| {
+                let value_json = serde_json::to_string(&var.value)
+                    .unwrap_or_else(|_| "null".to_string());
+                let name_str = name.as_str();
+                quote! {
+                    __child_vars.entry(#name_str.to_string()).or_insert_with(|| {
+                        serde_json::from_str(#value_json).unwrap_or(serde_json::Value::Null)
+                    });
+                }
+            })
+            .collect();
+        quote! { #(#inserts)* }
+    };
+
     Ok(quote! {
         // Define the embedded child scenario function
         #child_fn_code
@@ -313,6 +335,10 @@ fn emit_with_embedded_child(
                 }
             };
             __child_vars.insert("_cache_key_prefix".to_string(), serde_json::json!(__child_cache_prefix));
+
+            // Inject child scenario's default variables (e.g. "source", "fixed_fee").
+            // Uses or_insert_with so system variables above take precedence.
+            #child_default_vars_code
 
             // Runtime validation of child inputs against schema
             #runtime_validation_code
