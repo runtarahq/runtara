@@ -1742,21 +1742,39 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev_row[b_len]
 }
 
-/// Decode bytes into text using provided encoding (currently UTF-8 only)
+/// Decode bytes into text using provided encoding.
+/// For UTF-8: strict decoding. For LATIN-1/ISO-8859-1/CP1252: direct byte-to-char mapping.
+/// For "auto": try UTF-8 first, fall back to Latin-1.
 fn decode_text_bytes(bytes: Vec<u8>, encoding: &str) -> Result<String, AgentError> {
-    match encoding.to_uppercase().as_str() {
-        "UTF-8" | "UTF8" => String::from_utf8(bytes).map_err(|e| {
+    let enc = encoding.to_uppercase();
+    let enc = enc.as_str();
+    if enc == "UTF-8" || enc == "UTF8" {
+        String::from_utf8(bytes).map_err(|e| {
             AgentError::permanent(
                 "TEXT_UTF8_DECODE_ERROR",
                 format!("Decoded bytes are not valid UTF-8: {}", e),
             )
             .with_attr("decode_error", e.to_string())
-        }),
-        other => Err(AgentError::permanent(
+        })
+    } else if enc == "LATIN-1"
+        || enc == "LATIN1"
+        || enc == "ISO-8859-1"
+        || enc == "ISO88591"
+        || enc == "WINDOWS-1252"
+        || enc == "CP1252"
+    {
+        Ok(bytes.into_iter().map(|b| b as char).collect())
+    } else if enc == "AUTO" {
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(s),
+            Err(e) => Ok(e.into_bytes().into_iter().map(|b| b as char).collect()),
+        }
+    } else {
+        Err(AgentError::permanent(
             "TEXT_UNSUPPORTED_ENCODING",
-            format!("Unsupported encoding: {}", other),
+            format!("Unsupported encoding: {}", enc),
         )
-        .with_attr("encoding", other.to_string())),
+        .with_attr("encoding", enc.to_string()))
     }
 }
 
