@@ -127,9 +127,6 @@ pub fn step_name(step: &Step) -> Option<&str> {
     }
 }
 
-/// Maximum size in bytes for inputs/outputs in debug events before truncation.
-const STEP_DEBUG_MAX_PAYLOAD_SIZE: usize = 10 * 1024; // 10KB
-
 // ==========================================
 // Scope tracking for hierarchy support
 // ==========================================
@@ -298,18 +295,12 @@ pub fn emit_step_debug_start(
         return quote! {};
     }
 
-    let max_size = STEP_DEBUG_MAX_PAYLOAD_SIZE;
-
     let name_expr = step_name
-        .map(|n| quote! { Some(#n.to_string()) })
-        .unwrap_or(quote! { None::<String> });
+        .map(|n| quote! { Some(#n) })
+        .unwrap_or(quote! { None::<&str> });
 
     let inputs_expr = inputs_var
-        .map(|v| {
-            quote! {
-                Some(__truncate_json_value(&#v, #max_size))
-            }
-        })
+        .map(|v| quote! { Some(#v.clone()) })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
     let mapping_expr = input_mapping_json
@@ -360,43 +351,18 @@ pub fn emit_step_debug_start(
     quote! {
         let __step_start_time = std::time::Instant::now();
         {
-            // Truncate helper function
-            fn __truncate_json_value(value: &serde_json::Value, max_size: usize) -> serde_json::Value {
-                let serialized = serde_json::to_string(value).unwrap_or_default();
-                if serialized.len() <= max_size {
-                    value.clone()
-                } else {
-                    let truncated = &serialized[..max_size.saturating_sub(20)];
-                    serde_json::json!({
-                        "_truncated": true,
-                        "_original_size": serialized.len(),
-                        "_preview": truncated
-                    })
-                }
-            }
-
-            let __loop_indices = #loop_indices_expr;
-            let __scope_id: Option<String> = #scope_id_expr;
-            let __parent_scope_id: Option<String> = #parent_scope_id_expr;
-
-            let __payload = serde_json::json!({
-                "step_id": #step_id,
-                "step_name": #name_expr,
-                "step_type": #step_type,
-                "scope_id": __scope_id,
-                "parent_scope_id": __parent_scope_id,
-                "loop_indices": __loop_indices,
-                "timestamp_ms": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-                "inputs": #inputs_expr,
-                "input_mapping": #mapping_expr,
-            });
-
-            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event("step_debug_start", __payload_bytes).await;
+            __emit_step_debug_event(
+                "step_debug_start",
+                #step_id,
+                #name_expr,
+                #step_type,
+                #scope_id_expr,
+                #parent_scope_id_expr,
+                #loop_indices_expr,
+                #inputs_expr,
+                #mapping_expr,
+                None,
+            ).await;
         }
     }
 }
@@ -427,18 +393,12 @@ pub fn emit_step_debug_end(
         return quote! {};
     }
 
-    let max_size = STEP_DEBUG_MAX_PAYLOAD_SIZE;
-
     let name_expr = step_name
-        .map(|n| quote! { Some(#n.to_string()) })
-        .unwrap_or(quote! { None::<String> });
+        .map(|n| quote! { Some(#n) })
+        .unwrap_or(quote! { None::<&str> });
 
     let outputs_expr = outputs_var
-        .map(|v| {
-            quote! {
-                Some(__truncate_json_value(&#v, #max_size))
-            }
-        })
+        .map(|v| quote! { Some(#v.clone()) })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
     // Extract loop_indices from scenario inputs if available
@@ -484,43 +444,18 @@ pub fn emit_step_debug_end(
         {
             let __duration_ms = __step_start_time.elapsed().as_millis() as u64;
 
-            // Truncate helper function
-            fn __truncate_json_value(value: &serde_json::Value, max_size: usize) -> serde_json::Value {
-                let serialized = serde_json::to_string(value).unwrap_or_default();
-                if serialized.len() <= max_size {
-                    value.clone()
-                } else {
-                    let truncated = &serialized[..max_size.saturating_sub(20)];
-                    serde_json::json!({
-                        "_truncated": true,
-                        "_original_size": serialized.len(),
-                        "_preview": truncated
-                    })
-                }
-            }
-
-            let __loop_indices = #loop_indices_expr;
-            let __scope_id: Option<String> = #scope_id_expr;
-            let __parent_scope_id: Option<String> = #parent_scope_id_expr;
-
-            let __payload = serde_json::json!({
-                "step_id": #step_id,
-                "step_name": #name_expr,
-                "step_type": #step_type,
-                "scope_id": __scope_id,
-                "parent_scope_id": __parent_scope_id,
-                "loop_indices": __loop_indices,
-                "timestamp_ms": std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-                "duration_ms": __duration_ms,
-                "outputs": #outputs_expr,
-            });
-
-            let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event("step_debug_end", __payload_bytes).await;
+            __emit_step_debug_event(
+                "step_debug_end",
+                #step_id,
+                #name_expr,
+                #step_type,
+                #scope_id_expr,
+                #parent_scope_id_expr,
+                #loop_indices_expr,
+                #outputs_expr,
+                None,
+                Some(__duration_ms),
+            ).await;
         }
     }
 }
@@ -854,14 +789,13 @@ mod tests {
             code.contains("step_debug_start"),
             "Should use correct subtype"
         );
-        assert!(code.contains("custom_event"), "Should call custom_event");
+        assert!(
+            code.contains("__emit_step_debug_event"),
+            "Should call debug event helper"
+        );
         assert!(code.contains("step-1"), "Should include step_id");
         assert!(code.contains("Test Step"), "Should include step_name");
         assert!(code.contains("Agent"), "Should include step_type");
-        assert!(
-            code.contains("loop_indices"),
-            "Should include loop_indices in payload"
-        );
     }
 
     #[test]
@@ -885,8 +819,8 @@ mod tests {
             "Should reference the inputs variable"
         );
         assert!(
-            code.contains("__truncate_json_value"),
-            "Should include truncation helper"
+            code.contains("__emit_step_debug_event"),
+            "Should call debug event helper"
         );
     }
 
@@ -907,12 +841,12 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(
-            code.contains("input_mapping"),
-            "Should include input_mapping in payload"
-        );
-        assert!(
             code.contains("serde_json :: from_str"),
             "Should parse mapping JSON"
+        );
+        assert!(
+            code.contains("data.x"),
+            "Should include mapping JSON content"
         );
     }
 
@@ -968,16 +902,12 @@ mod tests {
             code.contains("step_debug_end"),
             "Should use correct subtype"
         );
-        assert!(code.contains("custom_event"), "Should call custom_event");
+        assert!(
+            code.contains("__emit_step_debug_event"),
+            "Should call debug event helper"
+        );
         assert!(code.contains("step-1"), "Should include step_id");
-        assert!(
-            code.contains("duration_ms"),
-            "Should include duration in payload"
-        );
-        assert!(
-            code.contains("loop_indices"),
-            "Should include loop_indices in payload"
-        );
+        assert!(code.contains("__duration_ms"), "Should include duration");
     }
 
     #[test]
@@ -1000,8 +930,8 @@ mod tests {
             "Should reference the outputs variable"
         );
         assert!(
-            code.contains("__truncate_json_value"),
-            "Should include truncation helper"
+            code.contains("__emit_step_debug_event"),
+            "Should call debug event helper"
         );
     }
 
@@ -1033,38 +963,31 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_step_debug_start_includes_timestamp() {
+    fn test_emit_step_debug_start_includes_start_time() {
         let ctx = make_debug_ctx();
         let tokens = emit_step_debug_start(&ctx, "step-5", None, "Finish", None, None, None, None);
         let code = tokens.to_string();
 
-        assert!(code.contains("timestamp_ms"), "Should include timestamp");
         assert!(
-            code.contains("SystemTime :: now"),
-            "Should use current time"
+            code.contains("__step_start_time"),
+            "Should record start time"
+        );
+        assert!(
+            code.contains("__emit_step_debug_event"),
+            "Should call debug event helper"
         );
     }
 
     #[test]
-    fn test_emit_step_debug_end_includes_timestamp_and_duration() {
+    fn test_emit_step_debug_end_includes_duration() {
         let ctx = make_debug_ctx();
         let tokens = emit_step_debug_end(&ctx, "step-6", None, "Agent", None, None, None);
         let code = tokens.to_string();
 
-        assert!(code.contains("timestamp_ms"), "Should include timestamp");
-        assert!(code.contains("duration_ms"), "Should include duration");
+        assert!(code.contains("__duration_ms"), "Should calculate duration");
         assert!(
             code.contains("__step_start_time . elapsed"),
             "Should calculate elapsed time"
-        );
-    }
-
-    #[test]
-    fn test_truncation_constant() {
-        assert_eq!(
-            STEP_DEBUG_MAX_PAYLOAD_SIZE,
-            10 * 1024,
-            "Max payload size should be 10KB"
         );
     }
 
@@ -1077,7 +1000,7 @@ mod tests {
 
         // Should still work, with None for step_name
         assert!(code.contains("nameless-step"), "Should include step_id");
-        assert!(code.contains("step_name"), "Should have step_name field");
+        assert!(code.contains("None"), "Should pass None for step_name");
     }
 
     #[test]
@@ -1096,11 +1019,14 @@ mod tests {
 
         // Should still work, with None for outputs
         assert!(code.contains("step-no-output"), "Should include step_id");
-        assert!(code.contains("outputs"), "Should have outputs field");
+        assert!(
+            code.contains("__emit_step_debug_event"),
+            "Should call debug event helper"
+        );
     }
 
     #[test]
-    fn test_emit_step_debug_generates_truncation_function() {
+    fn test_emit_step_debug_calls_helper_function() {
         let ctx = make_debug_ctx();
         let inputs_var = proc_macro2::Ident::new("big_data", proc_macro2::Span::call_site());
         let tokens = emit_step_debug_start(
@@ -1115,15 +1041,15 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        // Verify truncation function is generated
+        // Debug events are emitted via the global helper function.
+        // Truncation happens inside the helper.
         assert!(
-            code.contains("fn __truncate_json_value"),
-            "Should define truncation function"
+            code.contains("__emit_step_debug_event"),
+            "Should call global debug event helper"
         );
-        assert!(code.contains("_truncated"), "Should mark truncated values");
         assert!(
-            code.contains("_original_size"),
-            "Should include original size"
+            code.contains("big_data"),
+            "Should pass inputs variable to helper"
         );
     }
 
@@ -1363,7 +1289,7 @@ mod tests {
     // ==========================================
 
     #[test]
-    fn test_debug_event_includes_loop_indices_field() {
+    fn test_debug_event_includes_loop_indices_default() {
         let ctx = make_debug_ctx();
         let tokens = emit_step_debug_start(
             &ctx,
@@ -1377,24 +1303,24 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        // Verify the payload includes loop_indices field
+        // Without scenario_inputs_var, loop_indices defaults to empty array
         assert!(
-            code.contains("\"loop_indices\""),
-            "Debug start event should include loop_indices field in payload"
+            code.contains("serde_json :: Value :: Array (vec ! [])"),
+            "Debug start event should pass default empty array for loop_indices"
         );
     }
 
     #[test]
-    fn test_debug_end_event_includes_loop_indices_field() {
+    fn test_debug_end_event_includes_loop_indices_default() {
         let ctx = make_debug_ctx();
         let tokens =
             emit_step_debug_end(&ctx, "test-step", Some("Test"), "Agent", None, None, None);
         let code = tokens.to_string();
 
-        // Verify the payload includes loop_indices field
+        // Without scenario_inputs_var, loop_indices defaults to empty array
         assert!(
-            code.contains("\"loop_indices\""),
-            "Debug end event should include loop_indices field in payload"
+            code.contains("serde_json :: Value :: Array (vec ! [])"),
+            "Debug end event should pass default empty array for loop_indices"
         );
     }
 
@@ -1515,7 +1441,7 @@ mod tests {
         let tokens = split::emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify debug events are emitted with loop_indices
+        // Verify debug events are emitted
         assert!(
             code.contains("step_debug_start"),
             "Split should emit debug start event"
@@ -1525,8 +1451,8 @@ mod tests {
             "Split should emit debug end event"
         );
         assert!(
-            code.contains("\"loop_indices\""),
-            "Split debug events should include loop_indices"
+            code.contains("__emit_step_debug_event"),
+            "Split should call debug event helper"
         );
     }
 
@@ -1553,14 +1479,14 @@ mod tests {
         let tokens = agent::emit(&agent_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify debug events include loop_indices
+        // Verify debug events are emitted via helper
         assert!(
             code.contains("step_debug_start"),
             "Agent should emit debug start event"
         );
         assert!(
-            code.contains("\"loop_indices\""),
-            "Agent debug events should include loop_indices"
+            code.contains("__emit_step_debug_event"),
+            "Agent should call debug event helper"
         );
     }
 
@@ -1602,14 +1528,14 @@ mod tests {
         let tokens = while_loop::emit(&while_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify debug events include loop_indices
+        // Verify debug events are emitted via helper
         assert!(
             code.contains("step_debug_start"),
             "While should emit debug start event"
         );
         assert!(
-            code.contains("\"loop_indices\""),
-            "While debug events should include loop_indices"
+            code.contains("__emit_step_debug_event"),
+            "While should call debug event helper"
         );
     }
 
@@ -1645,14 +1571,14 @@ mod tests {
         let tokens = conditional::emit(&conditional_step, &mut ctx, &graph).unwrap();
         let code = tokens.to_string();
 
-        // Verify debug events include loop_indices
+        // Verify debug events are emitted via helper
         assert!(
             code.contains("step_debug_start"),
             "Conditional should emit debug start event"
         );
         assert!(
-            code.contains("\"loop_indices\""),
-            "Conditional debug events should include loop_indices"
+            code.contains("__emit_step_debug_event"),
+            "Conditional should call debug event helper"
         );
     }
 
@@ -1672,14 +1598,14 @@ mod tests {
         let tokens = finish::emit(&finish_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify debug events include loop_indices
+        // Verify debug events are emitted via helper
         assert!(
             code.contains("step_debug_start"),
             "Finish should emit debug start event"
         );
         assert!(
-            code.contains("\"loop_indices\""),
-            "Finish debug events should include loop_indices"
+            code.contains("__emit_step_debug_event"),
+            "Finish should call debug event helper"
         );
     }
 
@@ -1706,14 +1632,14 @@ mod tests {
         let tokens = switch::emit(&switch_step, &mut ctx, &graph).unwrap();
         let code = tokens.to_string();
 
-        // Verify debug events include loop_indices
+        // Verify debug events are emitted via helper
         assert!(
             code.contains("step_debug_start"),
             "Switch should emit debug start event"
         );
         assert!(
-            code.contains("\"loop_indices\""),
-            "Switch debug events should include loop_indices"
+            code.contains("__emit_step_debug_event"),
+            "Switch should call debug event helper"
         );
     }
 

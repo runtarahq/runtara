@@ -537,10 +537,10 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // (some production environments may have -D warnings set globally)
     cmd.env_remove("RUSTFLAGS");
 
-    // Compilation optimization settings (configurable via environment)
-    // Scenarios are glue code calling pre-compiled agents, so aggressive optimization
-    // of the generated code provides negligible runtime benefit.
-    let opt_level = std::env::var("RUNTARA_OPT_LEVEL").unwrap_or_else(|_| "1".to_string());
+    // Default opt-level=0: skips LLVM optimization passes entirely (~2x faster compilation).
+    // The generated code is all function calls into pre-optimized library code, so
+    // opt-level>0 only optimizes glue code with negligible runtime benefit.
+    let opt_level = std::env::var("RUNTARA_OPT_LEVEL").unwrap_or_else(|_| "0".to_string());
     let codegen_units = std::env::var("RUNTARA_CODEGEN_UNITS").unwrap_or_else(|_| "1".to_string());
 
     cmd.arg(format!("--target={}", target))

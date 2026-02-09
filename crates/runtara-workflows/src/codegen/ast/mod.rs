@@ -109,6 +109,10 @@ pub fn compile_with_children(
 }
 
 /// Convert a serde_json::Value to a TokenStream that constructs it.
+///
+/// For simple scalar values (null, bool, number, string), produces inline constructors.
+/// For complex values (objects, arrays), serializes to a JSON string and parses at runtime.
+/// This dramatically reduces generated code size for complex nested structures.
 pub fn json_to_tokens(value: &serde_json::Value) -> TokenStream {
     match value {
         serde_json::Value::Null => {
@@ -135,22 +139,13 @@ pub fn json_to_tokens(value: &serde_json::Value) -> TokenStream {
         serde_json::Value::String(s) => {
             quote! { serde_json::Value::String(#s.to_string()) }
         }
-        serde_json::Value::Array(arr) => {
-            let items: Vec<TokenStream> = arr.iter().map(json_to_tokens).collect();
-            quote! { serde_json::Value::Array(vec![#(#items),*]) }
-        }
-        serde_json::Value::Object(map) => {
-            let entries: Vec<TokenStream> = map
-                .iter()
-                .map(|(k, v)| {
-                    let val_tokens = json_to_tokens(v);
-                    quote! { (#k.to_string(), #val_tokens) }
-                })
-                .collect();
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            // Serialize to JSON string at codegen time, parse at runtime.
+            // This produces ~1 line of code instead of potentially hundreds
+            // for deeply nested structures, dramatically reducing compile time.
+            let json_str = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
             quote! {
-                serde_json::Value::Object(
-                    vec![#(#entries),*].into_iter().collect()
-                )
+                serde_json::from_str::<serde_json::Value>(#json_str).unwrap()
             }
         }
     }
@@ -191,13 +186,16 @@ mod tests {
     #[test]
     fn test_json_to_tokens_array() {
         let tokens = json_to_tokens(&json!([1, 2, 3]));
-        assert!(tokens.to_string().contains("Array"));
+        let output = tokens.to_string();
+        assert!(output.contains("from_str"));
+        assert!(output.contains("[1,2,3]"));
     }
 
     #[test]
     fn test_json_to_tokens_object() {
         let tokens = json_to_tokens(&json!({"key": "value"}));
-        assert!(tokens.to_string().contains("Object"));
-        assert!(tokens.to_string().contains("key"));
+        let output = tokens.to_string();
+        assert!(output.contains("from_str"));
+        assert!(output.contains("key"));
     }
 }

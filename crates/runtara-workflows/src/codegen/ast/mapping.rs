@@ -544,7 +544,8 @@ mod tests {
         };
         let tokens = emit_immediate_value(&imm);
         let code = tokens.to_string();
-        assert!(code.contains("Array"));
+        assert!(code.contains("from_str"));
+        assert!(code.contains("[1,2,3]"));
     }
 
     #[test]
@@ -554,7 +555,7 @@ mod tests {
         };
         let tokens = emit_immediate_value(&imm);
         let code = tokens.to_string();
-        assert!(code.contains("Object"));
+        assert!(code.contains("from_str"));
         assert!(code.contains("key"));
     }
 
