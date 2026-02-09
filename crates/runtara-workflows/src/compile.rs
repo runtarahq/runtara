@@ -546,9 +546,6 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     #[cfg(target_os = "linux")]
     {
         cmd.arg("-C").arg("target-feature=+crt-static");
-        // Use mold linker for faster linking (5-10x faster than GNU ld)
-        cmd.arg("-C").arg("linker=clang");
-        cmd.arg("-C").arg("link-arg=-fuse-ld=mold");
     }
 
     // Add library search paths
