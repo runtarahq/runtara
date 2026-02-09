@@ -507,6 +507,11 @@ fn emit_step_execution(
 
                     // Execute error handler branch based on conditions
                     #error_routing_code
+
+                    // If the error handler branch did not explicitly return (via Finish or Error step),
+                    // propagate the original error. This prevents silent error swallowing which can
+                    // cause infinite retry loops when steps fail inside While loops.
+                    return Err(__error.to_string());
                 }
             }
         })
