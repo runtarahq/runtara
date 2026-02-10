@@ -323,6 +323,43 @@ pub struct StartInstanceResponse {
     pub error: Option<String>,
 }
 
+/// Enrich instance input for storage (display/audit purposes):
+/// 1. Merge default variable values from image metadata (fill missing only)
+/// 2. Strip system variables (prefixed with `_`)
+///
+/// This ensures the stored input reflects what the scenario actually receives,
+/// while hiding internal runtime variables from API users.
+pub fn enrich_input_for_storage(
+    mut input: serde_json::Value,
+    image: &crate::image_registry::Image,
+) -> serde_json::Value {
+    // Merge defaults from image metadata (if available)
+    if let Some(ref metadata) = image.metadata {
+        if let Some(default_vars) = metadata.get("variables").and_then(|v| v.as_object()) {
+            let input_obj = input
+                .as_object_mut()
+                .expect("input should be a JSON object");
+            let vars = input_obj
+                .entry("variables")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(vars_obj) = vars.as_object_mut() {
+                for (key, value) in default_vars {
+                    if !key.starts_with('_') {
+                        vars_obj.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Strip system variables (prefixed with _)
+    if let Some(vars) = input.get_mut("variables").and_then(|v| v.as_object_mut()) {
+        vars.retain(|key, _| !key.starts_with('_'));
+    }
+
+    input
+}
+
 /// Handle start instance request.
 pub async fn handle_start_instance(
     state: &EnvironmentHandlerState,
@@ -401,8 +438,9 @@ pub async fn handle_start_instance(
     // Parse input for runner
     let input = request.input.unwrap_or(serde_json::json!({}));
 
-    // Serialize input for DB storage
-    let input_bytes = serde_json::to_vec(&input).ok();
+    // Enrich input for DB storage: merge variable defaults, strip system variables
+    let input_for_storage = enrich_input_for_storage(input.clone(), &image);
+    let input_bytes = serde_json::to_vec(&input_for_storage).ok();
 
     // Create instance record (with input and env for persistence across resume/wake)
     let env_for_db = if request.env.is_empty() {
@@ -1375,5 +1413,117 @@ pub async fn handle_get_capability(
             capability_json: vec![],
             inputs_json: vec![],
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image_registry::{Image, RunnerType};
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn make_image(metadata: Option<serde_json::Value>) -> Image {
+        Image {
+            image_id: "img-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            name: "test-image".to_string(),
+            description: None,
+            binary_path: "/tmp/binary".to_string(),
+            bundle_path: None,
+            runner_type: RunnerType::Oci,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn enrich_input_merges_default_variables() {
+        let input = json!({"data": {"key": "value"}});
+        let image = make_image(Some(json!({
+            "variables": {"color": "red", "size": 42}
+        })));
+
+        let result = enrich_input_for_storage(input, &image);
+
+        assert_eq!(result["variables"]["color"], "red");
+        assert_eq!(result["variables"]["size"], 42);
+        assert_eq!(result["data"]["key"], "value");
+    }
+
+    #[test]
+    fn enrich_input_does_not_override_explicit_variables() {
+        let input = json!({
+            "data": {},
+            "variables": {"color": "blue"}
+        });
+        let image = make_image(Some(json!({
+            "variables": {"color": "red", "size": 42}
+        })));
+
+        let result = enrich_input_for_storage(input, &image);
+
+        assert_eq!(result["variables"]["color"], "blue");
+        assert_eq!(result["variables"]["size"], 42);
+    }
+
+    #[test]
+    fn enrich_input_strips_system_variables() {
+        let input = json!({
+            "data": {},
+            "variables": {
+                "user_var": "keep",
+                "_scenario_id": "should-be-removed",
+                "_scope_id": "should-be-removed",
+                "_cache_key_prefix": "should-be-removed",
+                "_loop_indices": [0, 1],
+                "_parent_scenario_id": "should-be-removed"
+            }
+        });
+        let image = make_image(None);
+
+        let result = enrich_input_for_storage(input, &image);
+
+        let vars = result["variables"].as_object().unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars["user_var"], "keep");
+    }
+
+    #[test]
+    fn enrich_input_no_metadata() {
+        let input = json!({"data": {"x": 1}});
+        let image = make_image(None);
+
+        let result = enrich_input_for_storage(input, &image);
+
+        assert_eq!(result["data"]["x"], 1);
+    }
+
+    #[test]
+    fn enrich_input_empty_input_with_defaults() {
+        let input = json!({});
+        let image = make_image(Some(json!({
+            "variables": {"name": "default_name", "count": 10}
+        })));
+
+        let result = enrich_input_for_storage(input, &image);
+
+        assert_eq!(result["variables"]["name"], "default_name");
+        assert_eq!(result["variables"]["count"], 10);
+    }
+
+    #[test]
+    fn enrich_input_filters_system_vars_from_defaults() {
+        let input = json!({});
+        let image = make_image(Some(json!({
+            "variables": {"user_var": "ok", "_internal": "hidden"}
+        })));
+
+        let result = enrich_input_for_storage(input, &image);
+
+        let vars = result["variables"].as_object().unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars["user_var"], "ok");
     }
 }

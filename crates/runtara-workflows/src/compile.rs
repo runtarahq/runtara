@@ -326,6 +326,10 @@ pub struct NativeCompilationResult {
     pub has_side_effects: bool,
     /// Child workflow dependencies.
     pub child_dependencies: Vec<ChildDependency>,
+    /// Default variable values from the scenario definition.
+    /// Callers should include these in image metadata so the environment
+    /// can enrich stored input with defaults at instance start time.
+    pub default_variables: serde_json::Value,
 }
 
 /// Get the rustc compilation directory for scenarios
@@ -746,6 +750,19 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         })
         .collect();
 
+    // Extract default variable values from the execution graph for image metadata
+    let default_variables = if execution_graph.variables.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::Value::Object(
+            execution_graph
+                .variables
+                .iter()
+                .map(|(name, var)| (name.clone(), var.value.clone()))
+                .collect(),
+        )
+    };
+
     Ok(NativeCompilationResult {
         binary_path: binary_output_path,
         binary_size,
@@ -753,6 +770,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         build_dir,
         has_side_effects,
         child_dependencies,
+        default_variables,
     })
 }
 
