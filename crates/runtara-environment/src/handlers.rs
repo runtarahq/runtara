@@ -334,19 +334,19 @@ pub fn enrich_input_for_storage(
     image: &crate::image_registry::Image,
 ) -> serde_json::Value {
     // Merge defaults from image metadata (if available)
-    if let Some(ref metadata) = image.metadata {
-        if let Some(default_vars) = metadata.get("variables").and_then(|v| v.as_object()) {
-            let input_obj = input
-                .as_object_mut()
-                .expect("input should be a JSON object");
-            let vars = input_obj
-                .entry("variables")
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(vars_obj) = vars.as_object_mut() {
-                for (key, value) in default_vars {
-                    if !key.starts_with('_') {
-                        vars_obj.entry(key.clone()).or_insert_with(|| value.clone());
-                    }
+    if let Some(ref metadata) = image.metadata
+        && let Some(default_vars) = metadata.get("variables").and_then(|v| v.as_object())
+    {
+        let input_obj = input
+            .as_object_mut()
+            .expect("input should be a JSON object");
+        let vars = input_obj
+            .entry("variables")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(vars_obj) = vars.as_object_mut() {
+            for (key, value) in default_vars {
+                if !key.starts_with('_') {
+                    vars_obj.entry(key.clone()).or_insert_with(|| value.clone());
                 }
             }
         }
