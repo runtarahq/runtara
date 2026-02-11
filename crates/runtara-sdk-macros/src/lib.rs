@@ -281,6 +281,7 @@ fn generate_no_retry_wrapper(
                             Err(e) => {
                                 ::tracing::warn!(
                                     function = #fn_name_str,
+                                    cache_key = %__cache_key,
                                     error = %e,
                                     "Failed to cache result via checkpoint"
                                 );
@@ -290,6 +291,7 @@ fn generate_no_retry_wrapper(
                     Err(e) => {
                         ::tracing::warn!(
                             function = #fn_name_str,
+                            cache_key = %__cache_key,
                             error = %e,
                             "Failed to serialize result for caching"
                         );
@@ -396,6 +398,7 @@ fn generate_retry_wrapper(
 
                     ::tracing::info!(
                         function = #fn_name_str,
+                        cache_key = %__cache_key,
                         attempt = __attempt,
                         max_retries = __max_retries,
                         delay_ms = __delay.as_millis() as u64,
@@ -416,6 +419,7 @@ fn generate_retry_wrapper(
                         ).await {
                             ::tracing::warn!(
                                 function = #fn_name_str,
+                                cache_key = %__cache_key,
                                 error = %e,
                                 "Failed to record retry attempt"
                             );
@@ -439,7 +443,7 @@ fn generate_retry_wrapper(
                                         ::tracing::debug!(
                                             function = #fn_name_str,
                                             cache_key = %__cache_key,
-                                            attempts = __attempt,
+                                            attempt = __attempt,
                                             "Result cached via checkpoint"
                                         );
 
@@ -470,6 +474,8 @@ fn generate_retry_wrapper(
                                     Err(e) => {
                                         ::tracing::warn!(
                                             function = #fn_name_str,
+                                            cache_key = %__cache_key,
+                                            attempt = __attempt,
                                             error = %e,
                                             "Failed to cache result via checkpoint"
                                         );
@@ -479,6 +485,8 @@ fn generate_retry_wrapper(
                             Err(e) => {
                                 ::tracing::warn!(
                                     function = #fn_name_str,
+                                    cache_key = %__cache_key,
+                                    attempt = __attempt,
                                     error = %e,
                                     "Failed to serialize result for caching"
                                 );
@@ -492,6 +500,7 @@ fn generate_retry_wrapper(
                         if __attempt < __total_attempts {
                             ::tracing::warn!(
                                 function = #fn_name_str,
+                                cache_key = %__cache_key,
                                 attempt = __attempt,
                                 max_retries = __max_retries,
                                 error = %e,
@@ -501,7 +510,9 @@ fn generate_retry_wrapper(
                         } else {
                             ::tracing::error!(
                                 function = #fn_name_str,
-                                attempts = __attempt,
+                                cache_key = %__cache_key,
+                                attempt = __attempt,
+                                max_retries = __max_retries,
                                 error = %e,
                                 "All retry attempts exhausted"
                             );

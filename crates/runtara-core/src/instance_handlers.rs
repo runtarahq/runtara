@@ -402,7 +402,7 @@ pub async fn handle_sleep(
 ///
 /// All events return `InstanceEventResponse` to acknowledge persistence.
 /// This ensures no events are lost due to race conditions when the process exits.
-#[instrument(skip(state, event), fields(instance_id = %event.instance_id))]
+#[instrument(skip(state, event), fields(instance_id = %event.instance_id, event_type = ?event.event_type()))]
 pub async fn handle_instance_event(
     state: &InstanceHandlerState,
     event: InstanceEvent,
@@ -792,17 +792,17 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
 ///
 /// This is sent by the SDK when a durable function fails and is about
 /// to be retried (before the backoff delay).
-#[instrument(skip(state, event), fields(instance_id = %event.instance_id, checkpoint_id = %event.checkpoint_id))]
+#[instrument(skip(state, event), fields(
+    instance_id = %event.instance_id,
+    checkpoint_id = %event.checkpoint_id,
+    attempt = event.attempt_number,
+    error_message = ?event.error_message,
+))]
 pub async fn handle_retry_attempt(
     state: &InstanceHandlerState,
     event: RetryAttemptEvent,
 ) -> Result<()> {
-    debug!(
-        attempt = event.attempt_number,
-        error = ?event.error_message,
-        timestamp_ms = event.timestamp_ms,
-        "Recording retry attempt"
-    );
+    debug!(timestamp_ms = event.timestamp_ms, "Recording retry attempt");
 
     // Save retry attempt record for audit trail
     state
@@ -815,7 +815,18 @@ pub async fn handle_retry_attempt(
         )
         .await?;
 
-    debug!(attempt = event.attempt_number, "Retry attempt recorded");
+    if let Some(ref meta) = event.error_metadata {
+        info!(
+            error_category = ?meta.category(),
+            error_severity = ?meta.severity(),
+            retry_hint = ?meta.retry_hint(),
+            error_code = ?meta.error_code,
+            retry_after_ms = ?meta.retry_after_ms,
+            "Retry attempt with error metadata"
+        );
+    }
+
+    debug!("Retry attempt recorded");
 
     Ok(())
 }

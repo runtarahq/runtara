@@ -1,0 +1,79 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    # Only run on main branch PRs
+    branches:
+      - main
+
+jobs:
+  claude-review:
+    # Optional: Only review PRs from external contributors
+    # Uncomment if you only want reviews for first-time contributors
+    # if: github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+
+    runs-on: ubuntu-latest
+
+    # Use protected environment
+    environment: claude-code-review
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better context
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_AUTH_TOKEN }}
+
+          # Rust-specific review prompt
+          direct_prompt: |
+            Please review this Rust pull request with focus on:
+
+            **Code Quality**:
+            - Idiomatic Rust patterns and best practices
+            - Proper error handling with thiserror
+            - Efficient use of ownership, borrowing, and lifetimes
+            - Memory safety and thread safety
+
+            **Project Standards**:
+            - AGPL-3.0-or-later license headers on all files
+            - Zero clippy warnings policy compliance
+            - Consistent formatting (cargo fmt)
+            - Rust edition 2024 features
+
+            **Architecture**:
+            - Consistency with existing patterns
+            - Proper async/await usage with Tokio
+            - Database query patterns (SQLx)
+            - Error propagation patterns
+
+            **Testing**:
+            - Test coverage for new functionality
+            - Database test requirements (--test-threads=1)
+            - Edge cases and error scenarios
+
+            **Security**:
+            - Input validation
+            - SQL injection prevention
+            - Credential handling
+            - Resource exhaustion protection
+
+            Be constructive and provide specific file:line references.
+
+          # Use sticky comments to update the same comment on new pushes
+          use_sticky_comment: true
+
+          # Optional: Allow Claude to run clippy for static analysis
+          # allowed_tools: "Bash(cargo clippy --all-targets -- -D warnings),Bash(cargo fmt --all -- --check)"
