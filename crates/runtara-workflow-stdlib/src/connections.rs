@@ -29,6 +29,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
+use urlencoding::encode;
+
+/// Context for connection request tracking.
+///
+/// When provided to `fetch_connection`, these fields are sent as query parameters
+/// so the connection service can record which agent/step/scenario is using the connection.
+pub struct ConnectionRequestContext<'a> {
+    /// Agent or capability identifier (e.g. `shopify_graphql`, `http_request`)
+    pub tag: Option<&'a str>,
+    /// Step ID within the scenario
+    pub step_id: Option<&'a str>,
+    /// Scenario ID
+    pub scenario_id: Option<&'a str>,
+    /// Execution instance ID
+    pub instance_id: Option<&'a str>,
+}
 
 /// Response from the connection service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +127,7 @@ impl std::error::Error for ConnectionError {}
 /// * `service_url` - Base URL of the connection service
 /// * `tenant_id` - Tenant identifier
 /// * `connection_id` - Connection identifier
+/// * `context` - Optional request context for usage tracking
 ///
 /// # Returns
 /// Connection response with credentials and rate limit state
@@ -118,8 +135,29 @@ pub fn fetch_connection(
     service_url: &str,
     tenant_id: &str,
     connection_id: &str,
+    context: Option<&ConnectionRequestContext>,
 ) -> Result<ConnectionResponse, ConnectionError> {
-    let url = format!("{}/{}/{}", service_url, tenant_id, connection_id);
+    let mut url = format!("{}/{}/{}", service_url, tenant_id, connection_id);
+
+    if let Some(ctx) = context {
+        let mut params = Vec::new();
+        if let Some(tag) = ctx.tag {
+            params.push(format!("tag={}", encode(tag)));
+        }
+        if let Some(step_id) = ctx.step_id {
+            params.push(format!("stepId={}", encode(step_id)));
+        }
+        if let Some(scenario_id) = ctx.scenario_id {
+            params.push(format!("scenarioId={}", encode(scenario_id)));
+        }
+        if let Some(instance_id) = ctx.instance_id {
+            params.push(format!("instanceId={}", encode(instance_id)));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+    }
 
     let response = ureq::get(&url)
         .timeout(Duration::from_secs(30))

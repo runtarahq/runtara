@@ -208,6 +208,8 @@ fn emit_durable_call(
         ctx,
         inputs_var,
         false, // no rate limit handling
+        agent_id,
+        capability_id,
     );
 
     let max_retries_lit = max_retries;
@@ -310,6 +312,8 @@ fn emit_durable_rate_limited_call(
         ctx,
         inputs_var,
         true, // with rate limit handling
+        agent_id,
+        capability_id,
     );
 
     let max_retries_lit = max_retries;
@@ -395,6 +399,8 @@ fn emit_connection_fetch(
     ctx: &EmitContext,
     inputs_var: &proc_macro2::Ident,
     with_rate_limit_handling: bool,
+    agent_id: &str,
+    capability_id: &str,
 ) -> (TokenStream, proc_macro2::Ident) {
     // If no connection_id or no service URL configured, just use original inputs
     let Some(conn_id) = connection_id else {
@@ -431,7 +437,8 @@ fn emit_connection_fetch(
                     __conn_response = fetch_connection(
                         __conn_service_url,
                         TENANT_ID,
-                        #conn_id
+                        #conn_id,
+                        Some(&__conn_ctx)
                     ).map_err(|e| format!("Step {} failed to re-fetch connection {}: {}",
                         #step_id, #conn_id, e))?;
                 }
@@ -441,15 +448,29 @@ fn emit_connection_fetch(
         quote! {}
     };
 
+    let tag = format!("{}_{}", agent_id, capability_id);
+
     let code = quote! {
         let #final_inputs = {
             // Fetch connection from external service
             let __conn_service_url = get_connection_service_url()
                 .ok_or_else(|| format!("Step {} requires CONNECTION_SERVICE_URL to be configured", #step_id))?;
+
+            // Build request context for connection usage tracking
+            let __conn_scenario_id = std::env::var("SCENARIO_ID").ok();
+            let __conn_instance_id = std::env::var("RUNTARA_INSTANCE_ID").ok();
+            let __conn_ctx = ConnectionRequestContext {
+                tag: Some(#tag),
+                step_id: Some(#step_id),
+                scenario_id: __conn_scenario_id.as_deref(),
+                instance_id: __conn_instance_id.as_deref(),
+            };
+
             let mut __conn_response = fetch_connection(
                 __conn_service_url,
                 TENANT_ID,
-                #conn_id
+                #conn_id,
+                Some(&__conn_ctx)
             ).map_err(|e| format!("Step {} failed to fetch connection {}: {}",
                 #step_id, #conn_id, e))?;
 
@@ -1016,6 +1037,64 @@ mod tests {
         assert!(
             has_both_formats,
             "Should have proper format for cache key with scenario_id"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_connection_request_context() {
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "agent-conn-ctx".to_string(),
+            name: Some("With Context".to_string()),
+            agent_id: "http".to_string(),
+            capability_id: "http-request".to_string(),
+            connection_id: Some("my-connection".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            compensation: None,
+        };
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("ConnectionRequestContext"),
+            "Should create ConnectionRequestContext"
+        );
+        assert!(
+            code.contains("SCENARIO_ID"),
+            "Should read SCENARIO_ID env var"
+        );
+        assert!(
+            code.contains("RUNTARA_INSTANCE_ID"),
+            "Should read RUNTARA_INSTANCE_ID env var"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_connection_context_uses_agent_capability_tag() {
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "agent-tag".to_string(),
+            name: Some("Tag Test".to_string()),
+            agent_id: "shopify_graphql".to_string(),
+            capability_id: "execute_query".to_string(),
+            connection_id: Some("shopify-conn".to_string()),
+            input_mapping: None,
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            compensation: None,
+        };
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("shopify_graphql_execute_query"),
+            "Should use agent_id_capability_id as tag"
         );
     }
 }

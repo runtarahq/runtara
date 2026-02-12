@@ -78,7 +78,8 @@ pub mod prelude {
 
     // Connection types
     pub use crate::connections::{
-        ConnectionError, ConnectionResponse, RateLimitState, fetch_connection,
+        ConnectionError, ConnectionRequestContext, ConnectionResponse, RateLimitState,
+        fetch_connection,
     };
 
     // Note: instance_output removed from prelude - SDK events are now the single source

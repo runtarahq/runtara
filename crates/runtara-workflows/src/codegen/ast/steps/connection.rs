@@ -24,7 +24,7 @@ use runtara_dsl::ConnectionStep;
 pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
     let connection_id = &step.connection_id;
-    let _integration_id = &step.integration_id;
+    let integration_id = &step.integration_id;
 
     let result_var = ctx.temp_var("conn_result");
     let steps_context = ctx.steps_context_var.clone();
@@ -38,10 +38,22 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> Result<TokenStream,
         let #result_var = {
             let __conn_service_url = get_connection_service_url()
                 .ok_or_else(|| format!("Step {} requires CONNECTION_SERVICE_URL to be configured", #step_id))?;
+
+            // Build request context for connection usage tracking
+            let __conn_scenario_id = std::env::var("SCENARIO_ID").ok();
+            let __conn_instance_id = std::env::var("RUNTARA_INSTANCE_ID").ok();
+            let __conn_ctx = ConnectionRequestContext {
+                tag: Some(#integration_id),
+                step_id: Some(#step_id),
+                scenario_id: __conn_scenario_id.as_deref(),
+                instance_id: __conn_instance_id.as_deref(),
+            };
+
             let mut __conn_response = fetch_connection(
                 __conn_service_url,
                 TENANT_ID,
-                #connection_id
+                #connection_id,
+                Some(&__conn_ctx)
             ).map_err(|e| format!("Step {} failed to fetch connection {}: {}",
                 #step_id, #connection_id, e))?;
 
@@ -75,7 +87,8 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> Result<TokenStream,
                     __conn_response = fetch_connection(
                         __conn_service_url,
                         TENANT_ID,
-                        #connection_id
+                        #connection_id,
+                        Some(&__conn_ctx)
                     ).map_err(|e| format!("Step {} failed to re-fetch connection {}: {}",
                         #step_id, #connection_id, e))?;
                 }
@@ -317,5 +330,63 @@ mod tests {
                 integration
             );
         }
+    }
+
+    #[test]
+    fn test_emit_connection_request_context() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_connection_step("conn-ctx", "api-conn");
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("ConnectionRequestContext"),
+            "Should create ConnectionRequestContext"
+        );
+        assert!(
+            code.contains("SCENARIO_ID"),
+            "Should read SCENARIO_ID env var"
+        );
+        assert!(
+            code.contains("RUNTARA_INSTANCE_ID"),
+            "Should read RUNTARA_INSTANCE_ID env var"
+        );
+    }
+
+    #[test]
+    fn test_emit_connection_context_uses_integration_id_as_tag() {
+        let mut ctx = EmitContext::new(false);
+        let step = ConnectionStep {
+            id: "conn-tag".to_string(),
+            name: Some("Tag Test".to_string()),
+            connection_id: "test-conn".to_string(),
+            integration_id: "shopify_graphql".to_string(),
+        };
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("\"shopify_graphql\""),
+            "Should use integration_id as tag value"
+        );
+    }
+
+    #[test]
+    fn test_emit_connection_context_passed_to_both_fetches() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_connection_step("conn-ctx-both", "api-conn");
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Both fetch_connection calls should include Some(& __conn_ctx)
+        let ctx_count = code.matches("Some (& __conn_ctx)").count();
+        assert!(
+            ctx_count >= 2,
+            "Should pass context to both fetch_connection calls (initial + re-fetch), found {}",
+            ctx_count
+        );
     }
 }
