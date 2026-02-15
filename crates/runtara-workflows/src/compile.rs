@@ -34,7 +34,7 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
     // Missing target
     if stderr.contains("error[E0463]")
         && stderr.contains("can't find crate")
-        && stderr.contains("std")
+        && stderr.contains("can't find crate for `std`")
     {
         return format!(
             "Compilation failed: The Rust standard library for target '{}' is not installed.\n\n\
