@@ -366,8 +366,8 @@ mod tests {
         assert_eq!(config.batch_size, 10);
     }
 
-    #[test]
-    fn test_shutdown_handle() {
+    #[tokio::test]
+    async fn test_shutdown_handle() {
         let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
         let config = ImageCleanupWorkerConfig::default();
         let worker = ImageCleanupWorker::new(pool, config);
