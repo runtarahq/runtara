@@ -193,10 +193,10 @@ impl ImageCleanupWorker {
 
         let mut disk_ids = Vec::new();
         while let Ok(Some(entry)) = dir_entries.next_entry().await {
-            if let Ok(ft) = entry.file_type().await {
-                if ft.is_dir() {
-                    disk_ids.push(entry.file_name().to_string_lossy().to_string());
-                }
+            if let Ok(ft) = entry.file_type().await
+                && ft.is_dir()
+            {
+                disk_ids.push(entry.file_name().to_string_lossy().to_string());
             }
         }
 
@@ -244,7 +244,7 @@ impl ImageCleanupWorker {
         cleaned
     }
 
-    /// Phase 2: Clean up images in the DB that are stale (old + no active instances).
+    /// Phase 2: Clean up images in the DB that are stale (old + no active or recent instances).
     async fn cleanup_stale_images(&self) -> Result<u64> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(self.config.max_age)
@@ -260,7 +260,10 @@ impl ImageCleanupWorker {
                 FROM instance_images ii
                 JOIN instances inst ON ii.instance_id = inst.instance_id
                 WHERE ii.image_id = i.image_id
-                  AND inst.status NOT IN ('completed', 'failed', 'cancelled')
+                  AND (
+                    inst.status NOT IN ('completed', 'failed', 'cancelled')
+                    OR ii.created_at > $1
+                  )
               )
             ORDER BY i.updated_at ASC
             LIMIT $2
@@ -293,14 +296,14 @@ impl ImageCleanupWorker {
 
             // Delete disk directory
             let image_dir = self.config.data_dir.join("images").join(image_id);
-            if let Err(e) = tokio::fs::remove_dir_all(&image_dir).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    warn!(
-                        image_id = %image_id,
-                        error = %e,
-                        "Failed to remove stale image directory"
-                    );
-                }
+            if let Err(e) = tokio::fs::remove_dir_all(&image_dir).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(
+                    image_id = %image_id,
+                    error = %e,
+                    "Failed to remove stale image directory"
+                );
             }
 
             info!(
@@ -319,6 +322,7 @@ impl ImageCleanupWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_config_default() {
@@ -345,5 +349,129 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.max_age.as_secs() / 86400, 3);
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        let config = ImageCleanupWorkerConfig {
+            enabled: true,
+            poll_interval: Duration::from_secs(600),
+            max_age: Duration::from_secs(24 * 3600),
+            batch_size: 10,
+            data_dir: PathBuf::from("/tmp/test"),
+        };
+        assert!(config.enabled);
+        assert_eq!(config.poll_interval.as_secs(), 600);
+        assert_eq!(config.max_age.as_secs() / 86400, 1);
+        assert_eq!(config.batch_size, 10);
+    }
+
+    #[test]
+    fn test_shutdown_handle() {
+        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let config = ImageCleanupWorkerConfig::default();
+        let worker = ImageCleanupWorker::new(pool, config);
+        let handle = worker.shutdown_handle();
+        // Both the worker and the returned handle hold a reference
+        assert!(Arc::strong_count(&handle) >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_run_exits_immediately_when_disabled() {
+        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let config = ImageCleanupWorkerConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let worker = ImageCleanupWorker::new(pool, config);
+
+        // Should return immediately without blocking
+        tokio::time::timeout(Duration::from_secs(1), worker.run())
+            .await
+            .expect("run() should exit immediately when disabled");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_nonexistent_images_dir() {
+        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let config = ImageCleanupWorkerConfig {
+            data_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
+            ..Default::default()
+        };
+        let worker = ImageCleanupWorker::new(pool, config);
+
+        // Should return 0 without error when images dir doesn't exist
+        let cleaned = worker.cleanup_orphaned_directories().await;
+        assert_eq!(cleaned, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_empty_images_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        tokio::fs::create_dir_all(temp_dir.path().join("images"))
+            .await
+            .unwrap();
+
+        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let config = ImageCleanupWorkerConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let worker = ImageCleanupWorker::new(pool, config);
+
+        // Should return 0 when images dir is empty
+        let cleaned = worker.cleanup_orphaned_directories().await;
+        assert_eq!(cleaned, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_orphaned_skips_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let images_dir = temp_dir.path().join("images");
+        tokio::fs::create_dir_all(&images_dir).await.unwrap();
+
+        // Create a file (not a directory) — should be skipped
+        tokio::fs::write(images_dir.join("not-a-directory.txt"), "hello")
+            .await
+            .unwrap();
+
+        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let config = ImageCleanupWorkerConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let worker = ImageCleanupWorker::new(pool, config);
+
+        // Should return 0 because files are not processed, only directories
+        let cleaned = worker.cleanup_orphaned_directories().await;
+        assert_eq!(cleaned, 0);
+
+        // File should still exist
+        assert!(images_dir.join("not-a-directory.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_responds_to_shutdown() {
+        let pool = PgPool::connect_lazy("postgres://localhost/dummy").unwrap();
+        let config = ImageCleanupWorkerConfig {
+            enabled: true,
+            poll_interval: Duration::from_secs(3600), // Long interval
+            ..Default::default()
+        };
+        let worker = ImageCleanupWorker::new(pool, config);
+        let shutdown = worker.shutdown_handle();
+
+        let handle = tokio::spawn(async move {
+            worker.run().await;
+        });
+
+        // Signal shutdown
+        shutdown.notify_one();
+
+        // Should exit promptly
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("worker should shut down within 2 seconds")
+            .expect("worker task should not panic");
     }
 }
