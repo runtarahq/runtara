@@ -193,6 +193,9 @@ pub mod cleanup_worker;
 /// Background worker for cleaning up old database records.
 pub mod db_cleanup_worker;
 
+/// Background worker for cleaning up unused images.
+pub mod image_cleanup_worker;
+
 /// Background worker for detecting and failing stale instances.
 pub mod heartbeat_monitor;
 

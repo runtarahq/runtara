@@ -89,6 +89,7 @@ use crate::container_registry::ContainerRegistry;
 use crate::db_cleanup_worker::{DbCleanupWorker, DbCleanupWorkerConfig};
 use crate::handlers::EnvironmentHandlerState;
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
+use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
 use crate::runner::Runner;
 use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig};
 
@@ -109,6 +110,7 @@ pub struct EnvironmentRuntimeBuilder {
     heartbeat_poll_interval: Duration,
     heartbeat_timeout: Duration,
     db_cleanup_config: DbCleanupWorkerConfig,
+    image_cleanup_config: ImageCleanupWorkerConfig,
 }
 
 impl Default for EnvironmentRuntimeBuilder {
@@ -129,6 +131,7 @@ impl Default for EnvironmentRuntimeBuilder {
             heartbeat_poll_interval: Duration::from_secs(30), // 30 seconds
             heartbeat_timeout: Duration::from_secs(120),      // 2 minutes
             db_cleanup_config: DbCleanupWorkerConfig::from_env(),
+            image_cleanup_config: ImageCleanupWorkerConfig::from_env(),
         }
     }
 }
@@ -263,6 +266,14 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
+    /// Set the image cleanup worker configuration.
+    ///
+    /// Default: Loaded from environment variables via [`ImageCleanupWorkerConfig::from_env()`].
+    pub fn image_cleanup_config(mut self, config: ImageCleanupWorkerConfig) -> Self {
+        self.image_cleanup_config = config;
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -293,6 +304,7 @@ impl EnvironmentRuntimeBuilder {
             heartbeat_poll_interval: self.heartbeat_poll_interval,
             heartbeat_timeout: self.heartbeat_timeout,
             db_cleanup_config: self.db_cleanup_config,
+            image_cleanup_config: self.image_cleanup_config,
         })
     }
 }
@@ -314,6 +326,7 @@ pub struct EnvironmentRuntimeConfig {
     heartbeat_poll_interval: Duration,
     heartbeat_timeout: Duration,
     db_cleanup_config: DbCleanupWorkerConfig,
+    image_cleanup_config: ImageCleanupWorkerConfig,
 }
 
 impl EnvironmentRuntimeConfig {
@@ -424,6 +437,16 @@ impl EnvironmentRuntimeConfig {
             db_cleanup_worker.run().await;
         });
 
+        // Create image cleanup worker
+        let mut image_cleanup_config = self.image_cleanup_config;
+        image_cleanup_config.data_dir = self.data_dir.clone();
+        let image_cleanup_worker = ImageCleanupWorker::new(self.pool.clone(), image_cleanup_config);
+        let image_cleanup_shutdown = image_cleanup_worker.shutdown_handle();
+
+        let image_cleanup_handle = tokio::spawn(async move {
+            image_cleanup_worker.run().await;
+        });
+
         // Start QUIC server task
         let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
         let bind_addr = self.bind_addr;
@@ -454,6 +477,8 @@ impl EnvironmentRuntimeConfig {
             cleanup_shutdown,
             heartbeat_shutdown,
             db_cleanup_shutdown,
+            image_cleanup_handle,
+            image_cleanup_shutdown,
             state,
             bind_addr,
         })
@@ -467,6 +492,7 @@ impl EnvironmentRuntimeConfig {
 /// - Wake scheduler for durable sleep wake-ups
 /// - Cleanup worker for removing old run directories
 /// - Database cleanup worker for removing old database records
+/// - Image cleanup worker for removing unused images
 /// - Heartbeat monitor for detecting and failing stale instances
 /// - Embedded runtara-core (optional, when `core_bind_addr` is configured)
 ///
@@ -483,6 +509,8 @@ pub struct EnvironmentRuntime {
     cleanup_shutdown: Arc<Notify>,
     heartbeat_shutdown: Arc<Notify>,
     db_cleanup_shutdown: Arc<Notify>,
+    image_cleanup_handle: JoinHandle<()>,
+    image_cleanup_shutdown: Arc<Notify>,
     state: Arc<EnvironmentHandlerState>,
     bind_addr: SocketAddr,
 }
@@ -526,6 +554,9 @@ impl EnvironmentRuntime {
         // Signal database cleanup worker shutdown
         self.db_cleanup_shutdown.notify_one();
 
+        // Signal image cleanup worker shutdown
+        self.image_cleanup_shutdown.notify_one();
+
         // Wait for wake scheduler
         if let Err(e) = self.wake_handle.await {
             error!("Wake scheduler task panicked: {}", e);
@@ -544,6 +575,11 @@ impl EnvironmentRuntime {
         // Wait for database cleanup worker
         if let Err(e) = self.db_cleanup_handle.await {
             error!("Database cleanup worker task panicked: {}", e);
+        }
+
+        // Wait for image cleanup worker
+        if let Err(e) = self.image_cleanup_handle.await {
+            error!("Image cleanup worker task panicked: {}", e);
         }
 
         // Shutdown embedded CoreRuntime (if running)
@@ -579,6 +615,7 @@ impl EnvironmentRuntime {
             && !self.cleanup_handle.is_finished()
             && !self.heartbeat_handle.is_finished()
             && !self.db_cleanup_handle.is_finished()
+            && !self.image_cleanup_handle.is_finished()
             && core_running
     }
 
