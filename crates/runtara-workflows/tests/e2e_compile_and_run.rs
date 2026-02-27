@@ -865,6 +865,62 @@ fn test_parse_filter_with_not() {
 }
 
 // ============================================================================
+// LENGTH Operator Parsing Tests
+// ============================================================================
+
+#[test]
+fn test_parse_conditional_length_comparison() {
+    let workflow_json = include_str!("fixtures/conditional_length_comparison.json");
+    let graph: ExecutionGraph = serde_json::from_str(workflow_json)
+        .expect("Failed to parse conditional_length_comparison.json");
+
+    assert_eq!(graph.entry_point, "check");
+    assert!(graph.steps.contains_key("check"));
+    assert!(graph.steps.contains_key("long_finish"));
+    assert!(graph.steps.contains_key("short_finish"));
+
+    use runtara_dsl::Step;
+    if let Some(Step::Conditional(cond_step)) = graph.steps.get("check") {
+        // Verify top-level is GT
+        use runtara_dsl::{ConditionArgument, ConditionExpression, ConditionOperator};
+        match &cond_step.condition {
+            ConditionExpression::Operation(gt_op) => {
+                assert_eq!(gt_op.op, ConditionOperator::Gt);
+                assert_eq!(gt_op.arguments.len(), 2);
+
+                // First argument should be a nested LENGTH operation
+                if let ConditionArgument::Expression(inner) = &gt_op.arguments[0] {
+                    if let ConditionExpression::Operation(len_op) = inner.as_ref() {
+                        assert_eq!(len_op.op, ConditionOperator::Length);
+                        assert_eq!(len_op.arguments.len(), 1);
+                    } else {
+                        panic!("Expected LENGTH operation inside GT");
+                    }
+                } else {
+                    panic!("Expected expression argument for LENGTH");
+                }
+
+                // Second argument should be the immediate value 150
+                if let ConditionArgument::Value(mapping_value) = &gt_op.arguments[1] {
+                    use runtara_dsl::MappingValue;
+                    match mapping_value {
+                        MappingValue::Immediate(imm) => {
+                            assert_eq!(imm.value, serde_json::json!(150));
+                        }
+                        _ => panic!("Expected immediate value 150"),
+                    }
+                } else {
+                    panic!("Expected value argument for threshold");
+                }
+            }
+            _ => panic!("Expected GT operation condition"),
+        }
+    } else {
+        panic!("Expected Conditional step");
+    }
+}
+
+// ============================================================================
 // GroupBy Step Parsing Tests
 // ============================================================================
 
@@ -1244,6 +1300,42 @@ fn test_compile_conditional_workflow() {
     let input = CompilationInput {
         tenant_id: "test".to_string(),
         scenario_id: "conditional".to_string(),
+        version: 1,
+        execution_graph: graph,
+        debug_mode: false,
+        child_scenarios: vec![],
+        connection_service_url: None,
+    };
+
+    let result = compile_scenario(input).expect("Compilation failed");
+
+    assert!(result.binary_path.exists(), "Binary should exist");
+    assert!(result.binary_size > 0, "Binary should have non-zero size");
+    assert!(
+        !result.has_side_effects,
+        "Conditional workflow should not have side effects"
+    );
+
+    drop(temp_dir);
+}
+
+#[test]
+#[ignore = "requires pre-built native library"]
+fn test_compile_conditional_length_comparison() {
+    if !native_library_available() {
+        eprintln!("Skipping: native library not available");
+        return;
+    }
+
+    let workflow_json = include_str!("fixtures/conditional_length_comparison.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
+
+    let temp_dir = setup_test_env();
+
+    let input = CompilationInput {
+        tenant_id: "test".to_string(),
+        scenario_id: "length-comparison".to_string(),
         version: 1,
         execution_graph: graph,
         debug_mode: false,

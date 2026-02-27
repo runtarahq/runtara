@@ -186,11 +186,16 @@ pub fn emit_argument_as_value(
     source_var: &proc_macro2::Ident,
 ) -> TokenStream {
     match arg {
-        ConditionArgument::Expression(expr) => {
-            // Evaluate expression and wrap result in Value
-            let bool_code = emit_condition_expression(expr, ctx, source_var);
-            quote! { serde_json::Value::Bool(#bool_code) }
-        }
+        ConditionArgument::Expression(expr) => match &**expr {
+            // Length produces a numeric value, not a boolean
+            ConditionExpression::Operation(op) if op.op == ConditionOperator::Length => {
+                emit_length_as_value(&op.arguments, ctx, source_var)
+            }
+            _ => {
+                let bool_code = emit_condition_expression(expr, ctx, source_var);
+                quote! { serde_json::Value::Bool(#bool_code) }
+            }
+        },
         ConditionArgument::Value(mapping_value) => {
             emit_mapping_value(mapping_value, ctx, source_var)
         }
@@ -356,6 +361,31 @@ fn emit_ends_with(
                 (Some(s), Some(suf)) => s.ends_with(suf),
                 _ => false,
             }
+        }
+    }
+}
+
+/// Emit LENGTH as a numeric `Value` (for use as an argument to comparisons).
+fn emit_length_as_value(
+    arguments: &[ConditionArgument],
+    ctx: &mut EmitContext,
+    source_var: &proc_macro2::Ident,
+) -> TokenStream {
+    if arguments.is_empty() {
+        return quote! { serde_json::Value::Number(serde_json::Number::from(0i64)) };
+    }
+    let arg_code = emit_argument_as_value(&arguments[0], ctx, source_var);
+    quote! {
+        {
+            let val = #arg_code;
+            let len: i64 = match &val {
+                serde_json::Value::String(s) => s.len() as i64,
+                serde_json::Value::Array(a) => a.len() as i64,
+                serde_json::Value::Object(o) => o.len() as i64,
+                serde_json::Value::Null => 0,
+                _ => 1,
+            };
+            serde_json::Value::Number(serde_json::Number::from(len))
         }
     }
 }
