@@ -403,13 +403,33 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[doc(hidden)]
             fn #executor_fn_ident(input: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>> {
                 Box::pin(async move {
+                    // Helper to create JSON-structured errors matching AgentError format.
+                    // All capability errors must be parseable JSON so the #[durable] macro
+                    // can check error category for retry decisions.
+                    let __to_json_error = |code: &str, msg: String| -> String {
+                        serde_json::json!({
+                            "code": code,
+                            "message": msg,
+                            "category": "permanent",
+                            "severity": "error"
+                        }).to_string()
+                    };
+
                     // Apply type coercion before deserialization
                     let coerced_input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
                     let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
-                        .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
-                    let result = #fn_name(typed_input).await?;
+                        .map_err(|e| __to_json_error("INPUT_DESERIALIZATION_ERROR",
+                            format!("Invalid input for {}: {}", #capability_id, e)))?;
+                    let result = #fn_name(typed_input).await.map_err(|e| {
+                        let s: String = e.into();
+                        // Pass through existing JSON errors (from AgentError), wrap plain strings
+                        if s.starts_with('{') { s } else {
+                            __to_json_error("CAPABILITY_ERROR", s)
+                        }
+                    })?;
                     serde_json::to_value(result)
-                        .map_err(|e| format!("Failed to serialize result: {}", e))
+                        .map_err(|e| __to_json_error("OUTPUT_SERIALIZATION_ERROR",
+                            format!("Failed to serialize result for {}: {}", #capability_id, e)))
                 })
             }
         }
@@ -420,14 +440,38 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn #executor_fn_ident(input: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>> {
                 Box::pin(async move {
                     tokio::task::spawn_blocking(move || {
+                        // Helper to create JSON-structured errors matching AgentError format.
+                        let __to_json_error = |code: &str, msg: String| -> String {
+                            serde_json::json!({
+                                "code": code,
+                                "message": msg,
+                                "category": "permanent",
+                                "severity": "error"
+                            }).to_string()
+                        };
+
                         // Apply type coercion before deserialization
                         let coerced_input = runtara_dsl::coercion::coerce_input(input, &#input_meta_ident);
                         let typed_input: #input_type_ident = serde_json::from_value(coerced_input)
-                            .map_err(|e| format!("Invalid input for {}: {}", #capability_id, e))?;
-                        let result = #fn_name(typed_input)?;
+                            .map_err(|e| __to_json_error("INPUT_DESERIALIZATION_ERROR",
+                                format!("Invalid input for {}: {}", #capability_id, e)))?;
+                        let result = #fn_name(typed_input).map_err(|e| {
+                            let s: String = e.into();
+                            if s.starts_with('{') { s } else {
+                                __to_json_error("CAPABILITY_ERROR", s)
+                            }
+                        })?;
                         serde_json::to_value(result)
-                            .map_err(|e| format!("Failed to serialize result: {}", e))
-                    }).await.map_err(|e| format!("Task panicked: {}", e))?
+                            .map_err(|e| __to_json_error("OUTPUT_SERIALIZATION_ERROR",
+                                format!("Failed to serialize result for {}: {}", #capability_id, e)))
+                    }).await.map_err(|e| {
+                        serde_json::json!({
+                            "code": "TASK_PANIC",
+                            "message": format!("Task panicked in {}: {}", #capability_id, e),
+                            "category": "permanent",
+                            "severity": "error"
+                        }).to_string()
+                    })?
                 })
             }
         }

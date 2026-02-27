@@ -495,7 +495,30 @@ fn generate_retry_wrapper(
                         return __result;
                     }
                     Err(ref e) => {
-                        __last_error = Some(format!("{}", e));
+                        let __err_str = format!("{}", e);
+
+                        // Check if error is classified as permanent (non-retryable).
+                        // Capability errors are JSON with a "category" field matching
+                        // the AgentError format. Permanent errors (validation, deserialization,
+                        // business rules) should not be retried.
+                        let __is_permanent = (|| -> Option<bool> {
+                            let parsed: ::serde_json::Value = ::serde_json::from_str(&__err_str).ok()?;
+                            let category = parsed.get("category")?.as_str()?;
+                            Some(category == "permanent")
+                        })().unwrap_or(false);
+
+                        if __is_permanent {
+                            ::tracing::warn!(
+                                function = #fn_name_str,
+                                cache_key = %__cache_key,
+                                attempt = __attempt,
+                                error = %e,
+                                "Permanent error detected, skipping retries"
+                            );
+                            return __result;
+                        }
+
+                        __last_error = Some(__err_str);
 
                         if __attempt < __total_attempts {
                             ::tracing::warn!(

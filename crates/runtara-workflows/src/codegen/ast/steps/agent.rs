@@ -90,7 +90,6 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             agent_id,
             capability_id,
             &step_inputs_var,
-            &result_var,
             &durable_fn_name,
             step.connection_id.as_deref(),
             ctx,
@@ -103,7 +102,6 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             agent_id,
             capability_id,
             &step_inputs_var,
-            &result_var,
             &durable_fn_name,
             step.connection_id.as_deref(),
             ctx,
@@ -114,6 +112,9 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
     // Clone scenario inputs var for debug events (to access _loop_indices)
     let scenario_inputs_var = ctx.inputs_var.clone();
+
+    // Error output variable for debug events on failure
+    let error_output_var = ctx.temp_var("error_output");
 
     // Generate debug event emissions (Agent doesn't create a scope, so no override_scope_id)
     let debug_start = emit_step_debug_start(
@@ -135,6 +136,16 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         Some(&scenario_inputs_var),
         None,
     );
+    // Debug end event for error path — uses error output variable instead of result
+    let debug_end_error = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "Agent",
+        Some(&error_output_var),
+        Some(&scenario_inputs_var),
+        None,
+    );
 
     // Generate tracing span for OpenTelemetry
     let span_def = emit_agent_span_start(step_id, step_name, agent_id, capability_id);
@@ -153,25 +164,40 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
             #execute_capability
 
-            #debug_end
+            match __cap_result {
+                Ok(__cap_value) => {
+                    let #result_var = __cap_value;
 
-            let #step_var = serde_json::json!({
-                "stepId": #step_id,
-                "stepName": #step_name_display,
-                "stepType": "Agent",
-                "outputs": #result_var
-            });
-            #steps_context.insert(#step_id.to_string(), #step_var.clone());
+                    #debug_end
 
-            // Check for cancellation or pause via SDK signal polling
-            {
-                let mut __sdk = sdk().lock().await;
-                if let Err(e) = __sdk.check_signals().await {
-                    return Err(format!("Step {}: {}", #step_id, e));
+                    let #step_var = serde_json::json!({
+                        "stepId": #step_id,
+                        "stepName": #step_name_display,
+                        "stepType": "Agent",
+                        "outputs": #result_var
+                    });
+                    #steps_context.insert(#step_id.to_string(), #step_var.clone());
+
+                    // Check for cancellation or pause via SDK signal polling
+                    {
+                        let mut __sdk = sdk().lock().await;
+                        if let Err(e) = __sdk.check_signals().await {
+                            return Err(format!("Step {}: {}", #step_id, e));
+                        }
+                    }
+
+                    Ok(())
+                }
+                Err(__cap_err) => {
+                    // Emit debug end with error info so failures are visible in the UI
+                    let #error_output_var = serde_json::json!({
+                        "_error": true,
+                        "error": &__cap_err
+                    });
+                    #debug_end_error
+                    Err(__cap_err)
                 }
             }
-
-            Ok(())
         }.instrument(__step_span).await;
 
         // Propagate any error from the step
@@ -188,7 +214,6 @@ fn emit_durable_call(
     agent_id: &str,
     capability_id: &str,
     inputs_var: &proc_macro2::Ident,
-    result_var: &proc_macro2::Ident,
     durable_fn_name: &proc_macro2::Ident,
     connection_id: Option<&str>,
     ctx: &EmitContext,
@@ -253,7 +278,9 @@ fn emit_durable_call(
             }
         };
 
-        // Define the durable agent execution function with cancellation support
+        // Define the durable agent execution function with cancellation support.
+        // The raw capability error is passed through (not wrapped) so that the
+        // #[durable] macro can parse JSON error category for retry decisions.
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         async fn #durable_fn_name(
             cache_key: &str,
@@ -264,24 +291,25 @@ fn emit_durable_call(
         ) -> std::result::Result<serde_json::Value, String> {
             // Wrap agent execution with cancellation support - allows long-running
             // operations (HTTP requests, DB queries) to be interrupted mid-execution
-            let result = runtara_sdk::with_cancellation(
+            runtara_sdk::with_cancellation(
                 registry::execute_capability(agent_id, capability_id, inputs)
             ).await
                 .map_err(|e| format!("Step {} cancelled: {}", step_id, e))?
-                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                    step_id, agent_id, capability_id, e))?;
-            Ok(result)
         }
 
         #connection_fetch
 
-        let #result_var = #durable_fn_name(
+        // Call the durable function and wrap error with step context AFTER retry
+        // decisions have been made (inside the durable fn, errors are raw JSON)
+        let __cap_result = #durable_fn_name(
             &__durable_cache_key,
             #final_inputs.clone(),
             #agent_id,
             #capability_id,
             #step_id,
-        ).await?;
+        ).await
+            .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                #step_id, #agent_id, #capability_id, e));
     }
 }
 
@@ -292,7 +320,6 @@ fn emit_durable_rate_limited_call(
     agent_id: &str,
     capability_id: &str,
     inputs_var: &proc_macro2::Ident,
-    result_var: &proc_macro2::Ident,
     durable_fn_name: &proc_macro2::Ident,
     connection_id: Option<&str>,
     ctx: &EmitContext,
@@ -357,7 +384,9 @@ fn emit_durable_rate_limited_call(
             }
         };
 
-        // Define the durable agent execution function (rate-limited) with cancellation support
+        // Define the durable agent execution function (rate-limited) with cancellation support.
+        // The raw capability error is passed through (not wrapped) so that the
+        // #[durable] macro can parse JSON error category for retry decisions.
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         async fn #durable_fn_name(
             cache_key: &str,
@@ -368,24 +397,25 @@ fn emit_durable_rate_limited_call(
         ) -> std::result::Result<serde_json::Value, String> {
             // Wrap agent execution with cancellation support - allows long-running
             // operations (HTTP requests, DB queries) to be interrupted mid-execution
-            let result = runtara_sdk::with_cancellation(
+            runtara_sdk::with_cancellation(
                 registry::execute_capability(agent_id, capability_id, inputs)
             ).await
                 .map_err(|e| format!("Step {} cancelled: {}", step_id, e))?
-                .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
-                    step_id, agent_id, capability_id, e))?;
-            Ok(result)
         }
 
         #connection_fetch
 
-        let #result_var = #durable_fn_name(
+        // Call the durable function and wrap error with step context AFTER retry
+        // decisions have been made (inside the durable fn, errors are raw JSON)
+        let __cap_result = #durable_fn_name(
             &__durable_cache_key,
             #final_inputs.clone(),
             #agent_id,
             #capability_id,
             #step_id,
-        ).await?;
+        ).await
+            .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
+                #step_id, #agent_id, #capability_id, e));
     }
 }
 
