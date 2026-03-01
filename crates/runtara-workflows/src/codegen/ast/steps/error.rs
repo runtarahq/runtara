@@ -12,7 +12,7 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::emit_step_span_start;
+use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
 use runtara_dsl::{ErrorCategory, ErrorSeverity, ErrorStep};
 
 /// Emit code for an Error step.
@@ -41,9 +41,13 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     let step_var = ctx.declare_step(step_id);
     let source_var = ctx.temp_var("source");
     let context_var = ctx.temp_var("error_context");
+    let error_output_var = ctx.temp_var("error_output");
 
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
+
+    // Get the scenario inputs variable to access _loop_indices at runtime
+    let scenario_inputs_var = ctx.inputs_var.clone();
 
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
@@ -60,6 +64,27 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
+    // Generate debug event emissions (Error doesn't create a scope)
+    let debug_start = emit_step_debug_start(
+        ctx,
+        step_id,
+        step_name,
+        "Error",
+        None, // no pre-computed inputs var
+        None, // no input mapping JSON
+        Some(&scenario_inputs_var),
+        None, // no scope override
+    );
+    let debug_end = emit_step_debug_end(
+        ctx,
+        step_id,
+        step_name,
+        "Error",
+        Some(&error_output_var),
+        Some(&scenario_inputs_var),
+        None,
+    );
+
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Error");
 
@@ -73,6 +98,8 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Wrap step execution in async block instrumented with span
         // The async block returns the error string to propagate
         let __error_result: String = async {
+            #debug_start
+
             // Emit structured error event via SDK custom_event
             {
                 let __error_payload = serde_json::json!({
@@ -119,6 +146,16 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 "severity": #severity_str,
                 "context": #context_var
             });
+
+            // Emit debug end with error info so the step is visible in step summaries
+            let #error_output_var = serde_json::json!({
+                "_error": true,
+                "category": #category_str,
+                "code": #error_code,
+                "message": #error_message,
+                "severity": #severity_str
+            });
+            #debug_end
 
             // Return the error string from the async block
             serde_json::to_string(&__error_context).unwrap_or_else(|_| {
@@ -498,6 +535,55 @@ mod tests {
         assert!(
             code.contains("serde_json :: to_vec"),
             "Should serialize payload to bytes"
+        );
+    }
+
+    #[test]
+    fn test_emit_error_debug_events_in_debug_mode() {
+        let mut ctx = EmitContext::new(true); // debug_mode = true
+        let step = create_error_step(
+            "error-debug",
+            ErrorCategory::Permanent,
+            "DEBUG_ERROR",
+            "Debug test error",
+        );
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Error step must emit step_debug_start and step_debug_end events
+        // just like all other step types (Agent, Finish, Conditional, etc.)
+        assert!(
+            code.contains("step_debug_start"),
+            "Error step must emit step_debug_start in debug mode so it appears in step summaries"
+        );
+        assert!(
+            code.contains("step_debug_end"),
+            "Error step must emit step_debug_end in debug mode so it appears in step summaries"
+        );
+    }
+
+    #[test]
+    fn test_emit_error_no_debug_events_when_not_debug_mode() {
+        let mut ctx = EmitContext::new(false); // debug_mode = false
+        let step = create_error_step(
+            "error-no-debug",
+            ErrorCategory::Permanent,
+            "NO_DEBUG",
+            "No debug test",
+        );
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // When debug mode is off, no debug events should be emitted
+        assert!(
+            !code.contains("step_debug_start"),
+            "Error step should not emit step_debug_start when debug mode is off"
+        );
+        assert!(
+            !code.contains("step_debug_end"),
+            "Error step should not emit step_debug_end when debug mode is off"
         );
     }
 
