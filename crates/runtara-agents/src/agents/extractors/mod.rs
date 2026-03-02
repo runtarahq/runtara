@@ -51,6 +51,14 @@ pub trait HttpConnectionExtractor: Send + Sync {
 // Collect all extractors via inventory
 inventory::collect!(&'static dyn HttpConnectionExtractor);
 
+/// Returns all integration_ids that have a registered `HttpConnectionExtractor`.
+pub fn get_http_extractor_ids() -> Vec<&'static str> {
+    inventory::iter::<&'static dyn HttpConnectionExtractor>
+        .into_iter()
+        .map(|e| e.integration_id())
+        .collect()
+}
+
 /// Extract HTTP connection config from a raw connection
 ///
 /// Looks up the appropriate extractor based on `integration_id` and applies it.

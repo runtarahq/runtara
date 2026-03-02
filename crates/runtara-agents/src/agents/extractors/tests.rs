@@ -6,6 +6,25 @@ use super::*;
 use serde_json::json;
 
 // ============================================================================
+// get_http_extractor_ids Tests
+// ============================================================================
+
+#[test]
+fn test_get_http_extractor_ids() {
+    let ids = get_http_extractor_ids();
+    assert!(
+        ids.contains(&"http_bearer"),
+        "should contain http_bearer, got: {:?}",
+        ids
+    );
+    assert!(
+        ids.contains(&"http_api_key"),
+        "should contain http_api_key, got: {:?}",
+        ids
+    );
+}
+
+// ============================================================================
 // HttpBearerExtractor Tests
 // ============================================================================
 

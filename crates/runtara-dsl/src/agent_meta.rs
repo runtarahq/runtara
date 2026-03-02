@@ -525,7 +525,7 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         description: "HTTP capabilities for making web requests with JSON/text/binary support (has side effects)",
         has_side_effects: true,
         supports_connections: true,
-        integration_ids: &["bearer", "api_key", "basic_auth"],
+        integration_ids: &["http_bearer", "http_api_key"],
         secure: true,
     },
     AgentModuleConfig {
@@ -1401,16 +1401,12 @@ mod tests {
         let integration_ids = http_module.integration_ids;
 
         assert!(
-            integration_ids.contains(&"bearer"),
-            "http should support bearer"
+            integration_ids.contains(&"http_bearer"),
+            "http should support http_bearer"
         );
         assert!(
-            integration_ids.contains(&"api_key"),
-            "http should support api_key"
-        );
-        assert!(
-            integration_ids.contains(&"basic_auth"),
-            "http should support basic_auth"
+            integration_ids.contains(&"http_api_key"),
+            "http should support http_api_key"
         );
     }
 
