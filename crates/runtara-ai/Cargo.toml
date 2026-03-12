@@ -1,0 +1,17 @@
+[package]
+name = "runtara-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AI/LLM integration for runtara workflows via rig"
+keywords = ["durable", "workflow", "ai", "llm", "agents"]
+categories = ["development-tools"]
+
+[dependencies]
+rig-core = { version = "0.11", default-features = false, features = ["reqwest-rustls"] }
+runtara-dsl = { path = "../runtara-dsl", version = "1.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+tracing = "0.1"

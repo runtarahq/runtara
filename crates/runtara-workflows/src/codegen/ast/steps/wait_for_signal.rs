@@ -71,6 +71,13 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
     // Poll interval (default 1000ms)
     let poll_interval = step.poll_interval_ms.unwrap_or(1000);
 
+    // Serialize response_schema at codegen time for embedding in generated code
+    let response_schema_json = step
+        .response_schema
+        .as_ref()
+        .and_then(|s| serde_json::to_string(s).ok())
+        .unwrap_or_else(|| "null".to_string());
+
     // Generate on_wait subgraph if present
     let on_wait_code = if let Some(ref on_wait) = step.on_wait {
         let on_wait_fn_name =
@@ -181,25 +188,86 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
             // Execute on_wait subgraph (notifies external system of signal_id)
             #on_wait_code
 
+            // Emit custom event so frontend/external systems know input is needed
+            {
+                let __event_data = serde_json::json!({
+                    "type": "external_input_requested",
+                    "signal_id": &__signal_id,
+                    "step_id": #step_id,
+                    "step_name": #step_name_display,
+                    "response_schema": serde_json::from_str::<serde_json::Value>(#response_schema_json)
+                        .unwrap_or(serde_json::Value::Null),
+                });
+                {
+                    let __payload_bytes = serde_json::to_vec(&__event_data).unwrap_or_default();
+                    let mut __sdk = sdk().lock().await;
+                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes).await;
+                }
+            }
+
             // Poll for signal with timeout
             let __poll_interval = std::time::Duration::from_millis(#poll_interval);
             let __start_time = std::time::Instant::now();
             let __signal_payload: serde_json::Value;
 
+            let mut __poll_errors: u32 = 0;
             loop {
-                // Check for cancellation
+                // Check for cancellation (retry on transient connection errors)
                 {
                     let mut __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.check_signals().await {
-                        return Err(format!("WaitForSignal step '{}': {}", #step_id, e));
+                    match __sdk.check_signals().await {
+                        Ok(()) => { __poll_errors = 0; }
+                        Err(e) => {
+                            let err_str = format!("{}", e);
+                            if err_str.contains("connection") || err_str.contains("IO error") {
+                                __poll_errors += 1;
+                                tracing::warn!(
+                                    step_id = #step_id,
+                                    errors = __poll_errors,
+                                    "WaitForSignal: transient connection error, retrying"
+                                );
+                                if __poll_errors > 10 {
+                                    return Err(format!(
+                                        "WaitForSignal step '{}': too many connection errors: {}",
+                                        #step_id, err_str
+                                    ));
+                                }
+                                drop(__sdk);
+                                tokio::time::sleep(__poll_interval).await;
+                                continue;
+                            }
+                            return Err(format!("WaitForSignal step '{}': {}", #step_id, e));
+                        }
                     }
                 }
 
-                // Poll for custom signal
+                // Poll for custom signal (retry on transient connection errors)
                 let __maybe_signal = {
                     let mut __sdk = sdk().lock().await;
-                    __sdk.poll_custom_signal(&__signal_id).await
-                        .map_err(|e| format!("WaitForSignal step '{}' poll failed: {}", #step_id, e))?
+                    match __sdk.poll_custom_signal(&__signal_id).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let err_str = format!("{}", e);
+                            if err_str.contains("connection") || err_str.contains("IO error") {
+                                __poll_errors += 1;
+                                tracing::warn!(
+                                    step_id = #step_id,
+                                    errors = __poll_errors,
+                                    "WaitForSignal: poll connection error, retrying"
+                                );
+                                if __poll_errors > 10 {
+                                    return Err(format!(
+                                        "WaitForSignal step '{}' poll failed after retries: {}",
+                                        #step_id, err_str
+                                    ));
+                                }
+                                drop(__sdk);
+                                tokio::time::sleep(__poll_interval).await;
+                                continue;
+                            }
+                            return Err(format!("WaitForSignal step '{}' poll failed: {}", #step_id, e));
+                        }
+                    }
                 };
 
                 if let Some(payload) = __maybe_signal {
@@ -256,6 +324,7 @@ mod tests {
             on_wait: None,
             timeout_ms: None,
             poll_interval_ms: None,
+            response_schema: None,
         }
     }
 
@@ -268,6 +337,7 @@ mod tests {
                 value: serde_json::json!(timeout_ms),
             })),
             poll_interval_ms: None,
+            response_schema: None,
         }
     }
 
@@ -318,6 +388,7 @@ mod tests {
             on_wait: None,
             timeout_ms: None,
             poll_interval_ms: Some(500),
+            response_schema: None,
         };
         let mut ctx = EmitContext::new(false);
         let result = emit(&step, &mut ctx);

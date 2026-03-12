@@ -286,6 +286,14 @@ pub enum ValidationError {
         label: Option<String>,
         targets: Vec<String>,
     },
+
+    // === AI Agent Errors ===
+    /// AI Agent step has duplicate tool edge labels.
+    AiAgentDuplicateToolLabel { step_id: String, label: String },
+    /// AI Agent step has an invalid tool edge label (must be alphanumeric + underscore).
+    AiAgentInvalidToolLabel { step_id: String, label: String },
+    /// AI Agent step is missing connection_id (required for LLM access).
+    AiAgentMissingConnection { step_id: String },
 }
 
 /// Information about a missing required input field.
@@ -701,6 +709,29 @@ impl std::fmt::Display for ValidationError {
                     targets.join(", ")
                 )
             }
+            ValidationError::AiAgentDuplicateToolLabel { step_id, label } => {
+                write!(
+                    f,
+                    "[E110] AI Agent step '{}' has duplicate tool edge label '{}'",
+                    step_id, label
+                )
+            }
+            ValidationError::AiAgentInvalidToolLabel { step_id, label } => {
+                write!(
+                    f,
+                    "[E111] AI Agent step '{}' has invalid tool edge label '{}'. \
+                     Labels must contain only alphanumeric characters and underscores.",
+                    step_id, label
+                )
+            }
+            ValidationError::AiAgentMissingConnection { step_id } => {
+                write!(
+                    f,
+                    "[E112] AI Agent step '{}' is missing connection_id. \
+                     An LLM connection is required for AI Agent steps.",
+                    step_id
+                )
+            }
         }
     }
 }
@@ -985,6 +1016,9 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
 
     // Phase 10: Edge condition validation (unique priorities, at most one default)
     validate_edge_conditions(graph, &mut result);
+
+    // Phase 11: AI Agent validation
+    validate_ai_agent_steps(graph, &mut result);
 
     result
 }
@@ -1520,7 +1554,8 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
         | Step::While(_)
         | Step::Connection(_)
         | Step::Delay(_)
-        | Step::WaitForSignal(_) => {}
+        | Step::WaitForSignal(_)
+        | Step::AiAgent(_) => {}
     }
 
     mappings
@@ -2131,7 +2166,8 @@ fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
             | Step::Filter(_)
             | Step::GroupBy(_)
             | Step::Delay(_)
-            | Step::WaitForSignal(_) => {}
+            | Step::WaitForSignal(_)
+            | Step::AiAgent(_) => {}
         }
     }
 }
@@ -2225,6 +2261,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::GroupBy(s) => s.name.as_ref(),
             Step::Delay(s) => s.name.as_ref(),
             Step::WaitForSignal(s) => s.name.as_ref(),
+            Step::AiAgent(s) => s.name.as_ref(),
         };
 
         if let Some(name) = name {
@@ -2584,6 +2621,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::AiAgent(_) => "AiAgent",
     }
 }
 
@@ -2899,6 +2937,12 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
         Step::Connection(_) => {
             // Connection steps don't have user-provided references to validate
         }
+        Step::AiAgent(ai_agent_step) => {
+            if let Some(ref config) = ai_agent_step.config {
+                extract_references_from_mapping_value(&config.system_prompt, &mut refs);
+                extract_references_from_mapping_value(&config.user_prompt, &mut refs);
+            }
+        }
     }
 
     refs
@@ -2932,6 +2976,73 @@ fn extract_references_from_condition_argument(
         }
         runtara_dsl::ConditionArgument::Value(val) => {
             extract_references_from_mapping_value(val, refs);
+        }
+    }
+}
+
+// ============================================================================
+// Phase 11: AI Agent Validation
+// ============================================================================
+
+/// Validate AI Agent steps for correct configuration.
+fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    for (step_id, step) in &graph.steps {
+        if let Step::AiAgent(ai_step) = step {
+            // Must have a connection_id
+            if ai_step.connection_id.is_none() {
+                result
+                    .errors
+                    .push(ValidationError::AiAgentMissingConnection {
+                        step_id: step_id.clone(),
+                    });
+            }
+
+            // Collect labeled edges for this step.
+            // "next" is a reserved label meaning "continue to next step" — skip it.
+            let mut seen_labels: HashSet<String> = HashSet::new();
+            for edge in &graph.execution_plan {
+                if edge.from_step == *step_id
+                    && let Some(ref label) = edge.label
+                {
+                    // "next" is reserved for the default/continuation edge, not a tool
+                    if label == "next" {
+                        continue;
+                    }
+
+                    // Check for duplicate labels
+                    if !seen_labels.insert(label.clone()) {
+                        result
+                            .errors
+                            .push(ValidationError::AiAgentDuplicateToolLabel {
+                                step_id: step_id.clone(),
+                                label: label.clone(),
+                            });
+                    }
+
+                    // Check label format (alphanumeric + underscore)
+                    if !label.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        result
+                            .errors
+                            .push(ValidationError::AiAgentInvalidToolLabel {
+                                step_id: step_id.clone(),
+                                label: label.clone(),
+                            });
+                    }
+                }
+            }
+        }
+    }
+
+    // Recurse into subgraphs
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => {
+                validate_ai_agent_steps(&split_step.subgraph, result);
+            }
+            Step::While(while_step) => {
+                validate_ai_agent_steps(&while_step.subgraph, result);
+            }
+            _ => {}
         }
     }
 }

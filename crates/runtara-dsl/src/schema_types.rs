@@ -263,6 +263,9 @@ pub enum Step {
 
     /// Wait for an external signal before continuing
     WaitForSignal(WaitForSignalStep),
+
+    /// LLM-driven agent that selects and calls tools in a loop
+    AiAgent(AiAgentStep),
 }
 
 /// Common fields shared by all step types
@@ -920,6 +923,94 @@ pub struct WaitForSignalStep {
     /// Lower values mean faster response but more server load.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
+
+    /// Schema describing the expected response from the human/external system.
+    /// Uses the same flat-map format as scenario `inputSchema`.
+    ///
+    /// Examples:
+    /// - Confirm: `{"approved": {"type": "boolean", "required": true}}`
+    /// - Choice: `{"decision": {"type": "string", "required": true, "enum": ["approve", "reject"]}}`
+    /// - Text: `{"response": {"type": "string", "required": true}}`
+    ///
+    /// When used as an AI Agent tool, this schema is exposed to the LLM as tool
+    /// parameters and included in debug events so the frontend can render the
+    /// appropriate input widget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<HashMap<String, SchemaField>>,
+}
+
+/// LLM-driven agent that selects and calls tools in a loop.
+///
+/// The AI Agent step uses an LLM to autonomously decide which tools to call.
+/// Tools are defined as labeled edges in the execution plan, each pointing to
+/// a concrete step (Agent, StartScenario, WaitForSignal). The LLM picks which
+/// tool/branch to execute, collects the result, and loops until it produces a
+/// final text response or reaches max_iterations.
+///
+/// Without tool edges, it acts as a simple LLM completion step.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "AiAgent",
+///   "id": "assistant",
+///   "name": "Inventory Assistant",
+///   "connectionId": "conn-openai",
+///   "config": {
+///     "systemPrompt": { "valueType": "immediate", "value": "You are an inventory manager" },
+///     "userPrompt": { "valueType": "reference", "value": "data.userRequest" },
+///     "model": "gpt-4o",
+///     "maxIterations": 10,
+///     "temperature": 0.7
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Connection ID for the LLM provider (e.g., OpenAI, Anthropic)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+
+    /// AI Agent configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<AiAgentConfig>,
+}
+
+/// Configuration for the AI Agent step.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentConfig {
+    /// System prompt / instructions for the LLM
+    pub system_prompt: MappingValue,
+
+    /// User message / request to process
+    pub user_prompt: MappingValue,
+
+    /// LLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Maximum number of tool-call iterations before stopping (default: 10)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+
+    /// Temperature for LLM sampling (default: 0.7)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// Maximum tokens per LLM call
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
 }
 
 // ============================================================================

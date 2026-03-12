@@ -11,8 +11,8 @@
 
 use crate::agent_meta::StepTypeMeta;
 use crate::{
-    AgentStep, ConditionalStep, ConnectionStep, ErrorStep, FilterStep, FinishStep, GroupByStep,
-    LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep, WhileStep,
+    AgentStep, AiAgentStep, ConditionalStep, ConnectionStep, ErrorStep, FilterStep, FinishStep,
+    GroupByStep, LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep, WhileStep,
 };
 
 // ============================================================================
@@ -69,6 +69,10 @@ fn schema_group_by_step() -> schemars::schema::RootSchema {
 
 fn schema_wait_for_signal_step() -> schemars::schema::RootSchema {
     schemars::schema_for!(WaitForSignalStep)
+}
+
+fn schema_ai_agent_step() -> schemars::schema::RootSchema {
+    schemars::schema_for!(AiAgentStep)
 }
 
 // ============================================================================
@@ -179,6 +183,14 @@ static WAIT_FOR_SIGNAL_STEP_META: StepTypeMeta = StepTypeMeta {
     schema_fn: schema_wait_for_signal_step,
 };
 
+static AI_AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "AiAgent",
+    display_name: "AI Agent",
+    description: "LLM-driven agent that selects and calls tools in a loop",
+    category: "execution",
+    schema_fn: schema_ai_agent_step,
+};
+
 // Register all step types with inventory
 inventory::submit! { &FINISH_STEP_META }
 inventory::submit! { &AGENT_STEP_META }
@@ -193,3 +205,4 @@ inventory::submit! { &ERROR_STEP_META }
 inventory::submit! { &FILTER_STEP_META }
 inventory::submit! { &GROUP_BY_STEP_META }
 inventory::submit! { &WAIT_FOR_SIGNAL_STEP_META }
+inventory::submit! { &AI_AGENT_STEP_META }

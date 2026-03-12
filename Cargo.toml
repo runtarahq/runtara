@@ -11,6 +11,7 @@ members = [
     "crates/runtara-dsl",
     "crates/runtara-workflows",
     "crates/runtara-agents",
+    "crates/runtara-ai",
     "crates/runtara-workflow-stdlib",
     "crates/runtara-agent-macro",
     # Agent testing

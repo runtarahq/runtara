@@ -21,6 +21,9 @@
 // Re-export the agents crate
 pub use runtara_agents as agents;
 
+// Re-export the AI crate for AI Agent steps
+pub use runtara_ai as ai;
+
 // Runtime module (wraps runtara-sdk)
 pub mod runtime;
 

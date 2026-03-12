@@ -6,6 +6,7 @@
 //! for executing that step.
 
 pub mod agent;
+pub mod ai_agent;
 pub mod branching;
 pub mod conditional;
 pub mod connection;
@@ -63,6 +64,7 @@ impl StepEmitter for Step {
             Step::GroupBy(s) => group_by::emit(s, ctx),
             Step::Delay(s) => delay::emit(s, ctx),
             Step::WaitForSignal(s) => wait_for_signal::emit(s, ctx),
+            Step::AiAgent(s) => ai_agent::emit(s, ctx, graph),
         }
     }
 }
@@ -84,6 +86,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::AiAgent(_) => "AiAgent",
     }
 }
 
@@ -104,6 +107,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::GroupBy(s) => &s.id,
         Step::Delay(s) => &s.id,
         Step::WaitForSignal(s) => &s.id,
+        Step::AiAgent(s) => &s.id,
     }
 }
 
@@ -124,6 +128,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::GroupBy(s) => s.name.as_deref(),
         Step::Delay(s) => s.name.as_deref(),
         Step::WaitForSignal(s) => s.name.as_deref(),
+        Step::AiAgent(s) => s.name.as_deref(),
     }
 }
 
@@ -657,12 +662,24 @@ pub fn build_execution_order(graph: &ExecutionGraph) -> Vec<String> {
             continue;
         }
 
+        // For AI Agent steps, only follow the default (unlabeled) edge.
+        // Labeled edges are tool branches handled internally by the AI agent loop.
+        let is_ai_agent = matches!(step, Step::AiAgent(_));
+
         // Find next steps from execution plan
         for edge in &graph.execution_plan {
             if edge.from_step == step_id {
-                // Only follow "source" edges, skip "true"/"false" labels
                 let label = edge.label.as_deref().unwrap_or("");
-                if label != "true" && label != "false" && !visited.contains(&edge.to_step) {
+                // Skip true/false labels (Conditional branches)
+                if label == "true" || label == "false" {
+                    continue;
+                }
+                // For AI Agent steps, skip labeled edges (tool branches).
+                // "next" is a reserved label meaning "continue to next step" — follow it.
+                if is_ai_agent && !label.is_empty() && label != "next" {
+                    continue;
+                }
+                if !visited.contains(&edge.to_step) {
                     queue.push_back(edge.to_step.clone());
                 }
             }
