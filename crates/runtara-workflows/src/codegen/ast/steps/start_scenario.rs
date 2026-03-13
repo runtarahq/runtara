@@ -312,10 +312,21 @@ fn emit_with_embedded_child(
             let mut __child_vars = serde_json::Map::new();
             __child_vars.insert("_scope_id".to_string(), serde_json::json!(__child_scope_id.clone()));
 
-            // Propagate _scenario_id to child so it's available at all nesting levels
-            // This ensures Agent steps in deeply nested scenarios can access the root scenario identity
+            // Propagate built-in variables to child so they're available at all nesting levels.
+            // This ensures Agent steps in deeply nested scenarios can access scenario identity.
             if let Some(ref sid) = parent_scenario_id {
                 __child_vars.insert("_scenario_id".to_string(), serde_json::json!(sid));
+            }
+            // Propagate _instance_id and _tenant_id from parent
+            if let Some(iid) = (*#scenario_inputs_var.variables).as_object()
+                .and_then(|vars| vars.get("_instance_id"))
+            {
+                __child_vars.insert("_instance_id".to_string(), iid.clone());
+            }
+            if let Some(tid) = (*#scenario_inputs_var.variables).as_object()
+                .and_then(|vars| vars.get("_tenant_id"))
+            {
+                __child_vars.insert("_tenant_id".to_string(), tid.clone());
             }
 
             // Build cache key prefix for child scenario

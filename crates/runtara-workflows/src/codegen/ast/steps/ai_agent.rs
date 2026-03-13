@@ -56,17 +56,29 @@ pub fn emit(
 
     // Collect labeled edges (tools) from execution plan.
     // "next" is a reserved label meaning "continue to next step" — not a tool.
+    // "memory" is a reserved label for the memory provider — not a tool.
     let tool_edges: Vec<(&str, &str)> = execution_plan
         .iter()
         .filter(|e| e.from_step == step.id && e.label.is_some())
         .filter_map(|e| {
             let label = e.label.as_deref()?;
-            if label == "next" {
-                return None; // Reserved label — treated as default edge
+            if label == "next" || label == "memory" {
+                return None; // Reserved labels
             }
             Some((label, e.to_step.as_str()))
         })
         .collect();
+
+    // Find the "memory" edge (at most one, validated elsewhere)
+    let memory_edge: Option<&str> = execution_plan
+        .iter()
+        .filter(|e| e.from_step == step.id && e.label.as_deref() == Some("memory"))
+        .map(|e| e.to_step.as_str())
+        .next();
+
+    // Extract memory config
+    let memory_config = step.config.as_ref().and_then(|c| c.memory.as_ref());
+    let has_memory = memory_config.is_some() && memory_edge.is_some();
 
     // Get config values
     let max_iterations: u32 = step
@@ -102,6 +114,67 @@ pub fn emit(
         .as_ref()
         .map(|c| mapping::emit_mapping_value(&c.user_prompt, ctx, &source_var))
         .unwrap_or_else(|| quote! { serde_json::Value::String(String::new()) });
+
+    // Emit conversation_id mapping if memory is configured
+    let conversation_id_code = if let Some(mem_cfg) = memory_config {
+        mapping::emit_mapping_value(&mem_cfg.conversation_id, ctx, &source_var)
+    } else {
+        quote! { serde_json::Value::Null }
+    };
+
+    // Memory compaction config
+    let max_memory_messages: u32 = memory_config
+        .and_then(|m| m.compaction.as_ref())
+        .and_then(|c| c.max_messages)
+        .unwrap_or(50);
+    let use_summarize_compaction = memory_config
+        .and_then(|m| m.compaction.as_ref())
+        .and_then(|c| c.strategy.as_ref())
+        .is_some_and(|s| matches!(s, runtara_dsl::CompactionStrategy::Summarize));
+
+    // Memory provider agent info (from the target Agent step)
+    let memory_provider_code = if let Some(target_step_id) = memory_edge {
+        if let Some(Step::Agent(agent_step)) = graph.steps.get(target_step_id) {
+            let agent_id = &agent_step.agent_id;
+            let mem_step_id = &agent_step.id;
+
+            // Connection fetch for memory provider (if it has one)
+            let mem_conn_code = if let Some(ref conn_id) = agent_step.connection_id {
+                let conn_id_str = conn_id.as_str();
+                quote! {
+                    let __mem_conn_service_url = get_connection_service_url()
+                        .ok_or_else(|| format!("Memory provider '{}': CONNECTION_SERVICE_URL required", #mem_step_id))?;
+                    let __mem_conn_ctx = ConnectionRequestContext {
+                        tag: Some("memory_provider"),
+                        step_id: Some(#mem_step_id),
+                        scenario_id: std::env::var("SCENARIO_ID").ok().as_deref(),
+                        instance_id: std::env::var("RUNTARA_INSTANCE_ID").ok().as_deref(),
+                    };
+                    let __mem_conn = fetch_connection(
+                        __mem_conn_service_url,
+                        TENANT_ID,
+                        #conn_id_str,
+                        Some(&__mem_conn_ctx)
+                    ).map_err(|e| format!("Memory provider '{}': connection fetch failed: {}", #mem_step_id, e))?;
+                    let __mem_connection_json = serde_json::json!({
+                        "parameters": __mem_conn.parameters,
+                        "integration_id": __mem_conn.integration_id,
+                        "connection_subtype": __mem_conn.connection_subtype
+                    });
+                }
+            } else {
+                quote! {
+                    let __mem_connection_json = serde_json::Value::Null;
+                }
+            };
+
+            Some((agent_id.clone(), mem_conn_code))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Connection ID
     let connection_id = step.connection_id.as_deref();
@@ -228,6 +301,494 @@ pub fn emit(
 
     let max_iter_lit = max_iterations;
     let temp_lit = temperature;
+    let max_mem_messages_lit = max_memory_messages;
+
+    // Build memory lifecycle code blocks (conditionally emitted)
+    let memory_init_code = if has_memory {
+        let (mem_agent_id, mem_conn_code) = memory_provider_code.as_ref().unwrap();
+        quote! {
+            // === Memory: resolve conversation_id ===
+            let __conversation_id = {
+                let v = #conversation_id_code;
+                v.as_str().unwrap_or("").to_string()
+            };
+
+            // === Memory: fetch provider connection ===
+            #mem_conn_code
+
+            // === Memory: load conversation history ===
+            let __mem_load_step_id = format!("{}.memory_load", #step_id);
+            let __mem_load_step_name = "Memory: Load".to_string();
+
+            // Emit step_debug_start for memory load
+            {
+                let __mem_load_debug_inputs = serde_json::json!({
+                    "conversation_id": &__conversation_id,
+                });
+                __emit_step_debug_event(
+                    "step_debug_start",
+                    &__mem_load_step_id,
+                    Some(&__mem_load_step_name),
+                    "AiAgentMemoryLoad",
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    #scenario_inputs_var.parent_scope_id.clone(),
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![])),
+                    Some(__mem_load_debug_inputs),
+                    None::<serde_json::Value>,
+                    None,
+                ).await;
+            }
+
+            let __mem_load_start_time = std::time::Instant::now();
+            let __mem_load_key = format!("{}/memory_load", __ai_cache_key_base);
+            let __mem_load_inputs = {
+                let mut __inp = serde_json::json!({
+                    "conversation_id": &__conversation_id,
+                });
+                if !__mem_connection_json.is_null() {
+                    if let serde_json::Value::Object(ref mut map) = __inp {
+                        map.insert("_connection".to_string(), __mem_connection_json.clone());
+                    }
+                }
+                __inp
+            };
+            let __mem_loaded = __ai_tool_durable(
+                &__mem_load_key,
+                __mem_load_inputs,
+                #mem_agent_id,
+                "load-memory",
+                "memory_load",
+            ).await.unwrap_or_else(|e| {
+                tracing::warn!("AI Agent step '{}': memory load failed: {}", #step_id, e);
+                serde_json::json!({"messages": [], "message_count": 0})
+            });
+            let __mem_load_duration_ms = __mem_load_start_time.elapsed().as_millis() as u64;
+
+            // Parse loaded messages into chat history
+            let __mem_loaded_count = if let Some(messages) = __mem_loaded.get("messages").and_then(|v| v.as_array()) {
+                let count = messages.len();
+                for msg_val in messages {
+                    if let Ok(msg) = serde_json::from_value::<RigMessage>(msg_val.clone()) {
+                        __chat_history.push(msg);
+                    }
+                }
+                if !messages.is_empty() {
+                    tracing::info!(
+                        "AI Agent step '{}': loaded {} messages from memory (conversation: {})",
+                        #step_id, messages.len(), &__conversation_id
+                    );
+                }
+                count
+            } else {
+                0
+            };
+
+            // Emit step_debug_end for memory load
+            {
+                // Build truncated message previews for the debug event
+                let __mem_load_previews: Vec<serde_json::Value> = __chat_history.iter().map(|msg| {
+                    let (role, content_preview) = match msg {
+                        RigMessage::User { content } => {
+                            let preview = content.iter().filter_map(|part| {
+                                match part {
+                                    rig::message::UserContent::Text(t) => Some(t.text.clone()),
+                                    rig::message::UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
+                                    _ => None,
+                                }
+                            }).collect::<Vec<_>>().join(" ");
+                            ("user", preview)
+                        }
+                        RigMessage::Assistant { content } => {
+                            let preview = content.iter().filter_map(|part| {
+                                match part {
+                                    rig::message::AssistantContent::Text(t) => Some(t.text.clone()),
+                                    rig::message::AssistantContent::ToolCall(tc) => Some(format!("[tool_call:{}]", tc.function.name)),
+                                }
+                            }).collect::<Vec<_>>().join(" ");
+                            ("assistant", preview)
+                        }
+                    };
+                    let truncated = if content_preview.len() > 200 {
+                        format!("{}...", &content_preview[..200])
+                    } else {
+                        content_preview
+                    };
+                    serde_json::json!({ "role": role, "preview": truncated })
+                }).collect();
+
+                let __mem_load_debug_outputs = serde_json::json!({
+                    "success": true,
+                    "conversation_id": &__conversation_id,
+                    "message_count": __mem_loaded_count,
+                    "messages": __mem_load_previews,
+                });
+                __emit_step_debug_event(
+                    "step_debug_end",
+                    &__mem_load_step_id,
+                    Some(&__mem_load_step_name),
+                    "AiAgentMemoryLoad",
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    #scenario_inputs_var.parent_scope_id.clone(),
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![])),
+                    None::<serde_json::Value>,
+                    Some(__mem_load_debug_outputs),
+                    Some(__mem_load_duration_ms),
+                ).await;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let memory_save_code = if has_memory {
+        let (mem_agent_id, _) = memory_provider_code.as_ref().unwrap();
+        let compaction_code = if use_summarize_compaction {
+            quote! {
+                if __chat_history.len() > #max_mem_messages_lit as usize {
+                    let __compact_step_id = format!("{}.memory.compact", #step_id);
+                    let __compact_step_name = "Memory: Summarize".to_string();
+                    let __messages_before = __chat_history.len();
+                    let __excess = __chat_history.len() - #max_mem_messages_lit as usize;
+
+                    // Emit step_debug_start for compaction
+                    {
+                        let __compact_inputs = serde_json::json!({
+                            "strategy": "summarize",
+                            "messages_before": __messages_before,
+                            "messages_to_compact": __excess,
+                            "max_messages": #max_mem_messages_lit,
+                            "conversation_id": &__conversation_id,
+                        });
+                        __emit_step_debug_event(
+                            "step_debug_start",
+                            &__compact_step_id,
+                            Some(&__compact_step_name),
+                            "AiAgentMemoryCompaction",
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_scope_id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            #scenario_inputs_var.parent_scope_id.clone(),
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_loop_indices"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Array(vec![])),
+                            Some(__compact_inputs),
+                            None::<serde_json::Value>,
+                            None,
+                        ).await;
+                    }
+
+                    let __compact_start_time = std::time::Instant::now();
+                    let mut __compact_summary_text = String::from("[Summary unavailable]");
+                    let __compact_success;
+
+                    let __old_messages = &__chat_history[..__excess];
+                    let __old_json = serde_json::to_string(__old_messages).unwrap_or_default();
+                    let __summary_prompt = format!(
+                        "Summarize the following conversation history concisely, \
+                         preserving key facts, decisions, and context:\n{}",
+                        __old_json
+                    );
+
+                    let __compact_key = format!("{}/memory_compact", __ai_cache_key_base);
+
+                    match __ai_llm_durable(
+                        &__compact_key,
+                        __ai_integration_id.clone(),
+                        __ai_conn_params.clone(),
+                        __ai_model_id.clone(),
+                        "You are a conversation summarizer. Produce a concise summary preserving key facts.".to_string(),
+                        __summary_prompt,
+                        serde_json::json!([]),
+                        serde_json::json!([]),
+                        0.3f64,
+                        None,
+                    ).await {
+                        Ok(summary_choice) => {
+                            __compact_summary_text = summary_choice
+                                .as_array()
+                                .and_then(|arr| arr.first())
+                                .and_then(|c| c.get("text"))
+                                .and_then(|t| t.as_str())
+                                .or_else(|| summary_choice.as_str())
+                                .unwrap_or("[Summary unavailable]")
+                                .to_string();
+
+                            __chat_history.drain(0..__excess);
+                            __chat_history.insert(0, RigMessage::User {
+                                content: OneOrMany::one(UserContent::text(
+                                    format!("[Previous conversation summary]: {}", __compact_summary_text)
+                                )),
+                            });
+                            __compact_success = true;
+                        }
+                        Err(e) => {
+                            tracing::error!("AI Agent step '{}': compaction LLM call failed: {}", #step_id, e);
+                            __compact_success = false;
+                        }
+                    }
+
+                    let __compact_duration_ms = __compact_start_time.elapsed().as_millis() as u64;
+
+                    // Emit step_debug_end for compaction
+                    {
+                        let __compact_outputs = serde_json::json!({
+                            "stepId": &__compact_step_id,
+                            "stepName": &__compact_step_name,
+                            "stepType": "AiAgentMemoryCompaction",
+                            "outputs": {
+                                "strategy": "summarize",
+                                "success": __compact_success,
+                                "messages_before": __messages_before,
+                                "messages_after": __chat_history.len(),
+                                "messages_compacted": __excess,
+                                "summary": &__compact_summary_text,
+                            }
+                        });
+                        __emit_step_debug_event(
+                            "step_debug_end",
+                            &__compact_step_id,
+                            Some(&__compact_step_name),
+                            "AiAgentMemoryCompaction",
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_scope_id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            #scenario_inputs_var.parent_scope_id.clone(),
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_loop_indices"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Array(vec![])),
+                            Some(__compact_outputs),
+                            None,
+                            Some(__compact_duration_ms),
+                        ).await;
+                    }
+                }
+            }
+        } else {
+            // SlidingWindow (default): drop oldest messages with debug events
+            quote! {
+                if __chat_history.len() > #max_mem_messages_lit as usize {
+                    let __compact_step_id = format!("{}.memory.compact", #step_id);
+                    let __compact_step_name = "Memory: Sliding Window".to_string();
+                    let __messages_before = __chat_history.len();
+                    let __excess = __chat_history.len() - #max_mem_messages_lit as usize;
+
+                    // Emit step_debug_start
+                    {
+                        let __compact_inputs = serde_json::json!({
+                            "strategy": "sliding_window",
+                            "messages_before": __messages_before,
+                            "messages_to_drop": __excess,
+                            "max_messages": #max_mem_messages_lit,
+                            "conversation_id": &__conversation_id,
+                        });
+                        __emit_step_debug_event(
+                            "step_debug_start",
+                            &__compact_step_id,
+                            Some(&__compact_step_name),
+                            "AiAgentMemoryCompaction",
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_scope_id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            #scenario_inputs_var.parent_scope_id.clone(),
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_loop_indices"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Array(vec![])),
+                            Some(__compact_inputs),
+                            None::<serde_json::Value>,
+                            None,
+                        ).await;
+                    }
+
+                    let __compact_start_time = std::time::Instant::now();
+                    __chat_history.drain(0..__excess);
+                    let __compact_duration_ms = __compact_start_time.elapsed().as_millis() as u64;
+
+                    // Emit step_debug_end
+                    {
+                        let __compact_outputs = serde_json::json!({
+                            "stepId": &__compact_step_id,
+                            "stepName": &__compact_step_name,
+                            "stepType": "AiAgentMemoryCompaction",
+                            "outputs": {
+                                "strategy": "sliding_window",
+                                "success": true,
+                                "messages_before": __messages_before,
+                                "messages_after": __chat_history.len(),
+                                "messages_dropped": __excess,
+                            }
+                        });
+                        __emit_step_debug_event(
+                            "step_debug_end",
+                            &__compact_step_id,
+                            Some(&__compact_step_name),
+                            "AiAgentMemoryCompaction",
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_scope_id"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            #scenario_inputs_var.parent_scope_id.clone(),
+                            (*#scenario_inputs_var.variables).as_object()
+                                .and_then(|vars| vars.get("_loop_indices"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Array(vec![])),
+                            Some(__compact_outputs),
+                            None,
+                            Some(__compact_duration_ms),
+                        ).await;
+                    }
+                }
+            }
+        };
+
+        quote! {
+            // === Memory: compact if needed ===
+            #compaction_code
+
+            // === Memory: save conversation history ===
+            let __mem_save_step_id = format!("{}.memory_save", #step_id);
+            let __mem_save_step_name = "Memory: Save".to_string();
+            let __mem_save_msg_count = __chat_history.len();
+
+            // Emit step_debug_start for memory save
+            {
+                let __mem_save_debug_inputs = serde_json::json!({
+                    "conversation_id": &__conversation_id,
+                    "message_count": __mem_save_msg_count,
+                });
+                __emit_step_debug_event(
+                    "step_debug_start",
+                    &__mem_save_step_id,
+                    Some(&__mem_save_step_name),
+                    "AiAgentMemorySave",
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    #scenario_inputs_var.parent_scope_id.clone(),
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![])),
+                    Some(__mem_save_debug_inputs),
+                    None::<serde_json::Value>,
+                    None,
+                ).await;
+            }
+
+            let __mem_save_start_time = std::time::Instant::now();
+            let __mem_save_key = format!("{}/memory_save/{}", __ai_cache_key_base, __iterations);
+            let __messages_to_save = serde_json::to_value(&__chat_history)
+                .unwrap_or_else(|e| {
+                    tracing::error!("AI Agent step '{}': failed to serialize history: {}", #step_id, e);
+                    serde_json::json!([])
+                });
+            let __mem_save_inputs = {
+                let mut __inp = serde_json::json!({
+                    "conversation_id": &__conversation_id,
+                    "messages": __messages_to_save,
+                });
+                if !__mem_connection_json.is_null() {
+                    if let serde_json::Value::Object(ref mut map) = __inp {
+                        map.insert("_connection".to_string(), __mem_connection_json.clone());
+                    }
+                }
+                __inp
+            };
+            let __mem_save_success = match __ai_tool_durable(
+                &__mem_save_key,
+                __mem_save_inputs,
+                #mem_agent_id,
+                "save-memory",
+                "memory_save",
+            ).await {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::error!("AI Agent step '{}': memory save failed: {}", #step_id, e);
+                    false
+                }
+            };
+            let __mem_save_duration_ms = __mem_save_start_time.elapsed().as_millis() as u64;
+
+            // Emit step_debug_end for memory save
+            {
+                // Build truncated message previews for the debug event
+                let __mem_save_previews: Vec<serde_json::Value> = __chat_history.iter().map(|msg| {
+                    let (role, content_preview) = match msg {
+                        RigMessage::User { content } => {
+                            let preview = content.iter().filter_map(|part| {
+                                match part {
+                                    rig::message::UserContent::Text(t) => Some(t.text.clone()),
+                                    rig::message::UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
+                                    _ => None,
+                                }
+                            }).collect::<Vec<_>>().join(" ");
+                            ("user", preview)
+                        }
+                        RigMessage::Assistant { content } => {
+                            let preview = content.iter().filter_map(|part| {
+                                match part {
+                                    rig::message::AssistantContent::Text(t) => Some(t.text.clone()),
+                                    rig::message::AssistantContent::ToolCall(tc) => Some(format!("[tool_call:{}]", tc.function.name)),
+                                }
+                            }).collect::<Vec<_>>().join(" ");
+                            ("assistant", preview)
+                        }
+                    };
+                    let truncated = if content_preview.len() > 200 {
+                        format!("{}...", &content_preview[..200])
+                    } else {
+                        content_preview
+                    };
+                    serde_json::json!({ "role": role, "preview": truncated })
+                }).collect();
+
+                let __mem_save_debug_outputs = serde_json::json!({
+                    "success": __mem_save_success,
+                    "conversation_id": &__conversation_id,
+                    "message_count": __mem_save_msg_count,
+                    "messages": __mem_save_previews,
+                });
+                __emit_step_debug_event(
+                    "step_debug_end",
+                    &__mem_save_step_id,
+                    Some(&__mem_save_step_name),
+                    "AiAgentMemorySave",
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_scope_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    #scenario_inputs_var.parent_scope_id.clone(),
+                    (*#scenario_inputs_var.variables).as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![])),
+                    None::<serde_json::Value>,
+                    Some(__mem_save_debug_outputs),
+                    Some(__mem_save_duration_ms),
+                ).await;
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         // Pre-emit child scenario functions for StartScenario tool targets
@@ -368,6 +929,9 @@ pub fn emit(
             let mut __final_response: Option<String> = None;
             let mut __iterations: u32 = 0;
             let mut __tool_call_counter: u32 = 0;
+
+            // Load conversation memory (if configured)
+            #memory_init_code
 
             loop {
                 if __iterations >= #max_iter_lit {
@@ -569,6 +1133,9 @@ pub fn emit(
                     }
                 }
             }
+
+            // Save conversation memory (if configured)
+            #memory_save_code
 
             // Store step output
             let __response_text = __final_response.unwrap_or_default();
@@ -1189,6 +1756,7 @@ mod tests {
                 max_iterations: Some(5),
                 temperature: Some(0.7),
                 max_tokens: Some(1024),
+                memory: None,
             }),
         }
     }
@@ -1450,6 +2018,7 @@ mod tests {
                     max_iterations: None, // Should default to 10
                     temperature: None,    // Should default to 0.7
                     max_tokens: None,
+                    memory: None,
                 }),
             }),
         );
@@ -1498,6 +2067,7 @@ mod tests {
                 max_iterations: None,
                 temperature: None,
                 max_tokens: None,
+                memory: None,
             }),
         };
 

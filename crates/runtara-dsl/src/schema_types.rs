@@ -1011,6 +1011,65 @@ pub struct AiAgentConfig {
     /// Maximum tokens per LLM call
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+
+    /// Conversation memory configuration.
+    /// Requires a "memory" labeled edge pointing to a memory provider Agent step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<AiAgentMemory>,
+}
+
+/// Conversation memory configuration for the AI Agent step.
+///
+/// Memory allows conversation history to persist across:
+/// - Multiple iterations within one execution
+/// - Multiple AI Agent steps in the same execution (shared by conversation_id)
+/// - Multiple executions (cross-execution memory via an external conversation key)
+///
+/// The actual storage is delegated to a memory provider agent connected via
+/// a "memory" labeled edge. The provider must implement `load_memory` and
+/// `save_memory` capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentMemory {
+    /// Identifier for the conversation thread.
+    /// Can be a reference (e.g., `data.sessionId`) or an immediate value.
+    /// All AI Agent steps sharing the same conversation_id share memory.
+    pub conversation_id: MappingValue,
+
+    /// Compaction configuration — controls how old messages are handled
+    /// when the conversation grows beyond a threshold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionConfig>,
+}
+
+/// Controls how conversation memory is compacted when it grows too large.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionConfig {
+    /// Maximum number of messages before compaction triggers.
+    /// Default: 50
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_messages: Option<u32>,
+
+    /// Strategy for compacting old messages.
+    /// Default: SlidingWindow
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<CompactionStrategy>,
+}
+
+/// Strategy for compacting conversation memory.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum CompactionStrategy {
+    /// Summarize older messages via an LLM call and replace them with
+    /// a single summary message. Preserves context but costs one extra LLM call.
+    Summarize,
+    /// Drop the oldest messages beyond max_messages, keeping only the most
+    /// recent ones. Simple and free but loses context.
+    SlidingWindow,
 }
 
 // ============================================================================
@@ -1061,9 +1120,14 @@ pub enum MappingValue {
 ///
 /// Available root contexts:
 /// - `data` - Current iteration data (in Split) or scenario input data
-/// - `variables` - Scenario variables
+/// - `variables` - Scenario variables (user-defined + built-in)
 /// - `steps.<stepId>.outputs` - Outputs from a previous step
 /// - `scenario.inputs` - Original scenario inputs
+///
+/// Built-in variables (available in all steps, including subgraphs):
+/// - `variables._scenario_id` - Unique per execution: "{scenario_id}::{instance_id}"
+/// - `variables._instance_id` - Execution instance UUID
+/// - `variables._tenant_id` - Tenant identifier
 ///
 /// Example: `{ "valueType": "reference", "value": "data.user.name" }`
 /// With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "int" }`

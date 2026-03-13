@@ -294,6 +294,17 @@ pub enum ValidationError {
     AiAgentInvalidToolLabel { step_id: String, label: String },
     /// AI Agent step is missing connection_id (required for LLM access).
     AiAgentMissingConnection { step_id: String },
+    /// AI Agent step has multiple "memory" labeled edges (at most one allowed).
+    AiAgentMultipleMemoryEdges { step_id: String },
+    /// AI Agent step has a "memory" edge pointing to a non-Agent step.
+    AiAgentMemoryEdgeNotAgent {
+        step_id: String,
+        target_step_id: String,
+    },
+    /// AI Agent step has memory config but no "memory" edge in the execution plan.
+    AiAgentMemoryConfigWithoutEdge { step_id: String },
+    /// AI Agent step has a "memory" edge but no memory config.
+    AiAgentMemoryEdgeWithoutConfig { step_id: String },
 }
 
 /// Information about a missing required input field.
@@ -729,6 +740,41 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E112] AI Agent step '{}' is missing connection_id. \
                      An LLM connection is required for AI Agent steps.",
+                    step_id
+                )
+            }
+            ValidationError::AiAgentMultipleMemoryEdges { step_id } => {
+                write!(
+                    f,
+                    "[E113] AI Agent step '{}' has multiple 'memory' edges. \
+                     At most one memory provider is allowed.",
+                    step_id
+                )
+            }
+            ValidationError::AiAgentMemoryEdgeNotAgent {
+                step_id,
+                target_step_id,
+            } => {
+                write!(
+                    f,
+                    "[E114] AI Agent step '{}' has a 'memory' edge pointing to '{}', \
+                     which is not an Agent step. Memory providers must be Agent steps.",
+                    step_id, target_step_id
+                )
+            }
+            ValidationError::AiAgentMemoryConfigWithoutEdge { step_id } => {
+                write!(
+                    f,
+                    "[E115] AI Agent step '{}' has memory config but no 'memory' edge. \
+                     Add a 'memory' labeled edge to a memory provider Agent step.",
+                    step_id
+                )
+            }
+            ValidationError::AiAgentMemoryEdgeWithoutConfig { step_id } => {
+                write!(
+                    f,
+                    "[E116] AI Agent step '{}' has a 'memory' edge but no memory config. \
+                     Add a memory configuration with at least a conversation_id.",
                     step_id
                 )
             }
@@ -1362,9 +1408,12 @@ fn validate_references_with_inherited(
 ) {
     let step_ids: HashSet<String> = graph.steps.keys().cloned().collect();
 
-    // Merge inherited variables with graph's own variables
+    // Merge inherited variables with graph's own variables + built-in runtime variables
     let mut variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
     variable_names.extend(inherited_variables.iter().cloned());
+    variable_names.insert("_scenario_id".to_string());
+    variable_names.insert("_instance_id".to_string());
+    variable_names.insert("_tenant_id".to_string());
 
     for (step_id, step) in &graph.steps {
         let mappings = collect_step_mappings(step);
@@ -2776,9 +2825,14 @@ fn validate_data_and_variable_references_with_context(
 ) {
     let available_data_fields: Vec<String> = graph.input_schema.keys().cloned().collect();
 
-    // Merge inherited variables with graph's own variables
+    // Merge inherited variables with graph's own variables + built-in runtime variables.
+    // Built-in variables are injected at runtime by the codegen (program.rs) and propagated
+    // through all subgraphs (Split, While, StartScenario, WaitForSignal).
     let mut all_variables: HashSet<String> = graph.variables.keys().cloned().collect();
     all_variables.extend(inherited_variables.iter().cloned());
+    all_variables.insert("_scenario_id".to_string());
+    all_variables.insert("_instance_id".to_string());
+    all_variables.insert("_tenant_id".to_string());
     let available_variables: Vec<String> = all_variables.iter().cloned().collect();
 
     // Check each step for references
@@ -2941,6 +2995,9 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
             if let Some(ref config) = ai_agent_step.config {
                 extract_references_from_mapping_value(&config.system_prompt, &mut refs);
                 extract_references_from_mapping_value(&config.user_prompt, &mut refs);
+                if let Some(ref memory) = config.memory {
+                    extract_references_from_mapping_value(&memory.conversation_id, &mut refs);
+                }
             }
         }
     }
@@ -3029,6 +3086,57 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                             });
                     }
                 }
+            }
+
+            // === Memory edge validation ===
+            let memory_edges: Vec<&runtara_dsl::ExecutionPlanEdge> = graph
+                .execution_plan
+                .iter()
+                .filter(|e| e.from_step == *step_id && e.label.as_deref() == Some("memory"))
+                .collect();
+
+            // At most one memory edge
+            if memory_edges.len() > 1 {
+                result
+                    .errors
+                    .push(ValidationError::AiAgentMultipleMemoryEdges {
+                        step_id: step_id.clone(),
+                    });
+            }
+
+            // Memory edge must point to an Agent step
+            for edge in &memory_edges {
+                if !matches!(graph.steps.get(&edge.to_step), Some(Step::Agent(_))) {
+                    result
+                        .errors
+                        .push(ValidationError::AiAgentMemoryEdgeNotAgent {
+                            step_id: step_id.clone(),
+                            target_step_id: edge.to_step.clone(),
+                        });
+                }
+            }
+
+            // Memory config ↔ memory edge consistency
+            let has_memory_config = ai_step
+                .config
+                .as_ref()
+                .and_then(|c| c.memory.as_ref())
+                .is_some();
+            let has_memory_edge = !memory_edges.is_empty();
+
+            if has_memory_config && !has_memory_edge {
+                result
+                    .errors
+                    .push(ValidationError::AiAgentMemoryConfigWithoutEdge {
+                        step_id: step_id.clone(),
+                    });
+            }
+            if has_memory_edge && !has_memory_config {
+                result
+                    .errors
+                    .push(ValidationError::AiAgentMemoryEdgeWithoutConfig {
+                        step_id: step_id.clone(),
+                    });
             }
         }
     }

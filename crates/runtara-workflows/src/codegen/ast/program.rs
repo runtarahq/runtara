@@ -409,14 +409,28 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             let scenario_id = std::env::var("SCENARIO_ID").unwrap_or_else(|_| "unknown".to_string());
             let instance_id = std::env::var("RUNTARA_INSTANCE_ID").unwrap_or_else(|_| "unknown".to_string());
 
-            // Inject _scenario_id into variables for cache key prefix uniqueness.
-            // This ensures that when independent top-level scenarios call the same child scenario
-            // with identical step IDs, their cache keys don't collide.
-            // Format: "scenario_id::instance_id" to be unique per execution.
+            // Inject built-in variables into the variables namespace.
+            // These are available as `variables._scenario_id`, `variables._instance_id`, etc.
+            // in all input mappings, conditions, and memory conversation IDs.
+            //
+            // - _scenario_id: "scenario_id::instance_id" — unique per execution, used for
+            //   cache key prefix uniqueness across independent top-level scenarios.
+            // - _instance_id: execution instance UUID — useful for conversation memory keys,
+            //   correlation, and debugging.
+            // - _tenant_id: tenant identifier — useful for multi-tenant context in mappings.
             if let Some(vars_obj) = variables.as_object_mut() {
                 vars_obj.insert(
                     "_scenario_id".to_string(),
                     serde_json::json!(format!("{}::{}", scenario_id, instance_id))
+                );
+                vars_obj.insert(
+                    "_instance_id".to_string(),
+                    serde_json::json!(&instance_id)
+                );
+                let tenant_id_val = std::env::var("TENANT_ID").unwrap_or_else(|_| "unknown".to_string());
+                vars_obj.insert(
+                    "_tenant_id".to_string(),
+                    serde_json::json!(tenant_id_val)
                 );
             }
 
