@@ -5,8 +5,10 @@
 //! This module is moved from runtara-core.
 
 pub mod mock;
+pub mod native;
 pub mod oci;
 mod traits;
 
 pub use mock::MockRunner;
+pub use native::{NativeRunner, NativeRunnerConfig};
 pub use traits::*;
