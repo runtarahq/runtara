@@ -58,9 +58,11 @@ mod tests {
                 }
             }
         });
-        let result =
-            render_template("Bearer {{ steps.my_conn.outputs.parameters.api_key }}", &ctx)
-                .unwrap();
+        let result = render_template(
+            "Bearer {{ steps.my_conn.outputs.parameters.api_key }}",
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(result, "Bearer sk-12345");
     }
 
@@ -74,27 +76,22 @@ mod tests {
     #[test]
     fn test_filter_default() {
         let ctx = json!({"data": {}});
-        let result =
-            render_template("{{ data.missing | default('N/A') }}", &ctx).unwrap();
+        let result = render_template("{{ data.missing | default('N/A') }}", &ctx).unwrap();
         assert_eq!(result, "N/A");
     }
 
     #[test]
     fn test_multiple_interpolations() {
         let ctx = json!({"data": {"first": "John", "last": "Doe"}});
-        let result =
-            render_template("{{ data.first }} {{ data.last }}", &ctx).unwrap();
+        let result = render_template("{{ data.first }} {{ data.last }}", &ctx).unwrap();
         assert_eq!(result, "John Doe");
     }
 
     #[test]
     fn test_conditional() {
         let ctx = json!({"data": {"active": true}});
-        let result = render_template(
-            "{% if data.active %}yes{% else %}no{% endif %}",
-            &ctx,
-        )
-        .unwrap();
+        let result =
+            render_template("{% if data.active %}yes{% else %}no{% endif %}", &ctx).unwrap();
         assert_eq!(result, "yes");
     }
 

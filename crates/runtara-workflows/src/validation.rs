@@ -7232,7 +7232,10 @@ mod template_validation_tests {
             .iter()
             .filter(|e| matches!(e, ValidationError::InvalidReferencePath { .. }))
             .collect();
-        assert!(template_errors.is_empty(), "Unexpected template errors: {template_errors:?}");
+        assert!(
+            template_errors.is_empty(),
+            "Unexpected template errors: {template_errors:?}"
+        );
     }
 
     #[test]

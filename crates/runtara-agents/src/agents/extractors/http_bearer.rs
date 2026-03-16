@@ -14,7 +14,8 @@ use std::collections::HashMap;
     integration_id = "http_bearer",
     display_name = "HTTP Bearer Token",
     description = "Authenticate HTTP requests using a Bearer token",
-    category = "http"
+    category = "http",
+    auth_type = "api_key"
 )]
 struct HttpBearerParams {
     /// Bearer token for authentication

@@ -305,10 +305,7 @@ fn emit_immediate_value(imm_val: &ImmediateValue) -> TokenStream {
 /// Emit code for a template value (minijinja rendering).
 ///
 /// Generates code that renders the template string using the full execution context.
-fn emit_template_value(
-    tmpl_val: &TemplateValue,
-    source_var: &proc_macro2::Ident,
-) -> TokenStream {
+fn emit_template_value(tmpl_val: &TemplateValue, source_var: &proc_macro2::Ident) -> TokenStream {
     let template_str = &tmpl_val.value;
     quote! {
         {

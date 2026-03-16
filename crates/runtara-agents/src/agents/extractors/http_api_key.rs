@@ -14,7 +14,8 @@ use std::collections::HashMap;
     integration_id = "http_api_key",
     display_name = "HTTP API Key",
     description = "Authenticate HTTP requests using an API key header",
-    category = "http"
+    category = "http",
+    auth_type = "api_key"
 )]
 struct HttpApiKeyParams {
     /// API key value

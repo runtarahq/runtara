@@ -783,6 +783,12 @@ struct ConnectionContainerArgs {
     /// Category for grouping (e.g., "ecommerce", "file_storage", "llm")
     #[darling(default)]
     category: Option<String>,
+    /// External service identifier (e.g., "shopify", "openai")
+    #[darling(default)]
+    service_id: Option<String>,
+    /// Authentication / credential type (e.g., "api_key", "oauth2_client_credentials")
+    #[darling(default)]
+    auth_type: Option<String>,
 }
 
 /// Derive macro for connection parameter structs
@@ -874,7 +880,79 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
     });
 
     let description_token = option_to_tokens(&args.description);
-    let category_token = option_to_tokens(&args.category);
+
+    // Convert category string to typed enum variant
+    let category_token = match &args.category {
+        Some(cat) => {
+            let variant = match cat.to_lowercase().replace('-', "_").as_str() {
+                "ecommerce" | "e_commerce" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionCategory::Ecommerce }
+                }
+                "file_storage" | "storage" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionCategory::FileStorage }
+                }
+                "llm" | "ai" | "ai_llm" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionCategory::Llm }
+                }
+                "crm" => quote! { runtara_dsl::agent_meta::ConnectionCategory::Crm },
+                "erp" => quote! { runtara_dsl::agent_meta::ConnectionCategory::Erp },
+                "database" | "db" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionCategory::Database }
+                }
+                "email" | "smtp" => quote! { runtara_dsl::agent_meta::ConnectionCategory::Email },
+                "messaging" | "chat" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionCategory::Messaging }
+                }
+                "payment" => quote! { runtara_dsl::agent_meta::ConnectionCategory::Payment },
+                "cloud" => quote! { runtara_dsl::agent_meta::ConnectionCategory::Cloud },
+                "api" | "http" | "rest" | "graphql" | "webhook" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionCategory::Api }
+                }
+                other => {
+                    return TokenStream::from(
+                        syn::Error::new(proc_macro2::Span::call_site(), format!("Unknown connection category: \"{}\". Valid values: ecommerce, file_storage, llm, crm, erp, database, email, messaging, payment, cloud, api", other))
+                            .to_compile_error(),
+                    );
+                }
+            };
+            quote! { Some(#variant) }
+        }
+        None => quote! { None },
+    };
+
+    // Convert auth_type string to typed enum variant
+    let auth_type_token = match &args.auth_type {
+        Some(at) => {
+            let variant = match at.to_lowercase().replace('-', "_").as_str() {
+                "api_key" => quote! { runtara_dsl::agent_meta::ConnectionAuthType::ApiKey },
+                "oauth2_authorization_code" | "oauth2" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionAuthType::Oauth2AuthorizationCode }
+                }
+                "oauth2_client_credentials" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials }
+                }
+                "username_password" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionAuthType::UsernamePassword }
+                }
+                "ssh_key" => quote! { runtara_dsl::agent_meta::ConnectionAuthType::SshKey },
+                "access_key" => quote! { runtara_dsl::agent_meta::ConnectionAuthType::AccessKey },
+                "connection_string" | "dsn" => {
+                    quote! { runtara_dsl::agent_meta::ConnectionAuthType::ConnectionString }
+                }
+                "custom" => quote! { runtara_dsl::agent_meta::ConnectionAuthType::Custom },
+                other => {
+                    return TokenStream::from(
+                        syn::Error::new(proc_macro2::Span::call_site(), format!("Unknown connection auth_type: \"{}\". Valid values: api_key, oauth2_authorization_code, oauth2_client_credentials, username_password, ssh_key, access_key, connection_string, custom", other))
+                            .to_compile_error(),
+                    );
+                }
+            };
+            quote! { Some(#variant) }
+        }
+        None => quote! { None },
+    };
+
+    let service_id_token = option_to_tokens(&args.service_id);
 
     let meta_ident = format_ident!("__CONNECTION_META_{}", struct_name);
 
@@ -886,6 +964,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             display_name: #display_name,
             description: #description_token,
             category: #category_token,
+            service_id: #service_id_token,
+            auth_type: #auth_type_token,
             fields: &[#(#field_metas),*],
         };
 

@@ -638,6 +638,229 @@ pub fn find_step_type(id: &str) -> Option<&'static StepTypeMeta> {
 // Connection Type Metadata (for connection form generation)
 // ============================================================================
 
+// ============================================================================
+// Connection Enums
+// ============================================================================
+
+/// Canonical list of connection categories.
+///
+/// Used for grouping connection types in the UI and API responses.
+/// When adding a new integration, pick the most specific category that fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionCategory {
+    Ecommerce,
+    FileStorage,
+    Llm,
+    Crm,
+    Erp,
+    Database,
+    Email,
+    Messaging,
+    Payment,
+    Cloud,
+    Api,
+}
+
+impl ConnectionCategory {
+    /// All categories in preferred display order
+    pub const ALL: &[ConnectionCategory] = &[
+        ConnectionCategory::Ecommerce,
+        ConnectionCategory::FileStorage,
+        ConnectionCategory::Llm,
+        ConnectionCategory::Crm,
+        ConnectionCategory::Erp,
+        ConnectionCategory::Database,
+        ConnectionCategory::Email,
+        ConnectionCategory::Messaging,
+        ConnectionCategory::Payment,
+        ConnectionCategory::Cloud,
+        ConnectionCategory::Api,
+    ];
+
+    /// Snake_case identifier
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Ecommerce => "ecommerce",
+            Self::FileStorage => "file_storage",
+            Self::Llm => "llm",
+            Self::Crm => "crm",
+            Self::Erp => "erp",
+            Self::Database => "database",
+            Self::Email => "email",
+            Self::Messaging => "messaging",
+            Self::Payment => "payment",
+            Self::Cloud => "cloud",
+            Self::Api => "api",
+        }
+    }
+
+    /// Human-readable display name
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Ecommerce => "E-Commerce",
+            Self::FileStorage => "File Storage",
+            Self::Llm => "AI / LLM",
+            Self::Crm => "CRM",
+            Self::Erp => "ERP",
+            Self::Database => "Database",
+            Self::Email => "Email",
+            Self::Messaging => "Messaging",
+            Self::Payment => "Payment",
+            Self::Cloud => "Cloud",
+            Self::Api => "API",
+        }
+    }
+
+    /// Short description of what this category covers
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::Ecommerce => "Online store and marketplace platforms",
+            Self::FileStorage => "File transfer and cloud storage services",
+            Self::Llm => "Large language models and AI services",
+            Self::Crm => "Customer relationship management systems",
+            Self::Erp => "Enterprise resource planning systems",
+            Self::Database => "Relational and document database connections",
+            Self::Email => "Email delivery and transactional email services",
+            Self::Messaging => "Chat and messaging platforms",
+            Self::Payment => "Payment processing and billing platforms",
+            Self::Cloud => "Cloud infrastructure providers",
+            Self::Api => "Generic REST, GraphQL, or webhook endpoints",
+        }
+    }
+
+    /// Parse from a string, accepting common legacy variants
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "ecommerce" | "e_commerce" => Some(Self::Ecommerce),
+            "file_storage" | "storage" => Some(Self::FileStorage),
+            "llm" | "ai" | "ai_llm" => Some(Self::Llm),
+            "crm" => Some(Self::Crm),
+            "erp" => Some(Self::Erp),
+            "database" | "db" => Some(Self::Database),
+            "email" | "smtp" => Some(Self::Email),
+            "messaging" | "chat" => Some(Self::Messaging),
+            "payment" => Some(Self::Payment),
+            "cloud" => Some(Self::Cloud),
+            "api" | "http" | "rest" | "graphql" | "webhook" => Some(Self::Api),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// Canonical list of authentication / credential types for connections.
+///
+/// Describes **what credentials** are used to authenticate, not how they are
+/// transported (e.g. bearer header is a delivery mechanism, not a credential type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionAuthType {
+    /// Static secret key for API authentication
+    ApiKey,
+    /// User-interactive OAuth2 with redirect and consent
+    Oauth2AuthorizationCode,
+    /// Machine-to-machine OAuth2 token exchange
+    Oauth2ClientCredentials,
+    /// Credential pair authentication (login + password)
+    UsernamePassword,
+    /// Private key authentication (e.g. SSH, SFTP)
+    SshKey,
+    /// IAM-style key pair (key ID + secret key)
+    AccessKey,
+    /// Database DSN or connection URI
+    ConnectionString,
+    /// Integration-specific authentication that doesn't fit other types
+    Custom,
+}
+
+impl ConnectionAuthType {
+    /// All auth types in preferred display order
+    pub const ALL: &[ConnectionAuthType] = &[
+        ConnectionAuthType::ApiKey,
+        ConnectionAuthType::Oauth2AuthorizationCode,
+        ConnectionAuthType::Oauth2ClientCredentials,
+        ConnectionAuthType::UsernamePassword,
+        ConnectionAuthType::SshKey,
+        ConnectionAuthType::AccessKey,
+        ConnectionAuthType::ConnectionString,
+        ConnectionAuthType::Custom,
+    ];
+
+    /// Snake_case identifier
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::Oauth2AuthorizationCode => "oauth2_authorization_code",
+            Self::Oauth2ClientCredentials => "oauth2_client_credentials",
+            Self::UsernamePassword => "username_password",
+            Self::SshKey => "ssh_key",
+            Self::AccessKey => "access_key",
+            Self::ConnectionString => "connection_string",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// Human-readable display name
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "API Key",
+            Self::Oauth2AuthorizationCode => "OAuth2 (Authorization Code)",
+            Self::Oauth2ClientCredentials => "OAuth2 (Client Credentials)",
+            Self::UsernamePassword => "Username & Password",
+            Self::SshKey => "SSH Key",
+            Self::AccessKey => "Access Key & Secret",
+            Self::ConnectionString => "Connection String",
+            Self::Custom => "Custom",
+        }
+    }
+
+    /// Short description of this authentication type
+    pub fn description(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "Static secret key for API authentication",
+            Self::Oauth2AuthorizationCode => "User-interactive OAuth2 with redirect and consent",
+            Self::Oauth2ClientCredentials => "Machine-to-machine OAuth2 token exchange",
+            Self::UsernamePassword => "Credential pair authentication",
+            Self::SshKey => "Private key authentication",
+            Self::AccessKey => "IAM-style key pair (key ID + secret key)",
+            Self::ConnectionString => "Database DSN or connection URI",
+            Self::Custom => "Integration-specific authentication",
+        }
+    }
+
+    /// Parse from a string, accepting legacy SCREAMING_SNAKE_CASE variants
+    /// from smo-management and other common forms.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "api_key" => Some(Self::ApiKey),
+            "oauth2_authorization_code" | "oauth2" => Some(Self::Oauth2AuthorizationCode),
+            "oauth2_client_credentials" => Some(Self::Oauth2ClientCredentials),
+            "username_password" => Some(Self::UsernamePassword),
+            "ssh_key" => Some(Self::SshKey),
+            "access_key" => Some(Self::AccessKey),
+            "connection_string" | "dsn" => Some(Self::ConnectionString),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectionAuthType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+// ============================================================================
+// Connection Metadata Types
+// ============================================================================
+
 /// Metadata for a connection field parameter
 #[derive(Debug, Clone)]
 pub struct ConnectionFieldMeta {
@@ -668,8 +891,12 @@ pub struct ConnectionTypeMeta {
     pub display_name: &'static str,
     /// Description of this connection type
     pub description: Option<&'static str>,
-    /// Category for grouping (e.g., "ecommerce", "file_storage", "llm")
-    pub category: Option<&'static str>,
+    /// Category for grouping (e.g., Ecommerce, FileStorage, Llm)
+    pub category: Option<ConnectionCategory>,
+    /// External service identifier (e.g., "shopify", "openai")
+    pub service_id: Option<&'static str>,
+    /// Authentication / credential type
+    pub auth_type: Option<ConnectionAuthType>,
     /// Fields required for this connection type
     pub fields: &'static [ConnectionFieldMeta],
 }

@@ -15,7 +15,8 @@ use serde::Deserialize;
     integration_id = "sftp",
     display_name = "SFTP",
     description = "Connect to an SFTP server for file operations",
-    category = "file_storage"
+    category = "file_storage",
+    auth_type = "ssh_key"
 )]
 pub struct SftpParams {
     /// SFTP server hostname or IP
