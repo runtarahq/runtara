@@ -6,7 +6,7 @@
 //! dispatching based on `integration_id`.
 
 use rig::providers::openai;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Errors that can occur during provider creation.
 #[derive(Debug, thiserror::Error)]

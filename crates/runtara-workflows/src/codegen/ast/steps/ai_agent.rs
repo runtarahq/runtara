@@ -93,10 +93,7 @@ pub fn emit(
         .unwrap_or(0.7);
     let max_tokens: Option<u64> = step.config.as_ref().and_then(|c| c.max_tokens);
     let model_id: Option<&str> = step.config.as_ref().and_then(|c| c.model.as_deref());
-    let output_schema = step
-        .config
-        .as_ref()
-        .and_then(|c| c.output_schema.as_ref());
+    let output_schema = step.config.as_ref().and_then(|c| c.output_schema.as_ref());
 
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);

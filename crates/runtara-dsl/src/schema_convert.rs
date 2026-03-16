@@ -87,10 +87,7 @@ pub fn dsl_schema_to_json_schema(schema: &HashMap<String, SchemaField>) -> Value
         required.sort_by(|a, b| a.as_str().unwrap_or("").cmp(b.as_str().unwrap_or("")));
         json_schema.insert("required".to_string(), Value::Array(required));
     }
-    json_schema.insert(
-        "additionalProperties".to_string(),
-        Value::Bool(false),
-    );
+    json_schema.insert("additionalProperties".to_string(), Value::Bool(false));
 
     Value::Object(json_schema)
 }
@@ -196,9 +193,6 @@ mod tests {
         let schema = HashMap::new();
         let result = dsl_schema_to_json_schema(&schema);
         assert_eq!(result["type"], "object");
-        assert_eq!(
-            result["properties"].as_object().unwrap().len(),
-            0
-        );
+        assert_eq!(result["properties"].as_object().unwrap().len(), 0);
     }
 }
