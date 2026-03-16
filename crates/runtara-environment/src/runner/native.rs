@@ -105,7 +105,10 @@ impl NativeRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
-        env.insert("RUNTARA_SERVER_ADDR".to_string(), runtara_core_addr.to_string());
+        env.insert(
+            "RUNTARA_SERVER_ADDR".to_string(),
+            runtara_core_addr.to_string(),
+        );
 
         // Workspace directory for ephemeral file storage
         let workspace_dir = self
@@ -280,7 +283,13 @@ impl NativeRunner {
         let stderr_handle = child.stderr.take();
 
         let result = self
-            .wait_with_cancellation(&mut child, instance_id, cancel_token, timeout, stderr_handle)
+            .wait_with_cancellation(
+                &mut child,
+                instance_id,
+                cancel_token,
+                timeout,
+                stderr_handle,
+            )
             .await;
 
         // No cgroup metrics available for native processes
@@ -536,13 +545,8 @@ impl Runner for NativeRunner {
         );
         env.extend(options.env.clone());
 
-        self.spawn_detached(
-            &binary_path,
-            &env,
-            &options.instance_id,
-            &options.tenant_id,
-        )
-        .await
+        self.spawn_detached(&binary_path, &env, &options.instance_id, &options.tenant_id)
+            .await
     }
 
     async fn is_running(&self, handle: &RunnerHandle) -> bool {

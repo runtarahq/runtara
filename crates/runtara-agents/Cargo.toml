@@ -67,6 +67,8 @@ openssl = { workspace = true, optional = true }
 glob = "0.3"
 # ZIP archive support
 zip = "2.2"
+# Spreadsheet parsing (XLSX, XLS, XLSB, ODS)
+calamine = "0.26"
 
 [dev-dependencies]
 tempfile = "3"

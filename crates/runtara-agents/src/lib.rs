@@ -31,6 +31,8 @@ pub mod text;
 pub mod transform;
 #[path = "agents/utils.rs"]
 pub mod utils;
+#[path = "agents/xlsx.rs"]
+pub mod xlsx;
 #[path = "agents/xml.rs"]
 pub mod xml;
 
