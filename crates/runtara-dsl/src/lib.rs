@@ -29,6 +29,9 @@ pub mod coercion;
 // Specification generation (DSL schema, OpenAPI, compatibility)
 pub mod spec;
 
+// DSL flat-map schema → JSON Schema conversion
+pub mod schema_convert;
+
 // Step type metadata registration (auto-registers step types with inventory)
 mod step_registration;
 

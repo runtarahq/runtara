@@ -1016,6 +1016,27 @@ pub struct AiAgentConfig {
     /// Requires a "memory" labeled edge pointing to a memory provider Agent step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<AiAgentMemory>,
+
+    /// Output schema for structured responses (DSL flat-map format).
+    ///
+    /// When set, the LLM is instructed to return JSON matching this schema
+    /// via the provider's structured output feature (e.g., OpenAI `response_format`,
+    /// Anthropic `response_format`).
+    ///
+    /// Uses the same `SchemaField` format as scenario `inputSchema`/`outputSchema`.
+    ///
+    /// Example:
+    /// ```json
+    /// {
+    ///   "sentiment": { "type": "string", "required": true, "enum": ["positive", "negative", "neutral"] },
+    ///   "confidence": { "type": "number", "required": true },
+    ///   "reasoning": { "type": "string", "required": false }
+    /// }
+    /// ```
+    ///
+    /// The step output `response` will be a parsed JSON object instead of a string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<HashMap<String, SchemaField>>,
 }
 
 /// Conversation memory configuration for the AI Agent step.

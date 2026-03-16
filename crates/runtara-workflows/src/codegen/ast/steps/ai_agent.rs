@@ -93,6 +93,10 @@ pub fn emit(
         .unwrap_or(0.7);
     let max_tokens: Option<u64> = step.config.as_ref().and_then(|c| c.max_tokens);
     let model_id: Option<&str> = step.config.as_ref().and_then(|c| c.model.as_deref());
+    let output_schema = step
+        .config
+        .as_ref()
+        .and_then(|c| c.output_schema.as_ref());
 
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);
@@ -224,6 +228,32 @@ pub fn emit(
         quote! { Some(#mt) }
     } else {
         quote! { None::<u64> }
+    };
+
+    // Output schema: convert DSL flat-map → JSON Schema string at codegen time.
+    // This is embedded as a string literal and parsed at runtime to pass via additional_params.
+    let output_schema_json_str: Option<String> = output_schema.map(|schema| {
+        let json_schema = runtara_dsl::schema_convert::dsl_schema_to_json_schema(schema);
+        serde_json::to_string(&json_schema).unwrap_or_else(|_| "{}".to_string())
+    });
+    let output_schema_tokens = if let Some(ref schema_str) = output_schema_json_str {
+        quote! { Some(#schema_str.to_string()) }
+    } else {
+        quote! { None::<String> }
+    };
+    let has_output_schema = output_schema.is_some();
+
+    // Generate response parsing code: parse as JSON when output_schema is set,
+    // otherwise return as plain string.
+    let response_parse_code = if has_output_schema {
+        quote! {
+            serde_json::from_str::<serde_json::Value>(&__response_text)
+                .unwrap_or_else(|_| serde_json::Value::String(__response_text.clone()))
+        }
+    } else {
+        quote! {
+            serde_json::Value::String(__response_text.clone())
+        }
     };
 
     // Pre-emit child scenario functions for StartScenario tool targets.
@@ -516,6 +546,7 @@ pub fn emit(
                         serde_json::json!([]),
                         0.3f64,
                         None,
+                        None, // no structured output for compaction
                     ).await {
                         Ok(summary_choice) => {
                             __compact_summary_text = summary_choice
@@ -827,6 +858,7 @@ pub fn emit(
             let __ai_conn_params = serde_json::json!(__ai_conn.parameters);
             let __ai_model_id: Option<String> = #model_tokens.map(|s: &str| s.to_string());
             let __ai_max_tokens: Option<u64> = #max_tokens_tokens;
+            let __ai_output_schema_json: Option<String> = #output_schema_tokens;
 
             // Build tool definitions
             let __tools: Vec<ToolDefinition> = #tool_def_tokens;
@@ -892,6 +924,7 @@ pub fn emit(
                 tools_json: serde_json::Value,
                 temperature: f64,
                 max_tokens: Option<u64>,
+                output_schema_json: Option<String>,
             ) -> std::result::Result<serde_json::Value, String> {
                 // These use-imports are needed because inner fns don't inherit
                 // the parent scope's use declarations.
@@ -912,6 +945,16 @@ pub fn emit(
                     .temperature(temperature);
                 if let Some(mt) = max_tokens {
                     __b = __b.max_tokens(mt);
+                }
+                // Inject structured output via additional_params when output_schema is set
+                if let Some(ref schema_str) = output_schema_json {
+                    if let Ok(schema_val) = serde_json::from_str::<serde_json::Value>(schema_str) {
+                        if let Some(params) = #stdlib::ai::provider::structured_output_params(
+                            &integration_id, schema_val,
+                        ) {
+                            __b = __b.additional_params(params);
+                        }
+                    }
                 }
                 for t in &__tls { __b = __b.tool(t.clone()); }
                 for msg in &__hist { __b = __b.message(msg.clone()); }
@@ -975,6 +1018,7 @@ pub fn emit(
                     __tools_json,
                     #temp_lit,
                     __ai_max_tokens,
+                    __ai_output_schema_json.clone(),
                 ).await?;
                 let __response_choice: OneOrMany<AssistantContent> = serde_json::from_value(__cached_choice)
                     .map_err(|e| format!("AI Agent step '{}': failed to deserialize LLM response: {}", #step_id, e))?;
@@ -1139,13 +1183,14 @@ pub fn emit(
 
             // Store step output
             let __response_text = __final_response.unwrap_or_default();
+            let __response_value: serde_json::Value = #response_parse_code;
 
             let #step_var = serde_json::json!({
                 "stepId": #step_id,
                 "stepName": #step_name_display,
                 "stepType": "AiAgent",
                 "outputs": {
-                    "response": __response_text,
+                    "response": __response_value,
                     "iterations": __iterations,
                     "toolCalls": __tool_call_log
                 }
@@ -1757,6 +1802,7 @@ mod tests {
                 temperature: Some(0.7),
                 max_tokens: Some(1024),
                 memory: None,
+                output_schema: None,
             }),
         }
     }
@@ -2019,6 +2065,7 @@ mod tests {
                     temperature: None,    // Should default to 0.7
                     max_tokens: None,
                     memory: None,
+                    output_schema: None,
                 }),
             }),
         );
@@ -2068,6 +2115,7 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 memory: None,
+                output_schema: None,
             }),
         };
 

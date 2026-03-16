@@ -6,7 +6,7 @@
 //! dispatching based on `integration_id`.
 
 use rig::providers::openai;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Errors that can occur during provider creation.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +46,37 @@ pub fn create_openai_model(
 
     let model_id = model.unwrap_or("gpt-4o");
     Ok(client.completion_model(model_id))
+}
+
+/// Build provider-specific `additional_params` for structured output.
+///
+/// Takes a standard JSON Schema and wraps it in the format required by
+/// each LLM provider's structured output feature:
+/// - OpenAI: `response_format: { type: "json_schema", json_schema: { ... } }`
+/// - Anthropic: `response_format: { type: "json", schema: { ... } }`
+///
+/// Returns `None` for unsupported providers (structured output will be
+/// best-effort via prompt instructions).
+pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Option<Value> {
+    match integration_id {
+        "openai_api_key" => Some(json!({
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "strict": true,
+                    "schema": json_schema
+                }
+            }
+        })),
+        "anthropic_api_key" => Some(json!({
+            "response_format": {
+                "type": "json",
+                "schema": json_schema
+            }
+        })),
+        _ => None,
+    }
 }
 
 /// Dispatch to the appropriate LLM provider based on `integration_id`.
