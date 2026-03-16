@@ -1003,7 +1003,7 @@ mod tests {
         // Should have compatible changes:
         // 1. Log step added
         // 2. error enum value added
-        assert!(report.compatible_changes.len() >= 1);
+        assert!(!report.compatible_changes.is_empty());
     }
 
     #[test]

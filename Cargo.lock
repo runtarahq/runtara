@@ -2671,6 +2671,7 @@ name = "runtara-workflow-stdlib"
 version = "1.3.1"
 dependencies = [
  "futures",
+ "minijinja",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -2692,6 +2693,7 @@ dependencies = [
 name = "runtara-workflows"
 version = "1.3.1"
 dependencies = [
+ "minijinja",
  "proc-macro2",
  "quote",
  "runtara-agents",

@@ -283,6 +283,11 @@ impl MappingValue {
         matches!(self, MappingValue::Composite(_))
     }
 
+    /// Check if this is a template (minijinja string interpolation)
+    pub fn is_template(&self) -> bool {
+        matches!(self, MappingValue::Template(_))
+    }
+
     /// Get the string value if this is a reference
     pub fn as_reference_str(&self) -> Option<&str> {
         match self {
@@ -307,12 +312,23 @@ impl MappingValue {
         }
     }
 
+    /// Get the template string if this is a template
+    pub fn as_template_str(&self) -> Option<&str> {
+        match self {
+            MappingValue::Template(t) => Some(&t.value),
+            _ => None,
+        }
+    }
+
     /// Recursively collect all reference paths used in this MappingValue
     pub fn collect_references(&self) -> Vec<&str> {
         match self {
             MappingValue::Reference(r) => vec![r.value.as_str()],
             MappingValue::Immediate(_) => vec![],
             MappingValue::Composite(c) => c.value.collect_references(),
+            // Template references can't be statically extracted without parsing;
+            // validation handles this separately via regex extraction
+            MappingValue::Template(_) => vec![],
         }
     }
 
@@ -322,6 +338,8 @@ impl MappingValue {
             MappingValue::Reference(_) => true,
             MappingValue::Immediate(_) => false,
             MappingValue::Composite(c) => c.value.has_references(),
+            // Templates may contain references via {{ steps.*.outputs.* }} etc.
+            MappingValue::Template(_) => true,
         }
     }
 }
@@ -459,7 +477,7 @@ mod tests {
             let schema = (meta.schema_fn)();
             // Just verify it doesn't panic and returns something
             assert!(
-                schema.schema.metadata.is_some() || schema.definitions.len() > 0,
+                schema.schema.metadata.is_some() || !schema.definitions.is_empty(),
                 "Schema for {} should have metadata or definitions",
                 meta.id
             );
@@ -883,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_memory_tier_stack_size_bytes() {
-        assert_eq!(MemoryTier::S.stack_size_bytes(), 1 * 1024 * 1024);
+        assert_eq!(MemoryTier::S.stack_size_bytes(), 1024 * 1024);
         assert_eq!(MemoryTier::M.stack_size_bytes(), 4 * 1024 * 1024);
         assert_eq!(MemoryTier::L.stack_size_bytes(), 8 * 1024 * 1024);
         assert_eq!(MemoryTier::XL.stack_size_bytes(), 8 * 1024 * 1024);
@@ -1458,6 +1476,67 @@ mod tests {
         let parsed_arr: MappingValue = serde_json::from_str(&json_arr).unwrap();
         assert!(parsed_arr.is_composite());
         assert!(parsed_arr.as_composite().unwrap().is_array());
+    }
+
+    // ========================================================================
+    // TemplateValue Tests
+    // ========================================================================
+
+    #[test]
+    fn test_template_value_serde_roundtrip() {
+        let original = MappingValue::Template(TemplateValue {
+            value: "Hello {{ data.name }}".to_string(),
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains(r#""valueType":"template"#));
+        assert!(json.contains(r#""value":"Hello {{ data.name }}"#));
+
+        let parsed: MappingValue = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_template());
+        assert_eq!(parsed.as_template_str().unwrap(), "Hello {{ data.name }}");
+    }
+
+    #[test]
+    fn test_template_value_from_json() {
+        let json = r#"{"valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}"}"#;
+        let parsed: MappingValue = serde_json::from_str(json).unwrap();
+        assert!(parsed.is_template());
+        assert_eq!(
+            parsed.as_template_str().unwrap(),
+            "Bearer {{ steps.my_conn.outputs.parameters.api_key }}"
+        );
+    }
+
+    #[test]
+    fn test_template_value_helper_methods() {
+        let tmpl = MappingValue::Template(TemplateValue {
+            value: "{{ data.x }}".to_string(),
+        });
+        assert!(tmpl.is_template());
+        assert!(!tmpl.is_reference());
+        assert!(!tmpl.is_immediate());
+        assert!(!tmpl.is_composite());
+        assert_eq!(tmpl.as_template_str(), Some("{{ data.x }}"));
+        assert_eq!(tmpl.as_reference_str(), None);
+        assert_eq!(tmpl.as_immediate_value(), None);
+        assert!(tmpl.as_composite().is_none());
+    }
+
+    #[test]
+    fn test_template_has_references_returns_true() {
+        let tmpl = MappingValue::Template(TemplateValue {
+            value: "{{ steps.x.outputs.y }}".to_string(),
+        });
+        assert!(tmpl.has_references());
+    }
+
+    #[test]
+    fn test_template_collect_references_returns_empty() {
+        // Templates can't statically extract references; validation handles this
+        let tmpl = MappingValue::Template(TemplateValue {
+            value: "{{ steps.x.outputs.y }}".to_string(),
+        });
+        assert!(tmpl.collect_references().is_empty());
     }
 
     // ========================================================================

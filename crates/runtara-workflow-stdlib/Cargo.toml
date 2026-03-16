@@ -63,6 +63,9 @@ futures = "0.3"
 # HTTP client for connection fetching (native only)
 ureq = { version = "2.12", optional = true }
 
+# Template rendering for MappingValue::Template
+minijinja = "2.5"
+
 # URL encoding for query parameters
 urlencoding = "2"
 

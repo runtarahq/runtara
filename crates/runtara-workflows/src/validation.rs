@@ -1500,6 +1500,17 @@ fn validate_mapping_value_references(
                 }
             }
         }
+        MappingValue::Template(tmpl_value) => {
+            // Validate template syntax at compile time;
+            // reference resolution happens at runtime via minijinja context
+            if let Some(err) = validate_template_syntax(&tmpl_value.value) {
+                result.errors.push(ValidationError::InvalidReferencePath {
+                    step_id: step_id.to_string(),
+                    reference_path: tmpl_value.value.clone(),
+                    reason: err,
+                });
+            }
+        }
     }
 }
 
@@ -2590,6 +2601,9 @@ fn extract_step_ids_from_mapping_value(value: &MappingValue) -> Vec<String> {
                 }
             }
         },
+        MappingValue::Template(_) => {
+            // Template references are resolved at runtime by minijinja
+        }
     }
     step_ids
 }
@@ -2768,6 +2782,9 @@ fn extract_references_from_mapping_value(value: &MappingValue, refs: &mut Vec<St
         MappingValue::Immediate(_) => {}
         MappingValue::Composite(composite) => {
             extract_references_from_composite(&composite.value, refs);
+        }
+        MappingValue::Template(_) => {
+            // Template references are resolved at runtime by minijinja
         }
     }
 }
@@ -3152,6 +3169,20 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
             }
             _ => {}
         }
+    }
+}
+
+// ============================================================================
+// Template Validation Utilities
+// ============================================================================
+
+/// Validate that a minijinja template string has correct syntax.
+/// Returns Some(error_message) if the template has a parse error.
+fn validate_template_syntax(template_str: &str) -> Option<String> {
+    let mut env = minijinja::Environment::new();
+    match env.add_template("__check", template_str) {
+        Ok(_) => None,
+        Err(e) => Some(format!("Template syntax error: {e}")),
     }
 }
 
@@ -7134,5 +7165,107 @@ mod reference_extraction_tests {
         // steps reference (not data or variables)
         let result = parse_reference("steps.fetch.outputs");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_template_value_no_references_extracted() {
+        let mut refs = Vec::new();
+        let tmpl = MappingValue::Template(runtara_dsl::TemplateValue {
+            value: "Bearer {{ steps.conn.outputs.api_key }}".to_string(),
+        });
+        extract_references_from_mapping_value(&tmpl, &mut refs);
+        // Templates don't extract references statically — minijinja resolves at runtime
+        assert!(refs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod template_validation_tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_template_syntax_valid() {
+        assert!(validate_template_syntax("Hello {{ name }}").is_none());
+        assert!(validate_template_syntax("{{ x | upper }}").is_none());
+        assert!(validate_template_syntax("{% if a %}yes{% endif %}").is_none());
+        assert!(validate_template_syntax("plain text").is_none());
+    }
+
+    #[test]
+    fn test_validate_template_syntax_invalid() {
+        let err = validate_template_syntax("{{ unclosed");
+        assert!(err.is_some());
+        assert!(err.unwrap().contains("syntax error"));
+    }
+
+    #[test]
+    fn test_validate_template_syntax_invalid_block() {
+        let err = validate_template_syntax("{% if %}");
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn test_template_in_mapping_passes_validation() {
+        let json = r#"{
+            "steps": {
+                "fetch": {
+                    "stepType": "Agent", "id": "fetch",
+                    "agentId": "http", "capabilityId": "request",
+                    "inputMapping": {
+                        "url": {
+                            "valueType": "template",
+                            "value": "https://api.example.com/{{ data.path }}"
+                        }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+            },
+            "entryPoint": "fetch",
+            "executionPlan": [
+                { "fromStep": "fetch", "toStep": "finish" }
+            ]
+        }"#;
+        let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
+        let result = validate_workflow(&graph);
+        let template_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::InvalidReferencePath { .. }))
+            .collect();
+        assert!(template_errors.is_empty(), "Unexpected template errors: {template_errors:?}");
+    }
+
+    #[test]
+    fn test_template_syntax_error_caught_at_validation() {
+        let json = r#"{
+            "steps": {
+                "fetch": {
+                    "stepType": "Agent", "id": "fetch",
+                    "agentId": "http", "capabilityId": "request",
+                    "inputMapping": {
+                        "url": {
+                            "valueType": "template",
+                            "value": "{{ unclosed"
+                        }
+                    }
+                },
+                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+            },
+            "entryPoint": "fetch",
+            "executionPlan": [
+                { "fromStep": "fetch", "toStep": "finish" }
+            ]
+        }"#;
+        let graph: ExecutionGraph = serde_json::from_str(json).unwrap();
+        let result = validate_workflow(&graph);
+        assert!(
+            result.errors.iter().any(|e| matches!(
+                e,
+                ValidationError::InvalidReferencePath { reason, .. }
+                    if reason.contains("syntax error")
+            )),
+            "Expected template syntax error, got: {:?}",
+            result.errors
+        );
     }
 }

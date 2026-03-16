@@ -1112,6 +1112,9 @@ pub enum MappingValue {
     /// Composite value - structured object or array with nested MappingValues
     #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     Composite(CompositeValue),
+
+    /// Template string rendered with minijinja using the full execution context
+    Template(TemplateValue),
 }
 
 /// A reference to data at a specific path.
@@ -1211,6 +1214,26 @@ pub enum CompositeInner {
     /// Array composite: each element is a MappingValue
     #[cfg_attr(feature = "utoipa", schema(no_recursion))]
     Array(Vec<MappingValue>),
+}
+
+/// A template value rendered with minijinja using the full execution context.
+///
+/// Templates support full minijinja syntax: variable interpolation, filters, conditionals, loops.
+///
+/// Available context variables (same as reference resolution):
+/// - `data.*` — scenario input data
+/// - `variables.*` — scenario variables
+/// - `steps.<id>.outputs.*` — previous step outputs
+/// - `scenario.inputs.*` — original scenario inputs
+///
+/// Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
+/// With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateValue {
+    /// Minijinja template string
+    pub value: String,
 }
 
 /// Type hints for reference values.

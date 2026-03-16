@@ -18,6 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proc-macro2 = "1.0"
 quote = "1.0"
+minijinja = "2.5"
 
 [[bin]]
 name = "runtara-compile"

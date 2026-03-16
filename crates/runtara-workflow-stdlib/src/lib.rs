@@ -62,6 +62,9 @@ pub use tracing::Instrument;
 // Telemetry support (OpenTelemetry integration)
 pub mod telemetry;
 
+// Template rendering for MappingValue::Template
+pub mod template;
+
 // Child scenario input validation (runtime)
 pub mod child_input_validation;
 

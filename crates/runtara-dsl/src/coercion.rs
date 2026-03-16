@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn test_string_to_f64() {
         assert_eq!(coerce_to_type(json!("1840"), "f64"), json!(1840.0));
-        assert_eq!(coerce_to_type(json!("3.14159"), "f64"), json!(3.14159));
+        assert_eq!(coerce_to_type(json!("7.53"), "f64"), json!(7.53));
         assert_eq!(coerce_to_type(json!("-42.5"), "f64"), json!(-42.5));
         assert_eq!(coerce_to_type(json!("0"), "f64"), json!(0.0));
     }
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn test_string_to_f64_with_whitespace() {
         assert_eq!(coerce_to_type(json!("  1840  "), "f64"), json!(1840.0));
-        assert_eq!(coerce_to_type(json!("\t3.14\n"), "f64"), json!(3.14));
+        assert_eq!(coerce_to_type(json!("\t2.72\n"), "f64"), json!(2.72));
     }
 
     #[test]
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn test_number_to_string() {
         assert_eq!(coerce_to_type(json!(42), "String"), json!("42"));
-        assert_eq!(coerce_to_type(json!(3.14), "String"), json!("3.14"));
+        assert_eq!(coerce_to_type(json!(2.72), "String"), json!("2.72"));
         assert_eq!(coerce_to_type(json!(-100), "String"), json!("-100"));
     }
 

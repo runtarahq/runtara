@@ -85,7 +85,7 @@ mod tests {
         let data_dir = get_data_dir();
         // Should return either .data (default) or a custom path from env
         assert!(
-            data_dir == PathBuf::from(".data") || data_dir.is_absolute(),
+            data_dir == std::path::Path::new(".data") || data_dir.is_absolute(),
             "Data dir should be either .data or an absolute path, got: {:?}",
             data_dir
         );

@@ -11,7 +11,7 @@ use super::context::EmitContext;
 use super::json_to_tokens;
 use runtara_dsl::{
     CompositeInner, CompositeValue, ImmediateValue, InputMapping, MappingValue, ReferenceValue,
-    ValueType,
+    TemplateValue, ValueType,
 };
 
 /// Emit code for a complete input mapping.
@@ -169,6 +169,7 @@ pub fn emit_mapping_value(
         MappingValue::Reference(ref_val) => emit_reference_value(ref_val, ctx, source_var),
         MappingValue::Immediate(imm_val) => emit_immediate_value(imm_val),
         MappingValue::Composite(comp_val) => emit_composite_value(comp_val, ctx, source_var),
+        MappingValue::Template(tmpl_val) => emit_template_value(tmpl_val, source_var),
     }
 }
 
@@ -301,6 +302,31 @@ fn emit_immediate_value(imm_val: &ImmediateValue) -> TokenStream {
 
 /// Emit code for a composite value (nested object or array with MappingValues).
 ///
+/// Emit code for a template value (minijinja rendering).
+///
+/// Generates code that renders the template string using the full execution context.
+fn emit_template_value(
+    tmpl_val: &TemplateValue,
+    source_var: &proc_macro2::Ident,
+) -> TokenStream {
+    let template_str = &tmpl_val.value;
+    quote! {
+        {
+            let __tmpl_result = runtara_workflow_stdlib::template::render_template(
+                #template_str,
+                &#source_var,
+            );
+            match __tmpl_result {
+                Ok(rendered) => serde_json::Value::String(rendered),
+                Err(e) => {
+                    tracing::error!(error = %e, "Template rendering failed");
+                    serde_json::Value::String(format!("Template error: {}", e))
+                }
+            }
+        }
+    }
+}
+
 /// Generates code that builds a JSON object or array at runtime, where each
 /// field/element can be a reference, immediate, or another composite.
 fn emit_composite_value(
@@ -714,6 +740,30 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(code.contains("constant"));
+    }
+
+    #[test]
+    fn test_emit_mapping_value_template() {
+        let map_val = MappingValue::Template(TemplateValue {
+            value: "Bearer {{ steps.conn.outputs.api_key }}".to_string(),
+        });
+        let mut ctx = EmitContext::new(false);
+        let source_var = Ident::new("src", Span::call_site());
+        let tokens = emit_mapping_value(&map_val, &mut ctx, &source_var);
+        let code = tokens.to_string();
+
+        assert!(
+            code.contains("render_template"),
+            "Expected render_template call, got: {code}"
+        );
+        assert!(
+            code.contains("Bearer {{ steps.conn.outputs.api_key }}"),
+            "Expected template string in generated code, got: {code}"
+        );
+        assert!(
+            code.contains("src"),
+            "Expected source var passed as context, got: {code}"
+        );
     }
 
     // ==========================================
