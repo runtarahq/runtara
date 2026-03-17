@@ -23,7 +23,7 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_span_start};
 
 /// Emit code for a WaitForSignal step.
 ///
@@ -113,17 +113,57 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
         quote! {}
     };
 
-    // Generate debug events if enabled
-    let debug_start = emit_step_debug_start(
-        ctx,
-        step_id,
-        step_name,
-        "WaitForSignal",
-        None,
-        None,
-        Some(&inputs_var),
-        None,
-    );
+    // Generate debug events if enabled.
+    // WaitForSignal emits debug_start AFTER signal_id and timeout are resolved
+    // so we can include them in the event payload.
+    let debug_start = if ctx.debug_mode {
+        let name_expr = step_name
+            .map(|n| quote! { Some(#n) })
+            .unwrap_or(quote! { None::<&str> });
+        let loop_indices_expr = quote! {
+            (*#inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]))
+        };
+        let scope_id_expr = quote! {
+            (*#inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        let parent_scope_id_expr = quote! {
+            #inputs_var.parent_scope_id.clone()
+        };
+        let poll_interval_ms = poll_interval;
+        quote! {
+            {
+                let __wait_debug_inputs = serde_json::json!({
+                    "signal_id": &__signal_id,
+                    "timeout_ms": __timeout_ms,
+                    "poll_interval_ms": #poll_interval_ms,
+                    "response_schema": serde_json::from_str::<serde_json::Value>(#response_schema_json)
+                        .unwrap_or(serde_json::Value::Null),
+                });
+                __emit_step_debug_event(
+                    "step_debug_start",
+                    #step_id,
+                    #name_expr,
+                    "WaitForSignal",
+                    #scope_id_expr,
+                    #parent_scope_id_expr,
+                    #loop_indices_expr,
+                    Some(__wait_debug_inputs),
+                    None::<serde_json::Value>,
+                    None,
+                ).await;
+            }
+        }
+    } else {
+        quote! {}
+    };
     let debug_end = emit_step_debug_end(
         ctx,
         step_id,
@@ -146,7 +186,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
 
         // Wrap step execution in async block instrumented with span
         async {
-            #debug_start
+            let __step_start_time = std::time::Instant::now();
 
             // Get instance_id from SDK
             let __instance_id = {
@@ -184,6 +224,9 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
 
             // Evaluate timeout
             #timeout_code
+
+            // Emit debug_start after signal_id and timeout are resolved
+            #debug_start
 
             // Execute on_wait subgraph (notifies external system of signal_id)
             #on_wait_code
