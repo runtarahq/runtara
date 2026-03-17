@@ -31,7 +31,7 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{emit_step_debug_end, emit_step_span_start};
 use runtara_dsl::{AiAgentStep, ExecutionGraph, Step};
 
 /// Get the stdlib crate name, matching the logic in program.rs.
@@ -302,17 +302,83 @@ pub fn emit(
         &scenario_inputs_var,
     )?;
 
-    // Debug events
-    let debug_start = emit_step_debug_start(
-        ctx,
-        step_id,
-        step_name,
-        "AiAgent",
-        None,
-        None,
-        Some(&scenario_inputs_var),
-        None,
-    );
+    // Debug events — AI Agent emits debug_start AFTER prompts are resolved so we can
+    // include the resolved system_prompt and user_prompt in the event payload.
+    // We serialize the input_mapping (prompt MappingValues) at codegen time.
+    let ai_input_mapping_json = if ctx.debug_mode {
+        let mut map = serde_json::Map::new();
+        if let Some(cfg) = step.config.as_ref() {
+            map.insert(
+                "system_prompt".to_string(),
+                serde_json::to_value(&cfg.system_prompt).unwrap_or_default(),
+            );
+            map.insert(
+                "user_prompt".to_string(),
+                serde_json::to_value(&cfg.user_prompt).unwrap_or_default(),
+            );
+        }
+        serde_json::to_string(&serde_json::Value::Object(map)).ok()
+    } else {
+        None
+    };
+
+    let debug_start = if ctx.debug_mode {
+        let name_expr = step_name
+            .map(|n| quote! { Some(#n) })
+            .unwrap_or(quote! { None::<&str> });
+        let loop_indices_expr = quote! {
+            (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_loop_indices"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]))
+        };
+        let scope_id_expr = quote! {
+            (*#scenario_inputs_var.variables)
+                .as_object()
+                .and_then(|vars| vars.get("_scope_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        let parent_scope_id_expr = quote! {
+            #scenario_inputs_var.parent_scope_id.clone()
+        };
+        let mapping_expr = ai_input_mapping_json
+            .as_deref()
+            .map(|json| quote! {
+                Some(serde_json::from_str::<serde_json::Value>(#json).unwrap_or(serde_json::Value::Null))
+            })
+            .unwrap_or(quote! { None::<serde_json::Value> });
+        let model_str = model_id.unwrap_or("");
+        let temp_val = temperature;
+        let max_iter_val = max_iterations;
+        quote! {
+            // Emit debug_start after prompts are resolved so inputs are available
+            {
+                let __ai_debug_inputs = serde_json::json!({
+                    "system_prompt": &__system_prompt,
+                    "user_prompt": &__user_prompt,
+                    "model": #model_str,
+                    "temperature": #temp_val,
+                    "max_iterations": #max_iter_val,
+                });
+                __emit_step_debug_event(
+                    "step_debug_start",
+                    #step_id,
+                    #name_expr,
+                    "AiAgent",
+                    #scope_id_expr,
+                    #parent_scope_id_expr,
+                    #loop_indices_expr,
+                    Some(__ai_debug_inputs),
+                    #mapping_expr,
+                    None,
+                ).await;
+            }
+        }
+    } else {
+        quote! {}
+    };
     let debug_end = emit_step_debug_end(
         ctx,
         step_id,
@@ -829,9 +895,8 @@ pub fn emit(
 
         let __step_result: std::result::Result<(), String> = async {
             let __step_start_time = std::time::Instant::now();
-            #debug_start
 
-            // Resolve prompts from mappings
+            // Resolve prompts from mappings (before debug_start so inputs are available)
             let __system_prompt = {
                 let v = #system_prompt_code;
                 v.as_str().unwrap_or("").to_string()
@@ -840,6 +905,8 @@ pub fn emit(
                 let v = #user_prompt_code;
                 v.as_str().unwrap_or("").to_string()
             };
+
+            #debug_start
 
             // Fetch LLM connection
             #connection_fetch
