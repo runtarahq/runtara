@@ -337,13 +337,15 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                 tokio::time::sleep(__poll_interval).await;
             }
 
-            // Produce step result
+            // Produce step result.
+            // Signal payload is stored under "outputs" (matching all other step types)
+            // so that references like steps['...'].outputs.field_name work consistently.
             let #step_var = serde_json::json!({
                 "stepId": #step_id,
                 "stepName": #step_name_display,
                 "stepType": "WaitForSignal",
                 "signal_id": __signal_id,
-                "payload": __signal_payload
+                "outputs": __signal_payload
             });
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
