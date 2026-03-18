@@ -47,7 +47,10 @@ fn schema_field_to_json_schema(field: &SchemaField) -> Value {
     if let Some(min) = field.min {
         match field.field_type {
             SchemaFieldType::String => {
-                prop.insert("minLength".to_string(), Value::Number(serde_json::Number::from(min as u64)));
+                prop.insert(
+                    "minLength".to_string(),
+                    Value::Number(serde_json::Number::from(min as u64)),
+                );
             }
             SchemaFieldType::Integer | SchemaFieldType::Number => {
                 prop.insert("minimum".to_string(), serde_json::json!(min));
@@ -59,7 +62,10 @@ fn schema_field_to_json_schema(field: &SchemaField) -> Value {
     if let Some(max) = field.max {
         match field.field_type {
             SchemaFieldType::String => {
-                prop.insert("maxLength".to_string(), Value::Number(serde_json::Number::from(max as u64)));
+                prop.insert(
+                    "maxLength".to_string(),
+                    Value::Number(serde_json::Number::from(max as u64)),
+                );
             }
             SchemaFieldType::Integer | SchemaFieldType::Number => {
                 prop.insert("maximum".to_string(), serde_json::json!(max));
