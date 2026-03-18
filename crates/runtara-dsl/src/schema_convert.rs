@@ -74,26 +74,26 @@ fn schema_field_to_json_schema(field: &SchemaField) -> Value {
         }
     }
 
-    if let Some(ref pattern) = field.pattern {
-        if field.field_type == SchemaFieldType::String {
-            prop.insert("pattern".to_string(), Value::String(pattern.clone()));
-        }
+    if let Some(ref pattern) = field.pattern
+        && field.field_type == SchemaFieldType::String
+    {
+        prop.insert("pattern".to_string(), Value::String(pattern.clone()));
     }
 
     // Recurse into object properties
-    if let Some(ref properties) = field.properties {
-        if field.field_type == SchemaFieldType::Object {
-            let nested = dsl_schema_to_json_schema(properties);
-            if let Value::Object(nested_obj) = nested {
-                if let Some(props) = nested_obj.get("properties") {
-                    prop.insert("properties".to_string(), props.clone());
-                }
-                if let Some(req) = nested_obj.get("required") {
-                    prop.insert("required".to_string(), req.clone());
-                }
-                if let Some(ap) = nested_obj.get("additionalProperties") {
-                    prop.insert("additionalProperties".to_string(), ap.clone());
-                }
+    if let Some(ref properties) = field.properties
+        && field.field_type == SchemaFieldType::Object
+    {
+        let nested = dsl_schema_to_json_schema(properties);
+        if let Value::Object(nested_obj) = nested {
+            if let Some(props) = nested_obj.get("properties") {
+                prop.insert("properties".to_string(), props.clone());
+            }
+            if let Some(req) = nested_obj.get("required") {
+                prop.insert("required".to_string(), req.clone());
+            }
+            if let Some(ap) = nested_obj.get("additionalProperties") {
+                prop.insert("additionalProperties".to_string(), ap.clone());
             }
         }
     }
