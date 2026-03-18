@@ -43,6 +43,55 @@ fn schema_field_to_json_schema(field: &SchemaField) -> Value {
         prop.insert("enum".to_string(), Value::Array(enum_values.clone()));
     }
 
+    // Forward validation constraints to JSON Schema
+    if let Some(min) = field.min {
+        match field.field_type {
+            SchemaFieldType::String => {
+                prop.insert("minLength".to_string(), Value::Number(serde_json::Number::from(min as u64)));
+            }
+            SchemaFieldType::Integer | SchemaFieldType::Number => {
+                prop.insert("minimum".to_string(), serde_json::json!(min));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(max) = field.max {
+        match field.field_type {
+            SchemaFieldType::String => {
+                prop.insert("maxLength".to_string(), Value::Number(serde_json::Number::from(max as u64)));
+            }
+            SchemaFieldType::Integer | SchemaFieldType::Number => {
+                prop.insert("maximum".to_string(), serde_json::json!(max));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(ref pattern) = field.pattern {
+        if field.field_type == SchemaFieldType::String {
+            prop.insert("pattern".to_string(), Value::String(pattern.clone()));
+        }
+    }
+
+    // Recurse into object properties
+    if let Some(ref properties) = field.properties {
+        if field.field_type == SchemaFieldType::Object {
+            let nested = dsl_schema_to_json_schema(properties);
+            if let Value::Object(nested_obj) = nested {
+                if let Some(props) = nested_obj.get("properties") {
+                    prop.insert("properties".to_string(), props.clone());
+                }
+                if let Some(req) = nested_obj.get("required") {
+                    prop.insert("required".to_string(), req.clone());
+                }
+                if let Some(ap) = nested_obj.get("additionalProperties") {
+                    prop.insert("additionalProperties".to_string(), ap.clone());
+                }
+            }
+        }
+    }
+
     Value::Object(prop)
 }
 
@@ -106,6 +155,15 @@ mod tests {
             example: None,
             items: None,
             enum_values: None,
+            label: None,
+            placeholder: None,
+            order: None,
+            format: None,
+            min: None,
+            max: None,
+            pattern: None,
+            properties: None,
+            visible_when: None,
         }
     }
 
@@ -139,6 +197,15 @@ mod tests {
                 default: None,
                 example: None,
                 enum_values: None,
+                label: None,
+                placeholder: None,
+                order: None,
+                format: None,
+                min: None,
+                max: None,
+                pattern: None,
+                properties: None,
+                visible_when: None,
             },
         );
 
@@ -164,6 +231,15 @@ mod tests {
                 default: None,
                 example: None,
                 items: None,
+                label: None,
+                placeholder: None,
+                order: None,
+                format: None,
+                min: None,
+                max: None,
+                pattern: None,
+                properties: None,
+                visible_when: None,
             },
         );
 

@@ -1376,6 +1376,13 @@ pub struct Variable {
 ///
 /// Used to define the structure of scenario inputs and outputs.
 /// The field name is the key in the HashMap.
+///
+/// ## Form rendering extensions
+///
+/// The optional fields `label`, `placeholder`, `order`, `format`, `min`, `max`,
+/// `pattern`, `properties`, and `visible_when` enable clients to render rich
+/// forms from WaitForSignal response schemas. All are backward-compatible —
+/// existing schemas without these fields continue to work unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "SchemaField")]
@@ -1409,6 +1416,79 @@ pub struct SchemaField {
     /// Allowed values (enum)
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<serde_json::Value>>,
+
+    // -- Form rendering extensions (all optional, backward-compatible) --
+
+    /// Short display label for form rendering.
+    /// Falls back to the humanized field key name if not provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Placeholder text shown in empty inputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+
+    /// Sort order for rendering fields in forms.
+    /// Lower values appear first. Falls back to alphabetical order if not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+
+    /// Display format hint for the field type.
+    ///
+    /// For `string` type: `textarea`, `date`, `datetime`, `email`, `url`,
+    /// `tel`, `color`, `password`, `markdown`.
+    /// Unknown formats fall back to the default input for the type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+
+    /// Minimum value (for numbers) or minimum length (for strings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+
+    /// Maximum value (for numbers) or maximum length (for strings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+
+    /// Regex validation pattern (for string fields).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+
+    /// Sub-fields for `type: "object"`.
+    /// Uses the same flat-map format recursively.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(no_recursion))]
+    pub properties: Option<HashMap<String, SchemaField>>,
+
+    /// Conditional visibility — show this field only when a sibling field
+    /// matches a specific value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<VisibleWhen>,
+}
+
+/// Conditional visibility rule for a schema field.
+///
+/// When attached to a field, the field is only shown in forms if the
+/// referenced sibling field matches the condition. Only single-level
+/// comparisons are supported — no complex boolean logic.
+///
+/// Example:
+/// ```json
+/// { "field": "approved", "equals": false }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct VisibleWhen {
+    /// The sibling field name to check.
+    pub field: String,
+
+    /// Show this field when the sibling equals this value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equals: Option<serde_json::Value>,
+
+    /// Show this field when the sibling does NOT equal this value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_equals: Option<serde_json::Value>,
 }
 
 // ============================================================================
