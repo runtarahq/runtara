@@ -296,6 +296,8 @@ fn emit_with_embedded_child(
             parent_cache_prefix: Option<String>,
             loop_indices_suffix: String,
             parent_scenario_id: Option<String>,
+            parent_instance_id: Option<serde_json::Value>,
+            parent_tenant_id: Option<serde_json::Value>,
         ) -> std::result::Result<serde_json::Value, String> {
             // Generate scope ID for this child scenario execution
             let __child_scope_id = if let Some(ref parent) = parent_scope_id {
@@ -317,16 +319,13 @@ fn emit_with_embedded_child(
             if let Some(ref sid) = parent_scenario_id {
                 __child_vars.insert("_scenario_id".to_string(), serde_json::json!(sid));
             }
-            // Propagate _instance_id and _tenant_id from parent
-            if let Some(iid) = (*#scenario_inputs_var.variables).as_object()
-                .and_then(|vars| vars.get("_instance_id"))
-            {
-                __child_vars.insert("_instance_id".to_string(), iid.clone());
+            // Propagate _instance_id and _tenant_id from parent (passed as fn parameters
+            // because fn items cannot capture from their enclosing scope)
+            if let Some(iid) = parent_instance_id {
+                __child_vars.insert("_instance_id".to_string(), iid);
             }
-            if let Some(tid) = (*#scenario_inputs_var.variables).as_object()
-                .and_then(|vars| vars.get("_tenant_id"))
-            {
-                __child_vars.insert("_tenant_id".to_string(), tid.clone());
+            if let Some(tid) = parent_tenant_id {
+                __child_vars.insert("_tenant_id".to_string(), tid);
             }
 
             // Build cache key prefix for child scenario
@@ -486,6 +485,17 @@ fn emit_with_embedded_child(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Extract _instance_id and _tenant_id from parent variables so they can be
+        // passed as parameters to the durable fn (fn items cannot capture from outer scope)
+        let __parent_instance_id = (*#scenario_inputs_var.variables)
+            .as_object()
+            .and_then(|vars| vars.get("_instance_id"))
+            .cloned();
+        let __parent_tenant_id = (*#scenario_inputs_var.variables)
+            .as_object()
+            .and_then(|vars| vars.get("_tenant_id"))
+            .cloned();
+
         // Execute the durable child scenario function
         let #step_var = #durable_fn_name(
             &__durable_cache_key,
@@ -497,6 +507,8 @@ fn emit_with_embedded_child(
             __parent_cache_prefix,
             __loop_indices_suffix,
             __parent_scenario_id,
+            __parent_instance_id,
+            __parent_tenant_id,
         ).await?;
 
             #debug_end
