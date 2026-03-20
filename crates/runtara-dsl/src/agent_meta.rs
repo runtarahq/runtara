@@ -104,6 +104,17 @@ pub struct CapabilityMeta {
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
     pub known_errors: &'static [KnownError],
+    /// Semantic tags for capability classification and filtering.
+    /// Well-known tags: "memory:read", "memory:write".
+    pub tags: &'static [&'static str],
+}
+
+/// Well-known capability tags
+pub mod capability_tags {
+    /// Capability can load/read conversation memory
+    pub const MEMORY_READ: &str = "memory:read";
+    /// Capability can save/write conversation memory
+    pub const MEMORY_WRITE: &str = "memory:write";
 }
 
 // Register CapabilityMeta with inventory
@@ -351,6 +362,10 @@ pub struct CapabilityInfo {
     /// Used for tooling hints and documentation.
     #[serde(rename = "knownErrors", skip_serializing_if = "Vec::is_empty")]
     pub known_errors: Vec<KnownErrorInfo>,
+    /// Semantic tags for capability classification and filtering.
+    /// Well-known tags: "memory:read", "memory:write".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// API-compatible capability field info.
@@ -1185,6 +1200,7 @@ fn capability_to_api(
         rate_limited: cap.rate_limited,
         compensation_hint,
         known_errors,
+        tags: cap.tags.iter().map(|s| s.to_string()).collect(),
     }
 }
 

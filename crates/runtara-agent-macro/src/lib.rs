@@ -178,6 +178,12 @@ struct CapabilityArgs {
     #[darling(default)]
     errors: Option<ErrorsSpec>,
 
+    // === Capability tags ===
+    /// Comma-separated semantic tags for capability classification.
+    /// Well-known tags: "memory:read", "memory:write".
+    #[darling(default)]
+    tags: Option<String>,
+
     // === Module registration attributes ===
     // When module_display_name is provided, automatically registers an AgentModuleConfig
     /// Display name for auto-registered module (e.g., "SMO Test")
@@ -536,6 +542,18 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         (quote! {}, quote! { &[] })
     };
 
+    // Generate tags array from comma-separated string
+    let tags_token = if let Some(ref tags_str) = args.tags {
+        let tags: Vec<&str> = tags_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        quote! { &[#(#tags),*] }
+    } else {
+        quote! { &[] }
+    };
+
     let expanded = quote! {
         #input_fn
 
@@ -556,6 +574,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             rate_limited: #rate_limited,
             compensation_hint: #compensation_hint_token,
             known_errors: #known_errors_token,
+            tags: #tags_token,
         };
 
         inventory::submit! {
