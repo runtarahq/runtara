@@ -469,6 +469,11 @@ pub fn emit(
                 for msg_val in messages {
                     if let Ok(msg) = serde_json::from_value::<RigMessage>(msg_val.clone()) {
                         __chat_history.push(msg);
+                    } else {
+                        tracing::warn!(
+                            "AI Agent step '{}': skipped malformed message in memory",
+                            #step_id
+                        );
                     }
                 }
                 if !messages.is_empty() {
@@ -481,6 +486,34 @@ pub fn emit(
             } else {
                 0
             };
+
+            // Sanitize loaded history: remove orphaned tool_calls at the end.
+            // If the last assistant message has tool_calls but there are no matching
+            // tool_results after it, the LLM will reject it. Strip trailing
+            // assistant messages that contain tool calls without responses.
+            {
+                let __pre_sanitize_len = __chat_history.len();
+                while let Some(last) = __chat_history.last() {
+                    let has_tool_calls = match last {
+                        RigMessage::Assistant { content } => {
+                            content.iter().any(|part| matches!(part, AssistantContent::ToolCall(_)))
+                        }
+                        _ => false,
+                    };
+                    if has_tool_calls {
+                        __chat_history.pop();
+                    } else {
+                        break;
+                    }
+                }
+                let __removed = __pre_sanitize_len - __chat_history.len();
+                if __removed > 0 {
+                    tracing::warn!(
+                        "AI Agent step '{}': removed {} orphaned tool_call message(s) from memory",
+                        #step_id, __removed
+                    );
+                }
+            }
 
             // Emit step_debug_end for memory load
             {
