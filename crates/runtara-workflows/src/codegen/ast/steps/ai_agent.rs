@@ -515,6 +515,74 @@ pub fn emit(
                 }
             }
 
+            // Sanitize loaded history: convert orphaned tool_results to plain
+            // text messages.  OpenAI requires that every tool-result message is
+            // preceded by an assistant message with a matching tool_call.
+            // Orphaned tool_results appear when compaction (sliding window or
+            // summarize) drops the assistant tool_call message, or when
+            // deserialization skips it.  Instead of discarding the information,
+            // we rewrite them as regular user messages so the LLM still sees
+            // the prior tool output as context.
+            {
+                use std::collections::HashSet;
+
+                let mut __available_tool_ids: HashSet<String> = HashSet::new();
+                let mut __converted: usize = 0;
+
+                for msg in __chat_history.iter_mut() {
+                    match msg {
+                        RigMessage::Assistant { content } => {
+                            for part in content.iter() {
+                                if let AssistantContent::ToolCall(tc) = part {
+                                    __available_tool_ids.insert(tc.id.clone());
+                                }
+                            }
+                        }
+                        RigMessage::User { content } => {
+                            let is_orphaned_tool_result = content.iter().any(|part| {
+                                matches!(part, UserContent::ToolResult(tr) if !__available_tool_ids.contains(&tr.id))
+                            });
+
+                            if is_orphaned_tool_result {
+                                // Extract text from tool result content parts
+                                let summary_parts: Vec<String> = content.iter().filter_map(|part| {
+                                    if let UserContent::ToolResult(tr) = part {
+                                        let text = tr.content.iter().filter_map(|c| {
+                                            match c {
+                                                rig::message::ToolResultContent::Text(t) => Some(t.text.clone()),
+                                                _ => None,
+                                            }
+                                        }).collect::<Vec<_>>().join("\n");
+                                        if text.is_empty() {
+                                            Some(format!("[Previous tool call (id: {}) returned a result]", tr.id))
+                                        } else {
+                                            Some(format!("[Previous tool call (id: {}) returned: {}]", tr.id, text))
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }).collect();
+
+                                // Replace with a plain text user message
+                                *msg = RigMessage::User {
+                                    content: OneOrMany::one(UserContent::text(
+                                        summary_parts.join("\n")
+                                    )),
+                                };
+                                __converted += 1;
+                            }
+                        }
+                    }
+                }
+
+                if __converted > 0 {
+                    tracing::warn!(
+                        "AI Agent step '{}': converted {} orphaned tool_result message(s) to text in memory",
+                        #step_id, __converted
+                    );
+                }
+            }
+
             // Emit step_debug_end for memory load
             {
                 // Build truncated message previews for the debug event
