@@ -897,6 +897,20 @@ pub struct ConnectionFieldMeta {
     pub is_secret: bool,
 }
 
+/// OAuth2 configuration for connection types that use the authorization code flow.
+///
+/// This is provider-agnostic metadata — the same struct works for HubSpot, Google,
+/// Salesforce, or any OAuth2 provider.
+#[derive(Debug, Clone)]
+pub struct OAuthConfig {
+    /// Provider's authorization endpoint (e.g., "https://app.hubapi.com/oauth/authorize")
+    pub auth_url: &'static str,
+    /// Provider's token endpoint (e.g., "https://api.hubapi.com/oauth/v1/token")
+    pub token_url: &'static str,
+    /// Space-separated default scopes to request
+    pub default_scopes: &'static str,
+}
+
 /// Metadata for a connection type - registered via inventory
 #[derive(Debug, Clone)]
 pub struct ConnectionTypeMeta {
@@ -914,6 +928,8 @@ pub struct ConnectionTypeMeta {
     pub auth_type: Option<ConnectionAuthType>,
     /// Fields required for this connection type
     pub fields: &'static [ConnectionFieldMeta],
+    /// OAuth2 configuration (only for auth_type = Oauth2AuthorizationCode)
+    pub oauth_config: Option<&'static OAuthConfig>,
 }
 
 // Register ConnectionTypeMeta with inventory

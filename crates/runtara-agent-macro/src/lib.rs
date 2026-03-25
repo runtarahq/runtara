@@ -808,6 +808,15 @@ struct ConnectionContainerArgs {
     /// Authentication / credential type (e.g., "api_key", "oauth2_client_credentials")
     #[darling(default)]
     auth_type: Option<String>,
+    /// OAuth2 authorization URL (e.g., "https://app.hubapi.com/oauth/authorize")
+    #[darling(default)]
+    oauth_auth_url: Option<String>,
+    /// OAuth2 token URL (e.g., "https://api.hubapi.com/oauth/v1/token")
+    #[darling(default)]
+    oauth_token_url: Option<String>,
+    /// OAuth2 default scopes (space-separated)
+    #[darling(default)]
+    oauth_default_scopes: Option<String>,
 }
 
 /// Derive macro for connection parameter structs
@@ -973,6 +982,24 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
 
     let service_id_token = option_to_tokens(&args.service_id);
 
+    // Generate OAuthConfig if oauth_auth_url and oauth_token_url are provided
+    let oauth_config_token = match (&args.oauth_auth_url, &args.oauth_token_url) {
+        (Some(auth_url), Some(token_url)) => {
+            let default_scopes = args.oauth_default_scopes.as_deref().unwrap_or("");
+            quote! {
+                Some({
+                    static OAUTH_CFG: runtara_dsl::agent_meta::OAuthConfig = runtara_dsl::agent_meta::OAuthConfig {
+                        auth_url: #auth_url,
+                        token_url: #token_url,
+                        default_scopes: #default_scopes,
+                    };
+                    &OAUTH_CFG
+                })
+            }
+        }
+        _ => quote! { None },
+    };
+
     let meta_ident = format_ident!("__CONNECTION_META_{}", struct_name);
 
     let expanded = quote! {
@@ -986,6 +1013,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             service_id: #service_id_token,
             auth_type: #auth_type_token,
             fields: &[#(#field_metas),*],
+            oauth_config: #oauth_config_token,
         };
 
         inventory::submit! {
