@@ -16,11 +16,10 @@ crate-type = ["rlib"]
 [features]
 default = ["native"]
 
-# Native platform - full async runtime with QUIC transport
+# Native platform - full async runtime with HTTP transport
 native = [
     "dep:tokio",
     "dep:ureq",
-    "runtara-sdk/quic",
     "runtara-sdk/http",
     "runtara-agents/native",
 ]

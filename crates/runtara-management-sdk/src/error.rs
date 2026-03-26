@@ -51,27 +51,9 @@ pub enum SdkError {
     Protocol(String),
 }
 
-impl From<runtara_protocol::client::ClientError> for SdkError {
-    fn from(err: runtara_protocol::client::ClientError) -> Self {
-        SdkError::Connection(err.to_string())
-    }
-}
-
 impl From<serde_json::Error> for SdkError {
     fn from(err: serde_json::Error) -> Self {
         SdkError::Serialization(err.to_string())
-    }
-}
-
-impl From<prost::DecodeError> for SdkError {
-    fn from(err: prost::DecodeError) -> Self {
-        SdkError::Protocol(err.to_string())
-    }
-}
-
-impl From<runtara_protocol::frame::FrameError> for SdkError {
-    fn from(err: runtara_protocol::frame::FrameError) -> Self {
-        SdkError::Protocol(err.to_string())
     }
 }
 
@@ -81,14 +63,8 @@ impl From<std::io::Error> for SdkError {
     }
 }
 
-impl From<quinn::WriteError> for SdkError {
-    fn from(err: quinn::WriteError) -> Self {
-        SdkError::Connection(err.to_string())
-    }
-}
-
-impl From<quinn::ClosedStream> for SdkError {
-    fn from(err: quinn::ClosedStream) -> Self {
+impl From<reqwest::Error> for SdkError {
+    fn from(err: reqwest::Error) -> Self {
         SdkError::Connection(err.to_string())
     }
 }

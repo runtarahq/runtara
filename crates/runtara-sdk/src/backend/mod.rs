@@ -3,13 +3,10 @@
 //! SDK backend implementations.
 //!
 //! This module provides different backends for SDK operations:
-//! - `quic`: QUIC-based communication with runtara-core (default)
+//! - `http`: HTTP-based communication with runtara-core
 //! - `embedded`: Direct database calls for embedded deployments
 
 #![allow(dead_code)] // Trait methods used internally by durable_sleep implementation
-
-#[cfg(feature = "quic")]
-pub mod quic;
 
 #[cfg(feature = "embedded")]
 pub mod embedded;
@@ -18,9 +15,6 @@ pub mod embedded;
 pub mod http;
 
 use std::time::Duration;
-
-#[cfg(feature = "quic")]
-use std::any::Any;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,13 +25,9 @@ use crate::types::{CheckpointResult, CustomSignal, Signal, SignalType, StatusRes
 /// Backend trait for SDK operations.
 ///
 /// This trait abstracts the communication layer, allowing the SDK to work
-/// with either QUIC-based remote communication or direct embedded calls.
+/// with either HTTP-based remote communication or direct embedded calls.
 #[async_trait]
 pub trait SdkBackend: Send + Sync {
-    /// Return self as Any for downcasting to concrete types.
-    /// Only used with QUIC feature for QUIC-specific operations.
-    #[cfg(feature = "quic")]
-    fn as_any(&self) -> &dyn Any;
     /// Connect to the backend (no-op for embedded).
     async fn connect(&self) -> Result<()>;
 

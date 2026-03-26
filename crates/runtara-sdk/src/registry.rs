@@ -141,8 +141,7 @@ pub fn register_sdk(sdk: RuntaraSdk) {
         });
     }
 
-    // Spawn background cancellation poller (only available with QUIC backend)
-    #[cfg(feature = "quic")]
+    // Spawn background cancellation poller
     if cancellation_poll_interval_ms > 0 {
         let cancel_shutdown = shutdown_token.clone();
         let cancel_token = instance_cancel_token.clone();
@@ -194,9 +193,7 @@ pub fn register_sdk(sdk: RuntaraSdk) {
         });
     }
 
-    // Suppress unused variable warnings when QUIC is disabled
-    #[cfg(not(feature = "quic"))]
-    let _ = (shutdown_token, cancellation_poll_interval_ms);
+    let _ = shutdown_token;
 }
 
 /// Get a reference to the registered SDK.

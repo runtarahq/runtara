@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Runtara Environment - Instance Lifecycle Management Server
 //!
-//! A QUIC server responsible for:
+//! An HTTP server responsible for:
 //! - Image registry (create, list, delete images)
 //! - Instance lifecycle (start, stop, resume, status)
 //! - Wake queue (schedule and execute durable sleep wakes)
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
 
     info!(
-        quic_addr = %config.quic_addr,
+        bind_addr = %config.http_addr,
         core_addr = %config.core_addr,
         data_dir = %config.data_dir.display(),
         "Starting Runtara Environment"
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         .runner(runner)
         .core_persistence(persistence)
         .core_addr(&config.core_addr)
-        .bind_addr(config.quic_addr)
+        .bind_addr(config.http_addr)
         .data_dir(&config.data_dir)
         .request_timeout(std::time::Duration::from_millis(
             config.db_request_timeout_ms,
@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     let runtime = builder.build()?.start().await?;
 
     info!(
-        env_addr = %config.quic_addr,
+        env_addr = %config.http_addr,
         core_addr = %config.core_addr,
         "Runtara server ready (Environment + embedded Core)"
     );

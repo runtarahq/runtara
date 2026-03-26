@@ -2,9 +2,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! High-level types for the SDK.
 
-#[cfg(feature = "quic")]
-use runtara_protocol::instance_proto as proto;
-
 /// Instance status as returned by status queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceStatus {
@@ -24,30 +21,6 @@ pub enum InstanceStatus {
     Cancelled,
 }
 
-#[cfg(feature = "quic")]
-impl From<proto::InstanceStatus> for InstanceStatus {
-    fn from(status: proto::InstanceStatus) -> Self {
-        match status {
-            proto::InstanceStatus::StatusUnknown => InstanceStatus::Unknown,
-            proto::InstanceStatus::StatusPending => InstanceStatus::Pending,
-            proto::InstanceStatus::StatusRunning => InstanceStatus::Running,
-            proto::InstanceStatus::StatusSuspended => InstanceStatus::Suspended,
-            proto::InstanceStatus::StatusCompleted => InstanceStatus::Completed,
-            proto::InstanceStatus::StatusFailed => InstanceStatus::Failed,
-            proto::InstanceStatus::StatusCancelled => InstanceStatus::Cancelled,
-        }
-    }
-}
-
-#[cfg(feature = "quic")]
-impl From<i32> for InstanceStatus {
-    fn from(value: i32) -> Self {
-        proto::InstanceStatus::try_from(value)
-            .map(InstanceStatus::from)
-            .unwrap_or(InstanceStatus::Unknown)
-    }
-}
-
 /// Signal types that can be received from runtara-core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalType {
@@ -57,37 +30,6 @@ pub enum SignalType {
     Pause,
     /// Resume paused execution
     Resume,
-}
-
-#[cfg(feature = "quic")]
-impl From<proto::SignalType> for SignalType {
-    fn from(signal: proto::SignalType) -> Self {
-        match signal {
-            proto::SignalType::SignalCancel => SignalType::Cancel,
-            proto::SignalType::SignalPause => SignalType::Pause,
-            proto::SignalType::SignalResume => SignalType::Resume,
-        }
-    }
-}
-
-#[cfg(feature = "quic")]
-impl From<i32> for SignalType {
-    fn from(value: i32) -> Self {
-        proto::SignalType::try_from(value)
-            .map(SignalType::from)
-            .unwrap_or(SignalType::Cancel)
-    }
-}
-
-#[cfg(feature = "quic")]
-impl From<SignalType> for proto::SignalType {
-    fn from(signal: SignalType) -> Self {
-        match signal {
-            SignalType::Cancel => proto::SignalType::SignalCancel,
-            SignalType::Pause => proto::SignalType::SignalPause,
-            SignalType::Resume => proto::SignalType::SignalResume,
-        }
-    }
 }
 
 /// A signal received from runtara-core.
@@ -176,19 +118,6 @@ pub struct StatusResponse {
     pub error: Option<String>,
 }
 
-#[cfg(feature = "quic")]
-impl From<proto::GetInstanceStatusResponse> for StatusResponse {
-    fn from(resp: proto::GetInstanceStatusResponse) -> Self {
-        Self {
-            found: true,
-            status: resp.status.into(),
-            checkpoint_id: resp.checkpoint_id,
-            output: resp.output,
-            error: resp.error,
-        }
-    }
-}
-
 // ============================================================================
 // Retry Configuration
 // ============================================================================
@@ -265,74 +194,6 @@ mod tests {
     // InstanceStatus Tests
     // ============================================================================
 
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_instance_status_conversion() {
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusRunning),
-            InstanceStatus::Running
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusCompleted),
-            InstanceStatus::Completed
-        );
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_instance_status_all_variants() {
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusUnknown),
-            InstanceStatus::Unknown
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusPending),
-            InstanceStatus::Pending
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusRunning),
-            InstanceStatus::Running
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusSuspended),
-            InstanceStatus::Suspended
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusCompleted),
-            InstanceStatus::Completed
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusFailed),
-            InstanceStatus::Failed
-        );
-        assert_eq!(
-            InstanceStatus::from(proto::InstanceStatus::StatusCancelled),
-            InstanceStatus::Cancelled
-        );
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_instance_status_from_i32_valid() {
-        // Valid proto values
-        assert_eq!(InstanceStatus::from(0i32), InstanceStatus::Unknown);
-        assert_eq!(InstanceStatus::from(1i32), InstanceStatus::Pending);
-        assert_eq!(InstanceStatus::from(2i32), InstanceStatus::Running);
-        assert_eq!(InstanceStatus::from(3i32), InstanceStatus::Suspended);
-        assert_eq!(InstanceStatus::from(4i32), InstanceStatus::Completed);
-        assert_eq!(InstanceStatus::from(5i32), InstanceStatus::Failed);
-        assert_eq!(InstanceStatus::from(6i32), InstanceStatus::Cancelled);
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_instance_status_from_i32_invalid() {
-        // Invalid values should return Unknown
-        assert_eq!(InstanceStatus::from(100i32), InstanceStatus::Unknown);
-        assert_eq!(InstanceStatus::from(-1i32), InstanceStatus::Unknown);
-        assert_eq!(InstanceStatus::from(i32::MAX), InstanceStatus::Unknown);
-    }
-
     #[test]
     fn test_instance_status_clone_eq() {
         let status = InstanceStatus::Running;
@@ -350,69 +211,6 @@ mod tests {
     // ============================================================================
     // SignalType Tests
     // ============================================================================
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_signal_type_conversion() {
-        assert_eq!(
-            SignalType::from(proto::SignalType::SignalCancel),
-            SignalType::Cancel
-        );
-        assert_eq!(
-            proto::SignalType::from(SignalType::Pause),
-            proto::SignalType::SignalPause
-        );
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_signal_type_all_variants() {
-        assert_eq!(
-            SignalType::from(proto::SignalType::SignalCancel),
-            SignalType::Cancel
-        );
-        assert_eq!(
-            SignalType::from(proto::SignalType::SignalPause),
-            SignalType::Pause
-        );
-        assert_eq!(
-            SignalType::from(proto::SignalType::SignalResume),
-            SignalType::Resume
-        );
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_signal_type_to_proto() {
-        assert_eq!(
-            proto::SignalType::from(SignalType::Cancel),
-            proto::SignalType::SignalCancel
-        );
-        assert_eq!(
-            proto::SignalType::from(SignalType::Pause),
-            proto::SignalType::SignalPause
-        );
-        assert_eq!(
-            proto::SignalType::from(SignalType::Resume),
-            proto::SignalType::SignalResume
-        );
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_signal_type_from_i32_valid() {
-        assert_eq!(SignalType::from(0i32), SignalType::Cancel);
-        assert_eq!(SignalType::from(1i32), SignalType::Pause);
-        assert_eq!(SignalType::from(2i32), SignalType::Resume);
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_signal_type_from_i32_invalid() {
-        // Invalid values should default to Cancel
-        assert_eq!(SignalType::from(100i32), SignalType::Cancel);
-        assert_eq!(SignalType::from(-1i32), SignalType::Cancel);
-    }
 
     #[test]
     fn test_signal_type_clone_eq() {
@@ -729,26 +527,6 @@ mod tests {
         assert_eq!(cloned.status, response.status);
         assert_eq!(cloned.checkpoint_id, response.checkpoint_id);
         assert_eq!(cloned.output, response.output);
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_status_response_from_proto() {
-        let proto_response = proto::GetInstanceStatusResponse {
-            instance_id: "test-instance".to_string(),
-            status: proto::InstanceStatus::StatusCompleted.into(),
-            checkpoint_id: Some("last-cp".to_string()),
-            output: Some(vec![99]),
-            error: None,
-            started_at_ms: 1000,
-            finished_at_ms: Some(2000),
-        };
-
-        let response = StatusResponse::from(proto_response);
-        assert!(response.found);
-        assert_eq!(response.status, InstanceStatus::Completed);
-        assert_eq!(response.checkpoint_id, Some("last-cp".to_string()));
-        assert_eq!(response.output, Some(vec![99]));
     }
 
     // ============================================================================

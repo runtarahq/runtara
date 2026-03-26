@@ -110,7 +110,8 @@ impl TestContext {
             ..Default::default()
         };
         let client = RuntaraClient::new(config)
-            .map_err(|e| format!("Failed to create QUIC client: {}", e))?;
+            // TODO: Convert to HTTP client
+            .map_err(|e| format!("Failed to create client: {}", e))?;
 
         Ok(Self {
             pool,

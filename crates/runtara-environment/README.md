@@ -58,7 +58,7 @@ cargo run -p runtara-environment
 
 ## Environment Protocol (Port 8002)
 
-External clients connect via QUIC using `runtara-management-sdk`. The protocol supports:
+External clients connect via HTTP using `runtara-management-sdk`. The protocol supports:
 
 ### Image Operations
 
@@ -126,7 +126,7 @@ This enables workflows to sleep for hours/days without holding resources.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `RUNTARA_ENV_QUIC_PORT` | No | `8002` | Environment QUIC server port |
+| `RUNTARA_ENV_HTTP_PORT` | No | `8002` | Environment HTTP server port |
 | `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address of runtara-core. For pasta networking, use host's actual IP |
 | `DATA_DIR` | No | `.data` | Data directory for images and bundles |
 | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification (passed to instances) |
@@ -177,7 +177,7 @@ TEST_DATABASE_URL=postgres://... cargo test -p runtara-environment
 | `container_registry` | Running container tracking |
 | `instance_output` | Reading output.json from completed instances |
 | `runner` | Container/process execution backends |
-| `server` | QUIC server implementation |
+| `server` | HTTP server implementation |
 | `wake_scheduler` | Durable sleep wake scheduling |
 
 ## Related Crates

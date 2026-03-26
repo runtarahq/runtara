@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
 | `runner` | Container runner - `OciRunner` or `MockRunner` (required) |
 | `core_persistence` | Shared persistence for checkpoints/signals (required) |
 | `core_addr` | Address instances use to connect to core (default: `127.0.0.1:8001`) |
-| `bind_addr` | QUIC server bind address (default: `0.0.0.0:8002`) |
+| `bind_addr` | HTTP server bind address (default: `0.0.0.0:8002`) |
 | `data_dir` | Directory for images, bundles, instance I/O (default: `.data`) |
 | `wake_poll_interval` | How often to check for sleeping instances (default: 5s) |
 | `wake_batch_size` | Max instances to wake per poll (default: 10) |

@@ -4,24 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wire protocol layer for runtara (QUIC transport and Protobuf messages)"
-keywords = ["durable", "workflow", "protocol", "quic"]
+description = "Wire protocol layer for runtara (Protobuf message types and framing)"
+keywords = ["durable", "workflow", "protocol", "protobuf"]
 categories = ["network-programming"]
 
 [dependencies]
 prost = "0.13"
 bytes = "1.11"
-quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 tokio = { version = "1", features = ["io-util", "sync", "macros"] }
 thiserror = "2"
 tracing = "0.1"
-socket2 = "0.5"  # For configuring UDP socket buffer sizes
-
-# TLS dependencies
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rustls-pemfile = "2"
-webpki-roots = "0.26"
-rcgen = "0.13"  # For self-signed certificates in development
 
 [build-dependencies]
 prost-build = "0.13"

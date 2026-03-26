@@ -12,7 +12,7 @@ This crate is the heart of the Runtara platform, providing:
 - **Signal Delivery**: Cancel, pause, and resume signals to running instances
 - **Durable Sleep**: Store wake timestamps for long-running sleeps
 - **Instance Events**: Track heartbeats, completion, failure, and suspension
-- **QUIC Transport**: Fast, secure communication with workflow instances
+- **HTTP Transport**: Communication with workflow instances
 
 ## Architecture
 
@@ -57,7 +57,7 @@ cargo run -p runtara-core
 
 ## Instance Protocol (Port 8001)
 
-Workflow instances connect via QUIC using `runtara-sdk`. The protocol supports:
+Workflow instances connect via HTTP using `runtara-sdk`. The protocol supports:
 
 | Operation | Description |
 |-----------|-------------|
@@ -133,7 +133,7 @@ when their wake time arrives.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
-| `RUNTARA_QUIC_PORT` | No | `8001` | Instance QUIC server port |
+| `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
 | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances |
 
 ## Database
@@ -161,7 +161,7 @@ sqlx migrate run --source crates/runtara-core/migrations/sqlite
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `server` | Yes | Full server mode with QUIC transport |
+| `server` | Yes | Full server mode with HTTP transport |
 
 Without the `server` feature, only the persistence layer is available (used by `runtara-environment` for shared database access).
 

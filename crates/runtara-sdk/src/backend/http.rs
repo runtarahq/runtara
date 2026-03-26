@@ -3,15 +3,12 @@
 //! HTTP backend for runtara-sdk.
 //!
 //! Implements `SdkBackend` using HTTP/JSON to communicate with runtara-core's
-//! HTTP instance API. This is an alternative to the QUIC backend, enabling
-//! scenarios to work without quinn/ring/tokio-net dependencies.
+//! HTTP instance API.
 //!
 //! Used by:
 //! - Native scenarios with `RUNTARA_SDK_BACKEND=http`
 //! - WASM scenarios (future, via wasi-http)
 
-#[cfg(feature = "quic")]
-use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -56,14 +53,14 @@ impl HttpSdkConfig {
         let base_url = if let Ok(url) = std::env::var("RUNTARA_HTTP_URL") {
             url
         } else if let Ok(addr) = std::env::var("RUNTARA_SERVER_ADDR") {
-            // RUNTARA_SERVER_ADDR is host:port for QUIC. HTTP is typically on port+2.
+            // RUNTARA_SERVER_ADDR is host:port. HTTP is typically on port+2.
             let parts: Vec<&str> = addr.split(':').collect();
             let host = parts.first().unwrap_or(&"127.0.0.1");
-            let quic_port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(8001);
+            let base_port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(8001);
             let http_port = std::env::var("RUNTARA_CORE_HTTP_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(quic_port + 2); // Default: QUIC port + 2 (8001 → 8003)
+                .unwrap_or(base_port + 2); // Default: base port + 2 (8001 → 8003)
             format!("http://{}:{}", host, http_port)
         } else {
             "http://127.0.0.1:8003".to_string()
@@ -404,11 +401,6 @@ fn parse_custom_signal(resp: &CustomSignalResp) -> CustomSignal {
 
 #[async_trait]
 impl SdkBackend for HttpBackend {
-    #[cfg(feature = "quic")]
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     async fn connect(&self) -> Result<()> {
         // HTTP is connectionless — verify reachability with a health check
         let url = format!("{}/health", self.base_url);
@@ -582,12 +574,12 @@ impl SdkBackend for HttpBackend {
     }
 
     async fn set_sleep_until(&self, _sleep_until: DateTime<Utc>) -> Result<()> {
-        // Server-side managed — no-op for HTTP backend (same as QUIC)
+        // Server-side managed — no-op for HTTP backend
         Ok(())
     }
 
     async fn clear_sleep(&self) -> Result<()> {
-        // Server-side managed — no-op for HTTP backend (same as QUIC)
+        // Server-side managed — no-op for HTTP backend
         Ok(())
     }
 

@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Runtara Protocol - QUIC + Protobuf communication layer
+//! Runtara Protocol - Protobuf message definitions
 //!
-//! This crate provides the wire protocol for communication between:
+//! This crate provides the wire protocol types for communication between:
 //! - Instances and runtara-core (instance protocol)
 //! - External clients and runtara-core (management protocol)
 //!
@@ -16,7 +16,7 @@
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  Serialization: Protobuf (prost)                            │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │  Transport: QUIC (quinn)                                    │
+//! │  Transport: HTTP                                            │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -76,9 +76,7 @@
 //! let response: management_proto::RpcResponse = client.request(&rpc_request).await?;
 //! ```
 
-pub mod client;
 pub mod frame;
-pub mod server;
 
 // Re-export generated protobuf types for instance protocol
 pub mod instance_proto {
@@ -100,8 +98,4 @@ pub mod environment_proto {
 pub use prost;
 
 // Re-export main types
-pub use client::{ClientError, RuntaraClient, RuntaraClientConfig};
 pub use frame::{Frame, FrameError, FramedStream, MessageType};
-pub use server::{
-    ConnectionHandler, RuntaraServer, RuntaraServerConfig, ServerError, StreamHandler,
-};

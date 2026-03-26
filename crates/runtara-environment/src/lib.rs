@@ -38,9 +38,9 @@
 //! └───────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # QUIC Server (Environment Protocol - Port 8002)
+//! # HTTP Server (Environment Protocol - Port 8002)
 //!
-//! Environment exposes a single QUIC server for all management operations.
+//! Environment exposes an HTTP server for all management operations.
 //! External clients (via runtara-management-sdk) connect here.
 //!
 //! ## Image Operations
@@ -124,7 +124,7 @@
 //! |----------|----------|---------|-------------|
 //! | `RUNTARA_ENVIRONMENT_DATABASE_URL` | Yes* | - | PostgreSQL connection string |
 //! | `RUNTARA_DATABASE_URL` | Yes* | - | Fallback if above not set |
-//! | `RUNTARA_ENV_QUIC_PORT` | No | `8002` | QUIC server port |
+//! | `RUNTARA_ENV_HTTP_PORT` | No | `8002` | HTTP server port |
 //! | `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | runtara-core address |
 //! | `DATA_DIR` | No | `.data` | Data directory for images and bundles |
 //! | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification |
@@ -139,7 +139,7 @@
 //! - [`container_registry`]: Running container tracking
 //! - [`instance_output`]: Reading output.json from completed instances
 //! - [`runner`]: Container/process execution backends
-//! - [`server`]: QUIC server implementation
+//! - [`http_server`]: HTTP server implementation
 //! - [`wake_scheduler`]: Durable sleep wake scheduling
 
 #![deny(missing_docs)]
@@ -181,8 +181,8 @@ pub mod instance_output;
 /// Container/process execution backends (OCI, Native, Wasm).
 pub mod runner;
 
-/// QUIC server for the Environment protocol.
-pub mod server;
+/// HTTP server for the Environment protocol.
+pub mod http_server;
 
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;

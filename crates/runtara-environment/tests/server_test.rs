@@ -25,7 +25,7 @@ macro_rules! skip_if_no_db {
 }
 
 // ============================================================================
-// Server Integration Tests (via QUIC client)
+// Server Integration Tests
 // ============================================================================
 
 #[tokio::test]

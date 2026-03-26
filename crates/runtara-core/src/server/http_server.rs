@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! HTTP server for the instance protocol.
 //!
-//! Provides the same operations as the QUIC instance server but over HTTP/JSON.
-//! This enables scenarios compiled to WASM (or native scenarios using the HTTP
-//! SDK backend) to communicate with runtara-core without QUIC dependencies.
-//!
-//! All endpoints call the same handler functions as the QUIC server.
+//! Provides instance protocol operations over HTTP/JSON.
+//! This enables scenarios (native or WASM) using the HTTP SDK backend
+//! to communicate with runtara-core.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -752,8 +750,7 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
 /// Run the instance HTTP server.
 ///
 /// Starts an axum HTTP server on the given address, serving the instance
-/// protocol API. This runs alongside the QUIC server and provides the same
-/// operations for HTTP-based clients (WASM scenarios, debugging, etc.).
+/// protocol API for all clients (native scenarios, WASM scenarios, debugging, etc.).
 pub async fn run_http_server(
     bind_addr: SocketAddr,
     state: Arc<InstanceHandlerState>,

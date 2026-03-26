@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runtara_core::persistence::{ListEventsFilter, Persistence, SqlitePersistence};
-use runtara_sdk::{RuntaraSdk, SdkConfig, register_sdk, stop_heartbeat};
+use runtara_sdk::{RuntaraSdk, register_sdk, stop_heartbeat};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -61,9 +61,13 @@ async fn test_background_heartbeat_task() {
     let persistence = create_test_persistence().await;
 
     // Create SDK with a very short heartbeat interval for testing (100ms)
-    let config = SdkConfig::new(&instance_id, tenant_id).with_heartbeat_interval_ms(100);
-
-    let mut sdk = RuntaraSdk::with_embedded_backend(persistence.clone(), config);
+    let mut sdk = RuntaraSdk::with_embedded_backend(
+        persistence.clone(),
+        &instance_id,
+        tenant_id,
+        1_000,
+        100,
+    );
 
     // Connect and register with the core
     sdk.connect().await.expect("Failed to connect");
@@ -125,9 +129,13 @@ async fn test_heartbeats_continue_during_slow_sdk_operation() {
     let persistence = create_test_persistence().await;
 
     // Create SDK with 100ms heartbeat interval
-    let config = SdkConfig::new(&instance_id, tenant_id).with_heartbeat_interval_ms(100);
-
-    let mut sdk_instance = RuntaraSdk::with_embedded_backend(persistence.clone(), config);
+    let mut sdk_instance = RuntaraSdk::with_embedded_backend(
+        persistence.clone(),
+        &instance_id,
+        tenant_id,
+        1_000,
+        100,
+    );
     sdk_instance.connect().await.expect("Failed to connect");
     sdk_instance
         .register(None)

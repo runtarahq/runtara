@@ -32,25 +32,19 @@ use crate::runner::{Runner, RunnerHandle};
 ///
 /// # Timeout Design
 ///
-/// The heartbeat timeout should be **significantly shorter** than the QUIC idle timeout:
-/// - **QUIC idle timeout** (default: 600s): When the connection is truly idle, QUIC closes it
+/// The heartbeat timeout should be set appropriately:
 /// - **Heartbeat timeout** (default: 120s): When an instance crashes/hangs without sending events
 ///
 /// This ensures:
 /// 1. Crashed instances are detected and failed within 2 minutes
 /// 2. Long-running healthy instances (that send checkpoints/events) never time out
-/// 3. The QUIC connection stays alive for legitimate long-running workflows (up to 10 minutes of idle time)
-///
-/// If heartbeat_timeout >= QUIC idle timeout, you'll get false positives where healthy
-/// instances are marked as failed due to connection timeout rather than actual crashes.
 #[derive(Debug, Clone)]
 pub struct HeartbeatMonitorConfig {
     /// How often to check for stale instances.
     pub poll_interval: Duration,
     /// Maximum time since last heartbeat before marking as failed.
     ///
-    /// **IMPORTANT**: This must be significantly shorter than the QUIC idle timeout
-    /// (default: 120s vs 600s QUIC timeout).
+    /// Default: 120s.
     pub heartbeat_timeout: Duration,
 }
 

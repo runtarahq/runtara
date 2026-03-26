@@ -10,8 +10,8 @@ use std::path::PathBuf;
 pub struct Config {
     /// Database URL (shared with Core for checkpoints, events, signals)
     pub database_url: String,
-    /// QUIC server address for Environment API
-    pub quic_addr: SocketAddr,
+    /// HTTP server address for Environment API
+    pub http_addr: SocketAddr,
     /// Address of Runtara Core (for proxying signals and passing to instances)
     pub core_addr: String,
     /// Data directory for images, bundles, and instance I/O
@@ -31,12 +31,12 @@ impl Config {
         let database_url = std::env::var("RUNTARA_DATABASE_URL")
             .map_err(|_| ConfigError::MissingEnvVar("RUNTARA_DATABASE_URL"))?;
 
-        let port: u16 = std::env::var("RUNTARA_ENV_QUIC_PORT")
+        let port: u16 = std::env::var("RUNTARA_ENV_HTTP_PORT")
             .unwrap_or_else(|_| "8002".to_string())
             .parse()
             .map_err(|_| ConfigError::InvalidPort)?;
 
-        let quic_addr = SocketAddr::from(([0, 0, 0, 0], port));
+        let http_addr = SocketAddr::from(([0, 0, 0, 0], port));
 
         let core_addr =
             std::env::var("RUNTARA_CORE_ADDR").unwrap_or_else(|_| "127.0.0.1:8001".to_string());
@@ -60,7 +60,7 @@ impl Config {
 
         Ok(Self {
             database_url,
-            quic_addr,
+            http_addr,
             core_addr,
             data_dir,
             skip_cert_verification,
@@ -135,7 +135,7 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_ENV_QUIC_PORT");
+        guard.remove("RUNTARA_ENV_HTTP_PORT");
         guard.remove("RUNTARA_CORE_ADDR");
         guard.remove("DATA_DIR");
         guard.remove("RUNTARA_SKIP_CERT_VERIFICATION");
@@ -143,7 +143,7 @@ mod tests {
         let config = Config::from_env().unwrap();
 
         assert_eq!(config.database_url, "postgres://localhost/test");
-        assert_eq!(config.quic_addr.port(), 8002);
+        assert_eq!(config.http_addr.port(), 8002);
         assert_eq!(config.core_addr, "127.0.0.1:8001");
         assert_eq!(config.data_dir, PathBuf::from(".data"));
         assert!(!config.skip_cert_verification);
@@ -155,11 +155,11 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_ENV_QUIC_PORT", "9000");
+        guard.set("RUNTARA_ENV_HTTP_PORT", "9000");
 
         let config = Config::from_env().unwrap();
 
-        assert_eq!(config.quic_addr.port(), 9000);
+        assert_eq!(config.http_addr.port(), 9000);
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://user:pass@db:5432/prod");
-        guard.set("RUNTARA_ENV_QUIC_PORT", "8888");
+        guard.set("RUNTARA_ENV_HTTP_PORT", "8888");
         guard.set("RUNTARA_CORE_ADDR", "192.168.1.100:9001");
         guard.set("DATA_DIR", "/custom/data");
         guard.set("RUNTARA_SKIP_CERT_VERIFICATION", "true");
@@ -241,7 +241,7 @@ mod tests {
         let config = Config::from_env().unwrap();
 
         assert_eq!(config.database_url, "postgres://user:pass@db:5432/prod");
-        assert_eq!(config.quic_addr.port(), 8888);
+        assert_eq!(config.http_addr.port(), 8888);
         assert_eq!(config.core_addr, "192.168.1.100:9001");
         assert_eq!(config.data_dir, PathBuf::from("/custom/data"));
         assert!(config.skip_cert_verification);
@@ -271,7 +271,7 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_ENV_QUIC_PORT", "not_a_number");
+        guard.set("RUNTARA_ENV_HTTP_PORT", "not_a_number");
 
         let result = Config::from_env();
         assert!(result.is_err());
@@ -286,7 +286,7 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_ENV_QUIC_PORT", "99999"); // > 65535
+        guard.set("RUNTARA_ENV_HTTP_PORT", "99999"); // > 65535
 
         let result = Config::from_env();
         assert!(result.is_err());
@@ -316,7 +316,7 @@ mod tests {
 
         assert!(debug_str.contains("Config"));
         assert!(debug_str.contains("database_url"));
-        assert!(debug_str.contains("quic_addr"));
+        assert!(debug_str.contains("http_addr"));
         assert!(debug_str.contains("core_addr"));
         assert!(debug_str.contains("data_dir"));
     }
@@ -332,7 +332,7 @@ mod tests {
         let cloned = config.clone();
 
         assert_eq!(config.database_url, cloned.database_url);
-        assert_eq!(config.quic_addr, cloned.quic_addr);
+        assert_eq!(config.http_addr, cloned.http_addr);
         assert_eq!(config.core_addr, cloned.core_addr);
         assert_eq!(config.data_dir, cloned.data_dir);
         assert_eq!(config.skip_cert_verification, cloned.skip_cert_verification);

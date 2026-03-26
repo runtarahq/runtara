@@ -2,7 +2,7 @@
 
 This document outlines the architecture for compiling runtara workflow scenarios to **WebAssembly (WASM)** alongside the existing **Native** target, with a unified HTTP communication protocol.
 
-> **Key decision (2026-03-26):** Native and WASM scenarios will use the **same HTTP-based protocol** for all host communication. QUIC is removed from the scenario binary path entirely. This simplifies the stack, reduces binary size, and ensures identical behavior across targets.
+> **Key decision (2026-03-26):** Native and WASM scenarios will use the **same HTTP-based protocol** for all host communication. QUIC has been fully removed. This simplifies the stack, reduces binary size, and ensures identical behavior across targets.
 
 ---
 
@@ -167,7 +167,7 @@ These are pure Rust with no platform-specific dependencies:
 - Easier debugging (HTTP is inspectable with standard tools)
 - Slight latency increase per RPC (~1-3ms TCP vs ~0.5ms QUIC) — negligible given step execution times of 100ms+
 
-**What we keep:** QUIC remains in `runtara-core` and `runtara-environment` for host↔host communication (e.g., environment↔core protocol). Only the scenario binary path changes.
+**Note:** QUIC has been fully removed from the entire codebase. All communication now uses HTTP.
 
 ### ADR-2: Input Delivery via HTTP (No File I/O)
 

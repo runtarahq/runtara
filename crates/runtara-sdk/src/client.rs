@@ -8,22 +8,20 @@ use std::time::Instant;
 use tracing::{debug, info, instrument};
 
 use crate::backend::SdkBackend;
-#[cfg(feature = "quic")]
-use crate::config::SdkConfig;
 use crate::error::{Result, SdkError};
 use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 
 /// High-level SDK client for instance communication with runtara-core.
 ///
-/// This client wraps a backend (QUIC or embedded) and provides ergonomic methods
+/// This client wraps a backend (HTTP or embedded) and provides ergonomic methods
 /// for all instance lifecycle operations.
 ///
-/// # Example (QUIC mode)
+/// # Example (HTTP mode)
 ///
 /// ```ignore
 /// use runtara_sdk::RuntaraSdk;
 ///
-/// let mut sdk = RuntaraSdk::localhost("my-instance", "my-tenant")?;
+/// let mut sdk = RuntaraSdk::from_env()?;
 /// sdk.connect().await?;
 /// sdk.register(None).await?;
 ///
@@ -65,7 +63,7 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 /// sdk.completed(b"result").await?;
 /// ```
 pub struct RuntaraSdk {
-    /// Backend implementation (QUIC, HTTP, or embedded) - Arc for sharing with heartbeat task
+    /// Backend implementation (HTTP or embedded) - Arc for sharing with heartbeat task
     backend: std::sync::Arc<dyn SdkBackend>,
     /// Registration state
     registered: bool,
@@ -80,18 +78,18 @@ pub struct RuntaraSdk {
 }
 
 impl RuntaraSdk {
-    // ========== QUIC Construction ==========
+    // ========== HTTP Construction ==========
 
-    /// Create a new SDK instance with the given configuration.
+    /// Create an SDK instance using the HTTP backend.
     ///
-    /// This creates a QUIC-based SDK that connects to runtara-core over the network.
-    #[cfg(feature = "quic")]
-    pub fn new(config: SdkConfig) -> Result<Self> {
-        use crate::backend::quic::QuicBackend;
+    /// This connects to runtara-core's HTTP instance API.
+    #[cfg(feature = "http")]
+    pub fn new(config: crate::backend::http::HttpSdkConfig) -> Result<Self> {
+        use crate::backend::http::HttpBackend;
 
         let signal_poll_interval_ms = config.signal_poll_interval_ms;
         let heartbeat_interval_ms = config.heartbeat_interval_ms;
-        let backend = QuicBackend::new(&config)?;
+        let backend = HttpBackend::new(&config)?;
 
         Ok(Self {
             backend: std::sync::Arc::new(backend),
@@ -103,21 +101,13 @@ impl RuntaraSdk {
         })
     }
 
-    /// Create an SDK instance from environment variables.
+    /// Create an HTTP SDK instance from environment variables.
     ///
-    /// See [`SdkConfig::from_env`] for required and optional environment variables.
-    #[cfg(feature = "quic")]
+    /// Required: `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`
+    /// Optional: `RUNTARA_HTTP_URL` (default: `http://127.0.0.1:8003`)
+    #[cfg(feature = "http")]
     pub fn from_env() -> Result<Self> {
-        let config = SdkConfig::from_env()?;
-        Self::new(config)
-    }
-
-    /// Create an SDK instance for local development.
-    ///
-    /// This connects to `127.0.0.1:8001` with TLS verification disabled.
-    #[cfg(feature = "quic")]
-    pub fn localhost(instance_id: impl Into<String>, tenant_id: impl Into<String>) -> Result<Self> {
-        let config = SdkConfig::localhost(instance_id, tenant_id);
+        let config = crate::backend::http::HttpSdkConfig::from_env()?;
         Self::new(config)
     }
 
@@ -125,7 +115,7 @@ impl RuntaraSdk {
 
     /// Create an embedded SDK instance with direct database access.
     ///
-    /// This bypasses QUIC and communicates directly with the persistence layer.
+    /// This communicates directly with the persistence layer.
     /// Ideal for embedding runtara-core within the same process.
     ///
     /// Note: Signals and durable sleep are not supported in embedded mode.
@@ -156,54 +146,23 @@ impl RuntaraSdk {
     #[cfg(feature = "embedded")]
     pub fn with_embedded_backend(
         persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
-        config: SdkConfig,
+        instance_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        signal_poll_interval_ms: u64,
+        heartbeat_interval_ms: u64,
     ) -> Self {
         use crate::backend::embedded::EmbeddedBackend;
 
-        let backend = EmbeddedBackend::new(persistence, &config.instance_id, &config.tenant_id);
+        let backend = EmbeddedBackend::new(persistence, instance_id, tenant_id);
 
         Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
             last_signal_poll: Instant::now() - Duration::from_secs(60),
             pending_signal: None,
-            signal_poll_interval_ms: config.signal_poll_interval_ms,
-            heartbeat_interval_ms: config.heartbeat_interval_ms,
-        }
-    }
-
-    // ========== HTTP Construction ==========
-
-    /// Create an SDK instance using the HTTP backend.
-    ///
-    /// This connects to runtara-core's HTTP instance API instead of QUIC.
-    /// No quinn/ring/TLS dependencies required.
-    #[cfg(feature = "http")]
-    pub fn new_http(config: crate::backend::http::HttpSdkConfig) -> Result<Self> {
-        use crate::backend::http::HttpBackend;
-
-        let signal_poll_interval_ms = config.signal_poll_interval_ms;
-        let heartbeat_interval_ms = config.heartbeat_interval_ms;
-        let backend = HttpBackend::new(&config)?;
-
-        Ok(Self {
-            backend: std::sync::Arc::new(backend),
-            registered: false,
-            last_signal_poll: Instant::now() - Duration::from_secs(60),
-            pending_signal: None,
             signal_poll_interval_ms,
             heartbeat_interval_ms,
-        })
-    }
-
-    /// Create an HTTP SDK instance from environment variables.
-    ///
-    /// Required: `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`
-    /// Optional: `RUNTARA_HTTP_URL` (default: `http://127.0.0.1:8003`)
-    #[cfg(feature = "http")]
-    pub fn from_env_http() -> Result<Self> {
-        let config = crate::backend::http::HttpSdkConfig::from_env()?;
-        Self::new_http(config)
+        }
     }
 
     // ========== Initialization ==========
@@ -223,7 +182,7 @@ impl RuntaraSdk {
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     // One-liner setup for #[durable] functions
-    ///     RuntaraSdk::localhost("my-instance", "my-tenant")?
+    ///     RuntaraSdk::from_env()?
     ///         .init(None)
     ///         .await?;
     ///
@@ -288,32 +247,6 @@ impl RuntaraSdk {
     ///
     /// The returned [`CheckpointResult`] also includes any pending signal (cancel, pause)
     /// that the instance should handle after processing the checkpoint.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // In a loop - checkpoint handles both fresh runs and resumes
-    /// for i in 0..items.len() {
-    ///     let checkpoint_id = format!("item-{}", i);
-    ///     let result = sdk.checkpoint(&checkpoint_id, &state).await?;
-    ///
-    ///     // Check for pending signals
-    ///     if result.should_cancel() {
-    ///         return Err("Cancelled".into());
-    ///     }
-    ///     if result.should_pause() {
-    ///         // Exit cleanly - will be resumed later
-    ///         return Ok(());
-    ///     }
-    ///
-    ///     if let Some(existing_state) = result.existing_state() {
-    ///         // Resuming - restore state and skip already-processed work
-    ///         state = serde_json::from_slice(existing_state)?;
-    ///         continue;
-    ///     }
-    ///     // Fresh execution - process item
-    ///     process_item(&items[i]);
-    /// }
-    /// ```
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, state_size = state.len()))]
     pub async fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
         self.backend.checkpoint(checkpoint_id, state).await
@@ -322,20 +255,6 @@ impl RuntaraSdk {
     /// Get a checkpoint by ID without saving (read-only lookup).
     ///
     /// Returns the checkpoint state if found, or None if not found.
-    /// Use this when you want to check if a cached result exists before executing.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Check if result is already cached
-    /// if let Some(cached_state) = sdk.get_checkpoint("my-operation").await? {
-    ///     let result: MyResult = serde_json::from_slice(&cached_state)?;
-    ///     return Ok(result);
-    /// }
-    /// // Not cached - execute operation and save result
-    /// let result = do_expensive_operation();
-    /// let state = serde_json::to_vec(&result)?;
-    /// sdk.checkpoint("my-operation", &state).await?;
-    /// ```
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
     pub async fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
         self.backend.get_checkpoint(checkpoint_id).await
@@ -349,9 +268,6 @@ impl RuntaraSdk {
     /// - Saves a checkpoint with the provided state
     /// - Records the wake time (`sleep_until`) in the database
     /// - On resume, calculates remaining time and only sleeps for the remainder
-    ///
-    /// In QUIC mode, the server tracks the wake time. In embedded mode, the
-    /// persistence layer tracks it directly.
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64))]
     pub async fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         self.backend
@@ -362,9 +278,6 @@ impl RuntaraSdk {
     // ========== Events ==========
 
     /// Send a heartbeat event (simple "I'm alive" signal).
-    ///
-    /// Use this for progress reporting without checkpointing.
-    /// For durable progress, use `checkpoint()` instead.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn heartbeat(&self) -> Result<()> {
         self.backend.heartbeat().await
@@ -389,20 +302,6 @@ impl RuntaraSdk {
     }
 
     /// Suspend with durable sleep - saves checkpoint and schedules wake.
-    ///
-    /// This method:
-    /// 1. Saves checkpoint state for resume
-    /// 2. Sends SUSPENDED event with sleep data
-    /// 3. Core sets sleep_until for wake scheduler
-    ///
-    /// After calling this, the instance should exit. The environment will
-    /// relaunch the instance when the wake time arrives.
-    ///
-    /// # Arguments
-    ///
-    /// * `checkpoint_id` - Checkpoint ID for resume
-    /// * `wake_at` - When to wake the instance
-    /// * `state` - State to restore on wake
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
     pub async fn sleep_until(
         &self,
@@ -416,21 +315,6 @@ impl RuntaraSdk {
     }
 
     /// Send a custom event with arbitrary subtype and payload.
-    ///
-    /// This is a fire-and-forget event stored by runtara-core with the given subtype.
-    /// Core treats the subtype as an opaque string without any semantic interpretation.
-    ///
-    /// # Arguments
-    ///
-    /// * `subtype` - Arbitrary event subtype string
-    /// * `payload` - Event payload as raw bytes (typically JSON serialized)
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let payload = serde_json::to_vec(&my_event_data)?;
-    /// sdk.custom_event("my_custom_event", payload).await?;
-    /// ```
     #[instrument(skip(self, payload), fields(instance_id = %self.backend.instance_id(), subtype = %subtype))]
     pub async fn custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         self.backend.send_custom_event(subtype, payload).await
@@ -483,9 +367,6 @@ impl RuntaraSdk {
     }
 
     /// Poll for a custom signal scoped to a specific checkpoint/signal ID.
-    ///
-    /// This is used by WaitForSignal steps to wait for external signals.
-    /// Returns the signal payload if a signal is pending, None otherwise.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id))]
     pub async fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
         let (_signal, custom) = self.backend.poll_signals(Some(signal_id)).await?;
@@ -509,14 +390,6 @@ impl RuntaraSdk {
     }
 
     /// Check for cancellation and return error if cancelled.
-    ///
-    /// Convenience method for use in execution loops:
-    /// ```ignore
-    /// for item in items {
-    ///     sdk.check_cancelled().await?;
-    ///     // process item...
-    /// }
-    /// ```
     pub async fn check_cancelled(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             if signal.signal_type == SignalType::Cancel {
@@ -541,9 +414,6 @@ impl RuntaraSdk {
     }
 
     /// Check for any actionable signal (cancel or pause) and return appropriate error.
-    ///
-    /// This is a unified method that checks for both cancellation and pause signals.
-    /// Use this in workflow steps to detect both types of interruption.
     pub async fn check_signals(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             match signal.signal_type {
@@ -561,16 +431,6 @@ impl RuntaraSdk {
     // ========== Retry Tracking ==========
 
     /// Record a retry attempt for audit trail.
-    ///
-    /// This is a fire-and-forget operation that records a retry attempt
-    /// in the checkpoint history. Called by the `#[durable]` macro when
-    /// a function fails and is about to be retried.
-    ///
-    /// # Arguments
-    ///
-    /// * `checkpoint_id` - The durable function's cache key
-    /// * `attempt_number` - The 1-indexed retry attempt number
-    /// * `error_message` - Error message from the previous failed attempt
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, attempt = attempt_number))]
     pub async fn record_retry_attempt(
         &self,
@@ -620,10 +480,6 @@ impl RuntaraSdk {
     }
 
     /// Get a clone of the backend Arc for the heartbeat task.
-    ///
-    /// This allows the background heartbeat task to send heartbeats
-    /// without holding the SDK mutex, preventing mutex contention
-    /// with long-running network operations.
     pub(crate) fn backend_arc(&self) -> std::sync::Arc<dyn SdkBackend> {
         self.backend.clone()
     }
@@ -631,90 +487,40 @@ impl RuntaraSdk {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "quic")]
     use super::*;
 
-    #[cfg(feature = "quic")]
+    #[cfg(feature = "http")]
     #[test]
-    fn test_sdk_creation() {
-        // Note: This test may fail if the UDP socket cannot be bound (e.g., in sandboxed environments)
-        let sdk = RuntaraSdk::localhost("test-instance", "test-tenant");
-
-        // If we can't create the SDK, just skip the test assertions
-        if let Ok(sdk) = sdk {
-            assert_eq!(sdk.instance_id(), "test-instance");
-            assert_eq!(sdk.tenant_id(), "test-tenant");
-            assert!(!sdk.is_registered());
-        }
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_config_creation() {
-        let config = SdkConfig::localhost("test-instance", "test-tenant");
-        assert_eq!(config.instance_id, "test-instance");
-        assert_eq!(config.tenant_id, "test-tenant");
-        assert!(config.skip_cert_verification);
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_sdk_with_custom_config() {
-        let config = SdkConfig {
-            instance_id: "custom-instance".to_string(),
-            tenant_id: "custom-tenant".to_string(),
-            server_addr: "127.0.0.1:9999".parse().unwrap(),
-            server_name: "custom-server".to_string(),
-            skip_cert_verification: true,
-            request_timeout_ms: 5000,
-            connect_timeout_ms: 3000,
-            signal_poll_interval_ms: 500,
-            heartbeat_interval_ms: 30000,
+    fn test_sdk_creation_http() {
+        let config = crate::backend::http::HttpSdkConfig {
+            instance_id: "test-instance".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            base_url: "http://127.0.0.1:8003".to_string(),
+            request_timeout_ms: 30_000,
+            signal_poll_interval_ms: 1_000,
+            heartbeat_interval_ms: 30_000,
         };
 
-        // May fail in sandboxed environments
-        if let Ok(sdk) = RuntaraSdk::new(config) {
-            assert_eq!(sdk.instance_id(), "custom-instance");
-            assert_eq!(sdk.tenant_id(), "custom-tenant");
-        }
+        let sdk = RuntaraSdk::new(config).unwrap();
+        assert_eq!(sdk.instance_id(), "test-instance");
+        assert_eq!(sdk.tenant_id(), "test-tenant");
+        assert!(!sdk.is_registered());
     }
 
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_sdk_localhost_sets_defaults() {
-        // May fail in sandboxed environments
-        if let Ok(sdk) = RuntaraSdk::localhost("inst", "tenant") {
-            assert!(!sdk.is_registered());
-            assert_eq!(sdk.instance_id(), "inst");
-        }
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_sdk_config_defaults() {
-        let config = SdkConfig::localhost("a", "b");
-        assert_eq!(config.request_timeout_ms, 30_000);
-        assert_eq!(config.connect_timeout_ms, 10_000);
-        assert_eq!(config.signal_poll_interval_ms, 1_000);
-    }
-
-    #[cfg(feature = "quic")]
-    #[test]
-    fn test_sdk_config_with_string_types() {
-        // Test that String types work as well as &str
-        let config = SdkConfig::localhost(String::from("instance"), String::from("tenant"));
-        assert_eq!(config.instance_id, "instance");
-        assert_eq!(config.tenant_id, "tenant");
-    }
-
-    #[cfg(feature = "quic")]
+    #[cfg(feature = "http")]
     #[test]
     fn test_sdk_initial_state() {
-        if let Ok(sdk) = RuntaraSdk::localhost("test", "test") {
-            // SDK should start unregistered
-            assert!(!sdk.is_registered());
-            // pending_signal should be None
-            assert!(sdk.pending_signal.is_none());
-        }
+        let config = crate::backend::http::HttpSdkConfig {
+            instance_id: "test".to_string(),
+            tenant_id: "test".to_string(),
+            base_url: "http://127.0.0.1:8003".to_string(),
+            request_timeout_ms: 30_000,
+            signal_poll_interval_ms: 1_000,
+            heartbeat_interval_ms: 30_000,
+        };
+
+        let sdk = RuntaraSdk::new(config).unwrap();
+        assert!(!sdk.is_registered());
+        assert!(sdk.pending_signal.is_none());
     }
 }

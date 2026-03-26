@@ -263,7 +263,7 @@ impl OciRunner {
         }
 
         // Forward SDK backend selection and HTTP URL if set in host environment.
-        // This allows scenarios to use HTTP instead of QUIC when configured.
+        // This allows scenarios to select the HTTP backend when configured.
         if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
             env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
         }

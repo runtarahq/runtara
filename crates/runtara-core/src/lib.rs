@@ -36,15 +36,15 @@
 //! └───────────────────────┘
 //! ```
 //!
-//! # QUIC Server
+//! # HTTP Server
 //!
-//! Core exposes one QUIC server:
+//! Core exposes one HTTP server:
 //!
 //! | Server | Port | Purpose |
 //! |--------|------|---------|
 //! | Instance Server | 8001 | Workflow instances connect here via runtara-sdk |
 //!
-//! Environment uses the shared `Persistence` trait directly instead of QUIC.
+//! Environment uses the shared `Persistence` trait directly instead of HTTP.
 //!
 //! # Instance Protocol (Port 8001)
 //!
@@ -131,7 +131,7 @@
 //! | Variable | Required | Default | Description |
 //! |----------|----------|---------|-------------|
 //! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
-//! | `RUNTARA_QUIC_PORT` | No | `8001` | Instance QUIC server port |
+//! | `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
 //! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances |
 //!
 //! # Modules
@@ -140,7 +140,7 @@
 //! - [`persistence`]: Database persistence layer for instances, checkpoints, events, signals
 //! - [`error`]: Error types with RPC error code mapping
 //! - [`instance_handlers`]: Instance protocol request handlers
-//! - [`server`]: QUIC server implementation
+//! - [`server`]: HTTP server implementation
 
 #![deny(missing_docs)]
 
@@ -165,7 +165,7 @@ pub mod error;
 /// Compensation framework for saga pattern support.
 pub mod compensation;
 
-// Server-mode modules (require QUIC transport)
+// Server-mode modules (require HTTP transport)
 #[cfg(feature = "server")]
 /// Server configuration loaded from environment variables.
 pub mod config;
@@ -175,7 +175,7 @@ pub mod config;
 pub mod instance_handlers;
 
 #[cfg(feature = "server")]
-/// QUIC server implementation for the instance protocol.
+/// HTTP server implementation for the instance protocol.
 pub mod server;
 
 #[cfg(feature = "server")]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Embedded SDK backend for direct database access.
 //!
-//! This backend bypasses QUIC and calls the persistence layer directly,
+//! This backend calls the persistence layer directly,
 //! suitable for embedding runtara-core within the same process.
 
 use std::sync::Arc;
@@ -19,9 +19,8 @@ use crate::types::{CheckpointResult, CustomSignal, InstanceStatus, Signal, Signa
 
 /// Embedded backend for SDK operations.
 ///
-/// This backend communicates directly with the persistence layer,
-/// bypassing the QUIC transport. Ideal for embedded deployments
-/// where runtara-core runs in the same process.
+/// This backend communicates directly with the persistence layer.
+/// Ideal for embedded deployments where runtara-core runs in the same process.
 pub struct EmbeddedBackend {
     /// Persistence layer
     persistence: Arc<dyn Persistence>,
@@ -54,11 +53,6 @@ impl EmbeddedBackend {
 
 #[async_trait]
 impl SdkBackend for EmbeddedBackend {
-    #[cfg(feature = "quic")]
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     async fn connect(&self) -> Result<()> {
         // No-op for embedded - we're already "connected"
         debug!("Embedded backend: connect is a no-op");

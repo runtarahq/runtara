@@ -102,7 +102,7 @@ fn check_workflow_stdlib_available() -> bool {
 struct IntegratedTestContext {
     /// Database pool
     pool: PgPool,
-    /// runtara-core QUIC server address
+    /// runtara-core HTTP server address
     core_server_addr: SocketAddr,
     /// Persistence layer
     persistence: Arc<PostgresPersistence>,

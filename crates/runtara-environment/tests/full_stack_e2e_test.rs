@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Full-stack end-to-end tests for runtara-environment.
 //!
-//! These tests spin up a real QUIC server and test:
+//! These tests spin up a real HTTP server and test:
 //! - Image registration and retrieval
 //! - Instance lifecycle via Management SDK protocol
 //! - Signal delivery through the protocol
@@ -61,7 +61,7 @@ async fn test_environment_server_starts_and_responds() {
 // Image Management Tests
 // ============================================================================
 
-/// Tests image registration via the QUIC protocol.
+/// Tests image registration via the protocol.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_register_image_via_protocol() {
     let ctx = TestContext::new()

@@ -20,11 +20,8 @@ required-features = ["server"]
 [features]
 default = ["server"]
 
-# Full server mode with QUIC transport (for running runtara-core as a service)
-server = ["dep:quinn", "dep:runtara-protocol", "dep:dotenvy"]
-
-# HTTP API for the instance protocol (alternative to QUIC, for WASM transition)
-http = ["dep:axum"]
+# Full server mode with HTTP transport (for running runtara-core as a service)
+server = ["dep:runtara-protocol", "dep:dotenvy", "dep:axum"]
 
 [dependencies]
 # Async runtime
@@ -33,16 +30,13 @@ tokio = { version = "1", features = ["full"] }
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "sqlite", "uuid", "chrono", "macros", "migrate"] }
 
-# QUIC transport (optional, for server mode)
-quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls", "ring"], optional = true }
-
 # Protocol (optional, for server mode)
 runtara-protocol = { path = "../runtara-protocol", version = "1.0", optional = true }
 
 # Configuration (optional, for server mode)
 dotenvy = { version = "0.15", optional = true }
 
-# HTTP server (optional, for http feature)
+# HTTP server (optional, for server mode)
 axum = { version = "0.8", optional = true }
 
 # Serialization

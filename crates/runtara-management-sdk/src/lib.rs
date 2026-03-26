@@ -5,7 +5,7 @@
 //! High-level SDK for managing Runtara Environment instances and images.
 //!
 //! This crate provides an ergonomic client for interacting with runtara-environment's
-//! API over QUIC. It is the single entry point for all management operations.
+//! API over HTTP. It is the single entry point for all management operations.
 //!
 //! # Architecture
 //!

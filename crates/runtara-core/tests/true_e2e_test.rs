@@ -5,7 +5,7 @@
 //! These tests verify core functionality using real container execution:
 //! 1. DSL scenario → compile_scenario() → native binary
 //! 2. Binary → OCI bundle → crun container
-//! 3. Container ↔ runtara-core QUIC server (via runtara-sdk)
+//! 3. Container ↔ runtara-core HTTP server (via runtara-sdk)
 //!
 //! Unlike protocol-level tests that simulate instance behavior,
 //! these tests run actual workflow binaries in containers that

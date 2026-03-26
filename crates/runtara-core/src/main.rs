@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     })?;
 
     info!(
-        instance_addr = %config.quic_addr,
+        instance_addr = %config.http_addr,
         max_instances = config.max_concurrent_instances,
         "Configuration loaded"
     );
@@ -87,12 +87,12 @@ async fn main() -> Result<()> {
     // Start the runtime
     let runtime = CoreRuntime::builder()
         .persistence(persistence)
-        .bind_addr(config.quic_addr)
+        .bind_addr(config.http_addr)
         .build()?
         .start()
         .await?;
 
-    info!(addr = %config.quic_addr, "Runtara Core ready");
+    info!(addr = %config.http_addr, "Runtara Core ready");
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

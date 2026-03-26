@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Wire format for QUIC stream framing.
+//! Wire format framing for protocol messages.
 //!
-//! Each QUIC stream carries one RPC call with the following frame format:
+//! Each stream carries one RPC call with the following frame format:
 //! - 4 bytes: message length (big-endian)
 //! - 2 bytes: message type
 //! - N bytes: protobuf payload

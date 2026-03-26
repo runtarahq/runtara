@@ -16,4 +16,6 @@ mod error;
 pub use error::{Error, Result, WorkflowError};
 
 // Re-export SDK types for workflows
-pub use runtara_sdk::{RuntaraSdk, SdkConfig, SdkError, durable, register_sdk, sdk};
+pub use runtara_sdk::{RuntaraSdk, SdkError, durable, register_sdk, sdk};
+#[cfg(feature = "native")]
+pub use runtara_sdk::HttpSdkConfig;

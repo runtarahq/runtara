@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Full-stack end-to-end tests for runtara-core.
 //!
-//! These tests spin up a real QUIC server and test the complete flow:
-//! - Instance registration via QUIC protocol
+//! These tests spin up a real HTTP server and test the complete flow:
+//! - Instance registration via protocol
 //! - Checkpoint save/restore operations
 //! - Signal delivery and acknowledgement
 //! - Durable sleep with wake queue
@@ -33,7 +33,7 @@ use runtara_protocol::instance_proto::InstanceEventType;
 // Server Startup Tests
 // ============================================================================
 
-/// Verifies that the test infrastructure can start a real QUIC server
+/// Verifies that the test infrastructure can start a real HTTP server
 /// and establish a client connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_server_starts_and_accepts_connections() {
@@ -762,7 +762,7 @@ async fn test_multiple_concurrent_clients() {
         instance_ids.push(instance_id);
     }
 
-    // Connect single client (multiplexed over QUIC)
+    // Connect single client
     ctx.instance_client
         .connect()
         .await

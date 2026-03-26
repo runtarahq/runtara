@@ -359,14 +359,9 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             let _telemetry_guard = runtara_workflow_stdlib::telemetry::init_subscriber();
 
             // Initialize SDK from environment variables.
-            // Backend selection: RUNTARA_SDK_BACKEND=http uses HTTP, default is QUIC.
             // Required env vars: RUNTARA_INSTANCE_ID, RUNTARA_TENANT_ID
-            // QUIC: RUNTARA_SERVER_ADDR (defaults to 127.0.0.1:8001)
             // HTTP: RUNTARA_HTTP_URL (defaults to http://127.0.0.1:8003)
-            let mut sdk_instance = match std::env::var("RUNTARA_SDK_BACKEND").as_deref() {
-                Ok("http") => RuntaraSdk::from_env_http(),
-                _ => RuntaraSdk::from_env(),
-            };
+            let mut sdk_instance = RuntaraSdk::from_env();
             let mut sdk_instance = match sdk_instance {
                 Ok(s) => s,
                 Err(e) => {

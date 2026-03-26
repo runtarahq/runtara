@@ -30,7 +30,7 @@ Runtara is designed as a **platform** that products build on top of. It separate
 │  │  - Query status      │       │  - Checkpoint persistence (PG)    │   │
 │  │  - Send signals      │       │  - Wake scheduling & signals      │   │
 │  └──────────────────────┘       └──────────────┬────────────────────┘   │
-│                                                │ QUIC                   │
+│                                                │ HTTP                   │
 │  ┌──────────────────────┐       ┌──────────────▼────────────────────┐   │
 │  │  runtara-environment │       │       Workflow Instance           │   │
 │  │  - OCI container exec│       │  - Compiled native binary         │   │
@@ -48,7 +48,7 @@ Runtara is designed as a **platform** that products build on top of. It separate
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-Note: The Management SDK connects to `runtara-environment` (port 8002). Environment owns image registration and instance lifecycle. It proxies signals to `runtara-core` (port 8003) and passes the core address to instances so they can checkpoint and receive signals over QUIC.
+Note: The Management SDK connects to `runtara-environment` (port 8002). Environment owns image registration and instance lifecycle. It proxies signals to `runtara-core` (port 8003) and passes the core address to instances so they can checkpoint and receive signals over HTTP.
 
 ## Integration Points
 
@@ -223,7 +223,7 @@ pub mod my_erp {
 - **Checkpointing**: Automatically save workflow state to PostgreSQL for crash recovery
 - **Durable Sleep**: Long sleeps cause instance to exit; runtara-environment wakes it later
 - **Signal Handling**: External control (cancel, pause, resume) polled by instances
-- **QUIC Transport**: Fast, secure communication between instances and the execution engine
+- **HTTP Transport**: Communication between instances and the execution engine
 - **OCI Runner**: Run workflows as OCI containers with resource isolation
 - **DSL Compiler**: JSON workflow definitions compile to native Rust binaries
 - **Built-in Agents**: Pre-built integrations for HTTP, SFTP, CSV, XML, and more
@@ -354,8 +354,8 @@ The compiled binary:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `RUNTARA_QUIC_PORT` | No | 8001 | Instance QUIC server port |
-| `RUNTARA_ADMIN_PORT` | No | 8003 | Management QUIC server port (Environment connects) |
+| `RUNTARA_HTTP_PORT` | No | 8001 | Instance HTTP server port |
+| `RUNTARA_ADMIN_PORT` | No | 8003 | Management HTTP server port (Environment connects) |
 | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | 32 | Maximum concurrent instances |
 
 ### runtara-environment
@@ -363,7 +363,7 @@ The compiled binary:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `RUNTARA_ENVIRONMENT_DATABASE_URL` | Yes* | - | PostgreSQL connection string (falls back to `RUNTARA_DATABASE_URL`) |
-| `RUNTARA_ENV_QUIC_PORT` | No | 8002 | Environment QUIC server port |
+| `RUNTARA_ENV_HTTP_PORT` | No | 8002 | Environment HTTP server port |
 | `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address of runtara-core |
 | `DATA_DIR` | No | `.data` | Data directory for images, bundles, and instance I/O |
 | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification (passed to instances) |
@@ -466,7 +466,7 @@ TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-environment
 |-------|-------------|
 | `runtara-core` | Execution engine - manages instances, checkpoints, signals, wake scheduling |
 | `runtara-environment` | Execution environment - OCI container runner, image registry, instance lifecycle |
-| `runtara-protocol` | Wire protocol layer (QUIC transport via quinn, Protobuf via prost) |
+| `runtara-protocol` | Wire protocol layer (Protobuf message definitions via prost) |
 | `runtara-sdk` | High-level client for instances to communicate with runtara-core |
 | `runtara-sdk-macros` | Proc macros (`#[durable]`) for transparent durability |
 | `runtara-management-sdk` | Management client for external tools |

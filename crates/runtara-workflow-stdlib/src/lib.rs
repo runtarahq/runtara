@@ -74,7 +74,9 @@ pub mod prelude {
     pub use crate::runtime::{Error, Result};
 
     // SDK types for durability
-    pub use crate::runtime::{RuntaraSdk, SdkConfig, durable, register_sdk, sdk};
+    pub use crate::runtime::{RuntaraSdk, durable, register_sdk, sdk};
+    #[cfg(feature = "native")]
+    pub use crate::runtime::HttpSdkConfig;
 
     // Condition helpers for generated conditional steps
     pub use crate::conditions::{is_truthy, to_number, values_equal};

@@ -39,8 +39,8 @@ impl TestContext {
     ///
     /// This sets up:
     /// 1. Database connection (from TEST_RUNTARA_DATABASE_URL or auto-started container)
-    /// 2. Instance QUIC server on an available port
-    /// 3. QUIC client connected to the server
+    /// 2. Instance HTTP server on an available port
+    /// 3. Client connected to the server
     /// 4. Persistence layer for direct database operations
     pub async fn new() -> Result<Self, String> {
         // 1. Get database URL - either from env or start a container
@@ -96,7 +96,8 @@ impl TestContext {
             dangerous_skip_cert_verification: true,
             ..Default::default()
         })
-        .map_err(|e| format!("Failed to create QUIC client: {}", e))?;
+        // TODO: Convert to HTTP client
+        .map_err(|e| format!("Failed to create client: {}", e))?;
 
         Ok(Self {
             pool,

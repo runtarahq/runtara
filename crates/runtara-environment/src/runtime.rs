@@ -63,7 +63,7 @@
 //!         .start()
 //!         .await?;
 //!
-//!     // Both Environment QUIC server (8002) and Core QUIC server (8001) are now running
+//!     // Both Environment HTTP server (8002) and Core HTTP server (8001) are now running
 //!     // in this single process, sharing the same persistence layer.
 //!
 //!     runtime.shutdown().await?;  // Shuts down both Environment and embedded Core
@@ -80,7 +80,7 @@ use anyhow::Result;
 use runtara_core::persistence::Persistence;
 use runtara_core::runtime::CoreRuntime;
 use sqlx::PgPool;
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -163,7 +163,7 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
-    /// Set the bind address for the QUIC server.
+    /// Set the bind address for the HTTP server.
     ///
     /// Default: `0.0.0.0:8002`
     pub fn bind_addr(mut self, addr: SocketAddr) -> Self {
@@ -179,7 +179,7 @@ impl EnvironmentRuntimeBuilder {
         self
     }
 
-    /// Set the bind address for the embedded runtara-core QUIC server.
+    /// Set the bind address for the embedded runtara-core HTTP server.
     ///
     /// When set along with [`core_persistence`](Self::core_persistence), an embedded
     /// `CoreRuntime` will be started that listens on this address for instance connections.
@@ -330,7 +330,7 @@ pub struct EnvironmentRuntimeConfig {
 }
 
 impl EnvironmentRuntimeConfig {
-    /// Start the runtime, spawning the QUIC server and wake scheduler tasks.
+    /// Start the runtime, spawning the HTTP server and wake scheduler tasks.
     pub async fn start(self) -> Result<EnvironmentRuntime> {
         // Start embedded CoreRuntime if core_bind_addr is configured
         let core_runtime = if let Some(core_bind_addr) = self.core_bind_addr {
@@ -447,16 +447,13 @@ impl EnvironmentRuntimeConfig {
             image_cleanup_worker.run().await;
         });
 
-        // Start QUIC server task
-        let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
+        // Start HTTP server task
         let bind_addr = self.bind_addr;
         let server_state = state.clone();
 
-        let server_handle = tokio::spawn(run_environment_server_with_shutdown(
-            bind_addr,
-            server_state,
-            server_shutdown_rx,
-        ));
+        let server_handle = tokio::spawn(async move {
+            crate::http_server::run_http_server(bind_addr, server_state).await
+        });
 
         info!(
             bind_addr = %bind_addr,
@@ -472,7 +469,6 @@ impl EnvironmentRuntimeConfig {
             heartbeat_handle,
             db_cleanup_handle,
             core_runtime,
-            server_shutdown_tx,
             wake_shutdown,
             cleanup_shutdown,
             heartbeat_shutdown,
@@ -488,7 +484,7 @@ impl EnvironmentRuntimeConfig {
 /// A running runtara-environment instance that can be embedded in an application.
 ///
 /// The runtime manages:
-/// - QUIC server for management SDK connections (images, instances, signals)
+/// - HTTP server for management SDK connections (images, instances, signals)
 /// - Wake scheduler for durable sleep wake-ups
 /// - Cleanup worker for removing old run directories
 /// - Database cleanup worker for removing old database records
@@ -504,7 +500,6 @@ pub struct EnvironmentRuntime {
     heartbeat_handle: JoinHandle<()>,
     db_cleanup_handle: JoinHandle<()>,
     core_runtime: Option<CoreRuntime>,
-    server_shutdown_tx: watch::Sender<bool>,
     wake_shutdown: Arc<Notify>,
     cleanup_shutdown: Arc<Notify>,
     heartbeat_shutdown: Arc<Notify>,
@@ -521,7 +516,7 @@ impl EnvironmentRuntime {
         EnvironmentRuntimeBuilder::new()
     }
 
-    /// Get the bind address of the QUIC server.
+    /// Get the bind address of the HTTP server.
     pub fn bind_addr(&self) -> SocketAddr {
         self.bind_addr
     }
@@ -533,14 +528,14 @@ impl EnvironmentRuntime {
 
     /// Gracefully shut down the runtime.
     ///
-    /// This signals the QUIC server, wake scheduler, cleanup worker, database
+    /// This signals the HTTP server, wake scheduler, cleanup worker, database
     /// cleanup worker, heartbeat monitor, and embedded CoreRuntime (if present)
     /// to stop, then waits for them to complete.
     pub async fn shutdown(self) -> Result<()> {
         info!("EnvironmentRuntime shutting down...");
 
-        // Signal server shutdown
-        let _ = self.server_shutdown_tx.send(true);
+        // Abort the HTTP server
+        self.server_handle.abort();
 
         // Signal wake scheduler shutdown
         self.wake_shutdown.notify_one();
@@ -589,7 +584,7 @@ impl EnvironmentRuntime {
             error!("Embedded CoreRuntime error during shutdown: {}", e);
         }
 
-        // Wait for server
+        // Wait for HTTP server
         match self.server_handle.await {
             Ok(Ok(())) => {
                 info!("EnvironmentRuntime shutdown complete");
@@ -598,6 +593,10 @@ impl EnvironmentRuntime {
             Ok(Err(e)) => {
                 error!("EnvironmentRuntime server error during shutdown: {}", e);
                 Err(e)
+            }
+            Err(e) if e.is_cancelled() => {
+                info!("EnvironmentRuntime shutdown complete");
+                Ok(())
             }
             Err(e) => {
                 error!("EnvironmentRuntime server task panicked: {}", e);
@@ -623,62 +622,6 @@ impl EnvironmentRuntime {
     pub fn core_runtime(&self) -> Option<&CoreRuntime> {
         self.core_runtime.as_ref()
     }
-}
-
-/// Run the environment QUIC server with shutdown support.
-async fn run_environment_server_with_shutdown(
-    bind_addr: SocketAddr,
-    state: Arc<EnvironmentHandlerState>,
-    mut shutdown_rx: watch::Receiver<bool>,
-) -> Result<()> {
-    use runtara_protocol::server::RuntaraServer;
-
-    let server = RuntaraServer::localhost(bind_addr)?;
-
-    info!(addr = %bind_addr, "Environment QUIC server starting");
-
-    loop {
-        tokio::select! {
-            biased;
-
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    info!("Environment QUIC server received shutdown signal");
-                    server.close();
-                    break;
-                }
-            }
-
-            incoming = server.accept() => {
-                match incoming {
-                    Some(incoming) => {
-                        let state = state.clone();
-                        tokio::spawn(async move {
-                            match incoming.await {
-                                Ok(connection) => {
-                                    let remote_addr = connection.remote_address();
-                                    debug!(%remote_addr, "accepted connection");
-
-                                    let conn_handler = runtara_protocol::server::ConnectionHandler::new(connection);
-                                    crate::server::handle_connection(conn_handler, state).await;
-                                }
-                                Err(e) => {
-                                    debug!("failed to accept connection: {}", e);
-                                }
-                            }
-                        });
-                    }
-                    None => {
-                        // Endpoint closed
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    info!("Environment QUIC server stopped");
-    Ok(())
 }
 
 /// Check if a process is alive by checking /proc/<pid> existence.

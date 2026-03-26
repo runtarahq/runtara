@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 pub struct Config {
     /// PostgreSQL or SQLite connection URL
     pub database_url: String,
-    /// QUIC server address for instance communication
-    pub quic_addr: SocketAddr,
+    /// HTTP server address for instance communication
+    pub http_addr: SocketAddr,
     /// Maximum concurrent instances
     pub max_concurrent_instances: u32,
 }
@@ -22,17 +22,17 @@ impl Config {
     /// - `RUNTARA_DATABASE_URL`: PostgreSQL or SQLite connection string
     ///
     /// Optional (with defaults):
-    /// - `RUNTARA_QUIC_PORT`: QUIC server port (default: 8001)
+    /// - `RUNTARA_HTTP_PORT`: HTTP server port (default: 8001)
     /// - `RUNTARA_MAX_CONCURRENT_INSTANCES`: Max concurrent instances (default: 32)
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url = std::env::var("RUNTARA_DATABASE_URL")
             .map_err(|_| ConfigError::Missing("RUNTARA_DATABASE_URL"))?;
 
-        let quic_port: u16 = std::env::var("RUNTARA_QUIC_PORT")
+        let http_port: u16 = std::env::var("RUNTARA_HTTP_PORT")
             .unwrap_or_else(|_| "8001".to_string())
             .parse()
             .map_err(|_| {
-                ConfigError::Invalid("RUNTARA_QUIC_PORT", "must be a valid port number")
+                ConfigError::Invalid("RUNTARA_HTTP_PORT", "must be a valid port number")
             })?;
 
         let max_concurrent_instances: u32 = std::env::var("RUNTARA_MAX_CONCURRENT_INSTANCES")
@@ -47,7 +47,7 @@ impl Config {
 
         Ok(Self {
             database_url,
-            quic_addr: SocketAddr::from(([0, 0, 0, 0], quic_port)),
+            http_addr: SocketAddr::from(([0, 0, 0, 0], http_port)),
             max_concurrent_instances,
         })
     }
@@ -119,13 +119,13 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_QUIC_PORT");
+        guard.remove("RUNTARA_HTTP_PORT");
         guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
 
         let config = Config::from_env().unwrap();
 
         assert_eq!(config.database_url, "postgres://localhost/test");
-        assert_eq!(config.quic_addr.port(), 8001);
+        assert_eq!(config.http_addr.port(), 8001);
         assert_eq!(config.max_concurrent_instances, 32);
     }
 
@@ -135,13 +135,13 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "sqlite:test.db");
-        guard.set("RUNTARA_QUIC_PORT", "9999");
+        guard.set("RUNTARA_HTTP_PORT", "9999");
         guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
 
         let config = Config::from_env().unwrap();
 
         assert_eq!(config.database_url, "sqlite:test.db");
-        assert_eq!(config.quic_addr.port(), 9999);
+        assert_eq!(config.http_addr.port(), 9999);
         assert_eq!(config.max_concurrent_instances, 32);
     }
 
@@ -151,7 +151,7 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_QUIC_PORT");
+        guard.remove("RUNTARA_HTTP_PORT");
         guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "100");
 
         let config = Config::from_env().unwrap();
@@ -165,13 +165,13 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://user:pass@db:5432/prod");
-        guard.set("RUNTARA_QUIC_PORT", "8080");
+        guard.set("RUNTARA_HTTP_PORT", "8080");
         guard.set("RUNTARA_MAX_CONCURRENT_INSTANCES", "256");
 
         let config = Config::from_env().unwrap();
 
         assert_eq!(config.database_url, "postgres://user:pass@db:5432/prod");
-        assert_eq!(config.quic_addr.port(), 8080);
+        assert_eq!(config.http_addr.port(), 8080);
         assert_eq!(config.max_concurrent_instances, 256);
     }
 
@@ -191,33 +191,33 @@ mod tests {
     }
 
     #[test]
-    fn test_config_invalid_quic_port() {
+    fn test_config_invalid_http_port() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_QUIC_PORT", "not_a_number");
+        guard.set("RUNTARA_HTTP_PORT", "not_a_number");
 
         let result = Config::from_env();
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid("RUNTARA_QUIC_PORT", _)));
+        assert!(matches!(err, ConfigError::Invalid("RUNTARA_HTTP_PORT", _)));
     }
 
     #[test]
-    fn test_config_invalid_quic_port_out_of_range() {
+    fn test_config_invalid_http_port_out_of_range() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.set("RUNTARA_QUIC_PORT", "99999"); // > 65535
+        guard.set("RUNTARA_HTTP_PORT", "99999"); // > 65535
 
         let result = Config::from_env();
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid("RUNTARA_QUIC_PORT", _)));
+        assert!(matches!(err, ConfigError::Invalid("RUNTARA_HTTP_PORT", _)));
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_QUIC_PORT");
+        guard.remove("RUNTARA_HTTP_PORT");
         guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
 
         let config = Config::from_env().unwrap();
@@ -279,7 +279,7 @@ mod tests {
 
         assert!(debug_str.contains("Config"));
         assert!(debug_str.contains("database_url"));
-        assert!(debug_str.contains("quic_addr"));
+        assert!(debug_str.contains("http_addr"));
     }
 
     #[test]
@@ -288,14 +288,14 @@ mod tests {
         let mut guard = EnvGuard::new();
 
         guard.set("RUNTARA_DATABASE_URL", "postgres://localhost/test");
-        guard.remove("RUNTARA_QUIC_PORT");
+        guard.remove("RUNTARA_HTTP_PORT");
         guard.remove("RUNTARA_MAX_CONCURRENT_INSTANCES");
 
         let config = Config::from_env().unwrap();
         let cloned = config.clone();
 
         assert_eq!(config.database_url, cloned.database_url);
-        assert_eq!(config.quic_addr, cloned.quic_addr);
+        assert_eq!(config.http_addr, cloned.http_addr);
         assert_eq!(
             config.max_concurrent_instances,
             cloned.max_concurrent_instances

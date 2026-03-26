@@ -51,7 +51,7 @@ When deploying Runtara:
 ### Network Security
 
 - Run runtara-core and runtara-environment behind a firewall
-- Use TLS certificates for QUIC connections in production
+- Use TLS certificates for connections in production
 - Do not expose management ports (8002, 8003) to the public internet
 
 ### Configuration

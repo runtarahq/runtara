@@ -4,8 +4,6 @@
 
 #![allow(dead_code)] // Structured error types used by consuming code
 
-#[cfg(feature = "quic")]
-use runtara_protocol::ClientError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -268,11 +266,6 @@ pub enum SdkError {
     #[error("configuration error: {0}")]
     Config(String),
 
-    /// Connection to runtara-core failed
-    #[cfg(feature = "quic")]
-    #[error("connection error: {0}")]
-    Connection(#[from] ClientError),
-
     /// Registration with runtara-core failed
     #[error("registration failed: {0}")]
     Registration(String),
@@ -331,11 +324,6 @@ pub enum SdkError {
     Internal(String),
 }
 
-impl From<prost::DecodeError> for SdkError {
-    fn from(err: prost::DecodeError) -> Self {
-        SdkError::Serialization(err.to_string())
-    }
-}
 
 /// Type alias for SDK results.
 pub type Result<T> = std::result::Result<T, SdkError>;
@@ -452,20 +440,6 @@ mod tests {
         assert!(debug_str.contains("Server"));
         assert!(debug_str.contains("ERR_500"));
         assert!(debug_str.contains("Internal error"));
-    }
-
-    #[test]
-    fn test_from_prost_decode_error() {
-        // Create a decode error by trying to decode invalid protobuf
-        let invalid_bytes = vec![0xFF, 0xFF, 0xFF];
-        let decode_result: std::result::Result<runtara_protocol::instance_proto::InstanceEvent, _> =
-            prost::Message::decode(invalid_bytes.as_slice());
-
-        if let Err(decode_error) = decode_result {
-            let sdk_error: SdkError = decode_error.into();
-            let msg = format!("{}", sdk_error);
-            assert!(msg.starts_with("serialization error:"));
-        }
     }
 
     #[test]

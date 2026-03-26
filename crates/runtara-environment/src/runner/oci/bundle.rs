@@ -148,7 +148,7 @@ pub struct OciCpu {
 /// Network mode for container
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum NetworkMode {
-    /// Use host networking (no isolation, but allows direct QUIC access)
+    /// Use host networking (no isolation, but allows direct HTTP access)
     #[default]
     Host,
     /// Use pasta for user-mode networking with isolation
@@ -668,7 +668,7 @@ impl BundleManager {
                     ],
                     action: "SCMP_ACT_ALLOW".to_string(),
                 },
-                // Networking (for QUIC communication with runtara-core)
+                // Networking (for HTTP communication with runtara-core)
                 OciSyscall {
                     names: vec![
                         "socket".to_string(),

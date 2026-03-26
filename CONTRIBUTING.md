@@ -143,7 +143,7 @@ cargo clippy --all-targets -- -D warnings
 crates/
 ├── runtara-core/          # Execution engine
 ├── runtara-environment/   # OCI runner, image registry
-├── runtara-protocol/      # QUIC + Protobuf
+├── runtara-protocol/      # Protobuf protocol types
 ├── runtara-sdk/           # Instance SDK
 ├── runtara-management-sdk/# Management client
 ├── runtara-sdk-macros/    # #[durable] macro

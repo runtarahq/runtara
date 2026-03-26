@@ -1,22 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! ManagementSdk client for interacting with runtara-environment.
+//! ManagementSdk client for interacting with runtara-environment over HTTP/JSON.
+//!
+//! This module provides the client for all management operations, targeting the
+//! HTTP server defined in `runtara-environment/src/http_server.rs`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use base64::Engine;
 use chrono::{TimeZone, Utc};
+use reqwest::Client;
+use serde::Deserialize;
 use tracing::{debug, info, instrument};
-
-use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
-use runtara_protocol::environment_proto::{
-    DeleteImageRequest, GetCapabilityRequest, GetCheckpointRequest, GetImageRequest,
-    GetInstanceStatusRequest, GetScopeAncestorsRequest, GetTenantMetricsRequest,
-    HealthCheckRequest, ListAgentsRequest, ListCheckpointsRequest, ListEventsRequest,
-    ListImagesRequest, ListInstancesRequest, ListStepSummariesRequest, RegisterImageRequest,
-    RegisterImageStreamStart, ResumeInstanceRequest, RpcRequest, RpcResponse,
-    SendCustomSignalRequest, SendSignalRequest, StartInstanceRequest, StopInstanceRequest,
-    TestCapabilityRequest, rpc_request::Request, rpc_response::Response,
-};
-use runtara_protocol::frame::{Frame, write_frame};
-use tokio::io::AsyncRead;
 
 use crate::config::SdkConfig;
 use crate::error::{Result, SdkError};
@@ -29,39 +24,391 @@ use crate::types::{
     MetricsGranularity, RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions,
     RunnerType, ScopeInfo, SignalType, StartInstanceOptions, StartInstanceResult, StepStatus,
     StepSummary, StopInstanceOptions, TenantMetricsResult, TestCapabilityOptions,
-    TestCapabilityResult,
+    TestCapabilityResult, TerminationReason,
 };
 
-/// High-level SDK for managing runtara-environment instances and images.
+// ============================================================================
+// Intermediate JSON response structs (match HTTP server's JSON format)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct HealthCheckJson {
+    healthy: bool,
+    version: String,
+    #[serde(default)]
+    uptime_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstanceStatusJson {
+    found: bool,
+    instance_id: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default)]
+    image_id: Option<String>,
+    #[serde(default)]
+    image_name: Option<String>,
+    #[serde(default)]
+    checkpoint_id: Option<String>,
+    #[serde(default)]
+    created_at_ms: Option<i64>,
+    #[serde(default)]
+    started_at_ms: Option<i64>,
+    #[serde(default)]
+    finished_at_ms: Option<i64>,
+    #[serde(default)]
+    output: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    stderr: Option<String>,
+    #[serde(default)]
+    heartbeat_at_ms: Option<i64>,
+    #[serde(default)]
+    retry_count: Option<u32>,
+    #[serde(default)]
+    max_retries: Option<u32>,
+    #[serde(default)]
+    memory_peak_bytes: Option<u64>,
+    #[serde(default)]
+    cpu_usage_usec: Option<u64>,
+    #[serde(default)]
+    termination_reason: Option<String>,
+    #[serde(default)]
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListInstancesJson {
+    instances: Vec<InstanceSummaryJson>,
+    total_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstanceSummaryJson {
+    instance_id: String,
+    tenant_id: String,
+    #[serde(default)]
+    image_id: Option<String>,
+    status: String,
+    created_at_ms: i64,
+    #[serde(default)]
+    started_at_ms: Option<i64>,
+    #[serde(default)]
+    finished_at_ms: Option<i64>,
+    #[serde(default)]
+    has_error: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StartInstanceJson {
+    success: bool,
+    #[serde(default)]
+    instance_id: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimpleSuccessJson {
+    success: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterImageJson {
+    success: bool,
+    #[serde(default)]
+    image_id: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListImagesJson {
+    images: Vec<ImageSummaryJson>,
+    #[serde(default)]
+    total_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageSummaryJson {
+    image_id: String,
+    tenant_id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    runner_type: String,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetImageJson {
+    found: bool,
+    #[serde(default)]
+    image: Option<ImageSummaryJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListCheckpointsJson {
+    checkpoints: Vec<CheckpointSummaryJson>,
+    total_count: u32,
+    limit: i64,
+    offset: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckpointSummaryJson {
+    checkpoint_id: String,
+    instance_id: String,
+    created_at_ms: i64,
+    data_size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckpointDetailJson {
+    found: bool,
+    checkpoint_id: String,
+    instance_id: String,
+    created_at_ms: i64,
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListEventsJson {
+    events: Vec<EventSummaryJson>,
+    total_count: u32,
+    limit: i64,
+    offset: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventSummaryJson {
+    id: i64,
+    instance_id: String,
+    event_type: String,
+    #[serde(default)]
+    checkpoint_id: Option<String>,
+    #[serde(default)]
+    payload: Option<String>,
+    created_at_ms: i64,
+    #[serde(default)]
+    subtype: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListStepSummariesJson {
+    steps: Vec<StepSummaryJson>,
+    total_count: u32,
+    limit: i64,
+    offset: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StepSummaryJson {
+    step_id: String,
+    #[serde(default)]
+    step_name: Option<String>,
+    step_type: String,
+    status: String,
+    started_at_ms: i64,
+    #[serde(default)]
+    completed_at_ms: Option<i64>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+    #[serde(default)]
+    inputs: Option<serde_json::Value>,
+    #[serde(default)]
+    outputs: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+    #[serde(default)]
+    scope_id: Option<String>,
+    #[serde(default)]
+    parent_scope_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScopeAncestorsJson {
+    ancestors: Vec<ScopeInfoJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScopeInfoJson {
+    scope_id: String,
+    #[serde(default)]
+    parent_scope_id: Option<String>,
+    step_id: String,
+    #[serde(default)]
+    step_name: Option<String>,
+    step_type: String,
+    #[serde(default)]
+    index: Option<u32>,
+    created_at_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TenantMetricsJson {
+    tenant_id: String,
+    start_time_ms: i64,
+    end_time_ms: i64,
+    granularity: String,
+    buckets: Vec<MetricsBucketJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricsBucketJson {
+    bucket_time_ms: i64,
+    invocation_count: i64,
+    success_count: i64,
+    failure_count: i64,
+    cancelled_count: i64,
+    #[serde(default)]
+    avg_duration_ms: Option<f64>,
+    #[serde(default)]
+    min_duration_ms: Option<f64>,
+    #[serde(default)]
+    max_duration_ms: Option<f64>,
+    #[serde(default)]
+    avg_memory_bytes: Option<i64>,
+    #[serde(default)]
+    max_memory_bytes: Option<i64>,
+    #[serde(default)]
+    success_rate_percent: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TestCapabilityJson {
+    success: bool,
+    #[serde(default)]
+    output: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    execution_time_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAgentsJson {
+    agents: Vec<AgentInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetCapabilityJson {
+    found: bool,
+    #[serde(default)]
+    inputs: Option<Vec<CapabilityField>>,
+}
+
+/// Error response body from the HTTP server.
+#[derive(Debug, Deserialize)]
+struct ErrorResponseJson {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+// ============================================================================
+// Helper functions
+// ============================================================================
+
+fn runner_type_from_string(s: &str) -> RunnerType {
+    match s.to_lowercase().as_str() {
+        "native" | "1" => RunnerType::Native,
+        "wasm" | "2" => RunnerType::Wasm,
+        _ => RunnerType::Oci,
+    }
+}
+
+fn runner_type_to_string(rt: RunnerType) -> &'static str {
+    match rt {
+        RunnerType::Oci => "oci",
+        RunnerType::Native => "native",
+        RunnerType::Wasm => "wasm",
+    }
+}
+
+fn instance_status_from_string(s: &str) -> InstanceStatus {
+    match s {
+        "pending" => InstanceStatus::Pending,
+        "running" => InstanceStatus::Running,
+        "suspended" | "sleeping" => InstanceStatus::Suspended,
+        "completed" => InstanceStatus::Completed,
+        "failed" => InstanceStatus::Failed,
+        "cancelled" => InstanceStatus::Cancelled,
+        _ => InstanceStatus::Unknown,
+    }
+}
+
+fn step_status_from_string(s: &str) -> StepStatus {
+    match s {
+        "completed" => StepStatus::Completed,
+        "failed" => StepStatus::Failed,
+        _ => StepStatus::Running,
+    }
+}
+
+fn ms_to_datetime(ms: i64) -> chrono::DateTime<Utc> {
+    Utc.timestamp_millis_opt(ms)
+        .single()
+        .unwrap_or_else(Utc::now)
+}
+
+fn opt_ms_to_datetime(ms: Option<i64>) -> Option<chrono::DateTime<Utc>> {
+    ms.and_then(|ms| Utc.timestamp_millis_opt(ms).single())
+}
+
+/// Decode a base64-encoded string to JSON Value, or None if empty/invalid.
+fn decode_base64_json(encoded: &str) -> Option<serde_json::Value> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+// ============================================================================
+// ManagementSdk
+// ============================================================================
+
+/// HTTP-based management SDK for interacting with runtara-environment.
 ///
-/// This client wraps the low-level QUIC protocol and provides ergonomic methods
-/// for management operations like health checks, starting/stopping instances,
-/// managing images, and sending signals.
-///
-/// The Management SDK talks ONLY to runtara-environment. Environment handles
-/// all image registry and instance lifecycle operations. For signals (pause, cancel),
-/// Environment proxies the request to runtara-core internally.
+/// Provides the same API as [`ManagementSdk`](crate::ManagementSdk) but uses
+/// HTTP/JSON for communicating with runtara-environment.
 pub struct ManagementSdk {
-    client: RuntaraClient,
+    client: Client,
+    base_url: String,
     config: SdkConfig,
+    connected: AtomicBool,
 }
 
 impl ManagementSdk {
-    /// Create a new SDK with the given configuration.
+    /// Create a new HTTP SDK with the given configuration.
     pub fn new(config: SdkConfig) -> Result<Self> {
-        let client_config = RuntaraClientConfig {
-            server_addr: config.server_addr,
-            server_name: config.server_name.clone(),
-            enable_0rtt: true,
-            dangerous_skip_cert_verification: config.skip_cert_verification,
-            keep_alive_interval_ms: 10_000,
-            idle_timeout_ms: config.request_timeout.as_millis() as u64,
-            connect_timeout_ms: config.connect_timeout.as_millis() as u64,
-        };
+        let client = Client::builder()
+            .timeout(config.request_timeout)
+            .connect_timeout(config.connect_timeout)
+            .build()
+            .map_err(|e| SdkError::Connection(format!("Failed to create HTTP client: {}", e)))?;
 
-        let client = RuntaraClient::new(client_config)?;
+        let base_url = format!("http://{}", config.server_addr);
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            base_url,
+            config,
+            connected: AtomicBool::new(false),
+        })
     }
 
     /// Create an SDK from environment variables.
@@ -76,21 +423,24 @@ impl ManagementSdk {
     }
 
     /// Connect to runtara-environment.
+    ///
+    /// For HTTP, this performs a health check to verify reachability.
     #[instrument(skip(self), level = "debug")]
     pub async fn connect(&self) -> Result<()> {
-        self.client.connect().await?;
-        debug!("Connected to runtara-environment");
+        self.health_check().await?;
+        self.connected.store(true, Ordering::SeqCst);
+        debug!("Connected to runtara-environment (HTTP)");
         Ok(())
     }
 
-    /// Close the connection.
+    /// Close the connection (no-op for HTTP).
     pub async fn close(&self) {
-        self.client.close().await;
+        self.connected.store(false, Ordering::SeqCst);
     }
 
     /// Check if connected.
     pub async fn is_connected(&self) -> bool {
-        self.client.is_connected().await
+        self.connected.load(Ordering::SeqCst)
     }
 
     /// Get the SDK configuration.
@@ -102,23 +452,28 @@ impl ManagementSdk {
     // Internal helpers
     // =========================================================================
 
-    /// Send a request and receive a response.
-    async fn send_request(&self, request: Request) -> Result<Response> {
-        let rpc_request = RpcRequest {
-            request: Some(request),
-        };
+    /// Build a full URL from a path.
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
 
-        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(Response::Error(err)) => Err(SdkError::Server {
-                code: err.code,
-                message: err.message,
-            }),
-            Some(response) => Ok(response),
-            None => Err(SdkError::UnexpectedResponse(
-                "empty response from server".to_string(),
-            )),
+    /// Parse an error response body from the server.
+    async fn parse_error_response(resp: reqwest::Response) -> SdkError {
+        let status = resp.status();
+        match resp.json::<ErrorResponseJson>().await {
+            Ok(err_body) => {
+                let message = err_body
+                    .error
+                    .unwrap_or_else(|| format!("HTTP {} error", status));
+                let code = err_body
+                    .code
+                    .unwrap_or_else(|| status.as_str().to_string());
+                SdkError::Server { code, message }
+            }
+            Err(_) => SdkError::Server {
+                code: status.as_str().to_string(),
+                message: format!("HTTP {} error", status),
+            },
         }
     }
 
@@ -131,21 +486,21 @@ impl ManagementSdk {
     pub async fn health_check(&self) -> Result<HealthStatus> {
         debug!("Performing health check");
 
-        let response = self
-            .send_request(Request::HealthCheck(HealthCheckRequest {}))
-            .await?;
+        let resp = self.client.get(self.url("/api/v1/health")).send().await?;
 
-        match response {
-            Response::HealthCheck(resp) => Ok(HealthStatus {
-                healthy: resp.healthy,
-                version: resp.version,
-                uptime_ms: resp.uptime_ms,
-                active_instances: resp.active_instances,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected HealthCheckResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: HealthCheckJson = resp.json().await?;
+
+        // HTTP server doesn't return active_instances in health check, default to 0
+        Ok(HealthStatus {
+            healthy: json.healthy,
+            version: json.version,
+            uptime_ms: json.uptime_ms,
+            active_instances: 0,
+        })
     }
 
     // =========================================================================
@@ -157,61 +512,51 @@ impl ManagementSdk {
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<InstanceInfo> {
         debug!("Getting instance status");
 
-        let response = self
-            .send_request(Request::GetInstanceStatus(GetInstanceStatusRequest {
-                instance_id: instance_id.to_string(),
-            }))
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/instances/{}", instance_id)))
+            .send()
             .await?;
 
-        match response {
-            Response::GetInstanceStatus(resp) => {
-                // Check if instance was not found using explicit `found` field
-                if !resp.found {
-                    return Err(SdkError::InstanceNotFound(instance_id.to_string()));
-                }
-
-                Ok(InstanceInfo {
-                    instance_id: resp.instance_id,
-                    image_id: resp.image_id,
-                    image_name: resp.image_name,
-                    tenant_id: resp.tenant_id,
-                    status: InstanceStatus::from(resp.status),
-                    checkpoint_id: resp.checkpoint_id,
-                    created_at: Utc
-                        .timestamp_millis_opt(resp.created_at_ms)
-                        .single()
-                        .unwrap_or_else(Utc::now),
-                    started_at: resp
-                        .started_at_ms
-                        .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
-                    finished_at: resp
-                        .finished_at_ms
-                        .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
-                    heartbeat_at: resp
-                        .heartbeat_at_ms
-                        .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
-                    input: resp
-                        .input
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
-                    output: resp
-                        .output
-                        .and_then(|bytes| serde_json::from_slice(&bytes).ok()),
-                    error: resp.error,
-                    stderr: resp.stderr,
-                    retry_count: resp.retry_count,
-                    max_retries: resp.max_retries,
-                    memory_peak_bytes: resp.memory_peak_bytes,
-                    cpu_usage_usec: resp.cpu_usage_usec,
-                    termination_reason: resp
-                        .termination_reason
-                        .and_then(|s| crate::types::TerminationReason::from_str(&s)),
-                    exit_code: resp.exit_code,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetInstanceStatusResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: InstanceStatusJson = resp.json().await?;
+
+        if !json.found {
+            return Err(SdkError::InstanceNotFound(instance_id.to_string()));
+        }
+
+        Ok(InstanceInfo {
+            instance_id: json.instance_id,
+            image_id: json.image_id.unwrap_or_default(),
+            image_name: json.image_name.unwrap_or_default(),
+            tenant_id: json.tenant_id.unwrap_or_default(),
+            status: instance_status_from_string(
+                json.status.as_deref().unwrap_or("unknown"),
+            ),
+            checkpoint_id: json.checkpoint_id,
+            created_at: json
+                .created_at_ms
+                .map(ms_to_datetime)
+                .unwrap_or_else(Utc::now),
+            started_at: opt_ms_to_datetime(json.started_at_ms),
+            finished_at: opt_ms_to_datetime(json.finished_at_ms),
+            heartbeat_at: opt_ms_to_datetime(json.heartbeat_at_ms),
+            input: json.input.as_deref().and_then(decode_base64_json),
+            output: json.output.as_deref().and_then(decode_base64_json),
+            error: json.error,
+            stderr: json.stderr,
+            retry_count: json.retry_count.unwrap_or(0),
+            max_retries: json.max_retries.unwrap_or(0),
+            memory_peak_bytes: json.memory_peak_bytes,
+            cpu_usage_usec: json.cpu_usage_usec,
+            termination_reason: json
+                .termination_reason
+                .and_then(|s| TerminationReason::from_str(&s)),
+            exit_code: json.exit_code,
+        })
     }
 
     /// List instances with optional filtering.
@@ -222,55 +567,91 @@ impl ManagementSdk {
     ) -> Result<ListInstancesResult> {
         debug!("Listing instances");
 
-        let response = self
-            .send_request(Request::ListInstances(ListInstancesRequest {
-                tenant_id: options.tenant_id,
-                status: options.status.map(i32::from),
-                limit: options.limit,
-                offset: options.offset,
-                image_id: options.image_id,
-                created_after_ms: options.created_after.map(|t| t.timestamp_millis()),
-                created_before_ms: options.created_before.map(|t| t.timestamp_millis()),
-                finished_after_ms: options.finished_after.map(|t| t.timestamp_millis()),
-                finished_before_ms: options.finished_before.map(|t| t.timestamp_millis()),
-                order_by: options.order_by.map(|o| o.as_str().to_string()),
-                image_name_prefix: options.image_name_prefix,
-            }))
+        let mut query: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref tenant_id) = options.tenant_id {
+            query.push(("tenant_id".to_string(), tenant_id.clone()));
+        }
+        if let Some(status) = options.status {
+            let status_str = match status {
+                InstanceStatus::Pending => "pending",
+                InstanceStatus::Running => "running",
+                InstanceStatus::Suspended => "suspended",
+                InstanceStatus::Completed => "completed",
+                InstanceStatus::Failed => "failed",
+                InstanceStatus::Cancelled => "cancelled",
+                InstanceStatus::Unknown => "unknown",
+            };
+            query.push(("status".to_string(), status_str.to_string()));
+        }
+        if let Some(ref image_id) = options.image_id {
+            query.push(("image_id".to_string(), image_id.clone()));
+        }
+        if let Some(ref prefix) = options.image_name_prefix {
+            query.push(("image_name_prefix".to_string(), prefix.clone()));
+        }
+        if let Some(created_after) = options.created_after {
+            query.push((
+                "created_after_ms".to_string(),
+                created_after.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(created_before) = options.created_before {
+            query.push((
+                "created_before_ms".to_string(),
+                created_before.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(finished_after) = options.finished_after {
+            query.push((
+                "finished_after_ms".to_string(),
+                finished_after.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(finished_before) = options.finished_before {
+            query.push((
+                "finished_before_ms".to_string(),
+                finished_before.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(order_by) = options.order_by {
+            query.push(("order_by".to_string(), order_by.as_str().to_string()));
+        }
+        query.push(("limit".to_string(), options.limit.to_string()));
+        query.push(("offset".to_string(), options.offset.to_string()));
+
+        let resp = self
+            .client
+            .get(self.url("/api/v1/instances"))
+            .query(&query)
+            .send()
             .await?;
 
-        match response {
-            Response::ListInstances(resp) => {
-                let instances = resp
-                    .instances
-                    .into_iter()
-                    .map(|inst| InstanceSummary {
-                        instance_id: inst.instance_id,
-                        tenant_id: inst.tenant_id,
-                        image_id: inst.image_id,
-                        status: InstanceStatus::from(inst.status),
-                        created_at: Utc
-                            .timestamp_millis_opt(inst.created_at_ms)
-                            .single()
-                            .unwrap_or_else(Utc::now),
-                        started_at: inst
-                            .started_at_ms
-                            .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
-                        finished_at: inst
-                            .finished_at_ms
-                            .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
-                        has_error: inst.has_error,
-                    })
-                    .collect();
-
-                Ok(ListInstancesResult {
-                    instances,
-                    total_count: resp.total_count,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ListInstancesResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ListInstancesJson = resp.json().await?;
+
+        let instances = json
+            .instances
+            .into_iter()
+            .map(|inst| InstanceSummary {
+                instance_id: inst.instance_id,
+                tenant_id: inst.tenant_id,
+                image_id: inst.image_id.unwrap_or_default(),
+                status: instance_status_from_string(&inst.status),
+                created_at: ms_to_datetime(inst.created_at_ms),
+                started_at: opt_ms_to_datetime(inst.started_at_ms),
+                finished_at: opt_ms_to_datetime(inst.finished_at_ms),
+                has_error: inst.has_error,
+            })
+            .collect();
+
+        Ok(ListInstancesResult {
+            instances,
+            total_count: json.total_count,
+        })
     }
 
     /// Start a new instance.
@@ -281,45 +662,43 @@ impl ManagementSdk {
     ) -> Result<StartInstanceResult> {
         info!("Starting instance");
 
-        let input_bytes = match &options.input {
-            Some(value) => serde_json::to_vec(value)?,
-            None => Vec::new(),
-        };
+        let body = serde_json::json!({
+            "image_id": options.image_id,
+            "tenant_id": options.tenant_id,
+            "instance_id": options.instance_id,
+            "input": options.input,
+            "timeout_seconds": options.timeout_seconds,
+            "env": options.env,
+        });
 
-        let response = self
-            .send_request(Request::StartInstance(StartInstanceRequest {
-                image_id: options.image_id,
-                tenant_id: options.tenant_id,
-                instance_id: options.instance_id,
-                input: input_bytes,
-                timeout_seconds: options.timeout_seconds,
-                env: options.env,
-            }))
+        let resp = self
+            .client
+            .post(self.url("/api/v1/instances"))
+            .json(&body)
+            .send()
             .await?;
 
-        match response {
-            Response::StartInstance(resp) => {
-                if !resp.success && !resp.error.is_empty() {
-                    // Check for specific error types
-                    if resp.error.contains("not found") {
-                        return Err(SdkError::ImageNotFound(resp.error));
-                    }
-                }
+        // Server returns 201 on success, 400 on failure — both have JSON body
+        let json: StartInstanceJson = if resp.status().is_success() || resp.status().as_u16() == 400
+        {
+            resp.json().await?
+        } else {
+            return Err(Self::parse_error_response(resp).await);
+        };
 
-                Ok(StartInstanceResult {
-                    success: resp.success,
-                    instance_id: resp.instance_id,
-                    error: if resp.error.is_empty() {
-                        None
-                    } else {
-                        Some(resp.error)
-                    },
-                })
+        if !json.success {
+            if let Some(ref error) = json.error {
+                if error.contains("not found") {
+                    return Err(SdkError::ImageNotFound(error.clone()));
+                }
             }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected StartInstanceResponse".to_string(),
-            )),
         }
+
+        Ok(StartInstanceResult {
+            success: json.success,
+            instance_id: json.instance_id.unwrap_or_default(),
+            error: json.error,
+        })
     }
 
     /// Stop a running instance.
@@ -327,63 +706,68 @@ impl ManagementSdk {
     pub async fn stop_instance(&self, options: StopInstanceOptions) -> Result<()> {
         info!(reason = %options.reason, "Stopping instance");
 
-        let response = self
-            .send_request(Request::StopInstance(StopInstanceRequest {
-                instance_id: options.instance_id.clone(),
-                grace_period_seconds: options.grace_period_seconds,
-                reason: options.reason,
-            }))
+        let body = serde_json::json!({
+            "reason": options.reason,
+            "grace_period_seconds": options.grace_period_seconds,
+        });
+
+        let resp = self
+            .client
+            .post(self.url(&format!(
+                "/api/v1/instances/{}/stop",
+                options.instance_id
+            )))
+            .json(&body)
+            .send()
             .await?;
 
-        match response {
-            Response::StopInstance(resp) => {
-                if !resp.success {
-                    if resp.error.contains("not found") {
-                        return Err(SdkError::InstanceNotFound(options.instance_id));
-                    }
-                    return Err(SdkError::Server {
-                        code: "STOP_FAILED".to_string(),
-                        message: resp.error,
-                    });
-                }
-                Ok(())
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected StopInstanceResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: SimpleSuccessJson = resp.json().await?;
+
+        if !json.success {
+            let error = json.error.unwrap_or_default();
+            if error.contains("not found") {
+                return Err(SdkError::InstanceNotFound(options.instance_id));
+            }
+            return Err(SdkError::Server {
+                code: "STOP_FAILED".to_string(),
+                message: error,
+            });
+        }
+        Ok(())
     }
 
     /// Resume a suspended instance.
-    ///
-    /// This relaunches an instance that was paused via signal or is waiting after durable sleep.
     #[instrument(skip(self), fields(instance_id = %instance_id))]
     pub async fn resume_instance(&self, instance_id: &str) -> Result<()> {
         info!("Resuming instance");
 
-        let response = self
-            .send_request(Request::ResumeInstance(ResumeInstanceRequest {
-                instance_id: instance_id.to_string(),
-            }))
+        let resp = self
+            .client
+            .post(self.url(&format!("/api/v1/instances/{}/resume", instance_id)))
+            .send()
             .await?;
 
-        match response {
-            Response::ResumeInstance(resp) => {
-                if !resp.success {
-                    if resp.error.contains("not found") {
-                        return Err(SdkError::InstanceNotFound(instance_id.to_string()));
-                    }
-                    return Err(SdkError::Server {
-                        code: "RESUME_FAILED".to_string(),
-                        message: resp.error,
-                    });
-                }
-                Ok(())
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ResumeInstanceResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: SimpleSuccessJson = resp.json().await?;
+
+        if !json.success {
+            let error = json.error.unwrap_or_default();
+            if error.contains("not found") {
+                return Err(SdkError::InstanceNotFound(instance_id.to_string()));
+            }
+            return Err(SdkError::Server {
+                code: "RESUME_FAILED".to_string(),
+                message: error,
+            });
+        }
+        Ok(())
     }
 
     // =========================================================================
@@ -391,11 +775,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Register a new image.
-    ///
-    /// This uploads a compiled binary to runtara-environment, which will:
-    /// 1. Store the binary on disk
-    /// 2. Create an OCI bundle (for OCI runner type)
-    /// 3. Register the image in the database
     #[instrument(skip(self, options), fields(tenant_id = %options.tenant_id, name = %options.name))]
     pub async fn register_image(
         &self,
@@ -407,44 +786,43 @@ impl ManagementSdk {
             "Registering image"
         );
 
-        let metadata_bytes = match &options.metadata {
-            Some(value) => Some(serde_json::to_vec(value)?),
-            None => None,
-        };
+        let binary_b64 = base64::engine::general_purpose::STANDARD.encode(&options.binary);
 
-        let response = self
-            .send_request(Request::RegisterImage(RegisterImageRequest {
-                tenant_id: options.tenant_id,
-                name: options.name,
-                description: options.description,
-                binary: options.binary,
-                runner_type: i32::from(options.runner_type),
-                metadata: metadata_bytes,
-            }))
+        let body = serde_json::json!({
+            "tenant_id": options.tenant_id,
+            "name": options.name,
+            "description": options.description,
+            "binary": binary_b64,
+            "runner_type": runner_type_to_string(options.runner_type),
+            "metadata": options.metadata,
+        });
+
+        let resp = self
+            .client
+            .post(self.url("/api/v1/images"))
+            .json(&body)
+            .send()
             .await?;
 
-        match response {
-            Response::RegisterImage(resp) => Ok(RegisterImageResult {
-                success: resp.success,
-                image_id: resp.image_id,
-                error: if resp.error.is_empty() {
-                    None
-                } else {
-                    Some(resp.error)
-                },
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected RegisterImageResponse".to_string(),
-            )),
-        }
+        let json: RegisterImageJson =
+            if resp.status().is_success() || resp.status().as_u16() == 400 {
+                resp.json().await?
+            } else {
+                return Err(Self::parse_error_response(resp).await);
+            };
+
+        Ok(RegisterImageResult {
+            success: json.success,
+            image_id: json.image_id.unwrap_or_default(),
+            error: json.error,
+        })
     }
 
-    /// Register a new image using streaming upload.
+    /// Register a new image using streaming upload via multipart form.
     ///
-    /// This method streams the binary data directly from a reader, avoiding the need
-    /// to hold the entire binary in memory. Use this for large binaries.
+    /// For HTTP, this uses multipart/form-data upload to the `/api/v1/images/upload` endpoint.
     #[instrument(skip(self, options, reader), fields(tenant_id = %options.tenant_id, name = %options.name, binary_size = options.binary_size))]
-    pub async fn register_image_stream<R: AsyncRead + Unpin>(
+    pub async fn register_image_stream<R: tokio::io::AsyncRead + Unpin>(
         &self,
         options: RegisterImageStreamOptions,
         mut reader: R,
@@ -452,74 +830,56 @@ impl ManagementSdk {
         info!(
             binary_size = options.binary_size,
             runner_type = ?options.runner_type,
-            "Registering image via streaming"
+            "Registering image via streaming (HTTP multipart)"
         );
 
-        let metadata_bytes = match &options.metadata {
-            Some(value) => Some(serde_json::to_vec(value)?),
-            None => None,
-        };
+        // Read the entire stream into memory for multipart upload
+        let mut binary_data = Vec::with_capacity(options.binary_size as usize);
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut binary_data).await?;
 
-        // 1. Open a raw QUIC stream
-        let (mut send, mut recv) = self.client.open_raw_stream().await?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("tenant_id", options.tenant_id)
+            .text("name", options.name);
 
-        // 2. Send the start frame with metadata
-        let start_request = RpcRequest {
-            request: Some(Request::RegisterImageStream(RegisterImageStreamStart {
-                tenant_id: options.tenant_id,
-                name: options.name,
-                description: options.description,
-                binary_size: options.binary_size,
-                runner_type: i32::from(options.runner_type),
-                metadata: metadata_bytes,
-                sha256: options.sha256,
-            })),
-        };
-
-        let frame = Frame::request(&start_request)?;
-        write_frame(&mut send, &frame).await?;
-
-        // 3. Stream the binary data
-        let mut buf = [0u8; 64 * 1024]; // 64KB chunks
-        let mut total_sent = 0u64;
-
-        loop {
-            use tokio::io::AsyncReadExt;
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            send.write_all(&buf[..n]).await?;
-            total_sent += n as u64;
+        if let Some(description) = options.description {
+            form = form.text("description", description);
         }
 
-        debug!(total_sent, "Finished streaming binary data");
+        form = form.text("runner_type", runner_type_to_string(options.runner_type).to_string());
 
-        // 4. Signal end of data
-        send.finish()?;
-
-        // 5. Read the response
-        let response_frame = runtara_protocol::frame::read_frame(&mut recv).await?;
-        let rpc_response: RpcResponse = response_frame.decode()?;
-
-        match rpc_response.response {
-            Some(Response::Error(err)) => Err(SdkError::Server {
-                code: err.code,
-                message: err.message,
-            }),
-            Some(Response::RegisterImage(resp)) => Ok(RegisterImageResult {
-                success: resp.success,
-                image_id: resp.image_id,
-                error: if resp.error.is_empty() {
-                    None
-                } else {
-                    Some(resp.error)
-                },
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected RegisterImageResponse".to_string(),
-            )),
+        if let Some(metadata) = options.metadata {
+            form = form.text("metadata", serde_json::to_string(&metadata)?);
         }
+
+        if let Some(sha256) = options.sha256 {
+            form = form.text("sha256", sha256);
+        }
+
+        let binary_part = reqwest::multipart::Part::bytes(binary_data)
+            .file_name("binary")
+            .mime_str("application/octet-stream")
+            .map_err(|e| SdkError::Connection(format!("Failed to set MIME type: {}", e)))?;
+        form = form.part("binary", binary_part);
+
+        let resp = self
+            .client
+            .post(self.url("/api/v1/images/upload"))
+            .multipart(form)
+            .send()
+            .await?;
+
+        let json: RegisterImageJson =
+            if resp.status().is_success() || resp.status().as_u16() == 400 {
+                resp.json().await?
+            } else {
+                return Err(Self::parse_error_response(resp).await);
+            };
+
+        Ok(RegisterImageResult {
+            success: json.success,
+            image_id: json.image_id.unwrap_or_default(),
+            error: json.error,
+        })
     }
 
     /// List images with optional filtering.
@@ -527,41 +887,44 @@ impl ManagementSdk {
     pub async fn list_images(&self, options: ListImagesOptions) -> Result<ListImagesResult> {
         debug!("Listing images");
 
-        let response = self
-            .send_request(Request::ListImages(ListImagesRequest {
-                tenant_id: options.tenant_id,
-                limit: options.limit,
-                offset: options.offset,
-            }))
+        let mut query: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref tenant_id) = options.tenant_id {
+            query.push(("tenant_id".to_string(), tenant_id.clone()));
+        }
+        query.push(("limit".to_string(), options.limit.to_string()));
+        query.push(("offset".to_string(), options.offset.to_string()));
+
+        let resp = self
+            .client
+            .get(self.url("/api/v1/images"))
+            .query(&query)
+            .send()
             .await?;
 
-        match response {
-            Response::ListImages(resp) => {
-                let images = resp
-                    .images
-                    .into_iter()
-                    .map(|img| ImageSummary {
-                        image_id: img.image_id,
-                        tenant_id: img.tenant_id,
-                        name: img.name,
-                        description: img.description,
-                        runner_type: runner_type_from_i32(img.runner_type),
-                        created_at: Utc
-                            .timestamp_millis_opt(img.created_at_ms)
-                            .single()
-                            .unwrap_or_else(Utc::now),
-                    })
-                    .collect();
-
-                Ok(ListImagesResult {
-                    images,
-                    total_count: resp.total_count,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ListImagesResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ListImagesJson = resp.json().await?;
+
+        let images = json
+            .images
+            .into_iter()
+            .map(|img| ImageSummary {
+                image_id: img.image_id,
+                tenant_id: img.tenant_id,
+                name: img.name,
+                description: img.description,
+                runner_type: runner_type_from_string(&img.runner_type),
+                created_at: ms_to_datetime(img.created_at_ms),
+            })
+            .collect();
+
+        Ok(ListImagesResult {
+            images,
+            total_count: json.total_count,
+        })
     }
 
     /// Get information about a specific image.
@@ -569,36 +932,33 @@ impl ManagementSdk {
     pub async fn get_image(&self, image_id: &str, tenant_id: &str) -> Result<Option<ImageSummary>> {
         debug!("Getting image");
 
-        let response = self
-            .send_request(Request::GetImage(GetImageRequest {
-                image_id: image_id.to_string(),
-                tenant_id: tenant_id.to_string(),
-            }))
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/images/{}", image_id)))
+            .query(&[("tenant_id", tenant_id)])
+            .send()
             .await?;
 
-        match response {
-            Response::GetImage(resp) => {
-                if !resp.found {
-                    return Ok(None);
-                }
-                match resp.image {
-                    Some(img) => Ok(Some(ImageSummary {
-                        image_id: img.image_id,
-                        tenant_id: img.tenant_id,
-                        name: img.name,
-                        description: img.description,
-                        runner_type: runner_type_from_i32(img.runner_type),
-                        created_at: Utc
-                            .timestamp_millis_opt(img.created_at_ms)
-                            .single()
-                            .unwrap_or_else(Utc::now),
-                    })),
-                    None => Ok(None),
-                }
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetImageResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
+        }
+
+        let json: GetImageJson = resp.json().await?;
+
+        if !json.found {
+            return Ok(None);
+        }
+
+        match json.image {
+            Some(img) => Ok(Some(ImageSummary {
+                image_id: img.image_id,
+                tenant_id: img.tenant_id,
+                name: img.name,
+                description: img.description,
+                runner_type: runner_type_from_string(&img.runner_type),
+                created_at: ms_to_datetime(img.created_at_ms),
+            })),
+            None => Ok(None),
         }
     }
 
@@ -607,30 +967,34 @@ impl ManagementSdk {
     pub async fn delete_image(&self, image_id: &str, tenant_id: &str) -> Result<()> {
         info!("Deleting image");
 
-        let response = self
-            .send_request(Request::DeleteImage(DeleteImageRequest {
-                image_id: image_id.to_string(),
-                tenant_id: tenant_id.to_string(),
-            }))
+        let resp = self
+            .client
+            .delete(self.url(&format!("/api/v1/images/{}", image_id)))
+            .query(&[("tenant_id", tenant_id)])
+            .send()
             .await?;
 
-        match response {
-            Response::DeleteImage(resp) => {
-                if !resp.success {
-                    if resp.error.contains("not found") {
-                        return Err(SdkError::ImageNotFound(image_id.to_string()));
-                    }
-                    return Err(SdkError::Server {
-                        code: "DELETE_FAILED".to_string(),
-                        message: resp.error,
-                    });
-                }
-                Ok(())
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected DeleteImageResponse".to_string(),
-            )),
+        if resp.status().as_u16() == 404 {
+            return Err(SdkError::ImageNotFound(image_id.to_string()));
         }
+
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
+        }
+
+        let json: SimpleSuccessJson = resp.json().await?;
+
+        if !json.success {
+            let error = json.error.unwrap_or_default();
+            if error.contains("not found") {
+                return Err(SdkError::ImageNotFound(image_id.to_string()));
+            }
+            return Err(SdkError::Server {
+                code: "DELETE_FAILED".to_string(),
+                message: error,
+            });
+        }
+        Ok(())
     }
 
     // =========================================================================
@@ -638,8 +1002,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Send a signal to an instance.
-    ///
-    /// Note: Environment proxies this to runtara-core.
     #[instrument(skip(self), fields(instance_id = %instance_id, signal = ?signal_type))]
     pub async fn send_signal(
         &self,
@@ -649,37 +1011,55 @@ impl ManagementSdk {
     ) -> Result<()> {
         info!("Sending signal to instance");
 
-        // Note: Environment only supports Cancel and Pause signals (it proxies to Core)
-        // Resume is handled via resume_instance() which relaunches the container
+        // Resume is handled via resume_instance()
         if signal_type == SignalType::Resume {
             return self.resume_instance(instance_id).await;
         }
 
-        let response = self
-            .send_request(Request::SendSignal(SendSignalRequest {
-                instance_id: instance_id.to_string(),
-                signal_type: i32::from(signal_type),
-                payload: payload.unwrap_or(&[]).to_vec(),
-            }))
+        let signal_str = match signal_type {
+            SignalType::Cancel => "cancel",
+            SignalType::Pause => "pause",
+            SignalType::Resume => unreachable!(),
+        };
+
+        let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
+
+        let body = serde_json::json!({
+            "signal_type": signal_str,
+            "payload": payload_str,
+        });
+
+        let resp = self
+            .client
+            .post(self.url(&format!(
+                "/api/v1/instances/{}/signals",
+                instance_id
+            )))
+            .json(&body)
+            .send()
             .await?;
 
-        match response {
-            Response::SendSignal(resp) => {
-                if !resp.success {
-                    if resp.error.contains("not found") {
-                        return Err(SdkError::InstanceNotFound(instance_id.to_string()));
-                    }
-                    return Err(SdkError::Server {
-                        code: "SIGNAL_FAILED".to_string(),
-                        message: resp.error,
-                    });
-                }
-                Ok(())
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected SendSignalResponse".to_string(),
-            )),
+        if resp.status().as_u16() == 404 {
+            return Err(SdkError::InstanceNotFound(instance_id.to_string()));
         }
+
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
+        }
+
+        let json: SimpleSuccessJson = resp.json().await?;
+
+        if !json.success {
+            let error = json.error.unwrap_or_default();
+            if error.contains("not found") {
+                return Err(SdkError::InstanceNotFound(instance_id.to_string()));
+            }
+            return Err(SdkError::Server {
+                code: "SIGNAL_FAILED".to_string(),
+                message: error,
+            });
+        }
+        Ok(())
     }
 
     /// Send a cancel signal to an instance.
@@ -695,24 +1075,6 @@ impl ManagementSdk {
     }
 
     /// Send a custom signal to a specific checkpoint/signal ID.
-    ///
-    /// This is used to resume WaitForSignal steps in workflows.
-    /// The signal_id must match exactly what the workflow is waiting for.
-    ///
-    /// # Arguments
-    /// * `instance_id` - The instance waiting for the signal
-    /// * `signal_id` - The checkpoint/signal ID (from on_wait callback)
-    /// * `payload` - Optional payload data (typically JSON)
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Approve a workflow waiting for manager approval
-    /// sdk.send_custom_signal(
-    ///     "inst-abc123",
-    ///     "inst-abc123/root/approval_step/",
-    ///     Some(r#"{"approved": true, "approver": "manager@example.com"}"#.as_bytes()),
-    /// ).await?;
-    /// ```
     #[instrument(skip(self, payload), fields(instance_id = %instance_id, signal_id = %signal_id))]
     pub async fn send_custom_signal(
         &self,
@@ -722,31 +1084,44 @@ impl ManagementSdk {
     ) -> Result<()> {
         info!("Sending custom signal to instance");
 
-        let response = self
-            .send_request(Request::SendCustomSignal(SendCustomSignalRequest {
-                instance_id: instance_id.to_string(),
-                checkpoint_id: signal_id.to_string(),
-                payload: payload.unwrap_or(&[]).to_vec(),
-            }))
+        let payload_str = payload.map(|p| String::from_utf8_lossy(p).to_string());
+
+        let body = serde_json::json!({
+            "checkpoint_id": signal_id,
+            "payload": payload_str,
+        });
+
+        let resp = self
+            .client
+            .post(self.url(&format!(
+                "/api/v1/instances/{}/signals/custom",
+                instance_id
+            )))
+            .json(&body)
+            .send()
             .await?;
 
-        match response {
-            Response::SendCustomSignal(resp) => {
-                if !resp.success {
-                    if resp.error.contains("not found") {
-                        return Err(SdkError::InstanceNotFound(instance_id.to_string()));
-                    }
-                    return Err(SdkError::Server {
-                        code: "CUSTOM_SIGNAL_FAILED".to_string(),
-                        message: resp.error,
-                    });
-                }
-                Ok(())
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected SendCustomSignalResponse".to_string(),
-            )),
+        if resp.status().as_u16() == 404 {
+            return Err(SdkError::InstanceNotFound(instance_id.to_string()));
         }
+
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
+        }
+
+        let json: SimpleSuccessJson = resp.json().await?;
+
+        if !json.success {
+            let error = json.error.unwrap_or_default();
+            if error.contains("not found") {
+                return Err(SdkError::InstanceNotFound(instance_id.to_string()));
+            }
+            return Err(SdkError::Server {
+                code: "CUSTOM_SIGNAL_FAILED".to_string(),
+                message: error,
+            });
+        }
+        Ok(())
     }
 
     // =========================================================================
@@ -754,22 +1129,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// List checkpoints for an instance.
-    ///
-    /// Returns a paginated list of checkpoint summaries for the specified instance.
-    /// Checkpoints are ordered by creation time (newest first).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let result = sdk.list_checkpoints(
-    ///     "instance-123",
-    ///     ListCheckpointsOptions::new().with_limit(10)
-    /// ).await?;
-    ///
-    /// for checkpoint in result.checkpoints {
-    ///     println!("{}: {} bytes", checkpoint.checkpoint_id, checkpoint.data_size_bytes);
-    /// }
-    /// ```
     #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_checkpoints(
         &self,
@@ -778,57 +1137,66 @@ impl ManagementSdk {
     ) -> Result<ListCheckpointsResult> {
         debug!("Listing checkpoints");
 
-        let response = self
-            .send_request(Request::ListCheckpoints(ListCheckpointsRequest {
-                instance_id: instance_id.to_string(),
-                checkpoint_id: options.checkpoint_id,
-                limit: options.limit,
-                offset: options.offset,
-                created_after_ms: options.created_after.map(|t| t.timestamp_millis()),
-                created_before_ms: options.created_before.map(|t| t.timestamp_millis()),
-            }))
+        let mut query: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref checkpoint_id) = options.checkpoint_id {
+            query.push(("checkpoint_id".to_string(), checkpoint_id.clone()));
+        }
+        if let Some(limit) = options.limit {
+            query.push(("limit".to_string(), limit.to_string()));
+        }
+        if let Some(offset) = options.offset {
+            query.push(("offset".to_string(), offset.to_string()));
+        }
+        if let Some(created_after) = options.created_after {
+            query.push((
+                "created_after_ms".to_string(),
+                created_after.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(created_before) = options.created_before {
+            query.push((
+                "created_before_ms".to_string(),
+                created_before.timestamp_millis().to_string(),
+            ));
+        }
+
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/api/v1/instances/{}/checkpoints",
+                instance_id
+            )))
+            .query(&query)
+            .send()
             .await?;
 
-        match response {
-            Response::ListCheckpoints(resp) => {
-                let checkpoints = resp
-                    .checkpoints
-                    .into_iter()
-                    .map(|cp| CheckpointSummary {
-                        checkpoint_id: cp.checkpoint_id,
-                        instance_id: cp.instance_id,
-                        created_at: Utc
-                            .timestamp_millis_opt(cp.created_at_ms)
-                            .single()
-                            .unwrap_or_else(Utc::now),
-                        data_size_bytes: cp.data_size_bytes,
-                    })
-                    .collect();
-
-                Ok(ListCheckpointsResult {
-                    checkpoints,
-                    total_count: resp.total_count,
-                    limit: resp.limit,
-                    offset: resp.offset,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ListCheckpointsResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ListCheckpointsJson = resp.json().await?;
+
+        let checkpoints = json
+            .checkpoints
+            .into_iter()
+            .map(|cp| CheckpointSummary {
+                checkpoint_id: cp.checkpoint_id,
+                instance_id: cp.instance_id,
+                created_at: ms_to_datetime(cp.created_at_ms),
+                data_size_bytes: cp.data_size_bytes,
+            })
+            .collect();
+
+        Ok(ListCheckpointsResult {
+            checkpoints,
+            total_count: json.total_count,
+            limit: json.limit as u32,
+            offset: json.offset as u32,
+        })
     }
 
     /// Get a specific checkpoint with its full data.
-    ///
-    /// Returns the checkpoint data parsed as JSON, or None if the checkpoint doesn't exist.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// if let Some(checkpoint) = sdk.get_checkpoint("instance-123", "step-1").await? {
-    ///     println!("Checkpoint data: {:?}", checkpoint.data);
-    /// }
-    /// ```
     #[instrument(skip(self), fields(instance_id = %instance_id, checkpoint_id = %checkpoint_id), level = "debug")]
     pub async fn get_checkpoint(
         &self,
@@ -837,45 +1205,61 @@ impl ManagementSdk {
     ) -> Result<Option<Checkpoint>> {
         debug!("Getting checkpoint");
 
-        let response = self
-            .send_request(Request::GetCheckpoint(GetCheckpointRequest {
-                instance_id: instance_id.to_string(),
-                checkpoint_id: checkpoint_id.to_string(),
-            }))
+        // Percent-encode the checkpoint_id since it may contain slashes
+        let encoded_checkpoint_id =
+            percent_encoding::utf8_percent_encode(checkpoint_id, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/api/v1/instances/{}/checkpoints/{}",
+                instance_id, encoded_checkpoint_id
+            )))
+            .send()
             .await?;
 
-        match response {
-            Response::GetCheckpoint(resp) => {
-                if !resp.found {
-                    return Ok(None);
-                }
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
+        }
 
-                // Parse checkpoint data as JSON
-                let data: serde_json::Value = if resp.data.is_empty() {
+        let json: CheckpointDetailJson = resp.json().await?;
+
+        if !json.found {
+            return Ok(None);
+        }
+
+        // Decode base64 checkpoint data as JSON
+        let data = match json.data {
+            Some(encoded) => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&encoded)
+                    .map_err(|e| {
+                        SdkError::UnexpectedResponse(format!(
+                            "Failed to decode checkpoint data base64: {}",
+                            e
+                        ))
+                    })?;
+                if bytes.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    serde_json::from_slice(&resp.data).map_err(|e| {
+                    serde_json::from_slice(&bytes).map_err(|e| {
                         SdkError::UnexpectedResponse(format!(
                             "Failed to parse checkpoint data as JSON: {}",
                             e
                         ))
                     })?
-                };
-
-                Ok(Some(Checkpoint {
-                    checkpoint_id: resp.checkpoint_id,
-                    instance_id: resp.instance_id,
-                    created_at: Utc
-                        .timestamp_millis_opt(resp.created_at_ms)
-                        .single()
-                        .unwrap_or_else(Utc::now),
-                    data,
-                }))
+                }
             }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetCheckpointResponse".to_string(),
-            )),
-        }
+            None => serde_json::Value::Null,
+        };
+
+        Ok(Some(Checkpoint {
+            checkpoint_id: json.checkpoint_id,
+            instance_id: json.instance_id,
+            created_at: ms_to_datetime(json.created_at_ms),
+            data,
+        }))
     }
 
     // =========================================================================
@@ -883,33 +1267,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// List events for an instance with optional filtering.
-    ///
-    /// Returns a paginated list of events for the specified instance.
-    /// Events include debug step events, workflow logs, and lifecycle events.
-    /// Supports filtering by event type, subtype, time range, and full-text search in payload.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // List all debug events for an instance
-    /// let result = sdk.list_events(
-    ///     "instance-123",
-    ///     ListEventsOptions::new()
-    ///         .with_subtype("step_debug_start")
-    ///         .with_limit(50)
-    /// ).await?;
-    ///
-    /// for event in result.events {
-    ///     println!("{}: {} - {:?}", event.id, event.subtype.unwrap_or_default(), event.payload);
-    /// }
-    ///
-    /// // Search for events containing specific text in payload
-    /// let result = sdk.list_events(
-    ///     "instance-123",
-    ///     ListEventsOptions::new()
-    ///         .with_payload_contains("error")
-    /// ).await?;
-    /// ```
     #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_events(
         &self,
@@ -918,83 +1275,92 @@ impl ManagementSdk {
     ) -> Result<ListEventsResult> {
         debug!("Listing events");
 
-        let response = self
-            .send_request(Request::ListEvents(ListEventsRequest {
-                instance_id: instance_id.to_string(),
-                event_type: options.event_type,
-                subtype: options.subtype,
-                limit: options.limit,
-                offset: options.offset,
-                created_after_ms: options.created_after.map(|t| t.timestamp_millis()),
-                created_before_ms: options.created_before.map(|t| t.timestamp_millis()),
-                payload_contains: options.payload_contains,
-                scope_id: options.scope_id,
-                parent_scope_id: options.parent_scope_id,
-                root_scopes_only: options.root_scopes_only,
-                sort_order: options.sort_order.map(|s| s.as_str().to_string()),
-            }))
+        let mut query: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref event_type) = options.event_type {
+            query.push(("event_type".to_string(), event_type.clone()));
+        }
+        if let Some(ref subtype) = options.subtype {
+            query.push(("subtype".to_string(), subtype.clone()));
+        }
+        if let Some(limit) = options.limit {
+            query.push(("limit".to_string(), limit.to_string()));
+        }
+        if let Some(offset) = options.offset {
+            query.push(("offset".to_string(), offset.to_string()));
+        }
+        if let Some(created_after) = options.created_after {
+            query.push((
+                "created_after_ms".to_string(),
+                created_after.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(created_before) = options.created_before {
+            query.push((
+                "created_before_ms".to_string(),
+                created_before.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(ref payload_contains) = options.payload_contains {
+            query.push(("payload_contains".to_string(), payload_contains.clone()));
+        }
+        if let Some(ref scope_id) = options.scope_id {
+            query.push(("scope_id".to_string(), scope_id.clone()));
+        }
+        if let Some(ref parent_scope_id) = options.parent_scope_id {
+            query.push(("parent_scope_id".to_string(), parent_scope_id.clone()));
+        }
+        if options.root_scopes_only {
+            query.push(("root_scopes_only".to_string(), "true".to_string()));
+        }
+        if let Some(sort_order) = options.sort_order {
+            query.push(("sort_order".to_string(), sort_order.as_str().to_string()));
+        }
+
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/instances/{}/events", instance_id)))
+            .query(&query)
+            .send()
             .await?;
 
-        match response {
-            Response::ListEvents(resp) => {
-                let events = resp
-                    .events
-                    .into_iter()
-                    .map(|ev| {
-                        // Parse payload bytes as JSON if present
-                        let payload = ev.payload.and_then(|bytes| {
-                            if bytes.is_empty() {
-                                None
-                            } else {
-                                serde_json::from_slice(&bytes).ok()
-                            }
-                        });
-
-                        EventSummary {
-                            id: ev.id,
-                            instance_id: ev.instance_id,
-                            event_type: ev.event_type,
-                            checkpoint_id: ev.checkpoint_id,
-                            payload,
-                            created_at: Utc
-                                .timestamp_millis_opt(ev.created_at_ms)
-                                .single()
-                                .unwrap_or_else(Utc::now),
-                            subtype: ev.subtype,
-                        }
-                    })
-                    .collect();
-
-                Ok(ListEventsResult {
-                    events,
-                    total_count: resp.total_count,
-                    limit: resp.limit,
-                    offset: resp.offset,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ListEventsResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ListEventsJson = resp.json().await?;
+
+        let events = json
+            .events
+            .into_iter()
+            .map(|ev| {
+                // Decode base64 payload as JSON if present
+                let payload = ev
+                    .payload
+                    .as_deref()
+                    .and_then(decode_base64_json);
+
+                EventSummary {
+                    id: ev.id,
+                    instance_id: ev.instance_id,
+                    event_type: ev.event_type,
+                    checkpoint_id: ev.checkpoint_id,
+                    payload,
+                    created_at: ms_to_datetime(ev.created_at_ms),
+                    subtype: ev.subtype,
+                }
+            })
+            .collect();
+
+        Ok(ListEventsResult {
+            events,
+            total_count: json.total_count,
+            limit: json.limit as u32,
+            offset: json.offset as u32,
+        })
     }
 
     /// Get the ancestors of a scope in the execution hierarchy.
-    ///
-    /// Returns a list of `ScopeInfo` starting from the requested scope and walking
-    /// up through parent scopes to the root. This is useful for reconstructing
-    /// the call stack at any point in a workflow execution.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let ancestors = sdk.get_scope_ancestors("instance-123", "sc_split-orders_0_while-retry_2").await?;
-    /// for scope in &ancestors {
-    ///     println!("{}:{} (index {:?})", scope.step_type, scope.step_id, scope.index);
-    /// }
-    /// // Output:
-    /// // While:while-retry (index Some(2))
-    /// // Split:split-orders (index Some(0))
-    /// ```
     #[instrument(skip(self), fields(instance_id = %instance_id, scope_id = %scope_id), level = "debug")]
     pub async fn get_scope_ancestors(
         &self,
@@ -1003,67 +1369,39 @@ impl ManagementSdk {
     ) -> Result<Vec<ScopeInfo>> {
         debug!("Getting scope ancestors");
 
-        let response = self
-            .send_request(Request::GetScopeAncestors(GetScopeAncestorsRequest {
-                instance_id: instance_id.to_string(),
-                scope_id: scope_id.to_string(),
-            }))
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/api/v1/instances/{}/scopes/{}/ancestors",
+                instance_id, scope_id
+            )))
+            .send()
             .await?;
 
-        match response {
-            Response::GetScopeAncestors(resp) => {
-                let ancestors = resp
-                    .ancestors
-                    .into_iter()
-                    .map(|info| ScopeInfo {
-                        scope_id: info.scope_id,
-                        parent_scope_id: info.parent_scope_id,
-                        step_id: info.step_id,
-                        step_name: info.step_name,
-                        step_type: info.step_type,
-                        index: info.index,
-                        created_at: Utc
-                            .timestamp_millis_opt(info.created_at_ms)
-                            .single()
-                            .unwrap_or_else(Utc::now),
-                    })
-                    .collect();
-
-                Ok(ancestors)
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetScopeAncestorsResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ScopeAncestorsJson = resp.json().await?;
+
+        let ancestors = json
+            .ancestors
+            .into_iter()
+            .map(|info| ScopeInfo {
+                scope_id: info.scope_id,
+                parent_scope_id: info.parent_scope_id,
+                step_id: info.step_id,
+                step_name: info.step_name,
+                step_type: info.step_type,
+                index: info.index,
+                created_at: ms_to_datetime(info.created_at_ms),
+            })
+            .collect();
+
+        Ok(ancestors)
     }
 
     /// List step summaries for an instance.
-    ///
-    /// Returns paired step events as unified records with status, duration, and I/O.
-    /// This solves pagination issues where start/end events may appear on different
-    /// pages, and provides accurate counts (100 steps = 100 records, not 200 events).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use runtara_management_sdk::{ListStepSummariesOptions, StepStatus};
-    ///
-    /// // List all steps
-    /// let result = sdk.list_step_summaries(
-    ///     "instance-123",
-    ///     ListStepSummariesOptions::new()
-    /// ).await?;
-    ///
-    /// // Filter by status
-    /// let failed_steps = sdk.list_step_summaries(
-    ///     "instance-123",
-    ///     ListStepSummariesOptions::new().with_status(StepStatus::Failed)
-    /// ).await?;
-    ///
-    /// for step in &failed_steps.steps {
-    ///     println!("{}: {:?} ({}ms)", step.step_id, step.status, step.duration_ms.unwrap_or(0));
-    /// }
-    /// ```
     #[instrument(skip(self, options), fields(instance_id = %instance_id), level = "debug")]
     pub async fn list_step_summaries(
         &self,
@@ -1072,89 +1410,76 @@ impl ManagementSdk {
     ) -> Result<ListStepSummariesResult> {
         debug!("Listing step summaries");
 
-        let response = self
-            .send_request(Request::ListStepSummaries(ListStepSummariesRequest {
-                instance_id: instance_id.to_string(),
-                status: options.status.map(|s| {
-                    match s {
-                        StepStatus::Running => "running",
-                        StepStatus::Completed => "completed",
-                        StepStatus::Failed => "failed",
-                    }
-                    .to_string()
-                }),
-                step_type: options.step_type,
-                scope_id: options.scope_id,
-                parent_scope_id: options.parent_scope_id,
-                root_scopes_only: options.root_scopes_only,
-                sort_order: options.sort_order.map(|s| s.as_str().to_string()),
-                limit: options.limit,
-                offset: options.offset,
-            }))
+        let mut query: Vec<(String, String)> = Vec::new();
+
+        if let Some(status) = options.status {
+            let status_str = match status {
+                StepStatus::Running => "running",
+                StepStatus::Completed => "completed",
+                StepStatus::Failed => "failed",
+            };
+            query.push(("status".to_string(), status_str.to_string()));
+        }
+        if let Some(ref step_type) = options.step_type {
+            query.push(("step_type".to_string(), step_type.clone()));
+        }
+        if let Some(ref scope_id) = options.scope_id {
+            query.push(("scope_id".to_string(), scope_id.clone()));
+        }
+        if let Some(ref parent_scope_id) = options.parent_scope_id {
+            query.push(("parent_scope_id".to_string(), parent_scope_id.clone()));
+        }
+        if options.root_scopes_only {
+            query.push(("root_scopes_only".to_string(), "true".to_string()));
+        }
+        if let Some(sort_order) = options.sort_order {
+            query.push(("sort_order".to_string(), sort_order.as_str().to_string()));
+        }
+        if let Some(limit) = options.limit {
+            query.push(("limit".to_string(), limit.to_string()));
+        }
+        if let Some(offset) = options.offset {
+            query.push(("offset".to_string(), offset.to_string()));
+        }
+
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/instances/{}/steps", instance_id)))
+            .query(&query)
+            .send()
             .await?;
 
-        match response {
-            Response::ListStepSummaries(resp) => {
-                let steps = resp
-                    .steps
-                    .into_iter()
-                    .map(|step| {
-                        // Parse payload bytes as JSON if present
-                        let inputs = step.inputs.and_then(|bytes| {
-                            if bytes.is_empty() {
-                                None
-                            } else {
-                                serde_json::from_slice(&bytes).ok()
-                            }
-                        });
-                        let outputs = step.outputs.and_then(|bytes| {
-                            if bytes.is_empty() {
-                                None
-                            } else {
-                                serde_json::from_slice(&bytes).ok()
-                            }
-                        });
-                        let error = step.error.and_then(|bytes| {
-                            if bytes.is_empty() {
-                                None
-                            } else {
-                                serde_json::from_slice(&bytes).ok()
-                            }
-                        });
-
-                        StepSummary {
-                            step_id: step.step_id,
-                            step_name: step.step_name,
-                            step_type: step.step_type,
-                            status: StepStatus::from(step.status),
-                            started_at: Utc
-                                .timestamp_millis_opt(step.started_at_ms)
-                                .single()
-                                .unwrap_or_else(Utc::now),
-                            completed_at: step
-                                .completed_at_ms
-                                .and_then(|ms| Utc.timestamp_millis_opt(ms).single()),
-                            duration_ms: step.duration_ms,
-                            inputs,
-                            outputs,
-                            error,
-                            scope_id: step.scope_id,
-                            parent_scope_id: step.parent_scope_id,
-                        }
-                    })
-                    .collect();
-
-                Ok(ListStepSummariesResult {
-                    steps,
-                    total_count: resp.total_count,
-                    limit: resp.limit,
-                    offset: resp.offset,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ListStepSummariesResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ListStepSummariesJson = resp.json().await?;
+
+        let steps = json
+            .steps
+            .into_iter()
+            .map(|step| StepSummary {
+                step_id: step.step_id,
+                step_name: step.step_name,
+                step_type: step.step_type,
+                status: step_status_from_string(&step.status),
+                started_at: ms_to_datetime(step.started_at_ms),
+                completed_at: opt_ms_to_datetime(step.completed_at_ms),
+                duration_ms: step.duration_ms,
+                inputs: step.inputs,
+                outputs: step.outputs,
+                error: step.error,
+                scope_id: step.scope_id,
+                parent_scope_id: step.parent_scope_id,
+            })
+            .collect();
+
+        Ok(ListStepSummariesResult {
+            steps,
+            total_count: json.total_count,
+            limit: json.limit as u32,
+            offset: json.offset as u32,
+        })
     }
 
     // =========================================================================
@@ -1162,22 +1487,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Test a single agent capability.
-    ///
-    /// This executes the capability with the provided input and optional connection,
-    /// running inside an OCI container (same environment as production workflows).
-    /// Useful for validating agent behavior before deploying workflows.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let result = sdk.test_capability(
-    ///     TestCapabilityOptions::new("tenant-1", "utils", "random-double", json!({}))
-    /// ).await?;
-    ///
-    /// if result.success {
-    ///     println!("Output: {:?}", result.output);
-    /// }
-    /// ```
     #[instrument(skip(self, options), fields(agent_id = %options.agent_id, capability_id = %options.capability_id))]
     pub async fn test_capability(
         &self,
@@ -1185,74 +1494,52 @@ impl ManagementSdk {
     ) -> Result<TestCapabilityResult> {
         info!("Testing capability");
 
-        let input_bytes = serde_json::to_vec(&options.input)?;
-        let connection_bytes = match &options.connection {
-            Some(conn) => Some(serde_json::to_vec(conn)?),
-            None => None,
-        };
+        let body = serde_json::json!({
+            "tenant_id": options.tenant_id,
+            "agent_id": options.agent_id,
+            "capability_id": options.capability_id,
+            "input": options.input,
+            "connection": options.connection,
+            "timeout_ms": options.timeout_ms,
+        });
 
-        let response = self
-            .send_request(Request::TestCapability(TestCapabilityRequest {
-                tenant_id: options.tenant_id,
-                agent_id: options.agent_id,
-                capability_id: options.capability_id,
-                input: input_bytes,
-                connection: connection_bytes,
-                timeout_ms: options.timeout_ms,
-            }))
+        let resp = self
+            .client
+            .post(self.url("/api/v1/agents/test"))
+            .json(&body)
+            .send()
             .await?;
 
-        match response {
-            Response::TestCapability(resp) => {
-                let output = if resp.success && !resp.output.is_empty() {
-                    serde_json::from_slice(&resp.output).ok()
-                } else {
-                    None
-                };
-
-                Ok(TestCapabilityResult {
-                    success: resp.success,
-                    output,
-                    error: resp.error,
-                    execution_time_ms: resp.execution_time_ms,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected TestCapabilityResponse".to_string(),
-            )),
+        if !resp.status().is_success() && resp.status().as_u16() != 200 {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: TestCapabilityJson = resp.json().await?;
+
+        Ok(TestCapabilityResult {
+            success: json.success,
+            output: json.output,
+            error: json.error,
+            execution_time_ms: json.execution_time_ms,
+        })
     }
 
     /// List all available agents and their capabilities.
-    ///
-    /// Returns metadata about all registered agents, including their capabilities
-    /// and input schemas. This runs in-process (no OCI container needed).
     #[instrument(skip(self), level = "debug")]
     pub async fn list_agents(&self) -> Result<Vec<AgentInfo>> {
         debug!("Listing agents");
 
-        let response = self
-            .send_request(Request::ListAgents(ListAgentsRequest { tenant_id: None }))
-            .await?;
+        let resp = self.client.get(self.url("/api/v1/agents")).send().await?;
 
-        match response {
-            Response::ListAgents(resp) => {
-                let agents: Vec<AgentInfo> =
-                    serde_json::from_slice(&resp.agents_json).map_err(|e| {
-                        SdkError::UnexpectedResponse(format!("Failed to parse agents: {}", e))
-                    })?;
-                Ok(agents)
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected ListAgentsResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: ListAgentsJson = resp.json().await?;
+        Ok(json.agents)
     }
 
     /// Get details about a specific capability including its input schema.
-    ///
-    /// Returns the input field definitions for the specified capability,
-    /// or None if the capability is not found.
     #[instrument(skip(self), fields(agent_id = %agent_id, capability_id = %capability_id), level = "debug")]
     pub async fn get_capability(
         &self,
@@ -1261,28 +1548,38 @@ impl ManagementSdk {
     ) -> Result<Option<Vec<CapabilityField>>> {
         debug!("Getting capability details");
 
-        let response = self
-            .send_request(Request::GetCapability(GetCapabilityRequest {
-                agent_id: agent_id.to_string(),
-                capability_id: capability_id.to_string(),
-            }))
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/api/v1/agents/{}/capabilities/{}",
+                agent_id, capability_id
+            )))
+            .send()
             .await?;
 
-        match response {
-            Response::GetCapability(resp) => {
-                if !resp.found {
-                    return Ok(None);
-                }
-                let inputs: Vec<CapabilityField> = serde_json::from_slice(&resp.inputs_json)
-                    .map_err(|e| {
-                        SdkError::UnexpectedResponse(format!("Failed to parse inputs: {}", e))
-                    })?;
-                Ok(Some(inputs))
+        let status = resp.status();
+
+        // 404 means not found
+        if status.as_u16() == 404 {
+            let json: GetCapabilityJson = resp.json().await?;
+            if !json.found {
+                return Ok(None);
             }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetCapabilityResponse".to_string(),
-            )),
+            // Should not reach here, but if found is true at 404, fall through
+            return Ok(json.inputs);
         }
+
+        if !status.is_success() {
+            return Err(Self::parse_error_response(resp).await);
+        }
+
+        let json: GetCapabilityJson = resp.json().await?;
+
+        if !json.found {
+            return Ok(None);
+        }
+
+        Ok(json.inputs)
     }
 
     // =========================================================================
@@ -1290,34 +1587,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Get aggregated execution metrics for a tenant.
-    ///
-    /// Returns time-bucketed metrics including invocation counts, success rates,
-    /// duration statistics, and memory usage across all instances for the tenant.
-    ///
-    /// # Arguments
-    ///
-    /// * `options` - Options including tenant_id, time range, and granularity
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use chrono::{Duration, Utc};
-    ///
-    /// // Get last 7 days of daily metrics
-    /// let result = sdk.get_tenant_metrics(
-    ///     GetTenantMetricsOptions::new("tenant-1")
-    ///         .with_start_time(Utc::now() - Duration::days(7))
-    ///         .with_granularity(MetricsGranularity::Daily)
-    /// ).await?;
-    ///
-    /// for bucket in result.buckets {
-    ///     println!("{}: {} invocations, {:.1}% success rate",
-    ///         bucket.bucket_time.format("%Y-%m-%d"),
-    ///         bucket.invocation_count,
-    ///         bucket.success_rate_percent.unwrap_or(0.0)
-    ///     );
-    /// }
-    /// ```
     #[instrument(skip(self, options), fields(tenant_id = %options.tenant_id), level = "debug")]
     pub async fn get_tenant_metrics(
         &self,
@@ -1329,59 +1598,75 @@ impl ManagementSdk {
             return Err(SdkError::InvalidInput("tenant_id is required".to_string()));
         }
 
-        let request = GetTenantMetricsRequest {
-            tenant_id: options.tenant_id.clone(),
-            start_time_ms: options.start_time.map(|t| t.timestamp_millis()),
-            end_time_ms: options.end_time.map(|t| t.timestamp_millis()),
-            granularity: options.granularity.map(i32::from),
-        };
+        let mut query: Vec<(String, String)> = Vec::new();
 
-        let response = self
-            .send_request(Request::GetTenantMetrics(request))
+        if let Some(start_time) = options.start_time {
+            query.push((
+                "start_time_ms".to_string(),
+                start_time.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(end_time) = options.end_time {
+            query.push((
+                "end_time_ms".to_string(),
+                end_time.timestamp_millis().to_string(),
+            ));
+        }
+        if let Some(granularity) = options.granularity {
+            let gran_str = match granularity {
+                MetricsGranularity::Hourly => "hourly",
+                MetricsGranularity::Daily => "daily",
+            };
+            query.push(("granularity".to_string(), gran_str.to_string()));
+        }
+
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/api/v1/tenants/{}/metrics",
+                options.tenant_id
+            )))
+            .query(&query)
+            .send()
             .await?;
 
-        match response {
-            Response::GetTenantMetrics(resp) => {
-                let buckets = resp
-                    .buckets
-                    .into_iter()
-                    .map(|b| MetricsBucket {
-                        bucket_time: Utc
-                            .timestamp_millis_opt(b.bucket_time_ms)
-                            .single()
-                            .unwrap_or_else(Utc::now),
-                        invocation_count: b.invocation_count,
-                        success_count: b.success_count,
-                        failure_count: b.failure_count,
-                        cancelled_count: b.cancelled_count,
-                        // Convert milliseconds to seconds for SDK API
-                        avg_duration_seconds: b.avg_duration_ms.map(|ms| ms / 1000.0),
-                        min_duration_seconds: b.min_duration_ms.map(|ms| ms / 1000.0),
-                        max_duration_seconds: b.max_duration_ms.map(|ms| ms / 1000.0),
-                        avg_memory_bytes: b.avg_memory_bytes,
-                        max_memory_bytes: b.max_memory_bytes,
-                        success_rate_percent: b.success_rate_percent,
-                    })
-                    .collect();
-
-                Ok(TenantMetricsResult {
-                    tenant_id: resp.tenant_id,
-                    start_time: Utc
-                        .timestamp_millis_opt(resp.start_time_ms)
-                        .single()
-                        .unwrap_or_else(Utc::now),
-                    end_time: Utc
-                        .timestamp_millis_opt(resp.end_time_ms)
-                        .single()
-                        .unwrap_or_else(Utc::now),
-                    granularity: MetricsGranularity::from(resp.granularity),
-                    buckets,
-                })
-            }
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetTenantMetricsResponse".to_string(),
-            )),
+        if !resp.status().is_success() {
+            return Err(Self::parse_error_response(resp).await);
         }
+
+        let json: TenantMetricsJson = resp.json().await?;
+
+        let granularity = match json.granularity.as_str() {
+            "daily" => MetricsGranularity::Daily,
+            _ => MetricsGranularity::Hourly,
+        };
+
+        let buckets = json
+            .buckets
+            .into_iter()
+            .map(|b| MetricsBucket {
+                bucket_time: ms_to_datetime(b.bucket_time_ms),
+                invocation_count: b.invocation_count,
+                success_count: b.success_count,
+                failure_count: b.failure_count,
+                cancelled_count: b.cancelled_count,
+                // Convert milliseconds to seconds for SDK API
+                avg_duration_seconds: b.avg_duration_ms.map(|ms| ms / 1000.0),
+                min_duration_seconds: b.min_duration_ms.map(|ms| ms / 1000.0),
+                max_duration_seconds: b.max_duration_ms.map(|ms| ms / 1000.0),
+                avg_memory_bytes: b.avg_memory_bytes,
+                max_memory_bytes: b.max_memory_bytes,
+                success_rate_percent: b.success_rate_percent,
+            })
+            .collect();
+
+        Ok(TenantMetricsResult {
+            tenant_id: json.tenant_id,
+            start_time: ms_to_datetime(json.start_time_ms),
+            end_time: ms_to_datetime(json.end_time_ms),
+            granularity,
+            buckets,
+        })
     }
 
     // =========================================================================
@@ -1389,8 +1674,6 @@ impl ManagementSdk {
     // =========================================================================
 
     /// Wait for an instance to reach a terminal state.
-    ///
-    /// Returns the final instance info once it reaches Completed, Failed, or Cancelled.
     #[instrument(skip(self), fields(instance_id = %instance_id), level = "debug")]
     pub async fn wait_for_completion(
         &self,
@@ -1422,46 +1705,5 @@ impl ManagementSdk {
 
         self.wait_for_completion(&result.instance_id, poll_interval)
             .await
-    }
-}
-
-/// Convert i32 runner type to RunnerType enum.
-fn runner_type_from_i32(value: i32) -> RunnerType {
-    match value {
-        0 => RunnerType::Oci,
-        1 => RunnerType::Native,
-        2 => RunnerType::Wasm,
-        _ => RunnerType::Oci, // Default to OCI
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_instance_status_conversion() {
-        assert_eq!(InstanceStatus::from(0), InstanceStatus::Unknown);
-        assert_eq!(InstanceStatus::from(1), InstanceStatus::Pending);
-        assert_eq!(InstanceStatus::from(2), InstanceStatus::Running);
-        assert_eq!(InstanceStatus::from(3), InstanceStatus::Suspended);
-        assert_eq!(InstanceStatus::from(4), InstanceStatus::Completed);
-        assert_eq!(InstanceStatus::from(5), InstanceStatus::Failed);
-        assert_eq!(InstanceStatus::from(6), InstanceStatus::Cancelled);
-    }
-
-    #[test]
-    fn test_signal_type_conversion() {
-        assert_eq!(i32::from(SignalType::Cancel), 0);
-        assert_eq!(i32::from(SignalType::Pause), 1);
-        assert_eq!(i32::from(SignalType::Resume), 2);
-    }
-
-    #[test]
-    fn test_runner_type_from_i32() {
-        assert_eq!(runner_type_from_i32(0), RunnerType::Oci);
-        assert_eq!(runner_type_from_i32(1), RunnerType::Native);
-        assert_eq!(runner_type_from_i32(2), RunnerType::Wasm);
-        assert_eq!(runner_type_from_i32(99), RunnerType::Oci); // Unknown defaults to OCI
     }
 }

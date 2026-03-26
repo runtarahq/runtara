@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! E2E tests for heartbeat events via QUIC.
+//! E2E tests for heartbeat events.
 //!
-//! These tests verify that heartbeat events are correctly received via QUIC
+//! These tests verify that heartbeat events are correctly received
 //! and stored in the instance_events table.
 
 mod common;
@@ -553,7 +553,7 @@ async fn test_heartbeat_monitor_query_pattern() {
     .await
     .expect("Failed to create container entry");
 
-    // Now register via QUIC (this creates the 'started' event in instance_events)
+    // Now register via protocol (this creates the 'started' event in instance_events)
     ctx.instance_client
         .connect()
         .await

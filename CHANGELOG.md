@@ -13,7 +13,7 @@ Initial open-source release of Runtara.
 
 - **runtara-core**: Durable execution engine with checkpoint persistence, signal handling, and wake scheduling
 - **runtara-environment**: Execution environment with OCI container runner and image registry
-- **runtara-protocol**: QUIC transport layer with Protobuf message definitions
+- **runtara-protocol**: Protocol layer with Protobuf message definitions
 - **runtara-sdk**: Instance SDK for building durable workflows with checkpoint-based crash recovery
 - **runtara-sdk-macros**: `#[durable]` proc macro for transparent function durability
 - **runtara-management-sdk**: Management client for external tools to control instances
@@ -30,7 +30,7 @@ Initial open-source release of Runtara.
 - Checkpoint-based durability with PostgreSQL persistence
 - Durable sleep with automatic instance wake scheduling
 - Signal handling (cancel, pause, resume) with efficient polling
-- QUIC transport with TLS for secure communication
+- HTTP transport for communication between instances and engine
 - OCI container runtime for isolated workflow execution
 - Multi-tenant architecture with tenant isolation
 - JSON-based workflow DSL with step sequencing and branching
