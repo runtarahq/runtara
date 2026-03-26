@@ -48,6 +48,10 @@ use crate::server::InstanceServerState;
 pub struct CoreRuntimeBuilder {
     persistence: Option<Arc<dyn Persistence>>,
     bind_addr: SocketAddr,
+    /// Optional HTTP server bind address. If set, an HTTP server is started
+    /// alongside the QUIC server, serving the same instance protocol over REST/JSON.
+    #[cfg(feature = "http")]
+    http_bind_addr: Option<SocketAddr>,
 }
 
 impl std::fmt::Debug for CoreRuntimeBuilder {
@@ -64,6 +68,8 @@ impl Default for CoreRuntimeBuilder {
         Self {
             persistence: None,
             bind_addr: "0.0.0.0:8001".parse().unwrap(),
+            #[cfg(feature = "http")]
+            http_bind_addr: None,
         }
     }
 }
@@ -88,6 +94,19 @@ impl CoreRuntimeBuilder {
         self
     }
 
+    /// Set the bind address for the HTTP instance API server.
+    ///
+    /// When set, an HTTP server is started alongside the QUIC server, serving
+    /// the same instance protocol operations (checkpoint, signals, events)
+    /// over REST/JSON. This enables WASM scenarios and HTTP-based SDK backends.
+    ///
+    /// If not set, only the QUIC server is started.
+    #[cfg(feature = "http")]
+    pub fn http_bind_addr(mut self, addr: SocketAddr) -> Self {
+        self.http_bind_addr = Some(addr);
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -99,6 +118,8 @@ impl CoreRuntimeBuilder {
         Ok(CoreRuntimeConfig {
             persistence,
             bind_addr: self.bind_addr,
+            #[cfg(feature = "http")]
+            http_bind_addr: self.http_bind_addr,
         })
     }
 }
@@ -107,6 +128,8 @@ impl CoreRuntimeBuilder {
 pub struct CoreRuntimeConfig {
     persistence: Arc<dyn Persistence>,
     bind_addr: SocketAddr,
+    #[cfg(feature = "http")]
+    http_bind_addr: Option<SocketAddr>,
 }
 
 impl std::fmt::Debug for CoreRuntimeConfig {
@@ -119,7 +142,7 @@ impl std::fmt::Debug for CoreRuntimeConfig {
 }
 
 impl CoreRuntimeConfig {
-    /// Start the runtime, spawning the QUIC server task.
+    /// Start the runtime, spawning the QUIC server task and optionally the HTTP server.
     pub async fn start(self) -> Result<CoreRuntime> {
         let state = Arc::new(InstanceHandlerState::new(self.persistence));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -131,10 +154,25 @@ impl CoreRuntimeConfig {
             shutdown_rx,
         ));
 
+        // Optionally start HTTP server alongside QUIC
+        #[cfg(feature = "http")]
+        let http_server_handle = if let Some(http_addr) = self.http_bind_addr {
+            let http_state = state.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = crate::server::http_server::run_http_server(http_addr, http_state).await {
+                    error!("Instance HTTP server error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+
         info!(addr = %bind_addr, "CoreRuntime started");
 
         Ok(CoreRuntime {
             server_handle,
+            #[cfg(feature = "http")]
+            http_server_handle,
             shutdown_tx,
             state,
             bind_addr,
@@ -150,6 +188,8 @@ impl CoreRuntimeConfig {
 /// Call [`shutdown`](Self::shutdown) for graceful termination.
 pub struct CoreRuntime {
     server_handle: JoinHandle<Result<()>>,
+    #[cfg(feature = "http")]
+    http_server_handle: Option<JoinHandle<()>>,
     shutdown_tx: watch::Sender<bool>,
     state: Arc<InstanceServerState>,
     bind_addr: SocketAddr,
@@ -181,14 +221,21 @@ impl CoreRuntime {
     /// Gracefully shut down the runtime.
     ///
     /// This signals the QUIC server to stop accepting new connections and
-    /// waits for it to complete.
+    /// waits for it to complete. Also shuts down the HTTP server if running.
     pub async fn shutdown(self) -> Result<()> {
         info!("CoreRuntime shutting down...");
 
         // Signal shutdown
         let _ = self.shutdown_tx.send(true);
 
-        // Wait for server task to complete
+        // Abort HTTP server if running
+        #[cfg(feature = "http")]
+        if let Some(handle) = self.http_server_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        // Wait for QUIC server task to complete
         match self.server_handle.await {
             Ok(Ok(())) => {
                 info!("CoreRuntime shutdown complete");

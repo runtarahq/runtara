@@ -7,4 +7,9 @@
 
 pub mod instance_server;
 
+#[cfg(feature = "http")]
+#[allow(missing_docs)]
+/// HTTP server for the instance protocol (alternative to QUIC).
+pub mod http_server;
+
 pub use instance_server::{InstanceServerState, handle_connection, run_instance_server};

@@ -23,6 +23,9 @@ default = ["server"]
 # Full server mode with QUIC transport (for running runtara-core as a service)
 server = ["dep:quinn", "dep:runtara-protocol", "dep:dotenvy"]
 
+# HTTP API for the instance protocol (alternative to QUIC, for WASM transition)
+http = ["dep:axum"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -38,6 +41,9 @@ runtara-protocol = { path = "../runtara-protocol", version = "1.0", optional = t
 
 # Configuration (optional, for server mode)
 dotenvy = { version = "0.15", optional = true }
+
+# HTTP server (optional, for http feature)
+axum = { version = "0.8", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
