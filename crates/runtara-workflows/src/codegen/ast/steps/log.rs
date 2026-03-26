@@ -62,8 +62,8 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| {
             // Emit log event via SDK custom_event
             {
                 let __log_payload = serde_json::json!({
@@ -79,8 +79,8 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
                 });
 
                 let __payload_bytes = serde_json::to_vec(&__log_payload).unwrap_or_default();
-                let __sdk_guard = sdk().lock().await;
-                let _ = __sdk_guard.custom_event("workflow_log", __payload_bytes).await;
+                let __sdk_guard = sdk().lock().unwrap();
+                let _ = __sdk_guard.custom_event("workflow_log", __payload_bytes);
             }
 
             let #step_var = serde_json::json!({
@@ -94,7 +94,7 @@ pub fn emit(step: &LogStep, ctx: &mut EmitContext) -> Result<TokenStream, Codege
             });
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
-        }.instrument(__step_span).await;
+        });
     })
 }
 

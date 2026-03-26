@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Standard library for runtara workflow binaries - combines agents and runtime"
 keywords = ["durable", "workflow", "stdlib", "agents"]
-categories = ["asynchronous", "development-tools"]
+categories = ["development-tools"]
 
 [lib]
 name = "runtara_workflow_stdlib"
@@ -16,9 +16,8 @@ crate-type = ["rlib"]
 [features]
 default = ["native"]
 
-# Native platform - full async runtime with HTTP transport
+# Native platform - HTTP transport (sync execution)
 native = [
-    "dep:tokio",
     "dep:ureq",
     "runtara-sdk/http",
     "runtara-agents/native",
@@ -36,9 +35,10 @@ wasm-js = [
     "runtara-agents/wasm-js",
 ]
 
-# OpenTelemetry (native only)
+# OpenTelemetry (native only) — requires tokio for OTEL batch exporter flush
 telemetry = [
     "native",
+    "dep:tokio",
     "opentelemetry",
     "opentelemetry_sdk",
     "opentelemetry-otlp",
@@ -56,9 +56,8 @@ runtara-sdk = { path = "../runtara-sdk", version = "1.0", default-features = fal
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Async runtime (native only)
+# Tokio kept optional for telemetry OTEL batch exporter (needs async runtime for flush)
 tokio = { version = "1", features = ["full"], optional = true }
-futures = "0.3"
 
 # HTTP client for connection fetching (native only)
 ureq = { version = "2.12", optional = true }

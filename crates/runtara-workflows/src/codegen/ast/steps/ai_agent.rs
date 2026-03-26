@@ -373,7 +373,7 @@ pub fn emit(
                     Some(__ai_debug_inputs),
                     #mapping_expr,
                     None,
-                ).await;
+                );
             }
         }
     } else {
@@ -435,7 +435,7 @@ pub fn emit(
                     Some(__mem_load_debug_inputs),
                     None::<serde_json::Value>,
                     None,
-                ).await;
+                );
             }
 
             let __mem_load_start_time = std::time::Instant::now();
@@ -457,7 +457,7 @@ pub fn emit(
                 #mem_agent_id,
                 "load-memory",
                 "memory_load",
-            ).await.unwrap_or_else(|e| {
+            ).unwrap_or_else(|e| {
                 tracing::warn!("AI Agent step '{}': memory load failed: {}", #step_id, e);
                 serde_json::json!({"messages": [], "message_count": 0})
             });
@@ -549,8 +549,7 @@ pub fn emit(
                                     if let UserContent::ToolResult(tr) = part {
                                         let text = tr.content.iter().filter_map(|c| {
                                             match c {
-                                                rig::message::ToolResultContent::Text(t) => Some(t.text.clone()),
-                                                _ => None,
+                                                #stdlib::ai::message::ToolResultContent::Text(t) => Some(t.text.clone()),
                                             }
                                         }).collect::<Vec<_>>().join("\n");
                                         if text.is_empty() {
@@ -591,8 +590,8 @@ pub fn emit(
                         RigMessage::User { content } => {
                             let preview = content.iter().filter_map(|part| {
                                 match part {
-                                    rig::message::UserContent::Text(t) => Some(t.text.clone()),
-                                    rig::message::UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
+                                    UserContent::Text(t) => Some(t.text.clone()),
+                                    UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
                                     _ => None,
                                 }
                             }).collect::<Vec<_>>().join(" ");
@@ -601,8 +600,8 @@ pub fn emit(
                         RigMessage::Assistant { content } => {
                             let preview = content.iter().filter_map(|part| {
                                 match part {
-                                    rig::message::AssistantContent::Text(t) => Some(t.text.clone()),
-                                    rig::message::AssistantContent::ToolCall(tc) => Some(format!("[tool_call:{}]", tc.function.name)),
+                                    AssistantContent::Text(t) => Some(t.text.clone()),
+                                    AssistantContent::ToolCall(tc) => Some(format!("[tool_call:{}]", tc.function.name)),
                                 }
                             }).collect::<Vec<_>>().join(" ");
                             ("assistant", preview)
@@ -639,7 +638,7 @@ pub fn emit(
                     None::<serde_json::Value>,
                     Some(__mem_load_debug_outputs),
                     Some(__mem_load_duration_ms),
-                ).await;
+                );
             }
         }
     } else {
@@ -682,7 +681,7 @@ pub fn emit(
                             Some(__compact_inputs),
                             None::<serde_json::Value>,
                             None,
-                        ).await;
+                        );
                     }
 
                     let __compact_start_time = std::time::Instant::now();
@@ -711,7 +710,7 @@ pub fn emit(
                         0.3f64,
                         None,
                         None, // no structured output for compaction
-                    ).await {
+                    ) {
                         Ok(summary_choice) => {
                             __compact_summary_text = summary_choice
                                 .as_array()
@@ -770,7 +769,7 @@ pub fn emit(
                             Some(__compact_outputs),
                             None,
                             Some(__compact_duration_ms),
-                        ).await;
+                        );
                     }
                 }
             }
@@ -809,7 +808,7 @@ pub fn emit(
                             Some(__compact_inputs),
                             None::<serde_json::Value>,
                             None,
-                        ).await;
+                        );
                     }
 
                     let __compact_start_time = std::time::Instant::now();
@@ -847,7 +846,7 @@ pub fn emit(
                             Some(__compact_outputs),
                             None,
                             Some(__compact_duration_ms),
-                        ).await;
+                        );
                     }
                 }
             }
@@ -885,7 +884,7 @@ pub fn emit(
                     Some(__mem_save_debug_inputs),
                     None::<serde_json::Value>,
                     None,
-                ).await;
+                );
             }
 
             let __mem_save_start_time = std::time::Instant::now();
@@ -913,7 +912,7 @@ pub fn emit(
                 #mem_agent_id,
                 "save-memory",
                 "memory_save",
-            ).await {
+            ) {
                 Ok(_) => true,
                 Err(e) => {
                     tracing::error!("AI Agent step '{}': memory save failed: {}", #step_id, e);
@@ -930,8 +929,8 @@ pub fn emit(
                         RigMessage::User { content } => {
                             let preview = content.iter().filter_map(|part| {
                                 match part {
-                                    rig::message::UserContent::Text(t) => Some(t.text.clone()),
-                                    rig::message::UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
+                                    UserContent::Text(t) => Some(t.text.clone()),
+                                    UserContent::ToolResult(tr) => Some(format!("[tool_result:{}]", tr.id)),
                                     _ => None,
                                 }
                             }).collect::<Vec<_>>().join(" ");
@@ -940,8 +939,8 @@ pub fn emit(
                         RigMessage::Assistant { content } => {
                             let preview = content.iter().filter_map(|part| {
                                 match part {
-                                    rig::message::AssistantContent::Text(t) => Some(t.text.clone()),
-                                    rig::message::AssistantContent::ToolCall(tc) => Some(format!("[tool_call:{}]", tc.function.name)),
+                                    AssistantContent::Text(t) => Some(t.text.clone()),
+                                    AssistantContent::ToolCall(tc) => Some(format!("[tool_call:{}]", tc.function.name)),
                                 }
                             }).collect::<Vec<_>>().join(" ");
                             ("assistant", preview)
@@ -978,7 +977,7 @@ pub fn emit(
                     None::<serde_json::Value>,
                     Some(__mem_save_debug_outputs),
                     Some(__mem_save_duration_ms),
-                ).await;
+                );
             }
         }
     } else {
@@ -994,7 +993,7 @@ pub fn emit(
         // Define tracing span
         #span_def
 
-        let __step_result: std::result::Result<(), String> = async {
+        let __step_result: std::result::Result<(), String> = __step_span.in_scope(|| {
             let __step_start_time = std::time::Instant::now();
 
             // Resolve prompts from mappings (before debug_start so inputs are available)
@@ -1012,11 +1011,11 @@ pub fn emit(
             // Fetch LLM connection
             #connection_fetch
 
-            // Import rig types
-            use #stdlib::ai::rig::completion::CompletionModel;
-            use #stdlib::ai::rig::completion::ToolDefinition;
-            use #stdlib::ai::rig::message::{Message as RigMessage, AssistantContent, UserContent};
-            use #stdlib::ai::rig::OneOrMany;
+            // Import AI types
+            use #stdlib::ai::completion::CompletionModel;
+            use #stdlib::ai::types::ToolDefinition;
+            use #stdlib::ai::message::{Message as RigMessage, AssistantContent, UserContent};
+            use #stdlib::ai::OneOrMany;
 
             // Store connection info for passing to durable LLM calls
             let __ai_integration_id = __ai_conn.integration_id.clone();
@@ -1060,17 +1059,14 @@ pub fn emit(
 
             // Durable wrapper for individual tool calls
             #[durable(max_retries = 3, delay = 1000)]
-            async fn __ai_tool_durable(
+            fn __ai_tool_durable(
                 cache_key: &str,
                 inputs: serde_json::Value,
                 agent_id: &str,
                 capability_id: &str,
                 tool_name: &str,
             ) -> std::result::Result<serde_json::Value, String> {
-                runtara_sdk::with_cancellation(
-                    registry::execute_capability(agent_id, capability_id, inputs)
-                ).await
-                    .map_err(|e| format!("Tool '{}' cancelled: {}", tool_name, e))?
+                registry::execute_capability(agent_id, capability_id, inputs)
             }
 
             // Durable wrapper for LLM completion calls.
@@ -1078,7 +1074,7 @@ pub fn emit(
             // resume the #[durable] macro returns the cached result without
             // re-executing the LLM call, keeping conversation history consistent.
             #[durable(max_retries = 3, delay = 1000)]
-            async fn __ai_llm_durable(
+            fn __ai_llm_durable(
                 cache_key: &str,
                 integration_id: String,
                 conn_params: serde_json::Value,
@@ -1093,8 +1089,9 @@ pub fn emit(
             ) -> std::result::Result<serde_json::Value, String> {
                 // These use-imports are needed because inner fns don't inherit
                 // the parent scope's use declarations.
-                use #stdlib::ai::rig::completion::{CompletionModel as _CM, ToolDefinition as _TD};
-                use #stdlib::ai::rig::message::Message as _Msg;
+                use #stdlib::ai::completion::CompletionModel as _CM;
+                use #stdlib::ai::types::ToolDefinition as _TD;
+                use #stdlib::ai::message::Message as _Msg;
 
                 let __m = #stdlib::ai::provider::create_completion_model(
                     &integration_id, &conn_params, model_id.as_deref(),
@@ -1124,7 +1121,7 @@ pub fn emit(
                 for t in &__tls { __b = __b.tool(t.clone()); }
                 for msg in &__hist { __b = __b.message(msg.clone()); }
 
-                let __resp = __m.completion(__b.build()).await
+                let __resp = __m.completion(__b.build())
                     .map_err(|e| format!("LLM call failed: {}", e))?;
 
                 serde_json::to_value(&__resp.choice)
@@ -1184,7 +1181,7 @@ pub fn emit(
                     #temp_lit,
                     __ai_max_tokens,
                     __ai_output_schema_json.clone(),
-                ).await?;
+                )? ;
                 let __response_choice: OneOrMany<AssistantContent> = serde_json::from_value(__cached_choice)
                     .map_err(|e| format!("AI Agent step '{}': failed to deserialize LLM response: {}", #step_id, e))?;
 
@@ -1232,7 +1229,7 @@ pub fn emit(
                                     Some(__tool_inputs_data),
                                     None::<serde_json::Value>,
                                     None,
-                                ).await;
+                                );
                             }
 
                             let __tool_start_time = std::time::Instant::now();
@@ -1274,7 +1271,7 @@ pub fn emit(
                                     Some(__tool_output_data),
                                     None,
                                     Some(__tool_duration_ms),
-                                ).await;
+                                );
                             }
 
                             // Log tool call
@@ -1299,7 +1296,7 @@ pub fn emit(
                             __pending_tool_results.push(RigMessage::User {
                                 content: OneOrMany::one(UserContent::tool_result(
                                     __tool_id.clone(),
-                                    OneOrMany::one(#stdlib::ai::rig::message::ToolResultContent::text(__result_str)),
+                                    OneOrMany::one(#stdlib::ai::message::ToolResultContent::text(__result_str)),
                                 )),
                             });
                         }
@@ -1336,8 +1333,8 @@ pub fn emit(
 
                 // Check for cancellation between iterations
                 {
-                    let mut __sdk = sdk().lock().await;
-                    if let Err(e) = __sdk.check_signals().await {
+                    let mut __sdk = sdk().lock().unwrap();
+                    if let Err(e) = __sdk.check_signals() {
                         return Err(format!("AI Agent step '{}': {}", #step_id, e));
                     }
                 }
@@ -1367,14 +1364,14 @@ pub fn emit(
 
             // Check for cancellation after completion
             {
-                let mut __sdk = sdk().lock().await;
-                if let Err(e) = __sdk.check_signals().await {
+                let mut __sdk = sdk().lock().unwrap();
+                if let Err(e) = __sdk.check_signals() {
                     return Err(format!("AI Agent step '{}': {}", #step_id, e));
                 }
             }
 
             Ok(())
-        }.instrument(__step_span).await;
+        });
 
         // Propagate any error
         if let Err(e) = __step_result {
@@ -1692,7 +1689,7 @@ fn emit_agent_tool_arm(
                 #agent_id,
                 #capability_id,
                 #label_str,
-            ).await {
+            ) {
                 Ok(result) => result,
                 Err(e) => serde_json::json!({"error": e}),
             }
@@ -1754,7 +1751,7 @@ fn emit_start_scenario_tool_arm(
                     .map(|s| s.to_string()),
             });
 
-            match #child_fn(__child_inputs).await {
+            match #child_fn(__child_inputs) {
                 Ok(result) => result,
                 Err(e) => serde_json::json!({"error": e}),
             }
@@ -1795,7 +1792,7 @@ fn emit_wait_for_signal_tool_arm(
 
             // Compute deterministic signal_id
             let __wait_instance_id = {
-                let __sdk = sdk().lock().await;
+                let __sdk = sdk().lock().unwrap();
                 __sdk.instance_id().to_string()
             };
 
@@ -1846,8 +1843,8 @@ fn emit_wait_for_signal_tool_arm(
                 });
                 {
                     let __payload_bytes = serde_json::to_vec(&__signal_event_data).unwrap_or_default();
-                    let mut __sdk = sdk().lock().await;
-                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes).await;
+                    let mut __sdk = sdk().lock().unwrap();
+                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes);
                 }
             }
 
@@ -1859,8 +1856,8 @@ fn emit_wait_for_signal_tool_arm(
             let __signal_payload: serde_json::Value = loop {
                 // Check for cancellation (retry on connection errors)
                 {
-                    let mut __sdk = sdk().lock().await;
-                    match __sdk.check_signals().await {
+                    let mut __sdk = sdk().lock().unwrap();
+                    match __sdk.check_signals() {
                         Ok(()) => { __poll_errors = 0; }
                         Err(e) => {
                             let err_str = format!("{}", e);
@@ -1876,7 +1873,7 @@ fn emit_wait_for_signal_tool_arm(
                                     break serde_json::json!({"error": format!("Connection lost after {} retries: {}", __poll_errors, err_str)});
                                 }
                                 drop(__sdk);
-                                tokio::time::sleep(__poll_interval).await;
+                                std::thread::sleep(__poll_interval);
                                 continue;
                             }
                             // Non-connection error (actual cancellation)
@@ -1887,8 +1884,8 @@ fn emit_wait_for_signal_tool_arm(
 
                 // Poll for the signal
                 let __maybe_signal = {
-                    let mut __sdk = sdk().lock().await;
-                    __sdk.poll_custom_signal(&__wait_signal_id).await
+                    let mut __sdk = sdk().lock().unwrap();
+                    __sdk.poll_custom_signal(&__wait_signal_id)
                         .map_err(|e| format!("WaitForSignal poll failed: {}", e))
                 };
 
@@ -1908,7 +1905,7 @@ fn emit_wait_for_signal_tool_arm(
                     Ok(None) => {
                         // No signal yet — sleep and retry
                         __poll_errors = 0;
-                        tokio::time::sleep(__poll_interval).await;
+                        std::thread::sleep(__poll_interval);
                     }
                     Err(e) => {
                         // Retry transient connection errors
@@ -1923,7 +1920,7 @@ fn emit_wait_for_signal_tool_arm(
                             if __poll_errors > 10 {
                                 break serde_json::json!({"error": format!("Poll failed after {} retries: {}", __poll_errors, e)});
                             }
-                            tokio::time::sleep(__poll_interval).await;
+                            std::thread::sleep(__poll_interval);
                             continue;
                         }
                         break serde_json::json!({"error": e});
@@ -2406,7 +2403,7 @@ mod tests {
         );
         // The child function should be emitted
         assert!(
-            code.contains("async fn child_weather_scenario_id_1"),
+            code.contains("fn child_weather_scenario_id_1"),
             "Should emit child scenario function"
         );
     }

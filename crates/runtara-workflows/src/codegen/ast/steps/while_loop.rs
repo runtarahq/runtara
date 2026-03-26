@@ -93,8 +93,8 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| -> std::result::Result<(), String> {
             #debug_start
 
             // Define the subgraph function
@@ -121,7 +121,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                         otel.kind = "INTERNAL"
                     );
 
-                    // Build source with loop context for condition evaluation (sync, before async block)
+                    // Build source with loop context for condition evaluation
                     let mut __loop_source = #source_var.clone();
                     if let serde_json::Value::Object(ref mut map) = __loop_source {
                         let mut loop_ctx = serde_json::Map::new();
@@ -131,15 +131,15 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     }
                     let #source_var = __loop_source;
 
-                    // Evaluate condition (sync)
+                    // Evaluate condition
                     let __condition_result: bool = #condition_eval;
 
                     if !__condition_result {
                         break;
                     }
 
-                    // Wrap iteration body (with async operations) in instrumented async block
-                    let __iter_result: std::result::Result<serde_json::Value, String> = async {
+                    // Wrap iteration body in span scope
+                    let __iter_result: std::result::Result<serde_json::Value, String> = __iter_span.in_scope(|| {
                         // Prepare subgraph inputs with loop context
                         let mut __loop_vars = match (*#inputs_var.variables).clone() {
                             serde_json::Value::Object(m) => m,
@@ -180,8 +180,6 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                         __loop_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id.clone()));
 
                         // Inner steps use the While's scope (sc_{step_id}) as their parent, NOT the iteration scope.
-                        // This ensures all iterations share the same parent scope for hierarchy queries,
-                        // while still having unique scope_ids for cache key differentiation.
                         let __while_scope_id = format!("sc_{}", #step_id);
                         let __subgraph_inputs = ScenarioInputs {
                             data: #inputs_var.data.clone(),
@@ -194,32 +192,25 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             return Err(format!("While step {} cancelled before iteration {}", #step_id, __loop_index));
                         }
 
-                        // Execute subgraph with cancellation support
-                        let __iteration_outputs = match runtara_sdk::with_cancellation(
-                            #subgraph_fn_name(Arc::new(__subgraph_inputs))
-                        ).await {
-                            Ok(result) => result?,
-                            Err(cancel_err) => {
-                                return Err(format!("While step {} cancelled at iteration {}: {}", #step_id, __loop_index, cancel_err));
-                            }
-                        };
+                        // Execute subgraph (sync)
+                        let __iteration_outputs = #subgraph_fn_name(Arc::new(__subgraph_inputs))?;
 
                         // Heartbeat after each iteration to maintain liveness
                         {
-                            let __sdk = sdk().lock().await;
-                            let _ = __sdk.heartbeat().await;
+                            let __sdk = sdk().lock().unwrap();
+                            let _ = __sdk.heartbeat();
                         }
 
                         // Also check for cancellation or pause after each iteration (belt and suspenders)
                         {
-                            let mut __sdk = sdk().lock().await;
-                            if let Err(e) = __sdk.check_signals().await {
+                            let mut __sdk = sdk().lock().unwrap();
+                            if let Err(e) = __sdk.check_signals() {
                                 return Err(format!("While step {} at iteration {}: {}", #step_id, __loop_index, e));
                             }
                         }
 
                         Ok(__iteration_outputs)
-                    }.instrument(__iter_span).await;
+                    });
 
                     // Handle iteration result
                     __loop_outputs = __iter_result?;
@@ -240,7 +231,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
             Ok::<_, String>(())
-        }.instrument(__step_span).await?;
+        })?;
     })
 }
 

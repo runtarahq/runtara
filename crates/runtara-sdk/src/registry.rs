@@ -3,50 +3,38 @@
 //! Global SDK registry for the #[durable] macro.
 //!
 //! This module provides global SDK registration so the #[durable] macro
-//! can access the SDK without explicit passing. It also spawns background
-//! tasks for heartbeat and cancellation polling.
+//! can access the SDK without explicit passing.
 //!
 //! # Cancellation Support
 //!
 //! The registry provides cooperative cancellation for long-running operations.
-//! When a cancellation signal is detected, the global cancellation token is
-//! triggered, allowing operations to be interrupted mid-execution.
+//! When a cancellation signal is detected, the global cancellation flag is set,
+//! allowing operations to be interrupted.
 //!
-//! Use `with_cancellation()` to wrap async operations with cancellation support:
+//! Use `with_cancellation()` to wrap operations with cancellation support:
 //!
 //! ```ignore
-//! let result = with_cancellation(some_long_operation()).await?;
+//! let result = with_cancellation(|| some_long_operation())?;
 //! ```
 
-use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use once_cell::sync::OnceCell;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::RuntaraSdk;
 
 /// Global storage for the SDK instance.
-static SDK_INSTANCE: OnceCell<Arc<Mutex<RuntaraSdk>>> = OnceCell::new();
+static SDK_INSTANCE: OnceCell<Mutex<RuntaraSdk>> = OnceCell::new();
 
-/// Cancellation token for the background heartbeat task.
-static HEARTBEAT_CANCEL: OnceCell<CancellationToken> = OnceCell::new();
-
-/// Global cancellation token triggered when a cancel signal is received.
-/// This token can be used with `tokio::select!` to interrupt long-running operations.
-static INSTANCE_CANCELLATION: OnceCell<CancellationToken> = OnceCell::new();
-
-/// Default interval for polling cancellation status (in milliseconds).
-const DEFAULT_CANCELLATION_POLL_INTERVAL_MS: u64 = 1000;
+/// Global cancellation flag triggered when a cancel signal is received.
+static INSTANCE_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Register an SDK instance globally for use by #[durable] functions.
 ///
 /// This should be called once at application startup after creating and
-/// connecting the SDK. If the SDK is configured with a non-zero heartbeat
-/// interval, a background task will be spawned to send periodic heartbeats.
+/// connecting the SDK.
 ///
 /// # Panics
 ///
@@ -57,13 +45,11 @@ const DEFAULT_CANCELLATION_POLL_INTERVAL_MS: u64 = 1000;
 /// ```ignore
 /// use runtara_sdk::{RuntaraSdk, register_sdk};
 ///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let sdk = RuntaraSdk::localhost("my-instance", "my-tenant")?;
-///     sdk.connect().await?;
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let sdk = RuntaraSdk::from_env()?;
+///     sdk.connect()?;
 ///
 ///     // Register globally for #[durable] functions
-///     // This also starts a background heartbeat task (default: every 30s)
 ///     register_sdk(sdk);
 ///
 ///     // Now #[durable] functions will use this SDK
@@ -71,129 +57,9 @@ const DEFAULT_CANCELLATION_POLL_INTERVAL_MS: u64 = 1000;
 /// }
 /// ```
 pub fn register_sdk(sdk: RuntaraSdk) {
-    let heartbeat_interval_ms = sdk.heartbeat_interval_ms();
-    // Use the same interval for cancellation polling as heartbeat, or default to 1 second
-    let cancellation_poll_interval_ms = if heartbeat_interval_ms > 0 {
-        // Poll slightly more frequently than heartbeat to catch signals sooner
-        std::cmp::min(
-            heartbeat_interval_ms / 2,
-            DEFAULT_CANCELLATION_POLL_INTERVAL_MS,
-        )
-    } else {
-        DEFAULT_CANCELLATION_POLL_INTERVAL_MS
-    };
-
-    // Get backend Arc BEFORE wrapping SDK in mutex - background tasks use this directly
-    // to avoid mutex contention with long-running workflow operations
-    let backend = sdk.backend_arc();
-
-    let sdk_arc = Arc::new(Mutex::new(sdk));
-
-    if SDK_INSTANCE.set(sdk_arc.clone()).is_err() {
+    if SDK_INSTANCE.set(Mutex::new(sdk)).is_err() {
         panic!("SDK already registered. register_sdk() should only be called once.");
     }
-
-    // Create the global cancellation token
-    let instance_cancel_token = CancellationToken::new();
-    if INSTANCE_CANCELLATION
-        .set(instance_cancel_token.clone())
-        .is_err()
-    {
-        panic!("Cancellation token already set.");
-    }
-
-    // Create shutdown token for background tasks
-    let shutdown_token = CancellationToken::new();
-    let _ = HEARTBEAT_CANCEL.set(shutdown_token.clone());
-
-    // Spawn background heartbeat task if enabled
-    if heartbeat_interval_ms > 0 {
-        let heartbeat_backend = backend.clone();
-        let heartbeat_shutdown = shutdown_token.clone();
-        let interval = Duration::from_millis(heartbeat_interval_ms);
-
-        tokio::spawn(async move {
-            debug!(
-                interval_ms = heartbeat_interval_ms,
-                "Background heartbeat task started"
-            );
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = heartbeat_shutdown.cancelled() => {
-                        debug!("Background heartbeat task cancelled");
-                        break;
-                    }
-
-                    _ = tokio::time::sleep(interval) => {
-                        // Use backend directly - no mutex needed!
-                        // Backend methods are already thread-safe (RuntaraClient has internal mutex)
-                        if let Err(e) = heartbeat_backend.heartbeat().await {
-                            warn!(error = %e, "Failed to send background heartbeat");
-                        } else {
-                            debug!("Background heartbeat sent");
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // Spawn background cancellation poller
-    if cancellation_poll_interval_ms > 0 {
-        let cancel_shutdown = shutdown_token.clone();
-        let cancel_token = instance_cancel_token.clone();
-        let poll_interval = Duration::from_millis(cancellation_poll_interval_ms);
-
-        tokio::spawn(async move {
-            debug!(
-                interval_ms = cancellation_poll_interval_ms,
-                "Background cancellation poller started"
-            );
-
-            loop {
-                tokio::select! {
-                    biased;
-
-                    _ = cancel_shutdown.cancelled() => {
-                        debug!("Background cancellation poller stopped");
-                        break;
-                    }
-
-                    _ = cancel_token.cancelled() => {
-                        // Already cancelled, no need to poll
-                        debug!("Cancellation already triggered, stopping poller");
-                        break;
-                    }
-
-                    _ = tokio::time::sleep(poll_interval) => {
-                        // Check for cancellation signal
-                        let should_cancel = {
-                            let mut sdk_guard = sdk_arc.lock().await;
-                            match sdk_guard.check_cancelled().await {
-                                Err(crate::SdkError::Cancelled) => true,
-                                Err(e) => {
-                                    warn!(error = %e, "Error checking cancellation status");
-                                    false
-                                }
-                                Ok(()) => false,
-                            }
-                        };
-
-                        if should_cancel {
-                            info!("Cancellation signal received, triggering global cancellation");
-                            cancel_token.cancel();
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    let _ = shutdown_token;
 }
 
 /// Get a reference to the registered SDK.
@@ -201,7 +67,7 @@ pub fn register_sdk(sdk: RuntaraSdk) {
 /// # Panics
 ///
 /// Panics if no SDK has been registered.
-pub fn sdk() -> &'static Arc<Mutex<RuntaraSdk>> {
+pub fn sdk() -> &'static Mutex<RuntaraSdk> {
     SDK_INSTANCE
         .get()
         .expect("No SDK registered. Call register_sdk() at application startup.")
@@ -210,130 +76,64 @@ pub fn sdk() -> &'static Arc<Mutex<RuntaraSdk>> {
 /// Try to get a reference to the registered SDK.
 ///
 /// Returns `None` if no SDK has been registered.
-pub fn try_sdk() -> Option<&'static Arc<Mutex<RuntaraSdk>>> {
+pub fn try_sdk() -> Option<&'static Mutex<RuntaraSdk>> {
     SDK_INSTANCE.get()
 }
 
 /// Stop the background heartbeat task.
 ///
-/// This should be called when shutting down the SDK to cleanly stop
-/// the background heartbeat task. It's safe to call this multiple times
-/// or even if no heartbeat task was started.
-///
-/// # Example
-///
-/// ```ignore
-/// use runtara_sdk::{register_sdk, stop_heartbeat, sdk};
-///
-/// // ... at shutdown
-/// stop_heartbeat();
-/// let sdk_guard = sdk().lock().await;
-/// sdk_guard.close().await?;
-/// ```
+/// This is a no-op in the synchronous SDK (no background tasks).
 pub fn stop_heartbeat() {
-    if let Some(cancel_token) = HEARTBEAT_CANCEL.get() {
-        cancel_token.cancel();
-        debug!("Heartbeat cancellation requested");
-    }
-}
-
-/// Get the global cancellation token.
-///
-/// This token is triggered when a cancellation signal is received from runtara-core.
-/// Use this with `tokio::select!` to make long-running operations cancellable.
-///
-/// Returns `None` if no SDK has been registered.
-///
-/// # Example
-///
-/// ```ignore
-/// use runtara_sdk::cancellation_token;
-///
-/// async fn long_operation() -> Result<(), String> {
-///     if let Some(token) = cancellation_token() {
-///         tokio::select! {
-///             biased;
-///             _ = token.cancelled() => Err("Operation cancelled".to_string()),
-///             result = do_actual_work() => result,
-///         }
-///     } else {
-///         do_actual_work().await
-///     }
-/// }
-/// ```
-pub fn cancellation_token() -> Option<CancellationToken> {
-    INSTANCE_CANCELLATION.get().cloned()
+    // No-op — no background tasks in synchronous SDK
 }
 
 /// Check if the instance has been cancelled.
 ///
 /// Returns `true` if a cancellation signal has been received.
 pub fn is_cancelled() -> bool {
-    INSTANCE_CANCELLATION
-        .get()
-        .map(|t| t.is_cancelled())
-        .unwrap_or(false)
+    INSTANCE_CANCELLED.load(Ordering::SeqCst)
 }
 
-/// Execute a future with cancellation support.
+/// Execute a closure with cancellation support.
 ///
-/// This wraps the provided future with a cancellation check. If the global
-/// cancellation token is triggered, the future will be dropped and an error
-/// will be returned.
+/// This checks the cancellation flag before and after executing the closure.
+/// If the flag is set, returns an error.
 ///
 /// # Arguments
 ///
-/// * `operation` - The async operation to execute
+/// * `result` - The result of an operation to check
 ///
 /// # Returns
 ///
-/// Returns `Ok(result)` if the operation completes successfully, or
-/// `Err("Operation cancelled")` if cancellation was triggered.
+/// Returns `Ok(result)` if the operation completed and no cancellation,
+/// or `Err("Operation cancelled")` if cancellation was triggered.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use runtara_sdk::with_cancellation;
 ///
-/// async fn process_item(item: &Item) -> Result<Output, String> {
-///     // This HTTP request will be cancelled if a cancel signal is received
-///     let response = with_cancellation(http_client.get(item.url).send()).await?;
-///     Ok(response.json().await?)
+/// fn process_item(item: &Item) -> Result<Output, String> {
+///     let response = with_cancellation(http_client.get(item.url).send())?;
+///     Ok(response)
 /// }
 /// ```
-pub async fn with_cancellation<F, T>(operation: F) -> Result<T, String>
-where
-    F: Future<Output = T>,
-{
-    match INSTANCE_CANCELLATION.get() {
-        Some(token) => {
-            tokio::select! {
-                biased;
-
-                _ = token.cancelled() => {
-                    Err("Operation cancelled".to_string())
-                }
-
-                result = operation => {
-                    Ok(result)
-                }
-            }
-        }
-        None => {
-            // No cancellation token registered, just run the operation
-            Ok(operation.await)
-        }
+pub fn with_cancellation<T>(result: T) -> Result<T, String> {
+    if is_cancelled() {
+        Err("Operation cancelled".to_string())
+    } else {
+        Ok(result)
     }
 }
 
-/// Execute a future with cancellation support, using a custom error type.
+/// Check a result with cancellation support, using a custom error type.
 ///
 /// Similar to `with_cancellation`, but allows the caller to provide a custom
-/// error message or transform the cancellation error.
+/// error to return if cancelled.
 ///
 /// # Arguments
 ///
-/// * `operation` - The async operation to execute
+/// * `result` - The result of an operation
 /// * `cancel_error` - The error to return if cancelled
 ///
 /// # Example
@@ -342,30 +142,13 @@ where
 /// let result = with_cancellation_err(
 ///     http_request(),
 ///     MyError::Cancelled("HTTP request cancelled".into())
-/// ).await?;
+/// )?;
 /// ```
-pub async fn with_cancellation_err<F, T, E>(operation: F, cancel_error: E) -> Result<T, E>
-where
-    F: Future<Output = Result<T, E>>,
-{
-    match INSTANCE_CANCELLATION.get() {
-        Some(token) => {
-            tokio::select! {
-                biased;
-
-                _ = token.cancelled() => {
-                    Err(cancel_error)
-                }
-
-                result = operation => {
-                    result
-                }
-            }
-        }
-        None => {
-            // No cancellation token registered, just run the operation
-            operation.await
-        }
+pub fn with_cancellation_err<T, E>(result: Result<T, E>, cancel_error: E) -> Result<T, E> {
+    if is_cancelled() {
+        Err(cancel_error)
+    } else {
+        result
     }
 }
 
@@ -374,13 +157,11 @@ where
 /// This is useful for testing or when cancellation needs to be triggered
 /// from within the workflow (e.g., on a timeout condition).
 ///
-/// Note: This only affects the current instance's cancellation token.
+/// Note: This only affects the current instance's cancellation flag.
 /// The cancellation signal is not propagated to runtara-core.
 pub fn trigger_cancellation() {
-    if let Some(token) = INSTANCE_CANCELLATION.get() {
-        info!("Programmatic cancellation triggered");
-        token.cancel();
-    }
+    info!("Programmatic cancellation triggered");
+    INSTANCE_CANCELLED.store(true, Ordering::SeqCst);
 }
 
 /// Acknowledge cancellation to runtara-core.
@@ -390,39 +171,33 @@ pub fn trigger_cancellation() {
 /// status to "cancelled" (rather than "failed").
 ///
 /// This function is used by the `#[durable]` macro when cancellation is detected.
-/// It triggers the local cancellation token and sends the acknowledgment.
+/// It triggers the local cancellation flag and sends the acknowledgment.
 ///
 /// # Example
 ///
 /// ```ignore
 /// // Detected cancel signal in checkpoint response
 /// if checkpoint_result.should_cancel() {
-///     acknowledge_cancellation().await;
+///     acknowledge_cancellation();
 ///     return Err("Instance cancelled".into());
 /// }
 /// ```
-pub async fn acknowledge_cancellation() {
+pub fn acknowledge_cancellation() {
     use crate::types::SignalType;
 
-    // Trigger local cancellation token first
+    // Trigger local cancellation flag first
     trigger_cancellation();
 
-    // Send acknowledgment to core with timeout to prevent indefinite hang.
-    // This can happen if:
-    // 1. Multiple parallel durable functions try to acknowledge simultaneously
-    // 2. The connection is in a degraded state after stop signal
-    // 3. The grace period expired and core took action on the connection
-    if let Some(sdk_arc) = SDK_INSTANCE.get() {
-        let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
-            let sdk_guard = sdk_arc.lock().await;
-            sdk_guard.acknowledge_signal(SignalType::Cancel).await
-        })
-        .await;
-
-        match ack_result {
-            Ok(Ok(())) => info!("Cancellation acknowledged to core"),
-            Ok(Err(e)) => warn!(error = %e, "Failed to acknowledge cancellation signal"),
-            Err(_) => warn!("Timeout acknowledging cancellation signal - continuing with exit"),
+    // Send acknowledgment to core
+    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
+        match sdk_mutex.lock() {
+            Ok(sdk_guard) => {
+                match sdk_guard.acknowledge_signal(SignalType::Cancel) {
+                    Ok(()) => info!("Cancellation acknowledged to core"),
+                    Err(e) => warn!(error = %e, "Failed to acknowledge cancellation signal"),
+                }
+            }
+            Err(e) => warn!(error = %e, "Failed to lock SDK for cancellation acknowledgment"),
         }
     }
 }
@@ -439,26 +214,24 @@ pub async fn acknowledge_cancellation() {
 /// ```ignore
 /// // Detected pause signal in checkpoint response
 /// if checkpoint_result.should_pause() {
-///     acknowledge_pause().await;
-///     sdk.suspended().await?;
+///     acknowledge_pause();
+///     sdk.suspended()?;
 ///     return Ok(());
 /// }
 /// ```
-pub async fn acknowledge_pause() {
+pub fn acknowledge_pause() {
     use crate::types::SignalType;
 
-    // Send acknowledgment to core with timeout to prevent indefinite hang.
-    if let Some(sdk_arc) = SDK_INSTANCE.get() {
-        let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
-            let sdk_guard = sdk_arc.lock().await;
-            sdk_guard.acknowledge_signal(SignalType::Pause).await
-        })
-        .await;
-
-        match ack_result {
-            Ok(Ok(())) => info!("Pause acknowledged to core"),
-            Ok(Err(e)) => warn!(error = %e, "Failed to acknowledge pause signal"),
-            Err(_) => warn!("Timeout acknowledging pause signal - continuing with suspend"),
+    // Send acknowledgment to core
+    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
+        match sdk_mutex.lock() {
+            Ok(sdk_guard) => {
+                match sdk_guard.acknowledge_signal(SignalType::Pause) {
+                    Ok(()) => info!("Pause acknowledged to core"),
+                    Err(e) => warn!(error = %e, "Failed to acknowledge pause signal"),
+                }
+            }
+            Err(e) => warn!(error = %e, "Failed to lock SDK for pause acknowledgment"),
         }
     }
 }

@@ -106,6 +106,10 @@ impl NativeRunner {
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
         env.insert(
+            "RUNTARA_HTTP_URL".to_string(),
+            format!("http://{}", runtara_core_addr),
+        );
+        env.insert(
             "RUNTARA_SERVER_ADDR".to_string(),
             runtara_core_addr.to_string(),
         );
@@ -146,6 +150,16 @@ impl NativeRunner {
         }
         if let Ok(port) = std::env::var("RUNTARA_CORE_HTTP_PORT") {
             env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
+        }
+
+        // Forward object model internal API URL for smo-stdlib agents
+        if let Ok(url) = std::env::var("RUNTARA_OBJECT_MODEL_URL") {
+            env.insert("RUNTARA_OBJECT_MODEL_URL".to_string(), url);
+        }
+
+        // Forward tenant ID for internal API authentication
+        if let Ok(tid) = std::env::var("RUNTARA_TENANT_ID") {
+            env.insert("RUNTARA_TENANT_ID".to_string(), tid);
         }
 
         env

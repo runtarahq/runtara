@@ -157,9 +157,8 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        // This ensures proper span propagation across await points
-        let __step_result: std::result::Result<(), String> = async {
+        // Wrap step execution in span scope
+        let __step_result: std::result::Result<(), String> = __step_span.in_scope(|| {
             #debug_start
 
             #execute_capability
@@ -180,8 +179,8 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
                     // Check for cancellation or pause via SDK signal polling
                     {
-                        let mut __sdk = sdk().lock().await;
-                        if let Err(e) = __sdk.check_signals().await {
+                        let mut __sdk = sdk().lock().unwrap();
+                        if let Err(e) = __sdk.check_signals() {
                             return Err(format!("Step {}: {}", #step_id, e));
                         }
                     }
@@ -198,7 +197,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     Err(__cap_err)
                 }
             }
-        }.instrument(__step_span).await;
+        });
 
         // Propagate any error from the step
         if let Err(e) = __step_result {
@@ -282,19 +281,14 @@ fn emit_durable_call(
         // The raw capability error is passed through (not wrapped) so that the
         // #[durable] macro can parse JSON error category for retry decisions.
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
-        async fn #durable_fn_name(
+        fn #durable_fn_name(
             cache_key: &str,
             inputs: serde_json::Value,
             agent_id: &str,
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            // Wrap agent execution with cancellation support - allows long-running
-            // operations (HTTP requests, DB queries) to be interrupted mid-execution
-            runtara_sdk::with_cancellation(
-                registry::execute_capability(agent_id, capability_id, inputs)
-            ).await
-                .map_err(|e| format!("Step {} cancelled: {}", step_id, e))?
+            registry::execute_capability(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -307,7 +301,7 @@ fn emit_durable_call(
             #agent_id,
             #capability_id,
             #step_id,
-        ).await
+        )
             .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
                 #step_id, #agent_id, #capability_id, e));
     }
@@ -388,19 +382,14 @@ fn emit_durable_rate_limited_call(
         // The raw capability error is passed through (not wrapped) so that the
         // #[durable] macro can parse JSON error category for retry decisions.
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
-        async fn #durable_fn_name(
+        fn #durable_fn_name(
             cache_key: &str,
             inputs: serde_json::Value,
             agent_id: &str,
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            // Wrap agent execution with cancellation support - allows long-running
-            // operations (HTTP requests, DB queries) to be interrupted mid-execution
-            runtara_sdk::with_cancellation(
-                registry::execute_capability(agent_id, capability_id, inputs)
-            ).await
-                .map_err(|e| format!("Step {} cancelled: {}", step_id, e))?
+            registry::execute_capability(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -413,7 +402,7 @@ fn emit_durable_rate_limited_call(
             #agent_id,
             #capability_id,
             #step_id,
-        ).await
+        )
             .map_err(|e| format!("Step {} failed: Agent {}::{}: {}",
                 #step_id, #agent_id, #capability_id, e));
     }
@@ -458,8 +447,8 @@ fn emit_connection_fetch(
 
                     // Use durable sleep so we survive crashes while waiting
                     {
-                        let __sdk = sdk().lock().await;
-                        __sdk.durable_sleep(wait_duration).await
+                        let __sdk = sdk().lock().unwrap();
+                        __sdk.durable_sleep(wait_duration)
                             .map_err(|e| format!("Step {} rate limit sleep failed: {}", #step_id, e))?;
                     }
 
@@ -876,8 +865,8 @@ mod tests {
 
         // Verify durable function signature
         assert!(
-            code.contains("async fn"),
-            "Should define async durable function"
+            code.contains("fn "),
+            "Should define durable function"
         );
         assert!(
             code.contains("cache_key : & str"),

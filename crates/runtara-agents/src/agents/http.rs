@@ -17,6 +17,7 @@ use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Read as _;
 use strum::VariantNames;
 
 // ============================================================================
@@ -398,7 +399,7 @@ pub fn extract_connection_config(
 // Operations
 // ============================================================================
 
-/// Execute an HTTP request using async reqwest
+/// Execute an HTTP request using blocking ureq
 #[capability(
     module = "http",
     display_name = "HTTP Request",
@@ -411,7 +412,7 @@ pub fn extract_connection_config(
         permanent("HTTP_4XX", "Client error response (4xx status code except 429)", ["url", "status_code"]),
     )
 )]
-pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
+pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     // Start with input values
     let mut headers = input.headers.clone();
     let mut query_parameters = input.query_parameters.clone();
@@ -454,79 +455,92 @@ pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, Strin
         }
     }
 
-    // Create reqwest client with timeout
-    let client = reqwest::Client::builder()
+    // Create ureq agent with timeout
+    let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_millis(input.timeout_ms))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .build();
 
     // Build request based on method
-    let method = match input.method {
-        HttpMethod::Get => reqwest::Method::GET,
-        HttpMethod::Post => reqwest::Method::POST,
-        HttpMethod::Put => reqwest::Method::PUT,
-        HttpMethod::Delete => reqwest::Method::DELETE,
-        HttpMethod::Patch => reqwest::Method::PATCH,
-        HttpMethod::Head => reqwest::Method::HEAD,
-        HttpMethod::Options => reqwest::Method::OPTIONS,
-    };
-
-    let mut request = client.request(method, &url);
+    let method_str = input.method.as_str();
+    let mut request = agent.request(method_str, &url);
 
     // Add headers
     for (key, value) in &headers {
-        request = request.header(key, value);
+        request = request.set(key, value);
     }
 
-    // Add body if applicable
-    request = match input.method {
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => request,
+    // Add body and send
+    let result = match input.method {
+        HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => {
+            request.call()
+        }
         HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
             if let Some(body_str) = input.body.to_string_body() {
                 // Set content-type if not already set
                 if !headers.contains_key("Content-Type") && !headers.contains_key("content-type") {
-                    request = request.header("Content-Type", "application/json");
+                    request = request.set("Content-Type", "application/json");
                 }
-                request.body(body_str)
+                request.send_string(&body_str)
             } else {
-                request
+                request.call()
             }
         }
     };
 
-    // Execute request
-    let response = request.send().await.map_err(|e| {
-        let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
-            .with_attr("url", &input.url);
-        // Serialize as JSON to preserve structured error info
-        serde_json::to_string(&err).unwrap_or_else(|_| err.to_string())
-    })?;
+    // Handle response or error
+    let response = match result {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(status_code, resp)) => {
+            // Non-2xx response — ureq treats these as errors
+            let mut response_headers = HashMap::new();
+            for name in resp.headers_names() {
+                if let Some(value) = resp.header(&name) {
+                    response_headers.insert(name, value.to_string());
+                }
+            }
 
-    let status_code = response.status().as_u16();
-    let success = response.status().is_success();
+            if input.fail_on_error {
+                let body_text = resp.into_string().unwrap_or_default();
+                let err = http_error(status_code, &body_text).with_attr("url", &input.url);
+                return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
+            }
+
+            // Return as normal response with non-success status
+            let body = read_response_body_from_string(
+                resp.into_string().unwrap_or_default(),
+                &input.response_type,
+            );
+
+            return Ok(HttpResponse {
+                status_code,
+                headers: response_headers,
+                body,
+                success: false,
+            });
+        }
+        Err(ureq::Error::Transport(e)) => {
+            let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
+                .with_attr("url", &input.url);
+            return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
+        }
+    };
+
+    let status_code = response.status();
+    let success = (200..300).contains(&status_code);
 
     // Extract headers
     let mut response_headers = HashMap::new();
-    for (name, value) in response.headers() {
-        if let Ok(v) = value.to_str() {
-            response_headers.insert(name.to_string(), v.to_string());
+    for name in response.headers_names() {
+        if let Some(value) = response.header(&name) {
+            response_headers.insert(name, value.to_string());
         }
-    }
-
-    // Check for error status before consuming body
-    if !success && input.fail_on_error {
-        let body_text = response.text().await.unwrap_or_else(|_| String::new());
-        let err = http_error(status_code, &body_text).with_attr("url", &input.url);
-        // Serialize as JSON to preserve structured error info
-        return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
     }
 
     // Read body based on response type
     let body = match input.response_type {
         ResponseType::Json => {
             let text = response
-                .text()
-                .await
+                .into_string()
                 .map_err(|e| format!("Failed to read response body: {}", e))?;
             match serde_json::from_str(&text) {
                 Ok(json_value) => HttpResponseBody::Json(json_value),
@@ -535,17 +549,17 @@ pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, Strin
         }
         ResponseType::Text => {
             let text = response
-                .text()
-                .await
+                .into_string()
                 .map_err(|e| format!("Failed to read response body: {}", e))?;
             HttpResponseBody::Text(text)
         }
         ResponseType::Binary => {
-            let bytes = response
-                .bytes()
-                .await
+            let mut bytes = Vec::new();
+            response
+                .into_reader()
+                .read_to_end(&mut bytes)
                 .map_err(|e| format!("Failed to read response body: {}", e))?;
-            HttpResponseBody::Binary(bytes.to_vec())
+            HttpResponseBody::Binary(bytes)
         }
     };
 
@@ -555,6 +569,18 @@ pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, Strin
         body,
         success,
     })
+}
+
+/// Helper to parse a response body string into the appropriate HttpResponseBody type
+fn read_response_body_from_string(text: String, response_type: &ResponseType) -> HttpResponseBody {
+    match response_type {
+        ResponseType::Json => match serde_json::from_str(&text) {
+            Ok(json_value) => HttpResponseBody::Json(json_value),
+            Err(_) => HttpResponseBody::Text(text),
+        },
+        ResponseType::Text => HttpResponseBody::Text(text),
+        ResponseType::Binary => HttpResponseBody::Binary(text.into_bytes()),
+    }
 }
 
 /// URL encoding helper module
@@ -624,7 +650,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -661,7 +687,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -695,7 +721,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -724,7 +750,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -746,7 +772,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -776,7 +802,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -806,7 +832,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -827,7 +853,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 204);
     }
@@ -851,7 +877,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().status_code, 200);
     }
@@ -875,7 +901,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("404"));
     }
@@ -899,7 +925,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -927,7 +953,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -956,7 +982,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -986,7 +1012,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1011,7 +1037,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();
@@ -1037,7 +1063,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = http_request(input).await;
+        let result = http_request(input);
         assert!(result.is_ok());
 
         let response = result.unwrap();

@@ -168,8 +168,8 @@ fn emit_value_switch(
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| {
             #debug_start
 
             // Compile-time expanded case matching
@@ -189,7 +189,7 @@ fn emit_value_switch(
             #debug_end
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
-        }.instrument(__step_span).await;
+        });
     })
 }
 

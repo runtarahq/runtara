@@ -72,7 +72,7 @@ impl Parse for DurableAttr {
     }
 }
 
-/// Makes an async function durable by wrapping it with checkpoint-based caching and retry support.
+/// Makes a function durable by wrapping it with checkpoint-based caching and retry support.
 ///
 /// The macro automatically:
 /// - Checks for existing checkpoint before execution
@@ -83,7 +83,7 @@ impl Parse for DurableAttr {
 ///
 /// # Requirements
 ///
-/// - Function must be async
+/// - Function must be synchronous (not async)
 /// - **First parameter is the idempotency key** (any type that implements `Display`)
 /// - Function must return `Result<T, E>` where `T: Serialize + DeserializeOwned`
 /// - SDK must be registered via `RuntaraSdk::init()` before calling
@@ -94,9 +94,9 @@ impl Parse for DurableAttr {
 /// use runtara_sdk::durable;
 ///
 /// #[durable]
-/// pub async fn fetch_order(key: &str, order_id: &str) -> Result<Order, OrderError> {
+/// pub fn fetch_order(key: &str, order_id: &str) -> Result<Order, OrderError> {
 ///     // The key determines caching - same key = same cached result
-///     db.fetch_order(order_id).await
+///     db.fetch_order(order_id)
 /// }
 /// ```
 ///
@@ -106,12 +106,12 @@ impl Parse for DurableAttr {
 /// use runtara_sdk::durable;
 ///
 /// #[durable(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
-/// pub async fn submit_order(key: &str, order: &Order) -> Result<OrderResult, OrderError> {
+/// pub fn submit_order(key: &str, order: &Order) -> Result<OrderResult, OrderError> {
 ///     // Retries up to 3 times with exponential backoff:
 ///     // - First retry: 1000ms delay
 ///     // - Second retry: 2000ms delay
 ///     // - Third retry: 4000ms delay
-///     external_service.submit(order).await
+///     external_service.submit(order)
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -133,11 +133,11 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
     let sig = &input.sig;
     let block = &input.block;
 
-    // Must be async
-    if sig.asyncness.is_none() {
+    // Must NOT be async
+    if sig.asyncness.is_some() {
         return Err(syn::Error::new(
             sig.fn_token.span,
-            "#[durable] only works with async functions",
+            "#[durable] only works with synchronous (non-async) functions",
         ));
     }
 
@@ -197,9 +197,9 @@ fn generate_no_retry_wrapper(
             // Step 1: Check if we have a cached result (read-only lookup)
             {
                 let __sdk = ::runtara_sdk::sdk();
-                let __sdk_guard = __sdk.lock().await;
+                let __sdk_guard = __sdk.lock().unwrap();
 
-                match __sdk_guard.get_checkpoint(&__cache_key).await {
+                match __sdk_guard.get_checkpoint(&__cache_key) {
                     Ok(Some(cached_bytes)) => {
                         // Found cached result - deserialize and return
                         drop(__sdk_guard);
@@ -236,17 +236,17 @@ fn generate_no_retry_wrapper(
             }
 
             // Step 2: Execute original function body
-            let __result: std::result::Result<_, _> = async #block.await;
+            let __result: std::result::Result<_, _> = (|| #block)();
 
             // Step 3: Cache successful result
             if let Ok(ref value) = __result {
                 match ::serde_json::to_vec(value) {
                     Ok(result_bytes) => {
                         let __sdk = ::runtara_sdk::sdk();
-                        let __sdk_guard = __sdk.lock().await;
+                        let __sdk_guard = __sdk.lock().unwrap();
 
                         // Use checkpoint to save - it won't overwrite if already exists
-                        match __sdk_guard.checkpoint(&__cache_key, &result_bytes).await {
+                        match __sdk_guard.checkpoint(&__cache_key, &result_bytes) {
                             Ok(checkpoint_result) => {
                                 ::tracing::debug!(
                                     function = #fn_name_str,
@@ -265,8 +265,8 @@ fn generate_no_retry_wrapper(
                                         "Cancel signal detected - exiting"
                                     );
                                     // Acknowledge cancellation to core (sets status to "cancelled")
-                                    // and trigger local cancellation token
-                                    ::runtara_sdk::acknowledge_cancellation().await;
+                                    // and trigger local cancellation flag
+                                    ::runtara_sdk::acknowledge_cancellation();
                                     // Return error immediately to stop execution
                                     return Err("Instance cancelled".to_string().into());
                                 } else if checkpoint_result.should_pause() {
@@ -342,9 +342,9 @@ fn generate_retry_wrapper(
             // Step 1: Check if we have a cached result (read-only lookup)
             {
                 let __sdk = ::runtara_sdk::sdk();
-                let __sdk_guard = __sdk.lock().await;
+                let __sdk_guard = __sdk.lock().unwrap();
 
-                match __sdk_guard.get_checkpoint(&__cache_key).await {
+                match __sdk_guard.get_checkpoint(&__cache_key) {
                     Ok(Some(cached_bytes)) => {
                         // Found cached result - deserialize and return
                         drop(__sdk_guard);
@@ -406,17 +406,17 @@ fn generate_retry_wrapper(
                         "Retrying after backoff"
                     );
 
-                    ::tokio::time::sleep(__delay).await;
+                    ::std::thread::sleep(__delay);
 
                     // Record retry attempt to runtara-core
                     {
                         let __sdk = ::runtara_sdk::sdk();
-                        let __sdk_guard = __sdk.lock().await;
+                        let __sdk_guard = __sdk.lock().unwrap();
                         if let Err(e) = __sdk_guard.record_retry_attempt(
                             &__cache_key,
                             __attempt,
                             __last_error.as_deref(),
-                        ).await {
+                        ) {
                             ::tracing::warn!(
                                 function = #fn_name_str,
                                 cache_key = %__cache_key,
@@ -428,7 +428,7 @@ fn generate_retry_wrapper(
                 }
 
                 // Execute the function body
-                let __result: std::result::Result<_, _> = async #block.await;
+                let __result: std::result::Result<_, _> = (|| #block)();
 
                 match __result {
                     Ok(ref value) => {
@@ -436,9 +436,9 @@ fn generate_retry_wrapper(
                         match ::serde_json::to_vec(value) {
                             Ok(result_bytes) => {
                                 let __sdk = ::runtara_sdk::sdk();
-                                let __sdk_guard = __sdk.lock().await;
+                                let __sdk_guard = __sdk.lock().unwrap();
 
-                                match __sdk_guard.checkpoint(&__cache_key, &result_bytes).await {
+                                match __sdk_guard.checkpoint(&__cache_key, &result_bytes) {
                                     Ok(checkpoint_result) => {
                                         ::tracing::debug!(
                                             function = #fn_name_str,
@@ -458,8 +458,8 @@ fn generate_retry_wrapper(
                                                 "Cancel signal detected - exiting"
                                             );
                                             // Acknowledge cancellation to core (sets status to "cancelled")
-                                            // and trigger local cancellation token
-                                            ::runtara_sdk::acknowledge_cancellation().await;
+                                            // and trigger local cancellation flag
+                                            ::runtara_sdk::acknowledge_cancellation();
                                             // Return error immediately to stop execution
                                             return Err("Instance cancelled".to_string().into());
                                         } else if checkpoint_result.should_pause() {
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn test_extract_result_ok_type_valid() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str) -> Result<String, Error> {
+            fn foo(key: &str) -> Result<String, Error> {
                 Ok("hello".to_string())
             }
         };
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn test_extract_result_ok_type_no_return() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str) {
+            fn foo(key: &str) {
             }
         };
         let result = extract_result_ok_type(&fn_item.sig.output);
@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn test_extract_result_ok_type_not_result() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str) -> Option<String> {
+            fn foo(key: &str) -> Option<String> {
                 Some("hello".to_string())
             }
         };
@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn test_extract_first_arg_ident_valid() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str, value: i32) -> Result<(), ()> {
+            fn foo(key: &str, value: i32) -> Result<(), ()> {
                 Ok(())
             }
         };
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn test_extract_first_arg_ident_no_args() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo() -> Result<(), ()> {
+            fn foo() -> Result<(), ()> {
                 Ok(())
             }
         };
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn test_extract_first_arg_ident_with_self() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(&self, key: &str) -> Result<(), ()> {
+            fn foo(&self, key: &str) -> Result<(), ()> {
                 Ok(())
             }
         };
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn test_extract_clonable_params_reference_skipped() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str, value: &[u8]) -> Result<(), ()> {
+            fn foo(key: &str, value: &[u8]) -> Result<(), ()> {
                 Ok(())
             }
         };
@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn test_extract_clonable_params_owned_included() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str, value: String, count: i32) -> Result<(), ()> {
+            fn foo(key: &str, value: String, count: i32) -> Result<(), ()> {
                 Ok(())
             }
         };
@@ -830,9 +830,9 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_durable_wrapper_not_async_fails() {
+    fn test_generate_durable_wrapper_async_fails() {
         let fn_item: ItemFn = parse_quote! {
-            fn foo(key: &str) -> Result<(), ()> {
+            async fn foo(key: &str) -> Result<(), ()> {
                 Ok(())
             }
         };
@@ -840,13 +840,13 @@ mod tests {
         let result = generate_durable_wrapper(fn_item, config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("async"));
+        assert!(err.contains("synchronous"));
     }
 
     #[test]
     fn test_generate_durable_wrapper_valid() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str) -> Result<String, String> {
+            fn foo(key: &str) -> Result<String, String> {
                 Ok("hello".to_string())
             }
         };
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn test_generate_durable_wrapper_zero_retries() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str) -> Result<String, String> {
+            fn foo(key: &str) -> Result<String, String> {
                 Ok("hello".to_string())
             }
         };
@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn test_generate_durable_wrapper_with_retries() {
         let fn_item: ItemFn = parse_quote! {
-            async fn foo(key: &str) -> Result<String, String> {
+            fn foo(key: &str) -> Result<String, String> {
                 Ok("hello".to_string())
             }
         };
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn test_no_retry_wrapper_contains_cancellation_handling() {
         let fn_item: ItemFn = parse_quote! {
-            async fn process_item(key: &str) -> Result<(), String> {
+            fn process_item(key: &str) -> Result<(), String> {
                 Ok(())
             }
         };
@@ -946,7 +946,7 @@ mod tests {
     #[test]
     fn test_retry_wrapper_contains_cancellation_handling() {
         let fn_item: ItemFn = parse_quote! {
-            async fn process_item(key: &str) -> Result<(), String> {
+            fn process_item(key: &str) -> Result<(), String> {
                 Ok(())
             }
         };
@@ -993,7 +993,7 @@ mod tests {
     #[test]
     fn test_cancellation_returns_error_not_just_logs() {
         let fn_item: ItemFn = parse_quote! {
-            async fn my_function(key: &str) -> Result<i32, String> {
+            fn my_function(key: &str) -> Result<i32, String> {
                 Ok(42)
             }
         };
@@ -1025,7 +1025,7 @@ mod tests {
     /// acknowledge_cancellation() in the generated code.
     ///
     /// Background: The deadlock occurred because:
-    /// 1. __sdk_guard = __sdk.lock().await holds the SDK mutex
+    /// 1. __sdk_guard = __sdk.lock().unwrap() holds the SDK mutex
     /// 2. acknowledge_cancellation() tries to acquire the same mutex via SDK_INSTANCE.get()
     /// 3. This creates a self-deadlock
     ///
@@ -1036,7 +1036,7 @@ mod tests {
         // Test both no-retry and retry paths
         for (max_retries, path_name) in [(Some(0), "no-retry"), (Some(3), "retry")] {
             let fn_item: ItemFn = parse_quote! {
-                async fn process_item(key: &str) -> Result<(), String> {
+                fn process_item(key: &str) -> Result<(), String> {
                     Ok(())
                 }
             };
@@ -1077,5 +1077,55 @@ mod tests {
                 ack_pos.unwrap()
             );
         }
+    }
+
+    #[test]
+    fn test_generated_code_uses_sync_mutex() {
+        let fn_item: ItemFn = parse_quote! {
+            fn foo(key: &str) -> Result<String, String> {
+                Ok("hello".to_string())
+            }
+        };
+        let config = DurableAttr::default();
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        let tokens = result.unwrap().to_string();
+
+        // Should use .lock().unwrap() (sync Mutex), not .lock().await (tokio Mutex)
+        assert!(
+            tokens.contains("lock () . unwrap ()"),
+            "Generated code should use sync .lock().unwrap(), not async .lock().await"
+        );
+        assert!(
+            !tokens.contains("lock () . await"),
+            "Generated code should NOT use async .lock().await"
+        );
+    }
+
+    #[test]
+    fn test_generated_code_uses_std_thread_sleep() {
+        let fn_item: ItemFn = parse_quote! {
+            fn foo(key: &str) -> Result<String, String> {
+                Ok("hello".to_string())
+            }
+        };
+        let config = DurableAttr {
+            max_retries: Some(3),
+            strategy: None,
+            delay: Some(1000),
+        };
+        let result = generate_durable_wrapper(fn_item, config);
+        assert!(result.is_ok());
+        let tokens = result.unwrap().to_string();
+
+        // Should use std::thread::sleep, not tokio::time::sleep
+        assert!(
+            tokens.contains("std :: thread :: sleep"),
+            "Generated code should use std::thread::sleep"
+        );
+        assert!(
+            !tokens.contains("tokio :: time :: sleep"),
+            "Generated code should NOT use tokio::time::sleep"
+        );
     }
 }

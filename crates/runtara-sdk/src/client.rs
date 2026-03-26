@@ -22,13 +22,13 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 /// use runtara_sdk::RuntaraSdk;
 ///
 /// let mut sdk = RuntaraSdk::from_env()?;
-/// sdk.connect().await?;
-/// sdk.register(None).await?;
+/// sdk.connect()?;
+/// sdk.register(None)?;
 ///
 /// // Process items with checkpointing
 /// for i in 0..items.len() {
 ///     let state = serde_json::to_vec(&my_state)?;
-///     if let Some(existing) = sdk.checkpoint(&format!("item-{}", i), &state).await? {
+///     if let Some(existing) = sdk.checkpoint(&format!("item-{}", i), &state)? {
 ///         // Resuming - restore state and skip
 ///         my_state = serde_json::from_slice(&existing)?;
 ///         continue;
@@ -37,7 +37,7 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 ///     process_item(&items[i]);
 /// }
 ///
-/// sdk.completed(b"result").await?;
+/// sdk.completed(b"result")?;
 /// ```
 ///
 /// # Example (Embedded mode)
@@ -47,20 +47,20 @@ use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 /// use std::sync::Arc;
 ///
 /// // Create persistence layer (e.g., SQLite or PostgreSQL)
-/// let persistence: Arc<dyn Persistence> = create_persistence().await?;
+/// let persistence: Arc<dyn Persistence> = create_persistence()?;
 ///
 /// let mut sdk = RuntaraSdk::embedded(persistence, "my-instance", "my-tenant");
-/// sdk.connect().await?;  // No-op for embedded
-/// sdk.register(None).await?;
+/// sdk.connect()?;  // No-op for embedded
+/// sdk.register(None)?;
 ///
 /// // Same checkpoint API works with embedded mode
 /// for i in 0..items.len() {
 ///     let state = serde_json::to_vec(&my_state)?;
-///     let result = sdk.checkpoint(&format!("item-{}", i), &state).await?;
+///     let result = sdk.checkpoint(&format!("item-{}", i), &state)?;
 ///     // ...
 /// }
 ///
-/// sdk.completed(b"result").await?;
+/// sdk.completed(b"result")?;
 /// ```
 pub struct RuntaraSdk {
     /// Backend implementation (HTTP or embedded) - Arc for sharing with heartbeat task
@@ -179,22 +179,20 @@ impl RuntaraSdk {
     /// ```ignore
     /// use runtara_sdk::RuntaraSdk;
     ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     // One-liner setup for #[durable] functions
     ///     RuntaraSdk::from_env()?
-    ///         .init(None)
-    ///         .await?;
+    ///         .init(None)?;
     ///
     ///     // Now #[durable] functions work automatically
-    ///     my_durable_function("key".to_string(), args).await?;
+    ///     my_durable_function("key".to_string(), args)?;
     ///     Ok(())
     /// }
     /// ```
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn init(mut self, checkpoint_id: Option<&str>) -> Result<()> {
-        self.connect().await?;
-        self.register(checkpoint_id).await?;
+    pub fn init(mut self, checkpoint_id: Option<&str>) -> Result<()> {
+        self.connect()?;
+        self.register(checkpoint_id)?;
         crate::register_sdk(self);
         info!("SDK initialized globally");
         Ok(())
@@ -204,21 +202,21 @@ impl RuntaraSdk {
 
     /// Connect to runtara-core.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn connect(&self) -> Result<()> {
+    pub fn connect(&self) -> Result<()> {
         info!("Connecting to runtara-core");
-        self.backend.connect().await?;
+        self.backend.connect()?;
         info!("Connected to runtara-core");
         Ok(())
     }
 
     /// Check if connected to runtara-core.
-    pub async fn is_connected(&self) -> bool {
-        self.backend.is_connected().await
+    pub fn is_connected(&self) -> bool {
+        self.backend.is_connected()
     }
 
     /// Close the connection to runtara-core.
-    pub async fn close(&self) {
-        self.backend.close().await;
+    pub fn close(&self) {
+        self.backend.close();
     }
 
     // ========== Registration ==========
@@ -228,8 +226,8 @@ impl RuntaraSdk {
     /// This should be called at instance startup. If `checkpoint_id` is provided,
     /// the instance is resuming from a checkpoint.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn register(&mut self, checkpoint_id: Option<&str>) -> Result<()> {
-        self.backend.register(checkpoint_id).await?;
+    pub fn register(&mut self, checkpoint_id: Option<&str>) -> Result<()> {
+        self.backend.register(checkpoint_id)?;
         self.registered = true;
         info!("Instance registered");
         Ok(())
@@ -248,16 +246,16 @@ impl RuntaraSdk {
     /// The returned [`CheckpointResult`] also includes any pending signal (cancel, pause)
     /// that the instance should handle after processing the checkpoint.
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, state_size = state.len()))]
-    pub async fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
-        self.backend.checkpoint(checkpoint_id, state).await
+    pub fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
+        self.backend.checkpoint(checkpoint_id, state)
     }
 
     /// Get a checkpoint by ID without saving (read-only lookup).
     ///
     /// Returns the checkpoint state if found, or None if not found.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
-    pub async fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
-        self.backend.get_checkpoint(checkpoint_id).await
+    pub fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
+        self.backend.get_checkpoint(checkpoint_id)
     }
 
     // ========== Sleep/Wake ==========
@@ -269,41 +267,40 @@ impl RuntaraSdk {
     /// - Records the wake time (`sleep_until`) in the database
     /// - On resume, calculates remaining time and only sleeps for the remainder
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64))]
-    pub async fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
+    pub fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         self.backend
             .durable_sleep(duration, checkpoint_id, state)
-            .await
     }
 
     // ========== Events ==========
 
     /// Send a heartbeat event (simple "I'm alive" signal).
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn heartbeat(&self) -> Result<()> {
-        self.backend.heartbeat().await
+    pub fn heartbeat(&self) -> Result<()> {
+        self.backend.heartbeat()
     }
 
     /// Send a completed event with output.
     #[instrument(skip(self, output), fields(instance_id = %self.backend.instance_id(), output_size = output.len()))]
-    pub async fn completed(&self, output: &[u8]) -> Result<()> {
-        self.backend.completed(output).await
+    pub fn completed(&self, output: &[u8]) -> Result<()> {
+        self.backend.completed(output)
     }
 
     /// Send a failed event with error message.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn failed(&self, error: &str) -> Result<()> {
-        self.backend.failed(error).await
+    pub fn failed(&self, error: &str) -> Result<()> {
+        self.backend.failed(error)
     }
 
     /// Send a suspended event (for pause signals).
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn suspended(&self) -> Result<()> {
-        self.backend.suspended().await
+    pub fn suspended(&self) -> Result<()> {
+        self.backend.suspended()
     }
 
     /// Suspend with durable sleep - saves checkpoint and schedules wake.
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id))]
-    pub async fn sleep_until(
+    pub fn sleep_until(
         &self,
         checkpoint_id: &str,
         wake_at: chrono::DateTime<chrono::Utc>,
@@ -311,13 +308,12 @@ impl RuntaraSdk {
     ) -> Result<()> {
         self.backend
             .sleep_until(checkpoint_id, wake_at, state)
-            .await
     }
 
     /// Send a custom event with arbitrary subtype and payload.
     #[instrument(skip(self, payload), fields(instance_id = %self.backend.instance_id(), subtype = %subtype))]
-    pub async fn custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
-        self.backend.send_custom_event(subtype, payload).await
+    pub fn custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
+        self.backend.send_custom_event(subtype, payload)
     }
 
     // ========== Signals ==========
@@ -327,7 +323,7 @@ impl RuntaraSdk {
     /// Rate-limited to avoid hammering the server.
     /// Returns `Some(Signal)` if a signal is pending, `None` otherwise.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn poll_signal(&mut self) -> Result<Option<Signal>> {
+    pub fn poll_signal(&mut self) -> Result<Option<Signal>> {
         // Check cached signal first
         if self.pending_signal.is_some() {
             return Ok(self.pending_signal.take());
@@ -339,14 +335,14 @@ impl RuntaraSdk {
             return Ok(None);
         }
 
-        self.poll_signal_now().await
+        self.poll_signal_now()
     }
 
     /// Force poll for signals (ignoring rate limit).
-    pub async fn poll_signal_now(&mut self) -> Result<Option<Signal>> {
+    pub fn poll_signal_now(&mut self) -> Result<Option<Signal>> {
         self.last_signal_poll = Instant::now();
 
-        let (signal, custom) = self.backend.poll_signals(None).await?;
+        let (signal, custom) = self.backend.poll_signals(None)?;
 
         if let Some(sig) = signal {
             debug!(signal_type = ?sig.signal_type, "Signal received");
@@ -368,8 +364,8 @@ impl RuntaraSdk {
 
     /// Poll for a custom signal scoped to a specific checkpoint/signal ID.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id))]
-    pub async fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
-        let (_signal, custom) = self.backend.poll_signals(Some(signal_id)).await?;
+    pub fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
+        let (_signal, custom) = self.backend.poll_signals(Some(signal_id))?;
 
         if let Some(custom) = custom {
             debug!(signal_id = %signal_id, "Custom signal received");
@@ -380,15 +376,15 @@ impl RuntaraSdk {
 
     /// Acknowledge a received signal.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
-        self.backend.acknowledge_signal(signal_type).await?;
+    pub fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
+        self.backend.acknowledge_signal(signal_type)?;
         debug!("Signal acknowledged");
         Ok(())
     }
 
     /// Check for cancellation and return error if cancelled.
-    pub async fn check_cancelled(&mut self) -> Result<()> {
-        if let Some(signal) = self.poll_signal().await? {
+    pub fn check_cancelled(&mut self) -> Result<()> {
+        if let Some(signal) = self.poll_signal()? {
             if signal.signal_type == SignalType::Cancel {
                 return Err(SdkError::Cancelled);
             }
@@ -399,8 +395,8 @@ impl RuntaraSdk {
     }
 
     /// Check for pause and return error if paused.
-    pub async fn check_paused(&mut self) -> Result<()> {
-        if let Some(signal) = self.poll_signal().await? {
+    pub fn check_paused(&mut self) -> Result<()> {
+        if let Some(signal) = self.poll_signal()? {
             if signal.signal_type == SignalType::Pause {
                 return Err(SdkError::Paused);
             }
@@ -411,8 +407,8 @@ impl RuntaraSdk {
     }
 
     /// Check for any actionable signal (cancel or pause) and return appropriate error.
-    pub async fn check_signals(&mut self) -> Result<()> {
-        if let Some(signal) = self.poll_signal().await? {
+    pub fn check_signals(&mut self) -> Result<()> {
+        if let Some(signal) = self.poll_signal()? {
             match signal.signal_type {
                 SignalType::Cancel => return Err(SdkError::Cancelled),
                 SignalType::Pause => return Err(SdkError::Paused),
@@ -429,7 +425,7 @@ impl RuntaraSdk {
 
     /// Record a retry attempt for audit trail.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), checkpoint_id = %checkpoint_id, attempt = attempt_number))]
-    pub async fn record_retry_attempt(
+    pub fn record_retry_attempt(
         &self,
         checkpoint_id: &str,
         attempt_number: u32,
@@ -437,20 +433,19 @@ impl RuntaraSdk {
     ) -> Result<()> {
         self.backend
             .record_retry_attempt(checkpoint_id, attempt_number, error_message)
-            .await
     }
 
     // ========== Status ==========
 
     /// Get the current status of this instance.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn get_status(&self) -> Result<StatusResponse> {
-        self.backend.get_status().await
+    pub fn get_status(&self) -> Result<StatusResponse> {
+        self.backend.get_status()
     }
 
     /// Get the status of another instance.
-    pub async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
-        self.backend.get_instance_status(instance_id).await
+    pub fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
+        self.backend.get_instance_status(instance_id)
     }
 
     // ========== Helpers ==========
@@ -476,10 +471,6 @@ impl RuntaraSdk {
         self.heartbeat_interval_ms
     }
 
-    /// Get a clone of the backend Arc for the heartbeat task.
-    pub(crate) fn backend_arc(&self) -> std::sync::Arc<dyn SdkBackend> {
-        self.backend.clone()
-    }
 }
 
 #[cfg(test)]

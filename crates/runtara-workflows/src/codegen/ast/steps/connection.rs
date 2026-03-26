@@ -64,22 +64,22 @@ pub fn emit(step: &ConnectionStep, ctx: &mut EmitContext) -> Result<TokenStream,
 
                     // Emit heartbeat while waiting to prevent timeout
                     {
-                        let __sdk = sdk().lock().await;
-                        __sdk.heartbeat().await
+                        let __sdk = sdk().lock().unwrap();
+                        __sdk.heartbeat()
                             .map_err(|e| format!("Step {} heartbeat failed: {}", #step_id, e))?;
                     }
 
                     // Use durable sleep so we survive crashes while waiting
                     {
-                        let __sdk = sdk().lock().await;
-                        __sdk.durable_sleep(wait_duration).await
+                        let __sdk = sdk().lock().unwrap();
+                        __sdk.durable_sleep(wait_duration)
                             .map_err(|e| format!("Step {} rate limit sleep failed: {}", #step_id, e))?;
                     }
 
                     // Emit another heartbeat after sleep
                     {
-                        let __sdk = sdk().lock().await;
-                        __sdk.heartbeat().await
+                        let __sdk = sdk().lock().unwrap();
+                        __sdk.heartbeat()
                             .map_err(|e| format!("Step {} heartbeat failed: {}", #step_id, e))?;
                     }
 

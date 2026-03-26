@@ -142,7 +142,7 @@ pub enum RetryStrategy {
 /// Used by the `#[durable]` macro to control retry logic:
 /// ```ignore
 /// #[durable(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
-/// pub async fn my_function(...) -> Result<T, E> { ... }
+/// pub fn my_function(...) -> Result<T, E> { ... }
 /// ```
 #[derive(Debug, Clone)]
 pub struct RetryConfig {

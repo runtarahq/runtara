@@ -277,14 +277,14 @@ pub fn do_nothing(_input: DoNothingInput) -> Result<Value, String> {
 /// Delays for specified amount of milliseconds, returns the requested delay value.
 ///
 /// Note: For durable delays that survive crashes, consider using the Delay step type.
-/// This capability uses tokio sleep.
+/// This capability uses std::thread::sleep.
 #[capability(
     module = "utils",
     display_name = "Delay",
     description = "Delays execution for the specified number of milliseconds. For durable delays that survive crashes, use the Delay step type instead."
 )]
-pub async fn delay_in_ms(input: DelayInMsInput) -> Result<u64, String> {
-    tokio::time::sleep(Duration::from_millis(input.delay_value)).await;
+pub fn delay_in_ms(input: DelayInMsInput) -> Result<u64, String> {
+    std::thread::sleep(Duration::from_millis(input.delay_value));
     Ok(input.delay_value)
 }
 
@@ -1172,11 +1172,11 @@ mod tests {
         assert_eq!(result, Value::Null);
     }
 
-    #[tokio::test]
-    async fn test_delay_in_ms() {
+    #[test]
+    fn test_delay_in_ms() {
         let input = DelayInMsInput { delay_value: 10 };
         let start = std::time::Instant::now();
-        let result = delay_in_ms(input).await.unwrap();
+        let result = delay_in_ms(input).unwrap();
         let elapsed = start.elapsed().as_millis();
 
         assert_eq!(result, 10);

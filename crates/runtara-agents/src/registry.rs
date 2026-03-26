@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-/// Execute an agent capability asynchronously
+/// Execute an agent capability synchronously
 ///
 /// # Arguments
 /// * `agent_id` - The agent name (e.g., "utils", "transform", "csv")
@@ -16,14 +16,10 @@ use serde_json::Value;
 ///
 /// # Returns
 /// Result containing the capability result as JSON Value or an error
-///
-/// # Note
-/// This is an async function. Sync capabilities are automatically wrapped
-/// with `tokio::task::spawn_blocking` by the `#[capability]` macro.
-pub async fn execute_capability(
+pub fn execute_capability(
     agent_id: &str,
     capability_id: &str,
     step_inputs: Value,
 ) -> Result<Value, String> {
-    runtara_dsl::agent_meta::execute_capability(agent_id, capability_id, step_inputs).await
+    runtara_dsl::agent_meta::execute_capability(agent_id, capability_id, step_inputs)
 }

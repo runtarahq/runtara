@@ -95,9 +95,9 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        // The async block returns the error string to propagate
-        let __error_result: String = async {
+        // Wrap step execution in span scope
+        // The block returns the error string to propagate
+        let __error_result: String = __step_span.in_scope(|| {
             #debug_start
 
             // Emit structured error event via SDK custom_event
@@ -117,8 +117,8 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 });
 
                 let __payload_bytes = serde_json::to_vec(&__error_payload).unwrap_or_default();
-                let __sdk_guard = sdk().lock().await;
-                let _ = __sdk_guard.custom_event("workflow_error", __payload_bytes).await;
+                let __sdk_guard = sdk().lock().unwrap();
+                let _ = __sdk_guard.custom_event("workflow_error", __payload_bytes);
             }
 
             // Store step result in context (even though we'll fail after)
@@ -157,11 +157,11 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             });
             #debug_end
 
-            // Return the error string from the async block
+            // Return the error string from the block
             serde_json::to_string(&__error_context).unwrap_or_else(|_| {
                 format!("[{}] {}", #error_code, #error_message)
             })
-        }.instrument(__step_span).await;
+        });
 
         // Terminate workflow with structured error
         return Err(__error_result);

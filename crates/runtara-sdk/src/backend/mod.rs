@@ -16,7 +16,6 @@ pub mod http;
 
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
@@ -26,37 +25,36 @@ use crate::types::{CheckpointResult, CustomSignal, Signal, SignalType, StatusRes
 ///
 /// This trait abstracts the communication layer, allowing the SDK to work
 /// with either HTTP-based remote communication or direct embedded calls.
-#[async_trait]
 pub trait SdkBackend: Send + Sync {
     /// Connect to the backend (no-op for embedded).
-    async fn connect(&self) -> Result<()>;
+    fn connect(&self) -> Result<()>;
 
     /// Check if connected.
-    async fn is_connected(&self) -> bool;
+    fn is_connected(&self) -> bool;
 
     /// Close the connection (no-op for embedded).
-    async fn close(&self);
+    fn close(&self);
 
     /// Register an instance.
-    async fn register(&self, checkpoint_id: Option<&str>) -> Result<()>;
+    fn register(&self, checkpoint_id: Option<&str>) -> Result<()>;
 
     /// Checkpoint with the given ID and state.
-    async fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult>;
+    fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult>;
 
     /// Get a checkpoint by ID (read-only).
-    async fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>>;
+    fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>>;
 
     /// Send a heartbeat event.
-    async fn heartbeat(&self) -> Result<()>;
+    fn heartbeat(&self) -> Result<()>;
 
     /// Send a completed event.
-    async fn completed(&self, output: &[u8]) -> Result<()>;
+    fn completed(&self, output: &[u8]) -> Result<()>;
 
     /// Send a failed event.
-    async fn failed(&self, error: &str) -> Result<()>;
+    fn failed(&self, error: &str) -> Result<()>;
 
     /// Send a suspended event.
-    async fn suspended(&self) -> Result<()>;
+    fn suspended(&self) -> Result<()>;
 
     /// Suspend with durable sleep - saves checkpoint and schedules wake.
     ///
@@ -67,7 +65,7 @@ pub trait SdkBackend: Send + Sync {
     ///
     /// After calling this, the instance should exit. The environment will
     /// relaunch the instance when the wake time arrives.
-    async fn sleep_until(
+    fn sleep_until(
         &self,
         checkpoint_id: &str,
         wake_at: DateTime<Utc>,
@@ -78,10 +76,10 @@ pub trait SdkBackend: Send + Sync {
     ///
     /// This is a fire-and-forget operation - the event is stored by core
     /// but no response is expected. Core treats the subtype as an opaque string.
-    async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()>;
+    fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()>;
 
     /// Record a retry attempt.
-    async fn record_retry_attempt(
+    fn record_retry_attempt(
         &self,
         checkpoint_id: &str,
         attempt_number: u32,
@@ -89,7 +87,7 @@ pub trait SdkBackend: Send + Sync {
     ) -> Result<()>;
 
     /// Get instance status.
-    async fn get_status(&self) -> Result<StatusResponse>;
+    fn get_status(&self) -> Result<StatusResponse>;
 
     /// Poll for pending signals (instance-wide and/or custom).
     ///
@@ -97,16 +95,16 @@ pub trait SdkBackend: Send + Sync {
     /// If `None`, polls for instance-wide signals (cancel/pause/resume).
     ///
     /// Returns `(instance_signal, custom_signal)`.
-    async fn poll_signals(
+    fn poll_signals(
         &self,
         checkpoint_id: Option<&str>,
     ) -> Result<(Option<Signal>, Option<CustomSignal>)>;
 
     /// Acknowledge a received signal.
-    async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()>;
+    fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()>;
 
     /// Get the status of another instance by ID.
-    async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse>;
+    fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse>;
 
     /// Get the instance ID.
     fn instance_id(&self) -> &str;
@@ -115,13 +113,13 @@ pub trait SdkBackend: Send + Sync {
     fn tenant_id(&self) -> &str;
 
     /// Set the sleep_until timestamp for durable sleep.
-    async fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()>;
+    fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()>;
 
     /// Clear the sleep_until timestamp.
-    async fn clear_sleep(&self) -> Result<()>;
+    fn clear_sleep(&self) -> Result<()>;
 
     /// Get the current sleep_until timestamp for this instance.
-    async fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>>;
+    fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>>;
 
     /// Perform a durable sleep with checkpoint and remaining time calculation.
     ///
@@ -131,7 +129,7 @@ pub trait SdkBackend: Send + Sync {
     /// 3. On resume, calculates remaining time from stored sleep_until
     /// 4. Sleeps for the remaining duration
     /// 5. Clears sleep_until when done
-    async fn durable_sleep(
+    fn durable_sleep(
         &self,
         duration: Duration,
         checkpoint_id: &str,

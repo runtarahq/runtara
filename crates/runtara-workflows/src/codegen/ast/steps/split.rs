@@ -190,8 +190,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| -> std::result::Result<(), String> {
             #debug_start
 
             // Extract split configuration
@@ -253,7 +253,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
         // Define the durable split execution function
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
-        async fn #durable_fn_name(
+        fn #durable_fn_name(
             cache_key: &str,
             split_array: Vec<serde_json::Value>,
             variables_base: serde_json::Value,
@@ -327,8 +327,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                         otel.kind = "INTERNAL"
                     );
 
-                    // Wrap iteration in async block with instrumented span
-                    async {
+                    // Wrap iteration in span scope
+                    __iter_span.in_scope(|| -> std::result::Result<(), String> {
                         // Check for cancellation before starting each iteration
                         if runtara_sdk::is_cancelled() {
                             return Err(format!("Split step {} cancelled before iteration {}", step_id, idx));
@@ -336,14 +336,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
                         let subgraph_inputs = build_iteration_inputs(idx, item, &variables_base, &extra_variables);
 
-                        // Wrap subgraph execution with cancellation support
-                        let subgraph_result = runtara_sdk::with_cancellation(
-                            #subgraph_fn_name(Arc::new(subgraph_inputs))
-                        ).await;
-
-                        match subgraph_result {
-                            Ok(Ok(result)) => results.push(result),
-                            Ok(Err(e)) => {
+                        // Execute subgraph (sync)
+                        match #subgraph_fn_name(Arc::new(subgraph_inputs)) {
+                            Ok(result) => results.push(result),
+                            Err(e) => {
                                 if dont_stop_on_failed {
                                     errors.push(serde_json::json!({"error": e, "index": idx}));
                                 } else {
@@ -351,145 +347,130 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                     return Err(format!("Split step failed at index {}: {}", idx, e));
                                 }
                             }
-                            Err(cancel_err) => {
-                                // Cancellation during subgraph execution
-                                return Err(format!("Split step {} cancelled at iteration {}: {}", step_id, idx, cancel_err));
-                            }
                         }
 
                         // Also check for cancellation or pause after each iteration (belt and suspenders)
                         {
-                            let mut __sdk = sdk().lock().await;
-                            if let Err(e) = __sdk.check_signals().await {
+                            let mut __sdk = sdk().lock().unwrap();
+                            if let Err(e) = __sdk.check_signals() {
                                 return Err(format!("Split step {} at iteration {}: {}", step_id, idx, e));
                             }
                         }
 
                         Ok::<_, String>(())
-                    }.instrument(__iter_span).await?;
+                    })?;
                 }
             } else {
-                // Parallel execution with bounded concurrency
-                use futures::stream::{self, StreamExt};
+                // Parallel execution with std::thread::scope
                 use std::sync::atomic::{AtomicBool, Ordering};
+                use std::sync::Mutex;
 
                 let cancel_token = Arc::new(AtomicBool::new(false));
                 let error_token = Arc::new(AtomicBool::new(false));
 
-                // Build iteration data
-                let iteration_data: Vec<_> = split_array.iter().enumerate()
-                    .map(|(idx, item)| (idx, item.clone()))
-                    .collect();
-
-                // Clone values for use in async closures
+                // Clone values for use in thread closures
                 let variables_base = Arc::new(variables_base);
                 let extra_variables = Arc::new(extra_variables);
                 let step_id_owned = step_id.to_string();
+                let results_mutex = Arc::new(Mutex::new(Vec::new()));
+                let errors_mutex = Arc::new(Mutex::new(Vec::new()));
 
-                let stream = stream::iter(iteration_data)
-                    .map(|(idx, item)| {
-                        let cancel_token = cancel_token.clone();
-                        let error_token = error_token.clone();
-                        let variables_base = variables_base.clone();
-                        let extra_variables = extra_variables.clone();
-                        let step_id = step_id_owned.clone();
+                // Use std::thread::scope for parallel execution
+                let thread_results: Vec<(usize, std::result::Result<serde_json::Value, String>)> = std::thread::scope(|s| {
+                    let handles: Vec<_> = split_array.iter().enumerate()
+                        .map(|(idx, item)| {
+                            let cancel_token = cancel_token.clone();
+                            let error_token = error_token.clone();
+                            let variables_base = variables_base.clone();
+                            let extra_variables = extra_variables.clone();
+                            let step_id = step_id_owned.clone();
+                            let item = item.clone();
 
-                        // Create iteration span OUTSIDE async block for proper instrumentation
-                        let __iter_span = tracing::info_span!(
-                            "split.iteration",
-                            step.id = %step_id,
-                            iteration.index = idx,
-                            otel.kind = "INTERNAL"
-                        );
+                            s.spawn(move || {
+                                // Create iteration span
+                                let __iter_span = tracing::info_span!(
+                                    "split.iteration",
+                                    step.id = %step_id,
+                                    iteration.index = idx,
+                                    otel.kind = "INTERNAL"
+                                );
 
-                        // Instrument the async block with the span
-                        async move {
-                            // Check if we should skip due to cancellation or error (when dont_stop_on_failed is false)
-                            if cancel_token.load(Ordering::Relaxed) || runtara_sdk::is_cancelled() {
-                                return (idx, Err("Cancelled".to_string()));
-                            }
-                            if error_token.load(Ordering::Relaxed) {
-                                return (idx, Err("Aborted due to previous error".to_string()));
-                            }
-
-                            // Build inputs for this iteration
-                            let subgraph_inputs = {
-                                let mut merged_vars = match variables_base.as_ref() {
-                                    serde_json::Value::Object(base) => base.clone(),
-                                    _ => serde_json::Map::new(),
-                                };
-                                if let serde_json::Value::Object(extra) = extra_variables.as_ref() {
-                                    for (k, v) in extra {
-                                        merged_vars.insert(k.clone(), v.clone());
+                                __iter_span.in_scope(|| {
+                                    // Check if we should skip due to cancellation or error
+                                    if cancel_token.load(Ordering::Relaxed) || runtara_sdk::is_cancelled() {
+                                        return (idx, Err("Cancelled".to_string()));
                                     }
-                                }
-
-                                let parent_indices = merged_vars.get("_loop_indices")
-                                    .and_then(|v| v.as_array())
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let mut all_indices = parent_indices;
-                                all_indices.push(serde_json::json!(idx));
-                                merged_vars.insert("_loop_indices".to_string(), serde_json::json!(all_indices));
-                                merged_vars.insert("_index".to_string(), serde_json::json!(idx));
-
-                                let __iteration_scope_id = {
-                                    let parent_scope = merged_vars.get("_scope_id")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-
-                                    if let Some(parent) = parent_scope {
-                                        format!("{}_{}_{}", parent, step_id, idx)
-                                    } else {
-                                        format!("sc_{}_{}", step_id, idx)
+                                    if error_token.load(Ordering::Relaxed) {
+                                        return (idx, Err("Aborted due to previous error".to_string()));
                                     }
-                                };
-                                merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id));
 
-                                let __split_scope_id = format!("sc_{}", step_id);
-                                ScenarioInputs {
-                                    data: Arc::new(item.clone()),
-                                    variables: Arc::new(serde_json::Value::Object(merged_vars)),
-                                    parent_scope_id: Some(__split_scope_id),
-                                }
-                            };
+                                    // Build inputs for this iteration
+                                    let subgraph_inputs = {
+                                        let mut merged_vars = match variables_base.as_ref() {
+                                            serde_json::Value::Object(base) => base.clone(),
+                                            _ => serde_json::Map::new(),
+                                        };
+                                        if let serde_json::Value::Object(extra) = extra_variables.as_ref() {
+                                            for (k, v) in extra {
+                                                merged_vars.insert(k.clone(), v.clone());
+                                            }
+                                        }
 
-                            // Execute subgraph with cancellation support
-                            let result = match runtara_sdk::with_cancellation(
-                                #subgraph_fn_name(Arc::new(subgraph_inputs))
-                            ).await {
-                                Ok(subgraph_result) => subgraph_result,
-                                Err(cancel_err) => {
-                                    // Global cancellation triggered
-                                    cancel_token.store(true, Ordering::Relaxed);
-                                    return (idx, Err(cancel_err));
-                                }
-                            };
+                                        let parent_indices = merged_vars.get("_loop_indices")
+                                            .and_then(|v| v.as_array())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        let mut all_indices = parent_indices;
+                                        all_indices.push(serde_json::json!(idx));
+                                        merged_vars.insert("_loop_indices".to_string(), serde_json::json!(all_indices));
+                                        merged_vars.insert("_index".to_string(), serde_json::json!(idx));
 
-                            // Also check for cancellation or pause via SDK (belt and suspenders)
-                            {
-                                let mut __sdk = sdk().lock().await;
-                                if let Err(e) = __sdk.check_signals().await {
-                                    cancel_token.store(true, Ordering::Relaxed);
-                                    return (idx, Err(format!("{}", e)));
-                                }
-                            }
+                                        let __iteration_scope_id = {
+                                            let parent_scope = merged_vars.get("_scope_id")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string());
 
-                            (idx, result)
-                        }.instrument(__iter_span)
-                    });
+                                            if let Some(parent) = parent_scope {
+                                                format!("{}_{}_{}", parent, step_id, idx)
+                                            } else {
+                                                format!("sc_{}_{}", step_id, idx)
+                                            }
+                                        };
+                                        merged_vars.insert("_scope_id".to_string(), serde_json::json!(__iteration_scope_id));
 
-                // Execute with bounded concurrency
-                let collected: Vec<(usize, std::result::Result<serde_json::Value, String>)> = if sequential {
-                    // Preserve order with buffered()
-                    stream.buffered(parallelism).collect().await
-                } else {
-                    // Unordered for maximum throughput
-                    stream.buffer_unordered(parallelism).collect().await
-                };
+                                        let __split_scope_id = format!("sc_{}", step_id);
+                                        ScenarioInputs {
+                                            data: Arc::new(item.clone()),
+                                            variables: Arc::new(serde_json::Value::Object(merged_vars)),
+                                            parent_scope_id: Some(__split_scope_id),
+                                        }
+                                    };
+
+                                    // Execute subgraph (sync)
+                                    let result = #subgraph_fn_name(Arc::new(subgraph_inputs));
+
+                                    // Check for cancellation or pause via SDK
+                                    {
+                                        let mut __sdk = sdk().lock().unwrap();
+                                        if let Err(e) = __sdk.check_signals() {
+                                            cancel_token.store(true, Ordering::Relaxed);
+                                            return (idx, Err(format!("{}", e)));
+                                        }
+                                    }
+
+                                    (idx, result)
+                                })
+                            })
+                        })
+                        .collect();
+
+                    handles.into_iter()
+                        .map(|h| h.join().unwrap())
+                        .collect()
+                });
 
                 // Sort results by index to maintain original order
-                let mut sorted_results = collected;
+                let mut sorted_results = thread_results;
                 sorted_results.sort_by_key(|(idx, _)| *idx);
 
                 // Process results
@@ -560,14 +541,14 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             sequential,
             #step_id,
             #step_name_display,
-        ).await?;
+        )?;
 
             #debug_end
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
             Ok::<_, String>(())
-        }.instrument(__step_span).await?;
+        })?;
     })
 }
 
@@ -815,7 +796,7 @@ mod tests {
             code.contains("# [durable") || code.contains("#[durable"),
             "Should have durable macro"
         );
-        assert!(code.contains("async fn"), "Should be async function");
+        assert!(code.contains("fn "), "Should be a function");
         assert!(
             code.contains("cache_key"),
             "Should have cache_key parameter"
@@ -1102,8 +1083,8 @@ mod tests {
             "Should use buffered for sequential ordered execution"
         );
         assert!(
-            code.contains("futures :: stream"),
-            "Should use futures stream for parallel execution"
+            code.contains("thread :: scope") || code.contains("std :: thread :: scope"),
+            "Should use std::thread::scope for parallel execution"
         );
     }
 

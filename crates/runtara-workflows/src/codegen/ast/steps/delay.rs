@@ -52,8 +52,8 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Define tracing span for this step
         #span_start
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| -> std::result::Result<(), String> {
             // Get duration in milliseconds from mapping
             let __duration_value = #duration_code;
             let __duration_ms: u64 = match __duration_value.as_u64() {
@@ -71,9 +71,9 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
             // Perform durable sleep via SDK
             {
-                let __sdk = sdk().lock().await;
+                let __sdk = sdk().lock().unwrap();
                 let __duration = std::time::Duration::from_millis(__duration_ms);
-                __sdk.durable_sleep(__duration).await
+                __sdk.durable_sleep(__duration)
                     .map_err(|e| format!("Delay step '{}' failed: {}", #step_id, e))?;
             }
 
@@ -88,7 +88,7 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
             Ok::<(), String>(())
-        }.instrument(__step_span).await?;
+        })?;
     })
 }
 

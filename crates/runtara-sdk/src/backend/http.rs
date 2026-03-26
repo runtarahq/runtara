@@ -12,7 +12,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -96,23 +95,22 @@ impl HttpSdkConfig {
 
 /// HTTP backend for the SDK.
 ///
-/// Uses `reqwest::Client` for HTTP calls to runtara-core's HTTP instance API.
+/// Uses `ureq::Agent` for HTTP calls to runtara-core's HTTP instance API.
 /// All operations are request-response over HTTP/JSON with base64-encoded binary data.
 pub struct HttpBackend {
     instance_id: String,
     tenant_id: String,
     base_url: String,
-    client: reqwest::Client,
+    client: ureq::Agent,
     connected: AtomicBool,
 }
 
 impl HttpBackend {
     /// Create a new HTTP backend from config.
     pub fn new(config: &HttpSdkConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let client = ureq::AgentBuilder::new()
             .timeout(Duration::from_millis(config.request_timeout_ms))
-            .build()
-            .map_err(|e| SdkError::Internal(format!("Failed to create HTTP client: {}", e)))?;
+            .build();
 
         Ok(Self {
             instance_id: config.instance_id.clone(),
@@ -132,77 +130,64 @@ impl HttpBackend {
     }
 
     /// POST JSON to an endpoint and deserialize the response.
-    async fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
+    fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         url: &str,
         body: &T,
     ) -> Result<R> {
+        let json_value = serde_json::to_value(body)
+            .map_err(|e| SdkError::Internal(format!("Failed to serialize request body: {}", e)))?;
+
         let response = self
             .client
             .post(url)
-            .header("X-Runtara-Tenant-Id", &self.tenant_id)
-            .header("X-Runtara-Instance-Id", &self.instance_id)
-            .json(body)
-            .send()
-            .await
+            .set("Content-Type", "application/json")
+            .set("X-Runtara-Tenant-Id", &self.tenant_id)
+            .set("X-Runtara-Instance-Id", &self.instance_id)
+            .send_json(json_value)
             .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(SdkError::UnexpectedResponse(format!(
-                "HTTP {} from {}: {}",
-                status, url, body
-            )));
-        }
+        let result: R = response
+            .into_json()
+            .map_err(|e| SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e)))?;
 
-        response
-            .json()
-            .await
-            .map_err(|e| SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e)))
+        Ok(result)
     }
 
     /// GET from an endpoint and deserialize the response.
-    async fn get<R: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<R> {
+    fn get<R: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<R> {
         let response = self
             .client
             .get(url)
-            .header("X-Runtara-Tenant-Id", &self.tenant_id)
-            .header("X-Runtara-Instance-Id", &self.instance_id)
-            .send()
-            .await
+            .set("X-Runtara-Tenant-Id", &self.tenant_id)
+            .set("X-Runtara-Instance-Id", &self.instance_id)
+            .call()
             .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(SdkError::UnexpectedResponse(format!(
-                "HTTP {} from {}: {}",
-                status, url, body
-            )));
-        }
+        let result: R = response
+            .into_json()
+            .map_err(|e| SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e)))?;
 
-        response
-            .json()
-            .await
-            .map_err(|e| SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e)))
+        Ok(result)
     }
 
     /// POST JSON fire-and-forget (ignore response body, just check status).
-    async fn post_fire_and_forget<T: Serialize>(&self, url: &str, body: &T) -> Result<()> {
-        let response = self
+    fn post_fire_and_forget<T: Serialize>(&self, url: &str, body: &T) -> Result<()> {
+        let json_value = serde_json::to_value(body)
+            .map_err(|e| SdkError::Internal(format!("Failed to serialize request body: {}", e)))?;
+
+        match self
             .client
             .post(url)
-            .header("X-Runtara-Tenant-Id", &self.tenant_id)
-            .header("X-Runtara-Instance-Id", &self.instance_id)
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            let body = response.text().await.unwrap_or_default();
-            warn!("Fire-and-forget request failed: {}", body);
+            .set("Content-Type", "application/json")
+            .set("X-Runtara-Tenant-Id", &self.tenant_id)
+            .set("X-Runtara-Instance-Id", &self.instance_id)
+            .send_json(json_value)
+        {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("Fire-and-forget request failed: {}", e);
+            }
         }
 
         Ok(())
@@ -401,16 +386,15 @@ fn parse_custom_signal(resp: &CustomSignalResp) -> CustomSignal {
 // SdkBackend implementation
 // ============================================================================
 
-#[async_trait]
 impl SdkBackend for HttpBackend {
-    async fn connect(&self) -> Result<()> {
+    fn connect(&self) -> Result<()> {
         // HTTP is connectionless — verify reachability with a health check
         let url = format!("{}/health", self.base_url);
-        let resp = self.client.get(&url).send().await.map_err(|e| {
+        let resp = self.client.get(&url).call().map_err(|e| {
             SdkError::Internal(format!("Cannot reach runtara-core HTTP API: {}", e))
         })?;
 
-        if resp.status().is_success() {
+        if resp.status() >= 200 && resp.status() < 300 {
             self.connected.store(true, Ordering::SeqCst);
             info!(base_url = %self.base_url, "Connected to runtara-core HTTP API");
             Ok(())
@@ -422,22 +406,22 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn is_connected(&self) -> bool {
+    fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
     }
 
-    async fn close(&self) {
+    fn close(&self) {
         self.connected.store(false, Ordering::SeqCst);
         debug!("HTTP backend closed");
     }
 
-    async fn register(&self, checkpoint_id: Option<&str>) -> Result<()> {
+    fn register(&self, checkpoint_id: Option<&str>) -> Result<()> {
         let body = RegisterBody {
             tenant_id: self.tenant_id.clone(),
             checkpoint_id: checkpoint_id.map(|s| s.to_string()),
         };
 
-        let resp: RegisterResp = self.post(&self.url("register"), &body).await?;
+        let resp: RegisterResp = self.post(&self.url("register"), &body)?;
 
         if resp.success {
             info!("Instance registered via HTTP");
@@ -458,13 +442,13 @@ impl SdkBackend for HttpBackend {
         &self.tenant_id
     }
 
-    async fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
+    fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
         let body = CheckpointBody {
             checkpoint_id: checkpoint_id.to_string(),
             state: encode_b64(state),
         };
 
-        let resp: CheckpointResp = self.post(&self.url("checkpoint"), &body).await?;
+        let resp: CheckpointResp = self.post(&self.url("checkpoint"), &body)?;
 
         Ok(CheckpointResult {
             found: resp.found,
@@ -474,7 +458,7 @@ impl SdkBackend for HttpBackend {
         })
     }
 
-    async fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
+    fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
         // Use checkpoint endpoint with empty state to check if exists
         // The HTTP API's checkpoint endpoint handles this: if checkpoint exists, returns it
         let body = CheckpointBody {
@@ -482,7 +466,7 @@ impl SdkBackend for HttpBackend {
             state: encode_b64(&[]),
         };
 
-        let resp: CheckpointResp = self.post(&self.url("checkpoint"), &body).await?;
+        let resp: CheckpointResp = self.post(&self.url("checkpoint"), &body)?;
 
         if resp.found {
             Ok(Some(
@@ -493,7 +477,7 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn heartbeat(&self) -> Result<()> {
+    fn heartbeat(&self) -> Result<()> {
         let body = EventBody {
             event_type: "heartbeat".to_string(),
             checkpoint_id: None,
@@ -501,12 +485,12 @@ impl SdkBackend for HttpBackend {
             subtype: None,
         };
 
-        self.post_fire_and_forget(&self.url("events"), &body).await
+        self.post_fire_and_forget(&self.url("events"), &body)
     }
 
-    async fn completed(&self, output: &[u8]) -> Result<()> {
+    fn completed(&self, output: &[u8]) -> Result<()> {
         let body = serde_json::json!({ "output": encode_b64(output) });
-        let resp: SuccessResp = self.post(&self.url("completed"), &body).await?;
+        let resp: SuccessResp = self.post(&self.url("completed"), &body)?;
 
         if resp.success {
             Ok(())
@@ -517,9 +501,9 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn failed(&self, error: &str) -> Result<()> {
+    fn failed(&self, error: &str) -> Result<()> {
         let body = serde_json::json!({ "error": error });
-        let resp: SuccessResp = self.post(&self.url("failed"), &body).await?;
+        let resp: SuccessResp = self.post(&self.url("failed"), &body)?;
 
         if resp.success {
             Ok(())
@@ -530,10 +514,9 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn suspended(&self) -> Result<()> {
+    fn suspended(&self) -> Result<()> {
         let resp: SuccessResp = self
-            .post(&self.url("suspended"), &serde_json::json!({}))
-            .await?;
+            .post(&self.url("suspended"), &serde_json::json!({}))?;
 
         if resp.success {
             Ok(())
@@ -544,7 +527,7 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn sleep_until(
+    fn sleep_until(
         &self,
         checkpoint_id: &str,
         wake_at: DateTime<Utc>,
@@ -558,10 +541,9 @@ impl SdkBackend for HttpBackend {
         };
 
         self.durable_sleep(Duration::from_millis(duration_ms), checkpoint_id, state)
-            .await
     }
 
-    async fn durable_sleep(
+    fn durable_sleep(
         &self,
         duration: Duration,
         checkpoint_id: &str,
@@ -573,7 +555,7 @@ impl SdkBackend for HttpBackend {
             state: encode_b64(state),
         };
 
-        let resp: SuccessResp = self.post(&self.url("sleep"), &body).await?;
+        let resp: SuccessResp = self.post(&self.url("sleep"), &body)?;
 
         if resp.success {
             Ok(())
@@ -584,22 +566,22 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn set_sleep_until(&self, _sleep_until: DateTime<Utc>) -> Result<()> {
+    fn set_sleep_until(&self, _sleep_until: DateTime<Utc>) -> Result<()> {
         // Server-side managed — no-op for HTTP backend
         Ok(())
     }
 
-    async fn clear_sleep(&self) -> Result<()> {
+    fn clear_sleep(&self) -> Result<()> {
         // Server-side managed — no-op for HTTP backend
         Ok(())
     }
 
-    async fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
+    fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
         // Would need a separate endpoint; not currently needed by SDK
         Ok(None)
     }
 
-    async fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
+    fn send_custom_event(&self, subtype: &str, payload: Vec<u8>) -> Result<()> {
         let body = EventBody {
             event_type: "custom".to_string(),
             checkpoint_id: None,
@@ -607,7 +589,7 @@ impl SdkBackend for HttpBackend {
             subtype: Some(subtype.to_string()),
         };
 
-        let resp: SuccessResp = self.post(&self.url("events"), &body).await?;
+        let resp: SuccessResp = self.post(&self.url("events"), &body)?;
 
         if resp.success {
             Ok(())
@@ -616,7 +598,7 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    async fn record_retry_attempt(
+    fn record_retry_attempt(
         &self,
         checkpoint_id: &str,
         attempt_number: u32,
@@ -628,14 +610,14 @@ impl SdkBackend for HttpBackend {
             error_message: error_message.map(|s| s.to_string()),
         };
 
-        self.post_fire_and_forget(&self.url("retry"), &body).await
+        self.post_fire_and_forget(&self.url("retry"), &body)
     }
 
-    async fn get_status(&self) -> Result<StatusResponse> {
-        self.get_instance_status(&self.instance_id).await
+    fn get_status(&self) -> Result<StatusResponse> {
+        self.get_instance_status(&self.instance_id)
     }
 
-    async fn poll_signals(
+    fn poll_signals(
         &self,
         checkpoint_id: Option<&str>,
     ) -> Result<(Option<Signal>, Option<CustomSignal>)> {
@@ -652,25 +634,25 @@ impl SdkBackend for HttpBackend {
             ),
         };
 
-        let resp: PollSignalsResp = self.get(&url).await?;
+        let resp: PollSignalsResp = self.get(&url)?;
         let signal = resp.signal.as_ref().map(parse_signal);
         let custom = resp.custom_signal.as_ref().map(parse_custom_signal);
         Ok((signal, custom))
     }
 
-    async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
+    fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
         let body = SignalAckBody {
             signal_type: signal_type_str(&signal_type).to_string(),
         };
 
-        let _: SuccessResp = self.post(&self.url("signals/ack"), &body).await?;
+        let _: SuccessResp = self.post(&self.url("signals/ack"), &body)?;
         Ok(())
     }
 
-    async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
+    fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
         let url = format!("{}/api/v1/instances/{}/status", self.base_url, instance_id);
 
-        let resp: StatusResp = self.get(&url).await?;
+        let resp: StatusResp = self.get(&url)?;
 
         Ok(StatusResponse {
             found: resp.found,

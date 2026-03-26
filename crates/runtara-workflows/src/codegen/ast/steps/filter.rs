@@ -87,8 +87,8 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| {
             #debug_start
 
             // Filter the array
@@ -122,7 +122,7 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             #debug_end
 
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
-        }.instrument(__step_span).await;
+        });
     })
 }
 

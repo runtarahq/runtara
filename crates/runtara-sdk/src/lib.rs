@@ -20,25 +20,24 @@
 //! ```ignore
 //! use runtara_sdk::RuntaraSdk;
 //!
-//! #[tokio::main]
-//! async fn main() -> runtara_sdk::Result<()> {
+//! fn main() -> runtara_sdk::Result<()> {
 //!     let mut sdk = RuntaraSdk::from_env()?;
 //!
 //!     // Connect and register
-//!     sdk.connect().await?;
-//!     sdk.register(None).await?;
+//!     sdk.connect()?;
+//!     sdk.register(None)?;
 //!
 //!     // Process items with checkpointing
 //!     for i in 0..items.len() {
 //!         let state = serde_json::to_vec(&my_state)?;
-//!         let result = sdk.checkpoint(&format!("item-{}", i), &state).await?;
+//!         let result = sdk.checkpoint(&format!("item-{}", i), &state)?;
 //!
 //!         // Check for pause/cancel signals
 //!         if result.should_cancel() {
 //!             return Err(SdkError::Cancelled.into());
 //!         }
 //!         if result.should_pause() {
-//!             sdk.suspended().await?;
+//!             sdk.suspended()?;
 //!             return Ok(());
 //!         }
 //!
@@ -51,7 +50,7 @@
 //!         process_item(&items[i]);
 //!     }
 //!
-//!     sdk.completed(b"result data").await?;
+//!     sdk.completed(b"result data")?;
 //!     Ok(())
 //! }
 //! ```
@@ -110,7 +109,7 @@ pub use registry::{register_sdk, sdk, stop_heartbeat, try_sdk};
 
 // Cancellation/pause support - allows long-running operations to be interrupted
 pub use registry::{
-    acknowledge_cancellation, acknowledge_pause, cancellation_token, is_cancelled,
+    acknowledge_cancellation, acknowledge_pause, is_cancelled,
     trigger_cancellation, with_cancellation, with_cancellation_err,
 };
 

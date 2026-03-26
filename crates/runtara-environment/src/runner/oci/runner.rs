@@ -248,13 +248,13 @@ impl OciRunner {
             runtara_core_addr.to_string()
         };
 
+        // Set HTTP URL for the SDK (runtara-core HTTP API)
+        env.insert(
+            "RUNTARA_HTTP_URL".to_string(),
+            format!("http://{}", server_addr),
+        );
+        // Keep RUNTARA_SERVER_ADDR for backward compatibility
         env.insert("RUNTARA_SERVER_ADDR".to_string(), server_addr);
-        if self.config.skip_cert_verification {
-            env.insert(
-                "RUNTARA_SKIP_CERT_VERIFICATION".to_string(),
-                "true".to_string(),
-            );
-        }
         if let Some(cp_id) = checkpoint_id {
             env.insert("RUNTARA_CHECKPOINT_ID".to_string(), cp_id.to_string());
         }
@@ -262,16 +262,22 @@ impl OciRunner {
             env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
         }
 
-        // Forward SDK backend selection and HTTP URL if set in host environment.
-        // This allows scenarios to select the HTTP backend when configured.
-        if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
-            env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
-        }
+        // Allow host environment to override HTTP URL
         if let Ok(url) = std::env::var("RUNTARA_HTTP_URL") {
             env.insert("RUNTARA_HTTP_URL".to_string(), url);
         }
         if let Ok(port) = std::env::var("RUNTARA_CORE_HTTP_PORT") {
             env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
+        }
+
+        // Forward object model internal API URL for smo-stdlib agents
+        if let Ok(url) = std::env::var("RUNTARA_OBJECT_MODEL_URL") {
+            env.insert("RUNTARA_OBJECT_MODEL_URL".to_string(), url);
+        }
+
+        // Forward tenant ID for internal API authentication
+        if let Ok(tid) = std::env::var("RUNTARA_TENANT_ID") {
+            env.insert("RUNTARA_TENANT_ID".to_string(), tid);
         }
 
         env

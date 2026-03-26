@@ -106,7 +106,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
             };
 
             // Execute on_wait subgraph
-            #on_wait_fn_name(Arc::new(__on_wait_inputs)).await
+            #on_wait_fn_name(Arc::new(__on_wait_inputs))
                 .map_err(|e| format!("WaitForSignal step '{}' on_wait failed: {}", #step_id, e))?;
         }
     } else {
@@ -158,7 +158,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                     Some(__wait_debug_inputs),
                     None::<serde_json::Value>,
                     None,
-                ).await;
+                );
             }
         }
     } else {
@@ -184,13 +184,13 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
         // Define tracing span for this step
         #span_start
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| -> std::result::Result<(), String> {
             let __step_start_time = std::time::Instant::now();
 
             // Get instance_id from SDK
             let __instance_id = {
-                let __sdk = sdk().lock().await;
+                let __sdk = sdk().lock().unwrap();
                 __sdk.instance_id().to_string()
             };
 
@@ -243,8 +243,8 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                 });
                 {
                     let __payload_bytes = serde_json::to_vec(&__event_data).unwrap_or_default();
-                    let mut __sdk = sdk().lock().await;
-                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes).await;
+                    let mut __sdk = sdk().lock().unwrap();
+                    let _ = __sdk.custom_event("external_input_requested", __payload_bytes);
                 }
             }
 
@@ -257,8 +257,8 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
             loop {
                 // Check for cancellation (retry on transient connection errors)
                 {
-                    let mut __sdk = sdk().lock().await;
-                    match __sdk.check_signals().await {
+                    let mut __sdk = sdk().lock().unwrap();
+                    match __sdk.check_signals() {
                         Ok(()) => { __poll_errors = 0; }
                         Err(e) => {
                             let err_str = format!("{}", e);
@@ -276,7 +276,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                                     ));
                                 }
                                 drop(__sdk);
-                                tokio::time::sleep(__poll_interval).await;
+                                std::thread::sleep(__poll_interval);
                                 continue;
                             }
                             return Err(format!("WaitForSignal step '{}': {}", #step_id, e));
@@ -286,8 +286,8 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
 
                 // Poll for custom signal (retry on transient connection errors)
                 let __maybe_signal = {
-                    let mut __sdk = sdk().lock().await;
-                    match __sdk.poll_custom_signal(&__signal_id).await {
+                    let mut __sdk = sdk().lock().unwrap();
+                    match __sdk.poll_custom_signal(&__signal_id) {
                         Ok(v) => v,
                         Err(e) => {
                             let err_str = format!("{}", e);
@@ -305,7 +305,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                                     ));
                                 }
                                 drop(__sdk);
-                                tokio::time::sleep(__poll_interval).await;
+                                std::thread::sleep(__poll_interval);
                                 continue;
                             }
                             return Err(format!("WaitForSignal step '{}' poll failed: {}", #step_id, e));
@@ -334,7 +334,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                 }
 
                 // Sleep before next poll
-                tokio::time::sleep(__poll_interval).await;
+                std::thread::sleep(__poll_interval);
             }
 
             // Produce step result.
@@ -353,7 +353,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
             #debug_end
 
             Ok::<(), String>(())
-        }.instrument(__step_span).await?;
+        })?;
     })
 }
 

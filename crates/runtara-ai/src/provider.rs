@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! LLM provider dispatch.
 //!
-//! Creates rig `CompletionModel` instances from connection parameters,
+//! Creates `CompletionModel` instances from connection parameters,
 //! dispatching based on `integration_id`.
 
-use rig::providers::openai;
+use crate::providers::openai;
 use serde_json::{Value, json};
 
 /// Errors that can occur during provider creation.
@@ -22,7 +22,7 @@ pub enum ProviderError {
 /// Create an OpenAI completion model from connection parameters.
 ///
 /// Extracts `api_key` and optional `base_url` from the connection parameters,
-/// creates a rig OpenAI client, and returns the specified model.
+/// creates an OpenAI client, and returns the specified model.
 ///
 /// # Arguments
 /// * `parameters` - Connection parameters JSON (must contain `api_key`)
@@ -30,7 +30,7 @@ pub enum ProviderError {
 pub fn create_openai_model(
     parameters: &Value,
     model: Option<&str>,
-) -> Result<openai::CompletionModel, ProviderError> {
+) -> Result<openai::OpenAICompletionModel, ProviderError> {
     let api_key = parameters
         .get("api_key")
         .and_then(|v| v.as_str())
@@ -84,14 +84,18 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
 /// Currently supports:
 /// - `openai_api_key` → OpenAI
 ///
-/// Future: `anthropic_api_key`, `aws_credentials` (Bedrock)
+/// Returns a boxed `CompletionModel` so the caller doesn't need to know
+/// which concrete provider type is in use.
 pub fn create_completion_model(
     integration_id: &str,
     parameters: &Value,
     model: Option<&str>,
-) -> Result<openai::CompletionModel, ProviderError> {
+) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
     match integration_id {
-        "openai_api_key" => create_openai_model(parameters, model),
+        "openai_api_key" => {
+            let m = create_openai_model(parameters, model)?;
+            Ok(Box::new(m))
+        }
         other => Err(ProviderError::UnsupportedProvider(other.to_string())),
     }
 }

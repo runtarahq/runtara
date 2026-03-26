@@ -43,11 +43,7 @@ pub mod instance_output;
 pub use serde;
 pub use serde_json;
 
-// Re-export tokio for async runtime in generated workflows
-pub use tokio;
-
-// Re-export futures for stream-based concurrency in generated workflows
-pub use futures;
+// Note: tokio and futures are no longer re-exported — generated workflows are synchronous.
 
 // Re-export runtara-sdk for direct use
 pub use runtara_sdk;
@@ -56,8 +52,7 @@ pub use runtara_sdk;
 pub use tracing;
 pub use tracing_subscriber;
 
-// Re-export tracing::Instrument for async span wrapping in generated code
-pub use tracing::Instrument;
+// Note: tracing::Instrument is no longer needed — generated workflows use sync span scoping.
 
 // Telemetry support (OpenTelemetry integration)
 pub mod telemetry;

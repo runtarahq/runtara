@@ -240,8 +240,8 @@ pub fn emit_scope_enter_event(
             });
 
             let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event("scope_enter", __payload_bytes).await;
+            let __sdk_guard = sdk().lock().unwrap();
+            let _ = __sdk_guard.custom_event("scope_enter", __payload_bytes);
         }
     }
 }
@@ -265,8 +265,8 @@ pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStre
             });
 
             let __payload_bytes = serde_json::to_vec(&__payload).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event("scope_exit", __payload_bytes).await;
+            let __sdk_guard = sdk().lock().unwrap();
+            let _ = __sdk_guard.custom_event("scope_exit", __payload_bytes);
         }
     }
 }
@@ -367,7 +367,7 @@ pub fn emit_step_debug_start(
                 #inputs_expr,
                 #mapping_expr,
                 None,
-            ).await;
+            );
         }
     }
 }
@@ -460,7 +460,7 @@ pub fn emit_step_debug_end(
                 #outputs_expr,
                 None,
                 Some(__duration_ms),
-            ).await;
+            );
         }
     }
 }
@@ -501,7 +501,7 @@ pub fn emit_set_current_step(step_id: &str) -> TokenStream {
 ///     #span_def
 ///     async {
 ///         // step body with await points
-///     }.instrument(__step_span).await;
+///     }.instrument(__step_span);
 /// }
 /// ```
 ///
@@ -1743,7 +1743,7 @@ mod tests {
         // Note: No guard is created - step body uses .instrument(__step_span).await
         assert!(
             !code.contains("__step_span_guard"),
-            "Should NOT create span guard (uses async instrument pattern)"
+            "Should NOT create span guard (uses sync span pattern)"
         );
     }
 
@@ -1819,7 +1819,7 @@ mod tests {
         // Note: No guard is created - iteration body uses .instrument(__iter_span).await
         assert!(
             !code.contains("__iter_span_guard"),
-            "Should NOT create iteration span guard (uses async instrument pattern)"
+            "Should NOT create iteration span guard (uses sync span pattern)"
         );
     }
 

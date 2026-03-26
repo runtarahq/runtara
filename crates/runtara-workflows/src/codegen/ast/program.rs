@@ -208,9 +208,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
         use std::process::ExitCode;
         // prelude includes: RuntimeContext, Deserialize, Serialize, serde_json, registry, SDK types
         use #stdlib_ident::prelude::*;
-        use #stdlib_ident::tokio;
         use #stdlib_ident::tracing;
-        use #stdlib_ident::Instrument;
         #hashmap_import
 
         // Import only agents used by this workflow
@@ -250,7 +248,7 @@ fn emit_input_structs() -> TokenStream {
         /// Emit a step debug event (start or end). Defined once globally to avoid
         /// duplicating the JSON payload construction at every step site.
         #[allow(dead_code)]
-        async fn __emit_step_debug_event(
+        fn __emit_step_debug_event(
             subtype: &str,
             step_id: &str,
             step_name: Option<&str>,
@@ -289,8 +287,8 @@ fn emit_input_structs() -> TokenStream {
                 }
             }
             let __payload_bytes = serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_default();
-            let __sdk_guard = sdk().lock().await;
-            let _ = __sdk_guard.custom_event(subtype, __payload_bytes).await;
+            let __sdk_guard = sdk().lock().unwrap();
+            let _ = __sdk_guard.custom_event(subtype, __payload_bytes);
         }
     }
 }
@@ -340,17 +338,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
 
     quote! {
         fn main() -> ExitCode {
-            // Run async main with tokio runtime
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            rt.block_on(async_main())
-        }
-
-        async fn async_main() -> ExitCode {
             // Initialize tracing subscriber with optional OpenTelemetry layer.
-            // IMPORTANT: This must be inside async_main() so the TelemetryGuard is dropped
-            // while the Tokio runtime is still active. The OTEL batch exporter needs
-            // the runtime for its force_flush() call in the Drop implementation.
-            //
             // The telemetry module handles:
             // - EnvFilter setup (respects RUST_LOG, default: info)
             // - Fmt layer to stderr
@@ -371,13 +359,13 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             };
 
             // Connect to runtara-core
-            if let Err(e) = sdk_instance.connect().await {
+            if let Err(e) = sdk_instance.connect() {
                 tracing::error!("Failed to connect to runtara-core: {}", e);
                 return ExitCode::FAILURE;
             }
 
             // Register the instance
-            if let Err(e) = sdk_instance.register(None).await {
+            if let Err(e) = sdk_instance.register(None) {
                 tracing::error!("Failed to register instance: {}", e);
                 return ExitCode::FAILURE;
             }
@@ -448,12 +436,12 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             );
 
             // Execute the workflow within the root span
-            match execute_workflow(Arc::new(scenario_inputs)).instrument(__root_span).await {
+            match __root_span.in_scope(|| execute_workflow(Arc::new(scenario_inputs))) {
                 Ok(output) => {
                     // Report completion to runtara-core via SDK
-                    let sdk_guard = sdk().lock().await;
+                    let sdk_guard = sdk().lock().unwrap();
                     let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
-                    if let Err(e) = sdk_guard.completed(&output_bytes).await {
+                    if let Err(e) = sdk_guard.completed(&output_bytes) {
                         tracing::error!("Failed to report completion: {}", e);
                         return ExitCode::FAILURE;
                     }
@@ -464,7 +452,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                     if e.contains("cancelled") || e.contains("Cancelled") {
                         // Acknowledge cancellation to runtara-core (sends SignalAck)
                         // This updates instance status to "cancelled" in the database
-                        runtara_sdk::acknowledge_cancellation().await;
+                        runtara_sdk::acknowledge_cancellation();
                         tracing::info!("Workflow execution was cancelled");
                         return ExitCode::SUCCESS;
                     }
@@ -473,16 +461,16 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                     if e.contains("paused") || e.contains("Paused") {
                         // Acknowledge pause to runtara-core (sends SignalAck)
                         // This clears the pending signal so it won't be detected on resume
-                        runtara_sdk::acknowledge_pause().await;
-                        let sdk_guard = sdk().lock().await;
-                        let _ = sdk_guard.suspended().await;
+                        runtara_sdk::acknowledge_pause();
+                        let sdk_guard = sdk().lock().unwrap();
+                        let _ = sdk_guard.suspended();
                         tracing::info!("Workflow execution was paused");
                         return ExitCode::SUCCESS;
                     }
 
                     // Report failure to runtara-core via SDK
-                    let sdk_guard = sdk().lock().await;
-                    let _ = sdk_guard.failed(&e).await;
+                    let sdk_guard = sdk().lock().unwrap();
+                    let _ = sdk_guard.failed(&e);
                     tracing::error!("Workflow execution failed: {}", e);
                     ExitCode::FAILURE
                 }
@@ -513,7 +501,7 @@ fn emit_execute_workflow(
     let finish_output = emit_finish_output(graph, ctx);
 
     Ok(quote! {
-        async fn execute_workflow(#inputs_var: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
+        fn execute_workflow(#inputs_var: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
             let mut #steps_context_var = serde_json::Map::new();
 
             #(#step_code)*
@@ -563,10 +551,10 @@ fn emit_step_execution(
             // Step: #sid (#stype) with onError handling
             #debug_log
             {
-                let __step_result: std::result::Result<(), String> = async {
+                let __step_result: std::result::Result<(), String> = (|| {
                     #step_code
                     Ok(())
-                }.await;
+                })();
 
                 if let Err(__error_msg) = __step_result {
                     // Parse structured error context from JSON if possible
@@ -858,7 +846,7 @@ pub fn emit_graph_as_function(
     let finish_output = emit_finish_output(graph, &ctx);
 
     Ok(quote! {
-        async fn #fn_name(inputs: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
+        fn #fn_name(inputs: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
             let mut steps_context = serde_json::Map::new();
 
             #(#step_code)*
@@ -1310,11 +1298,10 @@ mod tests {
             "Should import ExitCode"
         );
         assert!(code.contains("prelude"), "Should import prelude");
-        assert!(code.contains("tokio"), "Should import tokio");
+        // tokio no longer imported — generated workflows are synchronous
         assert!(code.contains("tracing"), "Should import tracing");
         assert!(
-            code.contains("Instrument"),
-            "Should import Instrument trait"
+            // Instrument trait no longer imported — generated workflows use sync span scoping
         );
     }
 
@@ -1659,8 +1646,8 @@ mod tests {
         assert!(code.contains("fn main ()"), "Should define main function");
         assert!(code.contains("ExitCode"), "Should return ExitCode");
         assert!(
-            code.contains("async fn async_main"),
-            "Should define async_main function"
+            code.contains("fn main"),
+            "Should define main function"
         );
         assert!(
             code.contains("RuntaraSdk :: from_env"),
@@ -1781,7 +1768,7 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(
-            code.contains("async fn execute_workflow"),
+            code.contains("fn execute_workflow"),
             "Should define execute_workflow function"
         );
         assert!(
@@ -1815,7 +1802,7 @@ mod tests {
             code.contains("execute_child_scenario"),
             "Should use provided function name"
         );
-        assert!(code.contains("async fn"), "Should be async function");
+        assert!(code.contains("fn "), "Should be a function");
         assert!(
             code.contains("inputs : Arc < ScenarioInputs >"),
             "Should take inputs parameter"

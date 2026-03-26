@@ -250,8 +250,8 @@ fn emit_with_embedded_child(
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        async {
+        // Wrap step execution in span scope
+        __step_span.in_scope(|| -> std::result::Result<(), String> {
             #debug_start
 
             // Build cache key dynamically, including prefix and loop indices
@@ -286,7 +286,7 @@ fn emit_with_embedded_child(
 
         // Define the durable child scenario execution function
         #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
-        async fn #durable_fn_name(
+        fn #durable_fn_name(
             cache_key: &str,
             child_inputs: serde_json::Value,
             child_scenario_id: &str,
@@ -382,29 +382,10 @@ fn emit_with_embedded_child(
             // Create child scenario span for tracing
             #child_span_def
 
-            // Execute child scenario with cancellation support, instrumented with child span
-            let child_result = async {
-                match runtara_sdk::with_cancellation(
-                    #child_fn_name(Arc::new(child_scenario_inputs))
-                ).await {
-                    Ok(result) => result,
-                    Err(interrupt_err) => {
-                        let structured_error = serde_json::json!({
-                            "stepId": step_id,
-                            "stepName": step_name,
-                            "stepType": "StartScenario",
-                            "code": "STEP_INTERRUPTED",
-                            "message": format!("StartScenario step {} interrupted during execution", step_id),
-                            "category": "transient",
-                            "severity": "info",
-                            "childScenarioId": child_scenario_id,
-                            "interruptionReason": interrupt_err
-                        });
-                        return Err(serde_json::to_string(&structured_error).unwrap_or_else(|_| {
-                            format!("StartScenario step {} interrupted", step_id)
-                        }));
-                    }
-                }.map_err(|e: String| {
+            // Execute child scenario, instrumented with child span
+            let child_result = __child_span.in_scope(|| {
+                #child_fn_name(Arc::new(child_scenario_inputs))
+                .map_err(|e: String| {
                     // Try to parse the child error as structured JSON
                     let child_error: serde_json::Value = serde_json::from_str(&e)
                         .unwrap_or_else(|_| serde_json::json!({
@@ -438,7 +419,7 @@ fn emit_with_embedded_child(
                         format!("Child scenario {} failed: {}", child_scenario_id, e)
                     })
                 })
-            }.instrument(__child_span).await?;
+            })? ;
 
             let result = serde_json::json!({
                 "stepId": step_id,
@@ -509,7 +490,7 @@ fn emit_with_embedded_child(
             __parent_scenario_id,
             __parent_instance_id,
             __parent_tenant_id,
-        ).await?;
+        )? ;
 
             #debug_end
 
@@ -517,8 +498,8 @@ fn emit_with_embedded_child(
 
             // Check for cancellation or pause after child scenario completes
             {
-                let mut __sdk = sdk().lock().await;
-                if let Err(e) = __sdk.check_signals().await {
+                let mut __sdk = sdk().lock().unwrap();
+                if let Err(e) = __sdk.check_signals() {
                     let structured_error = serde_json::json!({
                         "stepId": #step_id,
                         "stepName": #step_name_display,
@@ -537,7 +518,7 @@ fn emit_with_embedded_child(
             }
 
             Ok::<_, String>(())
-        }.instrument(__step_span).await?;
+        })?;
     })
 }
 #[cfg(test)]
@@ -782,7 +763,7 @@ mod tests {
 
         // 2. Durable wrapper function
         assert!(code.contains("durable"));
-        assert!(code.contains("async fn"));
+        assert!(code.contains("fn "));
 
         // 3. ScenarioInputs creation for child
         assert!(code.contains("ScenarioInputs"));
@@ -1458,13 +1439,13 @@ mod tests {
 
         // First emission should contain the function definition
         assert!(
-            code1_str.contains("async fn child_shared_child_1"),
+            code1_str.contains("fn child_shared_child_1"),
             "First step should define the shared function"
         );
 
         // Second emission should NOT contain the function definition
         assert!(
-            !code2_str.contains("async fn child_shared_child_1"),
+            !code2_str.contains("fn child_shared_child_1"),
             "Second step should NOT redefine the shared function"
         );
 
@@ -1505,11 +1486,11 @@ mod tests {
 
         // Both should emit their respective functions (different children)
         assert!(
-            code1.to_string().contains("async fn child_child_a_1"),
+            code1.to_string().contains("fn child_child_a_1"),
             "First step should define child_a function"
         );
         assert!(
-            code2.to_string().contains("async fn child_child_b_1"),
+            code2.to_string().contains("fn child_child_b_1"),
             "Second step should define child_b function"
         );
     }
@@ -1540,11 +1521,11 @@ mod tests {
 
         // Different versions = different functions
         assert!(
-            code1.to_string().contains("async fn child_my_child_1"),
+            code1.to_string().contains("fn child_my_child_1"),
             "First step should define version 1 function"
         );
         assert!(
-            code2.to_string().contains("async fn child_my_child_2"),
+            code2.to_string().contains("fn child_my_child_2"),
             "Second step should define version 2 function"
         );
     }
@@ -1583,9 +1564,9 @@ mod tests {
             .to_string();
 
         // Only first should have the function definition
-        assert!(code1.contains("async fn child_shared_1"));
-        assert!(!code2.contains("async fn child_shared_1"));
-        assert!(!code3.contains("async fn child_shared_1"));
+        assert!(code1.contains("fn child_shared_1"));
+        assert!(!code2.contains("fn child_shared_1"));
+        assert!(!code3.contains("fn child_shared_1"));
 
         // All should call it
         assert!(code1.contains("child_shared_1"));

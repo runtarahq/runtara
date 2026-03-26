@@ -57,23 +57,6 @@ struct TestRequest {
 }
 
 fn main() -> ExitCode {
-    // Build tokio runtime (same as workflows)
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("Failed to create tokio runtime: {}", e);
-            let _ = write_failed(format!("Failed to create runtime: {}", e));
-            return ExitCode::FAILURE;
-        }
-    };
-
-    rt.block_on(async_main())
-}
-
-async fn async_main() -> ExitCode {
     // Read input from /data/input.json (mounted by OCI runner)
     let input_json = match std::fs::read_to_string("/data/input.json") {
         Ok(json) => json,
@@ -92,7 +75,7 @@ async fn async_main() -> ExitCode {
     };
 
     // Execute the capability
-    match execute_capability_test(&request).await {
+    match execute_capability_test(&request) {
         Ok(output) => {
             let _ = write_completed(output);
             ExitCode::SUCCESS
@@ -105,7 +88,7 @@ async fn async_main() -> ExitCode {
 }
 
 /// Execute a capability test.
-async fn execute_capability_test(
+fn execute_capability_test(
     request: &TestRequest,
 ) -> std::result::Result<serde_json::Value, String> {
     // Build input with connection injected as _connection field
@@ -117,7 +100,7 @@ async fn execute_capability_test(
     }
 
     // Execute the capability via the registry
-    registry::execute_capability(&request.agent_id, &request.capability_id, input).await
+    registry::execute_capability(&request.agent_id, &request.capability_id, input)
 }
 
 #[cfg(test)]
@@ -201,8 +184,8 @@ mod tests {
         assert_eq!(input["key"], "value");
     }
 
-    #[tokio::test]
-    async fn test_execute_utils_random_double() {
+    #[test]
+    fn test_execute_utils_random_double() {
         let request = TestRequest {
             agent_id: "utils".to_string(),
             capability_id: "random-double".to_string(),
@@ -210,7 +193,7 @@ mod tests {
             connection: None,
         };
 
-        let result = execute_capability_test(&request).await;
+        let result = execute_capability_test(&request);
         assert!(result.is_ok());
 
         let value = result.unwrap();
@@ -219,8 +202,8 @@ mod tests {
         assert!(num >= 0.0 && num <= 1.0);
     }
 
-    #[tokio::test]
-    async fn test_execute_transform_extract() {
+    #[test]
+    fn test_execute_transform_extract() {
         let request = TestRequest {
             agent_id: "transform".to_string(),
             capability_id: "extract".to_string(),
@@ -234,7 +217,7 @@ mod tests {
             connection: None,
         };
 
-        let result = execute_capability_test(&request).await;
+        let result = execute_capability_test(&request);
         assert!(result.is_ok());
 
         let output = result.unwrap();
@@ -243,8 +226,8 @@ mod tests {
         assert_eq!(output["values"][1], "Bob");
     }
 
-    #[tokio::test]
-    async fn test_execute_unknown_capability() {
+    #[test]
+    fn test_execute_unknown_capability() {
         let request = TestRequest {
             agent_id: "nonexistent".to_string(),
             capability_id: "fake-capability".to_string(),
@@ -252,7 +235,7 @@ mod tests {
             connection: None,
         };
 
-        let result = execute_capability_test(&request).await;
+        let result = execute_capability_test(&request);
         assert!(result.is_err());
     }
 

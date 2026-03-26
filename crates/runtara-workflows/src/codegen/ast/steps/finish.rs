@@ -92,9 +92,9 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         // Define tracing span for this step
         #span_def
 
-        // Wrap step execution in async block instrumented with span
-        // The async block returns the finish output value
-        let __finish_output: serde_json::Value = async {
+        // Wrap step execution in span scope
+        // The block returns the finish output value
+        let __finish_output: serde_json::Value = __step_span.in_scope(|| {
             #debug_start
 
             let #outputs_var = #outputs;
@@ -114,7 +114,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             #steps_context.insert(#step_id.to_string(), #step_var.clone());
 
             #outputs_var
-        }.instrument(__step_span).await;
+        });
 
         // Return immediately with the outputs
         return Ok(__finish_output);
