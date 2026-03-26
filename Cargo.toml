@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/runtara-core",
     "crates/runtara-environment",
-    "crates/runtara-protocol",
     "crates/runtara-management-sdk",
     "crates/runtara-sdk",
     "crates/runtara-sdk-macros",

@@ -7,8 +7,6 @@
 
 #![allow(dead_code)] // Variants and methods used in tests and for future expansion
 
-#[cfg(feature = "server")]
-use runtara_protocol::instance_proto::{self as proto, RpcError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -58,28 +56,6 @@ impl ErrorCategory {
             _ => Self::Unknown,
         }
     }
-
-    /// Convert to protocol buffer enum value.
-    #[cfg(feature = "server")]
-    pub fn to_proto(&self) -> i32 {
-        match self {
-            Self::Unknown => proto::ErrorCategory::Unknown as i32,
-            Self::Transient => proto::ErrorCategory::Transient as i32,
-            Self::Permanent => proto::ErrorCategory::Permanent as i32,
-        }
-    }
-
-    /// Parse from protocol buffer enum value.
-    #[cfg(feature = "server")]
-    pub fn from_proto(value: i32) -> Self {
-        match value {
-            x if x == proto::ErrorCategory::Transient as i32 => Self::Transient,
-            x if x == proto::ErrorCategory::Permanent as i32 => Self::Permanent,
-            // Legacy: map Business to Permanent for backwards compatibility
-            x if x == proto::ErrorCategory::Business as i32 => Self::Permanent,
-            _ => Self::Unknown,
-        }
-    }
 }
 
 /// Error severity for logging/alerting.
@@ -114,28 +90,6 @@ impl ErrorSeverity {
             "info" => Self::Info,
             "warning" => Self::Warning,
             "critical" => Self::Critical,
-            _ => Self::Error,
-        }
-    }
-
-    /// Convert to protocol buffer enum value.
-    #[cfg(feature = "server")]
-    pub fn to_proto(&self) -> i32 {
-        match self {
-            Self::Info => proto::ErrorSeverity::Info as i32,
-            Self::Warning => proto::ErrorSeverity::Warning as i32,
-            Self::Error => proto::ErrorSeverity::Error as i32,
-            Self::Critical => proto::ErrorSeverity::Critical as i32,
-        }
-    }
-
-    /// Parse from protocol buffer enum value.
-    #[cfg(feature = "server")]
-    pub fn from_proto(value: i32) -> Self {
-        match value {
-            x if x == proto::ErrorSeverity::Info as i32 => Self::Info,
-            x if x == proto::ErrorSeverity::Warning as i32 => Self::Warning,
-            x if x == proto::ErrorSeverity::Critical as i32 => Self::Critical,
             _ => Self::Error,
         }
     }
@@ -185,32 +139,6 @@ impl RetryHint {
             self,
             Self::RetryImmediately | Self::RetryWithBackoff | Self::RetryAfter(_)
         )
-    }
-
-    /// Convert to protocol buffer enum value.
-    #[cfg(feature = "server")]
-    pub fn to_proto(&self) -> i32 {
-        match self {
-            Self::Unknown => proto::RetryHint::Unknown as i32,
-            Self::RetryImmediately => proto::RetryHint::RetryImmediately as i32,
-            Self::RetryWithBackoff => proto::RetryHint::RetryWithBackoff as i32,
-            Self::RetryAfter(_) => proto::RetryHint::RetryAfter as i32,
-            Self::DoNotRetry => proto::RetryHint::DoNotRetry as i32,
-        }
-    }
-
-    /// Parse from protocol buffer enum value.
-    #[cfg(feature = "server")]
-    pub fn from_proto(value: i32, retry_after_ms: Option<u64>) -> Self {
-        match value {
-            x if x == proto::RetryHint::RetryImmediately as i32 => Self::RetryImmediately,
-            x if x == proto::RetryHint::RetryWithBackoff as i32 => Self::RetryWithBackoff,
-            x if x == proto::RetryHint::RetryAfter as i32 => {
-                Self::RetryAfter(retry_after_ms.unwrap_or(0))
-            }
-            x if x == proto::RetryHint::DoNotRetry as i32 => Self::DoNotRetry,
-            _ => Self::Unknown,
-        }
     }
 }
 
@@ -340,66 +268,6 @@ impl StructuredError {
     pub fn should_retry(&self) -> bool {
         self.retry_hint.should_retry()
     }
-
-    /// Convert to protocol StructuredError message.
-    #[cfg(feature = "server")]
-    pub fn to_proto(&self) -> proto::StructuredError {
-        use runtara_protocol::prost::Message;
-
-        proto::StructuredError {
-            code: self.code.clone(),
-            message: self.message.clone(),
-            metadata: Some(proto::ErrorMetadata {
-                category: self.category.to_proto(),
-                severity: self.severity.to_proto(),
-                retry_hint: self.retry_hint.to_proto(),
-                retry_after_ms: self.retry_hint.retry_after_ms(),
-                error_code: Some(self.code.clone()),
-                attributes: self.attributes.clone(),
-            }),
-            source_step_id: self.source_step_id.clone(),
-            cause: self.cause.as_ref().map(|c| c.to_proto().encode_to_vec()),
-        }
-    }
-
-    /// Convert from protocol StructuredError message.
-    #[cfg(feature = "server")]
-    pub fn from_proto(proto_err: &proto::StructuredError) -> Self {
-        use runtara_protocol::prost::Message;
-
-        let (category, severity, retry_hint) = if let Some(meta) = &proto_err.metadata {
-            (
-                ErrorCategory::from_proto(meta.category),
-                ErrorSeverity::from_proto(meta.severity),
-                RetryHint::from_proto(meta.retry_hint, meta.retry_after_ms),
-            )
-        } else {
-            (
-                ErrorCategory::Unknown,
-                ErrorSeverity::Error,
-                RetryHint::Unknown,
-            )
-        };
-
-        Self {
-            code: proto_err.code.clone(),
-            message: proto_err.message.clone(),
-            category,
-            severity,
-            retry_hint,
-            source_step_id: proto_err.source_step_id.clone(),
-            attributes: proto_err
-                .metadata
-                .as_ref()
-                .map(|m| m.attributes.clone())
-                .unwrap_or_default(),
-            cause: proto_err.cause.as_ref().and_then(|bytes| {
-                proto::StructuredError::decode(bytes.as_slice())
-                    .ok()
-                    .map(|p| Box::new(Self::from_proto(&p)))
-            }),
-        }
-    }
 }
 
 impl fmt::Display for StructuredError {
@@ -487,15 +355,6 @@ pub enum CoreError {
 }
 
 impl CoreError {
-    /// Convert this error to an RpcError for protocol responses.
-    #[cfg(feature = "server")]
-    pub fn to_rpc_error(&self) -> RpcError {
-        RpcError {
-            code: self.error_code().to_string(),
-            message: self.to_string(),
-        }
-    }
-
     /// Get the error code string for this error type.
     pub fn error_code(&self) -> &'static str {
         match self {
@@ -643,8 +502,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(feature = "server")]
-    fn test_core_error_to_rpc_error_codes() {
+    fn test_core_error_codes() {
         let test_cases = vec![
             (
                 CoreError::InstanceNotFound {
@@ -705,13 +563,14 @@ mod tests {
         ];
 
         for (error, expected_code) in test_cases {
-            let rpc_error = error.to_rpc_error();
             assert_eq!(
-                rpc_error.code, expected_code,
+                error.error_code(),
+                expected_code,
                 "Error {:?} should have code {}",
-                error, expected_code
+                error,
+                expected_code
             );
-            assert!(!rpc_error.message.is_empty(), "Message should not be empty");
+            assert!(!error.to_string().is_empty(), "Message should not be empty");
         }
     }
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Common test infrastructure for runtara-environment E2E tests.
 //!
-//! Provides TestContext for setting up database, server, and client connections.
+//! Provides TestContext for setting up database, server, and HTTP client.
 //! Automatically spins up a PostgreSQL container using testcontainers when
 //! TEST_RUNTARA_DATABASE_URL is not set.
 
@@ -23,12 +23,12 @@ use uuid::Uuid;
 use runtara_environment::handlers::EnvironmentHandlerState;
 use runtara_environment::runner::MockRunner;
 use runtara_environment::runner::Runner;
-use runtara_protocol::client::{RuntaraClient, RuntaraClientConfig};
 
-/// Test context that manages database, server, and client for E2E tests.
+/// Test context that manages database, server, and HTTP client for E2E tests.
 pub struct TestContext {
     pub pool: PgPool,
-    pub client: RuntaraClient,
+    /// Base URL for HTTP requests (e.g., "http://127.0.0.1:12345").
+    pub base_url: String,
     pub server_addr: SocketAddr,
     pub data_dir: PathBuf,
     _temp_dir: tempfile::TempDir,
@@ -89,12 +89,12 @@ impl TestContext {
             data_dir.clone(),
         ));
 
-        // Start server in background
+        // Start HTTP server in background
         let server_state = state.clone();
         let bind_addr = server_addr;
         tokio::spawn(async move {
             if let Err(e) =
-                runtara_environment::server::run_environment_server(bind_addr, server_state).await
+                runtara_environment::http_server::run_http_server(bind_addr, server_state).await
             {
                 eprintln!("Test environment server error: {}", e);
             }
@@ -103,19 +103,11 @@ impl TestContext {
         // Wait for server to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Create client
-        let config = RuntaraClientConfig {
-            server_addr,
-            dangerous_skip_cert_verification: true,
-            ..Default::default()
-        };
-        let client = RuntaraClient::new(config)
-            // TODO: Convert to HTTP client
-            .map_err(|e| format!("Failed to create client: {}", e))?;
+        let base_url = format!("http://{}", server_addr);
 
         Ok(Self {
             pool,
-            client,
+            base_url,
             server_addr,
             data_dir,
             _temp_dir: temp_dir,
@@ -353,85 +345,4 @@ macro_rules! skip_if_no_env_db {
     () => {
         // No-op: tests now auto-start containers if no DB URL is set
     };
-}
-
-// Protocol helpers for environment
-pub fn wrap_health_check(
-    req: runtara_protocol::environment_proto::HealthCheckRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(runtara_protocol::environment_proto::rpc_request::Request::HealthCheck(req)),
-    }
-}
-
-pub fn wrap_register_image(
-    req: runtara_protocol::environment_proto::RegisterImageRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(
-            runtara_protocol::environment_proto::rpc_request::Request::RegisterImage(req),
-        ),
-    }
-}
-
-pub fn wrap_get_image(
-    req: runtara_protocol::environment_proto::GetImageRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(runtara_protocol::environment_proto::rpc_request::Request::GetImage(req)),
-    }
-}
-
-pub fn wrap_list_images(
-    req: runtara_protocol::environment_proto::ListImagesRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(runtara_protocol::environment_proto::rpc_request::Request::ListImages(req)),
-    }
-}
-
-pub fn wrap_delete_image(
-    req: runtara_protocol::environment_proto::DeleteImageRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(runtara_protocol::environment_proto::rpc_request::Request::DeleteImage(req)),
-    }
-}
-
-pub fn wrap_start_instance(
-    req: runtara_protocol::environment_proto::StartInstanceRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(
-            runtara_protocol::environment_proto::rpc_request::Request::StartInstance(req),
-        ),
-    }
-}
-
-pub fn wrap_stop_instance(
-    req: runtara_protocol::environment_proto::StopInstanceRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(runtara_protocol::environment_proto::rpc_request::Request::StopInstance(req)),
-    }
-}
-
-pub fn wrap_get_instance_status(
-    req: runtara_protocol::environment_proto::GetInstanceStatusRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(
-            runtara_protocol::environment_proto::rpc_request::Request::GetInstanceStatus(req),
-        ),
-    }
-}
-
-pub fn wrap_list_instances(
-    req: runtara_protocol::environment_proto::ListInstancesRequest,
-) -> runtara_protocol::environment_proto::RpcRequest {
-    runtara_protocol::environment_proto::RpcRequest {
-        request: Some(
-            runtara_protocol::environment_proto::rpc_request::Request::ListInstances(req),
-        ),
-    }
 }

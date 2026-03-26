@@ -21,7 +21,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
-use crate::instance_handlers::{self, InstanceHandlerState};
+use crate::instance_handlers::{
+    self, CheckpointRequest as HandlerCheckpointRequest,
+    GetInstanceStatusRequest as HandlerGetStatusRequest, InstanceEvent as HandlerInstanceEvent,
+    InstanceEventType as HandlerEventType, InstanceHandlerState, InstanceStatus,
+    PollSignalsRequest as HandlerPollSignalsRequest,
+    RegisterInstanceRequest as HandlerRegisterRequest,
+    RetryAttemptEvent as HandlerRetryAttemptEvent, SignalAck as HandlerSignalAck, SignalType,
+    SleepRequest as HandlerSleepRequest,
+};
 
 // ============================================================================
 // JSON request/response types (mirror the protobuf types)
@@ -154,24 +162,22 @@ pub struct SuccessResponse {
 // ============================================================================
 
 fn signal_type_to_string(st: i32) -> String {
-    use runtara_protocol::instance_proto::SignalType;
-    match SignalType::try_from(st) {
-        Ok(SignalType::SignalCancel) => "cancel".to_string(),
-        Ok(SignalType::SignalPause) => "pause".to_string(),
-        Ok(SignalType::SignalResume) => "resume".to_string(),
+    match st {
+        0 => "cancel".to_string(), // SignalCancel
+        1 => "pause".to_string(),  // SignalPause
+        2 => "resume".to_string(), // SignalResume
         _ => format!("unknown({})", st),
     }
 }
 
 fn event_type_from_string(s: &str) -> i32 {
-    use runtara_protocol::instance_proto::InstanceEventType;
     match s {
-        "heartbeat" => InstanceEventType::EventHeartbeat as i32,
-        "completed" => InstanceEventType::EventCompleted as i32,
-        "failed" => InstanceEventType::EventFailed as i32,
-        "suspended" => InstanceEventType::EventSuspended as i32,
-        "custom" => InstanceEventType::EventCustom as i32,
-        _ => InstanceEventType::EventCustom as i32,
+        "heartbeat" => HandlerEventType::EventHeartbeat as i32,
+        "completed" => HandlerEventType::EventCompleted as i32,
+        "failed" => HandlerEventType::EventFailed as i32,
+        "suspended" => HandlerEventType::EventSuspended as i32,
+        "custom" => HandlerEventType::EventCustom as i32,
+        _ => HandlerEventType::EventCustom as i32,
     }
 }
 
@@ -185,9 +191,7 @@ async fn register_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::RegisterInstanceRequest;
-
-    let request = RegisterInstanceRequest {
+    let request = HandlerRegisterRequest {
         instance_id,
         tenant_id: body.tenant_id,
         checkpoint_id: body.checkpoint_id,
@@ -233,7 +237,6 @@ async fn checkpoint_handler(
     Json(body): Json<CheckpointRequest>,
 ) -> impl IntoResponse {
     use base64::Engine;
-    use runtara_protocol::instance_proto::CheckpointRequest as ProtoCheckpointRequest;
 
     let state_bytes = match base64::engine::general_purpose::STANDARD.decode(&body.state) {
         Ok(b) => b,
@@ -249,7 +252,7 @@ async fn checkpoint_handler(
         }
     };
 
-    let request = ProtoCheckpointRequest {
+    let request = HandlerCheckpointRequest {
         instance_id,
         checkpoint_id: body.checkpoint_id,
         state: state_bytes,
@@ -312,9 +315,7 @@ async fn poll_signals_handler(
     State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::PollSignalsRequest;
-
-    let request = PollSignalsRequest {
+    let request = HandlerPollSignalsRequest {
         instance_id,
         checkpoint_id: None,
     };
@@ -364,9 +365,7 @@ async fn poll_custom_signal_handler(
     State(state): State<Arc<InstanceHandlerState>>,
     Path((instance_id, signal_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::PollSignalsRequest;
-
-    let request = PollSignalsRequest {
+    let request = HandlerPollSignalsRequest {
         instance_id,
         checkpoint_id: Some(signal_id),
     };
@@ -408,8 +407,6 @@ async fn instance_event_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<InstanceEventRequest>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::InstanceEvent;
-
     let payload = body
         .payload
         .as_deref()
@@ -430,7 +427,7 @@ async fn instance_event_handler(
         }
     };
 
-    let event = InstanceEvent {
+    let event = HandlerInstanceEvent {
         instance_id,
         event_type: event_type_from_string(&body.event_type),
         checkpoint_id: body.checkpoint_id,
@@ -475,8 +472,6 @@ async fn completed_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::{InstanceEvent, InstanceEventType};
-
     let payload = body
         .get("output")
         .and_then(|v| v.as_str())
@@ -497,9 +492,9 @@ async fn completed_handler(
         }
     };
 
-    let event = InstanceEvent {
+    let event = HandlerInstanceEvent {
         instance_id,
-        event_type: InstanceEventType::EventCompleted as i32,
+        event_type: HandlerEventType::EventCompleted as i32,
         checkpoint_id: None,
         payload,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
@@ -528,16 +523,14 @@ async fn failed_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::{InstanceEvent, InstanceEventType};
-
     let error_msg = body
         .get("error")
         .and_then(|v| v.as_str())
         .unwrap_or("Unknown error");
 
-    let event = InstanceEvent {
+    let event = HandlerInstanceEvent {
         instance_id,
-        event_type: InstanceEventType::EventFailed as i32,
+        event_type: HandlerEventType::EventFailed as i32,
         checkpoint_id: None,
         payload: error_msg.as_bytes().to_vec(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
@@ -565,11 +558,9 @@ async fn suspended_handler(
     State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::{InstanceEvent, InstanceEventType};
-
-    let event = InstanceEvent {
+    let event = HandlerInstanceEvent {
         instance_id,
-        event_type: InstanceEventType::EventSuspended as i32,
+        event_type: HandlerEventType::EventSuspended as i32,
         checkpoint_id: None,
         payload: Vec::new(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
@@ -598,8 +589,6 @@ async fn sleep_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<SleepRequest>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::SleepRequest as ProtoSleepRequest;
-
     let state_bytes = match base64::engine::general_purpose::STANDARD.decode(&body.state) {
         Ok(b) => b,
         Err(e) => {
@@ -614,7 +603,7 @@ async fn sleep_handler(
         }
     };
 
-    let request = ProtoSleepRequest {
+    let request = HandlerSleepRequest {
         instance_id,
         duration_ms: body.duration_ms,
         checkpoint_id: body.checkpoint_id,
@@ -643,8 +632,6 @@ async fn signal_ack_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<SignalAckRequest>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::{SignalAck, SignalType};
-
     let signal_type = match body.signal_type.as_str() {
         "cancel" => SignalType::SignalCancel as i32,
         "pause" => SignalType::SignalPause as i32,
@@ -661,7 +648,7 @@ async fn signal_ack_handler(
         }
     };
 
-    let ack = SignalAck {
+    let ack = HandlerSignalAck {
         instance_id,
         signal_type,
         acknowledged: true,
@@ -689,9 +676,7 @@ async fn retry_handler(
     Path(instance_id): Path<String>,
     Json(body): Json<RetryAttemptRequest>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::RetryAttemptEvent;
-
-    let event = RetryAttemptEvent {
+    let event = HandlerRetryAttemptEvent {
         instance_id,
         checkpoint_id: body.checkpoint_id,
         attempt_number: body.attempt,
@@ -736,25 +721,20 @@ async fn status_handler(
     State(state): State<Arc<InstanceHandlerState>>,
     Path(instance_id): Path<String>,
 ) -> impl IntoResponse {
-    use runtara_protocol::instance_proto::GetInstanceStatusRequest;
-
-    let request = GetInstanceStatusRequest {
+    let request = HandlerGetStatusRequest {
         instance_id: instance_id.clone(),
     };
 
     match instance_handlers::handle_get_instance_status(&state, request).await {
         Ok(resp) => {
-            let status_str = {
-                use runtara_protocol::instance_proto::InstanceStatus;
-                match InstanceStatus::try_from(resp.status) {
-                    Ok(InstanceStatus::StatusPending) => "pending",
-                    Ok(InstanceStatus::StatusRunning) => "running",
-                    Ok(InstanceStatus::StatusSuspended) => "suspended",
-                    Ok(InstanceStatus::StatusCompleted) => "completed",
-                    Ok(InstanceStatus::StatusFailed) => "failed",
-                    Ok(InstanceStatus::StatusCancelled) => "cancelled",
-                    _ => "unknown",
-                }
+            let status_str = match InstanceStatus::try_from_i32(resp.status) {
+                Some(InstanceStatus::StatusPending) => "pending",
+                Some(InstanceStatus::StatusRunning) => "running",
+                Some(InstanceStatus::StatusSuspended) => "suspended",
+                Some(InstanceStatus::StatusCompleted) => "completed",
+                Some(InstanceStatus::StatusFailed) => "failed",
+                Some(InstanceStatus::StatusCancelled) => "cancelled",
+                _ => "unknown",
             };
 
             let output = resp
