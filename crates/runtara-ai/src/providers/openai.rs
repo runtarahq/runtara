@@ -76,23 +76,36 @@ impl CompletionModel for OpenAICompletionModel {
 
         let url = format!("{}/chat/completions", self.client.base_url);
 
-        let response = self
+        let response = match self
             .client
             .http
             .post(&url)
             .set("Authorization", &format!("Bearer {}", self.client.api_key))
             .set("Content-Type", "application/json")
             .send_json(&body)
-            .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+        {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(code, resp)) => {
+                let error_body = resp.into_string().unwrap_or_default();
+                tracing::error!(
+                    target: "runtara_ai",
+                    status = code,
+                    body = %error_body,
+                    "OpenAI API error"
+                );
+                return Err(CompletionError::ProviderError(format!(
+                    "OpenAI API returned {}: {}",
+                    code, error_body
+                )));
+            }
+            Err(e) => {
+                return Err(CompletionError::HttpError(e.to_string()));
+            }
+        };
 
-        let status = response.status();
         let response_text = response.into_string().map_err(|e| {
             CompletionError::HttpError(format!("Failed to read response body: {e}"))
         })?;
-
-        if status >= 400 {
-            return Err(CompletionError::ProviderError(response_text));
-        }
 
         tracing::debug!(target: "runtara_ai", "OpenAI raw response: {}", response_text);
 
