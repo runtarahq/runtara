@@ -1,131 +1,787 @@
 # Cross-Platform Compilation for Runtara Workflows
 
-This document outlines the architecture for compiling runtara workflow scenarios to multiple platforms: **Native** (current), **WebAssembly (WASM)**, and **Embedded**.
+This document outlines the architecture for compiling runtara workflow scenarios to **WebAssembly (WASM)** alongside the existing **Native** target, with a unified HTTP communication protocol.
 
-## Current Platform Dependencies
-
-### Platform-Specific Code by Crate
-
-| Crate | Dependency | Platform Limitation |
-|-------|------------|---------------------|
-| `runtara-workflow-stdlib` | `libc` for stderr redirection | Unix-only |
-| `runtara-workflow-stdlib` | `tokio` with full features | Not WASM-compatible |
-| `runtara-workflow-stdlib` | `ureq` for connections | Native TLS |
-| `runtara-agents` | `reqwest`, `ssh2`, `openssl` | Native only |
-| `runtara-sdk` | QUIC via `quinn` | Requires tokio UDP |
-| `runtara-workflows/compile.rs` | Hardcoded native targets | Lines 157-185 |
-| Generated code | `libc::dup2` stderr redirect | Unix-only |
-
-### Already Portable Crates
-
-These crates are pure Rust with no platform-specific dependencies:
-
-- `runtara-dsl` - Workflow DSL types (serde, schemars)
-- `runtara-sdk-macros` - Procedural macros
-- `runtara-agent-macro` - Agent/capability macros
-
-### Crate Not Intended for Cross-Platform
-
-- `runtara-environment` - Linux-only container orchestrator (OCI, cgroups, pasta networking). This is intentional as it manages container execution on Linux hosts.
+> **Key decision (2026-03-26):** Native and WASM scenarios will use the **same HTTP-based protocol** for all host communication. QUIC is removed from the scenario binary path entirely. This simplifies the stack, reduces binary size, and ensures identical behavior across targets.
 
 ---
 
-## Architecture Changes
+## Table of Contents
 
-### 1. Feature Flags (Platform Selection)
+1. [Current Architecture](#current-architecture)
+2. [Target Architecture](#target-architecture)
+3. [Architectural Decisions](#architectural-decisions)
+4. [Protocol: Unified HTTP](#protocol-unified-http)
+5. [I/O Model: Host-Mediated](#io-model-host-mediated)
+6. [Database Access Pattern](#database-access-pattern)
+7. [Agent Platform Support](#agent-platform-support)
+8. [Feature Flags](#feature-flags)
+9. [Compilation Pipeline Changes](#compilation-pipeline-changes)
+10. [Implementation Phases](#implementation-phases)
+11. [Files to Modify](#files-to-modify)
+12. [Verification](#verification)
 
-#### runtara-workflow-stdlib/Cargo.toml
+---
+
+## Current Architecture
+
+### How Scenarios Run Today
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    smo-runtime (host)                             │
+│                                                                  │
+│  1. Write input.json to disk                                     │
+│  2. Spawn native binary as child process                         │
+│  3. Pass env vars: RUNTARA_INSTANCE_ID, RUNTARA_SERVER_ADDR, …  │
+│  4. Wait for process exit                                        │
+│  5. Read output.json from disk                                   │
+└──────────────────────────────────────────────────────────────────┘
+         │ spawn                              ▲ exit
+         ▼                                    │
+┌──────────────────────────────────────────────────────────────────┐
+│                Scenario Binary (native ELF)                       │
+│                                                                  │
+│  main() {                                                        │
+│    rt = tokio::Runtime::new()          ← tokio needed for QUIC   │
+│    sdk = RuntaraSdk::from_env()        ← QUIC backend            │
+│    sdk.connect()                       ← QUIC handshake          │
+│    sdk.register()                      ← QUIC RPC                │
+│    input = read("/data/input.json")    ← filesystem              │
+│    for step in steps {                                           │
+│      result = execute_capability()     ← agent runs in-process   │
+│      sdk.checkpoint(state)             ← QUIC RPC                │
+│      sdk.check_signals()               ← QUIC polling            │
+│    }                                                             │
+│    sdk.completed(output)               ← QUIC RPC                │
+│    write("/data/output.json")          ← filesystem              │
+│  }                                                               │
+└──────────────────────────────────────────────────────────────────┘
+         │ QUIC (UDP)
+         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                    runtara-core                                   │
+│  Persistence: checkpoints, signals, events                       │
+│  Protocol: QUIC server on port 8001                              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Platform-Specific Dependencies in Scenario Binary
+
+| Crate | Dependency | Why it blocks WASM |
+|-------|------------|---------------------|
+| `runtara-workflow-stdlib` | `tokio` (full features) | OS threads, epoll/kqueue |
+| `runtara-workflow-stdlib` | `libc` for stderr redirect | Unix-only syscall |
+| `runtara-sdk` | `quinn` (QUIC) | UDP sockets, `ring` crypto |
+| `runtara-protocol` | `quinn`, `socket2`, `rustls` | UDP, platform crypto |
+| `runtara-agents` | `reqwest`, `ssh2`, `openssl` | Native TLS, C FFI |
+| `smo-stdlib` | `runtara-object-store` (sqlx) | TCP sockets to PostgreSQL |
+| `smo-stdlib` | `tokio::runtime::Handle` | All agents bridge sync→async |
+| Generated code | `tokio::runtime::Runtime::new()` | Creates OS thread pool |
+| Generated code | `tokio::time::sleep` | OS timer primitives |
+
+### Already Portable Crates
+
+These are pure Rust with no platform-specific dependencies:
+
+- `runtara-dsl` — Workflow DSL types (serde, schemars)
+- `runtara-sdk-macros` — Procedural macros
+- `runtara-agent-macro` — Agent/capability macros
+
+### Not Intended for Cross-Platform
+
+- `runtara-environment` — Linux-only container/process orchestrator (OCI, cgroups, signals). Manages scenario execution on the host. Stays native.
+
+---
+
+## Target Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    smo-runtime (host)                             │
+│                                                                  │
+│  ┌──────────────────────────────────┐                            │
+│  │   Instance HTTP API              │  ← NEW: replaces QUIC     │
+│  │   POST /instances/{id}/register  │                            │
+│  │   POST /instances/{id}/checkpoint│                            │
+│  │   GET  /instances/{id}/signals   │                            │
+│  │   POST /instances/{id}/completed │                            │
+│  │   POST /instances/{id}/input     │  ← NEW: replaces file I/O │
+│  │   POST /agents/{agent}/{cap}     │  ← NEW: host-mediated I/O │
+│  └──────────────────────────────────┘                            │
+│                                                                  │
+│  ┌──────────────────────────────────┐                            │
+│  │   Host-side adapters             │                            │
+│  │   - Database adapters (PG, MySQL)│  ← TCP connections here    │
+│  │   - SFTP adapter (ssh2)          │                            │
+│  │   - Connection/OAuth2 management │                            │
+│  └──────────────────────────────────┘                            │
+└──────────────────────────────────────────────────────────────────┘
+         │ HTTP (both native & WASM)
+         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│          Scenario (native binary OR .wasm module)                 │
+│                                                                  │
+│  main() {                                                        │
+│    sdk = HttpSdk::from_env()           ← blocking HTTP client    │
+│    sdk.register()                      ← HTTP POST               │
+│    input = sdk.get_input()             ← HTTP GET (no files)     │
+│    for step in steps {                                           │
+│      result = sdk.execute_capability() ← HTTP POST to host      │
+│      sdk.checkpoint(state)             ← HTTP POST               │
+│      sdk.check_signals()               ← HTTP GET                │
+│    }                                                             │
+│    sdk.completed(output)               ← HTTP POST               │
+│  }                                                               │
+│                                                                  │
+│  Dependencies: serde, ureq (or wasi-http). NO tokio, NO QUIC.   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Key properties:**
+- Same binary/module, same protocol, same behavior — native and WASM
+- Scenario is pure computation + HTTP calls to host
+- All I/O (databases, SFTP, external APIs) mediated through host
+- No tokio, no QUIC, no filesystem I/O in scenario binary
+
+---
+
+## Architectural Decisions
+
+### ADR-1: Unified HTTP Protocol (No QUIC in Scenarios)
+
+**Decision:** Replace QUIC with HTTP for all scenario↔host communication. Both native and WASM use the same HTTP protocol.
+
+**Context:** Analysis of the existing QUIC usage revealed:
+- All communication is **instance-initiated request-response** (no server push)
+- Signal delivery is **polling-based** (1000ms interval), not push-based
+- Steps execute **sequentially** — no concurrent I/O, no multiplexed streams
+- QUIC's advantages (0-RTT, multiplexing, UDP) are unused
+
+**Consequences:**
+- Remove `quinn`, `runtara-protocol`, `ring`, `socket2` from scenario binary
+- Remove `tokio` from scenario binary (was only needed for QUIC + reqwest)
+- One `HttpSdk` implementation replaces `QuicBackend`
+- ~10x smaller scenario binaries
+- Faster cold start (no tokio runtime initialization)
+- Easier debugging (HTTP is inspectable with standard tools)
+- Slight latency increase per RPC (~1-3ms TCP vs ~0.5ms QUIC) — negligible given step execution times of 100ms+
+
+**What we keep:** QUIC remains in `runtara-core` and `runtara-environment` for host↔host communication (e.g., environment↔core protocol). Only the scenario binary path changes.
+
+### ADR-2: Input Delivery via HTTP (No File I/O)
+
+**Decision:** Scenario inputs are delivered via the `register()` HTTP response or a dedicated `GET /instances/{id}/input` endpoint. No file-based input/output.
+
+**Context:** Today, the runner writes `input.json` to disk before spawning the binary, and reads `output.json` after exit. This requires filesystem access, which WASM doesn't have.
+
+**Options considered:**
+1. ~~Environment variables~~ — size limits, inputs can be megabytes (e.g., array of 10k products)
+2. **HTTP fetch on startup** — instance asks host for inputs after registering ✓
+
+**Consequences:**
+- `register()` response includes input payload, or instance calls `GET /instances/{id}/input`
+- `completed(output_bytes)` already sends output over the wire — no need for `output.json`
+- Remove file I/O from generated code
+- Runner no longer needs to write/read files for data exchange
+- Works identically for native process and WASM module
+
+### ADR-3: Host-Mediated I/O for All External Services
+
+**Decision:** All I/O that requires network connections (databases, SFTP, external APIs) runs on the host. Scenarios call host-side adapters via HTTP.
+
+**Context:** Today, agents like `object_model`, `shopify`, `http` make network calls directly from within the scenario binary. This requires `reqwest`, `sqlx`, `ssh2`, `tokio` — none of which compile to WASM.
+
+**Consequences:**
+- Scenario binary contains no network client libraries
+- All agents become thin HTTP wrappers calling host endpoints
+- Host manages connection pools, credentials, TLS
+- New database support = new host-side adapter, zero scenario changes
+- Security boundary: scenarios never see raw credentials or raw SQL
+
+### ADR-4: WASM Target is `wasm32-wasip2`
+
+**Decision:** Server-side WASM uses WASI Preview 2 (Component Model).
+
+**Why P2 over P1:**
+- `wasi-http` — native HTTP client support (needed if we want WASM modules to make HTTP calls directly in the future)
+- Component Model — typed interfaces, better composability
+- `wasi-sockets` — direct networking (future option)
+- Ecosystem: Wasmtime 14+, Cloudflare Workers, Fermyon Spin, Fastly Compute
+
+**Why not `wasm32-unknown-unknown` (browser):**
+- Browser target is a separate concern (Phase 3)
+- Server-side WASM is the priority for scenario execution
+
+---
+
+## Protocol: Unified HTTP
+
+### Instance HTTP API
+
+All endpoints are served by runtara-core (or smo-runtime acting as proxy).
+
+```
+Base URL: http://127.0.0.1:{port}/api/v1
+
+Headers (all requests):
+  X-Runtara-Tenant-Id: {tenant_id}
+  X-Runtara-Instance-Id: {instance_id}
+```
+
+#### Endpoints
+
+| Method | Path | Purpose | Request Body | Response |
+|--------|------|---------|-------------|----------|
+| POST | `/instances/{id}/register` | Register instance, get inputs | `{checkpoint_id?}` | `{success, input, variables}` |
+| POST | `/instances/{id}/checkpoint` | Save/load checkpoint + poll signals | `{checkpoint_id, state: base64}` | `{found, state?, signal?, custom_signal?}` |
+| GET | `/instances/{id}/signals` | Poll for signals | — | `{signal?, custom_signal?}` |
+| GET | `/instances/{id}/signals/{signal_id}` | Poll for custom signal (WaitForSignal) | — | `{payload?}` |
+| POST | `/instances/{id}/completed` | Report success | `{output: base64}` | `{success}` |
+| POST | `/instances/{id}/failed` | Report failure | `{error}` | `{success}` |
+| POST | `/instances/{id}/suspended` | Report suspension | — | `{success}` |
+| POST | `/instances/{id}/sleep` | Durable sleep | `{duration_ms, checkpoint_id, state}` | `{}` |
+| POST | `/instances/{id}/events` | Custom event | `{subtype, payload}` | `{success}` |
+| POST | `/instances/{id}/signals/ack` | Acknowledge signal | `{signal_type}` | `{success}` |
+| POST | `/instances/{id}/retry` | Record retry attempt | `{checkpoint_id, attempt, error?}` | — |
+
+#### Agent Execution (Host-Mediated)
+
+| Method | Path | Purpose | Request Body | Response |
+|--------|------|---------|-------------|----------|
+| POST | `/agents/{agent_id}/{capability_id}` | Execute agent capability | `{inputs, connection_id?}` | `{outputs}` or `{error}` |
+
+### SDK Implementation (Blocking HTTP)
+
+```rust
+/// Unified SDK backend — same code for native and WASM.
+/// Uses blocking HTTP client (ureq for native, wasi-http for WASM).
+pub struct HttpSdk {
+    base_url: String,
+    instance_id: String,
+    tenant_id: String,
+    client: HttpClient,  // ureq::Agent or wasi-http wrapper
+}
+
+impl HttpSdk {
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            base_url: std::env::var("RUNTARA_SERVER_URL")?,
+            instance_id: std::env::var("RUNTARA_INSTANCE_ID")?,
+            tenant_id: std::env::var("RUNTARA_TENANT_ID")?,
+            client: HttpClient::new(),
+        })
+    }
+
+    /// Register and retrieve inputs.
+    pub fn register(&self) -> Result<RegisterResponse> {
+        self.post(&format!("/instances/{}/register", self.instance_id), &json!({}))
+    }
+
+    /// Checkpoint with signal piggyback.
+    pub fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
+        self.post(&format!("/instances/{}/checkpoint", self.instance_id), &json!({
+            "checkpoint_id": checkpoint_id,
+            "state": base64::encode(state),
+        }))
+    }
+
+    /// Poll for global signals (cancel/pause).
+    pub fn check_signals(&self) -> Result<Option<Signal>> {
+        self.get(&format!("/instances/{}/signals", self.instance_id))
+    }
+
+    /// Poll for custom signal (WaitForSignal step).
+    pub fn poll_custom_signal(&self, signal_id: &str) -> Result<Option<Vec<u8>>> {
+        self.get(&format!("/instances/{}/signals/{}", self.instance_id, signal_id))
+    }
+
+    /// Execute an agent capability on the host.
+    pub fn execute_capability(
+        &self,
+        agent_id: &str,
+        capability_id: &str,
+        inputs: Value,
+        connection_id: Option<&str>,
+    ) -> Result<Value> {
+        self.post(&format!("/agents/{}/{}", agent_id, capability_id), &json!({
+            "inputs": inputs,
+            "connection_id": connection_id,
+            "instance_id": self.instance_id,
+            "tenant_id": self.tenant_id,
+        }))
+    }
+
+    /// Report completion with output.
+    pub fn completed(&self, output: &[u8]) -> Result<()> {
+        self.post(&format!("/instances/{}/completed", self.instance_id), &json!({
+            "output": base64::encode(output),
+        }))
+    }
+}
+```
+
+### HttpClient Abstraction
+
+```rust
+/// Platform-agnostic blocking HTTP client.
+/// Compiles to both native (ureq) and WASM (wasi-http).
+pub struct HttpClient {
+    #[cfg(not(target_arch = "wasm32"))]
+    inner: ureq::Agent,
+
+    #[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+    inner: WasiHttpClient,  // Wraps wasi:http/outgoing-handler
+}
+```
+
+### Signal Flow (Unchanged Semantics)
+
+The signal model is **pull-based** and works identically over HTTP:
+
+```
+Workflow Instance                              runtara-core (host)
+─────────────────                              ────────────────────
+
+1. POST /checkpoint  ──────────────────────►   Store checkpoint
+                                               Check queued signals
+2. ◄─────────────────────────────────────────  {found, state?, signal?}
+
+   External signal (pause/cancel) arrives ──►  Queue in database
+                                               (no push to workflow)
+
+3. GET /signals or POST /checkpoint ────────►  Fetch queued signals
+4. ◄─────────────────────────────────────────  {signal: "cancel"}
+```
+
+**WaitForSignal polling loop (same pattern, HTTP instead of QUIC):**
+```rust
+let poll_interval = Duration::from_millis(1000);
+loop {
+    // Check for cancel/pause
+    if let Some(signal) = sdk.check_signals()? {
+        if signal.is_cancel() { return Err("cancelled"); }
+    }
+
+    // Poll for custom signal
+    if let Some(payload) = sdk.poll_custom_signal(&signal_id)? {
+        break payload;
+    }
+
+    // Timeout check
+    if start.elapsed() > timeout { return Err("timeout"); }
+
+    std::thread::sleep(poll_interval);  // Works in both native and WASI
+}
+```
+
+---
+
+## I/O Model: Host-Mediated
+
+### Before (In-Process I/O)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Scenario Binary                                                  │
+│                                                                  │
+│  shopify agent ──reqwest──► Shopify GraphQL API                  │
+│  object_model  ──sqlx────► PostgreSQL                            │
+│  http agent    ──reqwest──► Any URL                              │
+│  sftp agent    ──ssh2────► SFTP server                           │
+│  openai agent  ──reqwest──► OpenAI API                           │
+│                                                                  │
+│  Dependencies: reqwest, sqlx, ssh2, openssl, tokio, ring, …     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### After (Host-Mediated I/O)
+
+```
+┌───────────────────────────────────────┐
+│ Scenario (native or .wasm)            │
+│                                       │
+│  All agents → sdk.execute_capability()│
+│              → HTTP POST to host      │
+│                                       │
+│  Dependencies: serde, ureq            │
+└──────────────┬────────────────────────┘
+               │ HTTP
+               ▼
+┌───────────────────────────────────────┐
+│ smo-runtime (host)                    │
+│                                       │
+│  /agents/shopify/query                │
+│    → reqwest → Shopify GraphQL API    │
+│                                       │
+│  /agents/object_model/find            │
+│    → sqlx → PostgreSQL                │
+│                                       │
+│  /agents/http/request                 │
+│    → reqwest → Any URL                │
+│                                       │
+│  /agents/sftp/list-files              │
+│    → ssh2 → SFTP server              │
+│                                       │
+│  /agents/database/query               │  ← NEW: generic DB adapter
+│    → sqlx/mysql/clickhouse → DB       │
+│                                       │
+│  Connection pool, credentials, TLS    │
+│  all managed here                     │
+└───────────────────────────────────────┘
+```
+
+### Agent Execution Changes
+
+**Today:** The `#[capability]` macro generates executor code that runs the agent function directly in the scenario process. Sync agents use `tokio::task::spawn_blocking()`, then bridge back to async with `Handle::try_current().block_on()`.
+
+**After:** The agent capability registry still exists in the scenario binary for metadata (input/output schemas, descriptions), but execution is delegated to the host:
+
+```rust
+// Today (in-process):
+registry::execute_capability("shopify", "get-products", inputs).await
+
+// After (host-mediated):
+sdk.execute_capability("shopify", "get-products", inputs)  // blocking HTTP to host
+```
+
+The host side receives the request and runs the actual agent code (which has full access to tokio, reqwest, sqlx, etc.).
+
+### Benefits
+
+1. **Scenario binary is pure computation + HTTP** — compiles to WASM trivially
+2. **Connection management centralized** — pooling, credential refresh, rate limiting all on host
+3. **Security boundary** — scenarios never see raw credentials, raw SQL, or raw network access
+4. **New integrations = host-side only** — adding MySQL, ClickHouse, etc. requires zero scenario changes
+
+---
+
+## Database Access Pattern
+
+### Current: Direct PostgreSQL from Scenario
+
+```rust
+// smo-stdlib/src/smo_agents/object_model.rs (today)
+fn find(input: FindInput) -> Result<Value> {
+    let handle = Handle::try_current()?;
+    handle.block_on(async {
+        let pool = get_object_model_pool()?;
+        sqlx::query("SELECT * FROM ...").fetch_all(&pool).await
+    })
+}
+```
+
+### Target: Host-Mediated Database Access
+
+```rust
+// smo-stdlib/src/smo_agents/object_model.rs (after)
+fn find(input: FindInput) -> Result<Value> {
+    sdk().execute_capability("object_model", "find", serde_json::to_value(input)?)
+}
+```
+
+Host side:
+```rust
+// smo-runtime host adapter
+async fn handle_agent_request(agent_id: &str, capability_id: &str, inputs: Value) -> Result<Value> {
+    match (agent_id, capability_id) {
+        ("object_model", "find") => {
+            let input: FindInput = serde_json::from_value(inputs)?;
+            let pool = get_object_model_pool().await?;
+            // Execute actual sqlx query here on the host
+            object_model_service::find(&pool, input).await
+        }
+        ("database", "query") => {
+            let input: DatabaseQueryInput = serde_json::from_value(inputs)?;
+            let connection = get_connection(&input.connection_id).await?;
+            database_adapter::execute(&connection, &input.query, &input.params).await
+        }
+        _ => execute_agent_capability(agent_id, capability_id, inputs).await,
+    }
+}
+```
+
+### Supporting Multiple Databases
+
+The connection model already supports typed connections (OAuth for SaaS, credentials for APIs). Extend to databases:
+
+```json
+{
+  "id": "conn_warehouse_pg",
+  "type": "postgresql",
+  "config": {
+    "host": "warehouse.example.com",
+    "port": 5432,
+    "database": "analytics",
+    "credentials_ref": "vault://pg-warehouse"
+  }
+}
+```
+
+```json
+{
+  "id": "conn_reporting_mysql",
+  "type": "mysql",
+  "config": {
+    "host": "reporting.example.com",
+    "port": 3306,
+    "database": "reports",
+    "credentials_ref": "vault://mysql-reporting"
+  }
+}
+```
+
+A generic `database` agent with capabilities like `query`, `execute`, `batch`:
+
+```json
+{
+  "step": "fetch_orders",
+  "type": "agent",
+  "agent": "database",
+  "capability": "query",
+  "inputMapping": {
+    "connection_id": {"valueType": "immediate", "value": "conn_warehouse_pg"},
+    "query": {"valueType": "immediate", "value": "SELECT * FROM orders WHERE status = :status LIMIT :limit"},
+    "params": {"valueType": "reference", "value": "data.query_params"}
+  }
+}
+```
+
+**Host-side adapter architecture:**
+
+```rust
+/// Each database type implements this trait on the host
+pub trait DatabaseAdapter: Send + Sync {
+    async fn query(&self, query: &str, params: &Value) -> Result<Vec<Value>>;
+    async fn execute(&self, query: &str, params: &Value) -> Result<u64>;
+}
+
+/// PostgreSQL adapter (uses sqlx)
+pub struct PostgresAdapter { pool: PgPool }
+
+/// MySQL adapter (uses sqlx or mysql_async)
+pub struct MySqlAdapter { pool: MySqlPool }
+
+/// ClickHouse adapter (uses clickhouse-rs HTTP client)
+pub struct ClickHouseAdapter { client: ClickHouseClient }
+```
+
+**Key properties:**
+- TCP connections live on the host, never in the scenario
+- Connection pools managed by host (shared across concurrent scenarios)
+- Parameterized queries enforced at the adapter level
+- Adding a new database = implementing `DatabaseAdapter` on the host
+- Scenario code is identical regardless of database type
+
+---
+
+## Agent Platform Support
+
+### Agent Location Matrix
+
+With host-mediated I/O, agents split into two categories:
+
+| Agent | Runs where | Why |
+|-------|-----------|-----|
+| `transform` (map-fields, filter, etc.) | **Scenario** | Pure computation, no I/O |
+| `utils` (random, timestamp, calc) | **Scenario** | Pure computation |
+| `csv` (parse, generate) | **Scenario** | Pure computation |
+| `xml` (parse, xpath) | **Scenario** | Pure computation |
+| `text` (regex, string ops) | **Scenario** | Pure computation |
+| `http` | **Host** | Needs reqwest/network |
+| `sftp` | **Host** | Needs ssh2/TCP |
+| `shopify` | **Host** | Needs HTTP + connection management |
+| `hubspot` | **Host** | Needs HTTP + connection management |
+| `stripe` | **Host** | Needs HTTP + connection management |
+| `mailgun` | **Host** | Needs HTTP + connection management |
+| `slack` | **Host** | Needs HTTP + connection management |
+| `openai` | **Host** | Needs HTTP + connection management |
+| `bedrock` | **Host** | Needs AWS SDK + credentials |
+| `ai_tools` | **Host** | Dispatches to openai/bedrock |
+| `hdm_commerce` | **Host** | Dispatches to platform agents |
+| `object_model` | **Host** | Needs database (sqlx) |
+| `database` (new) | **Host** | Needs database adapters |
+| `s3_client` | **Host** | Needs HTTP + AWS credentials |
+
+### Hybrid Execution
+
+Some capabilities may run partially in the scenario (data transformation) and partially on the host (I/O). The generated code can optimize:
+
+```rust
+// Pure computation — runs in scenario directly
+let filtered = transform::filter(data, condition);
+
+// I/O — delegates to host
+let products = sdk.execute_capability("shopify", "get-products", inputs)?;
+```
+
+This is an optimization for Phase 2. Phase 1 can route everything through the host for simplicity.
+
+---
+
+## Feature Flags
+
+### runtara-workflow-stdlib
 
 ```toml
 [features]
 default = ["native"]
 
 native = [
-    "tokio/full",
-    "libc",
-    "ureq",
-    "runtara-sdk/quic",
-    "runtara-agents/native",
+    "dep:ureq",               # Blocking HTTP client (same as WASM, but with native TLS)
+    "runtara-sdk/native",
 ]
 
 wasi = [
-    # WASI target - server-side WASM (WASMEdge, Wasmtime, edge platforms)
     "runtara-sdk/wasi",
-    "runtara-agents/wasi",
 ]
 
-wasm-js = [
-    # Browser/Node.js target
-    "wasm-bindgen",
-    "wasm-bindgen-futures",
-    "js-sys",
-    "web-sys",
-    "runtara-sdk/wasm-js",
-    "runtara-agents/wasm-js",
-]
-
-embedded = [
-    "embassy-executor",
-    "runtara-sdk/embedded",
-    "runtara-agents/embedded",
+# Optional: telemetry (native only, host-side concern for WASM)
+telemetry = [
+    "native",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-appender-tracing",
 ]
 ```
 
-#### runtara-agents/Cargo.toml
+**Key change:** No tokio, no reqwest, no runtara-agents/native in the stdlib. Agents that need I/O are host-mediated.
+
+### runtara-sdk
 
 ```toml
 [features]
 default = ["native"]
 
-native = ["reqwest", "ssh2", "openssl", "tokio/rt"]
-wasi = ["wasi"]  # HTTP via wasi-http (P2), SFTP not available
-wasm-js = ["gloo-net"]  # Browser fetch, SFTP not available
-embedded = ["embedded-nal"]  # Limited agent support
+native = ["dep:ureq"]           # Blocking HTTP via ureq
+wasi = []                        # Blocking HTTP via wasi-http
 
-[target.'cfg(target_os = "wasi")'.dependencies]
-wasi = "0.13"  # WASI P2 bindings
+# Legacy (to be removed after migration)
+quic = ["dep:runtara-protocol"]
+embedded = ["dep:runtara-core"]
 ```
 
-#### runtara-sdk/Cargo.toml
+### runtara-agents (for in-scenario agents only)
 
 ```toml
 [features]
-default = ["quic"]
+default = []
 
-quic = ["dep:runtara-protocol"]
-embedded = ["dep:runtara-core"]
-wasi = ["wasi"]  # HTTP-based checkpointing via wasi-http (P2)
-wasm-js = ["wasm-bindgen", "web-sys"]  # localStorage/IndexedDB for checkpoints
-
-[target.'cfg(target_os = "wasi")'.dependencies]
-wasi = "0.13"  # WASI P2 bindings for wasi-http
+# Pure computation agents — no platform-specific deps
+# transform, utils, csv, xml, text are always available
 ```
 
-### 2. Compilation Target Abstraction
+**Key change:** `native`, `wasi`, `wasm-js` feature flags on agents are no longer needed because I/O agents run on the host. Only pure computation agents are compiled into the scenario binary.
 
-Add to `runtara-workflows/src/compile.rs`:
+### smo-stdlib
+
+```toml
+[features]
+default = []
+
+# No feature flags needed — SMO agents are host-mediated
+# Only agent metadata (schemas, descriptions) compiled into scenario
+```
+
+**Key change:** `runtara-object-store`, `reqwest`, `tokio` are completely removed from smo-stdlib. They move to smo-runtime (host).
+
+---
+
+## Compilation Pipeline Changes
+
+### Code Generation
+
+The generated `main()` function changes from async+tokio to synchronous+blocking:
 
 ```rust
-/// Compilation target for scenarios
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Generated scenario code (works for both native and wasm32-wasip2)
+fn main() -> ExitCode {
+    // Initialize tracing (stderr, works on all platforms)
+    let _guard = runtara_workflow_stdlib::telemetry::init_subscriber();
+
+    // Initialize SDK (blocking HTTP)
+    let sdk = match HttpSdk::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to initialize SDK: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Register and get inputs
+    let reg = match sdk.register() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to register: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let data = reg.input.get("data").cloned().unwrap_or(json!({}));
+    let variables = reg.input.get("variables").cloned().unwrap_or(json!({}));
+
+    let scenario_inputs = ScenarioInputs {
+        data: Arc::new(data),
+        variables: Arc::new(variables),
+        parent_scope_id: None,
+    };
+
+    // Register SDK globally
+    register_sdk(sdk);
+
+    // Execute workflow (synchronous)
+    match execute_workflow(Arc::new(scenario_inputs)) {
+        Ok(output) => {
+            let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
+            if let Err(e) = sdk().completed(&output_bytes) {
+                eprintln!("Failed to report completion: {}", e);
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let _ = sdk().failed(&e);
+            ExitCode::FAILURE
+        }
+    }
+}
+```
+
+### Agent Step Codegen
+
+```rust
+// Before (async, in-process):
+let result = runtara_sdk::with_cancellation(
+    registry::execute_capability("shopify", "get-products", inputs)
+).await?;
+
+// After (blocking, host-mediated):
+let result = sdk().execute_capability("shopify", "get-products", inputs)?;
+```
+
+For pure computation agents (transform, csv, xml, etc.) that still run in the scenario:
+```rust
+// Still direct execution for pure agents
+let result = registry::execute_capability("transform", "filter", inputs)?;
+```
+
+### Compilation Target
+
+```rust
 pub enum CompilationTarget {
     /// Native binary for current host (musl on Linux, darwin on macOS)
     Native,
-    /// WASI - server-side WASM (WASMEdge, Wasmtime, edge platforms)
+    /// WASI P2 — server-side WASM
     Wasi,
-    /// Browser/Node.js WASM via wasm-bindgen
-    WasmJs,
-    /// Embedded (configurable target triple)
-    Embedded { target_triple: &'static str },
 }
 
 impl CompilationTarget {
     pub fn target_triple(&self) -> &str {
         match self {
-            Self::Native => get_host_target(),
+            Self::Native => get_host_target(),  // x86_64-unknown-linux-musl, etc.
             Self::Wasi => "wasm32-wasip2",
-            Self::WasmJs => "wasm32-unknown-unknown",
-            Self::Embedded { target_triple } => target_triple,
         }
     }
 
@@ -133,1580 +789,254 @@ impl CompilationTarget {
         match self {
             Self::Native => "native",
             Self::Wasi => "wasi",
-            Self::WasmJs => "wasm-js",
-            Self::Embedded { .. } => "embedded",
+        }
+    }
+
+    pub fn output_extension(&self) -> &str {
+        match self {
+            Self::Native => "",       // ELF binary, no extension
+            Self::Wasi => ".wasm",
         }
     }
 }
 ```
 
-### 3. Platform-Specific Code Generation
-
-Modify `runtara-workflows/src/codegen/ast/program.rs` to generate different `main()` functions based on target:
-
-**Native (current):**
-```rust
-fn main() -> ExitCode {
-    // libc::dup2 for stderr redirection
-    // tokio::runtime::Runtime for async
-    // File-based input/output
-}
-```
-
-**WASI (server-side WASM):**
-```rust
-fn main() {
-    // WASI provides file I/O via preopened directories
-    // Read input from /input/data.json (preopened)
-    // Write output to /output/result.json
-    // stderr works naturally
-    // Checkpoints via HTTP (wasi-http) or custom host functions
-}
-```
-
-**Browser WASM (wasm-bindgen):**
-```rust
-#[wasm_bindgen]
-pub async fn run(input: JsValue) -> Result<JsValue, JsError> {
-    // Host provides input via JS interop
-    // Output returned to host via JsValue
-    // Checkpoints/signals via imported host functions or fetch
-}
-```
-
-**Embedded:**
-```rust
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    // Embassy runtime
-    // Flash/RAM storage
-    // Hardware-specific I/O
-}
-```
-
-### 4. WASM Runtime Models
-
-WASM has two main deployment models with different host communication mechanisms:
-
-#### 4a. WASI Runtimes (WASMEdge, Wasmtime, Wasmer)
-
-Server-side WASM using WASI (WebAssembly System Interface). This is the **preferred model** for runtara because it provides file-like I/O similar to native:
-
-| Service | Native | WASI |
-|---------|--------|------|
-| Input data | File (`/data/input.json`) | WASI fd_read (preopened dir) |
-| Output data | File (`/data/output.json`) | WASI fd_write |
-| Logging | stderr | WASI stderr (fd 2) |
-| Env vars | `std::env` | WASI environ_get |
-| Checkpoints | QUIC to runtara-core | HTTP via WASI sockets or host function |
-| Signals | QUIC polling | HTTP polling or host callback |
-
-**Target:** `wasm32-wasip2` (WASI Preview 2 with Component Model)
-
-**Why WASI P2 over P1:**
-- **wasi-http** - Native HTTP client/server support (needed for checkpointing)
-- **Component Model** - Better composability, typed interfaces
-- **wasi-sockets** - Direct networking support
-- **Future-proof** - P2 is the standardization target
-
-**Cargo.toml:**
-```toml
-[target.wasm32-wasip2.dependencies]
-# Standard library works with WASI P2
-# wasi-http available for HTTP operations
-```
-
-**Advantages:**
-- File I/O works almost like native (via preopened directories)
-- stderr/stdout work naturally
-- Environment variables available
-- **wasi-http** for HTTP requests (checkpointing, HTTP agent)
-- Can run on edge platforms (Cloudflare Workers, Fastly Compute, Fermyon Spin)
-- No JavaScript dependency
-
-**Runtime Support:**
-- Wasmtime 14+ (full P2 support)
-- WASMEdge (P2 support in progress)
-- Cloudflare Workers (wasi-http)
-- Fermyon Spin (native P2)
-
-#### 4b. Browser/Node.js (wasm-bindgen)
-
-JavaScript interop for browser-based execution:
-
-| Service | Native | JS/WASM |
-|---------|--------|---------|
-| Input data | File | JS function call / postMessage |
-| Output data | File | Return value / callback |
-| Logging | stderr | console.log or host callback |
-| Checkpoints | QUIC | fetch API or localStorage |
-| Signals | QUIC | fetch polling or WebSocket |
-
-**Target:** `wasm32-unknown-unknown`
-
-**Host interface (example):**
-```rust
-#[wasm_bindgen]
-extern "C" {
-    fn host_log(level: u8, message: &str);
-    fn host_checkpoint(id: &str, state: &[u8]) -> JsValue;
-    fn host_poll_signals() -> JsValue;
-}
-```
-
-#### 4c. WASI HTTP Architecture (Recommended for WASM)
-
-**Goal:** Truly portable .wasm modules that run on **any** WASI P2 runtime without custom host functions.
-
-WASI P2 includes `wasi-http` which supports HTTPS. By using HTTP/HTTPS for all SDK operations, the .wasm module depends only on standard WASI interfaces - no runtara-specific FFI required.
-
-**Architecture:**
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                         Any WASI P2 Runtime                                  │
-│  (Wasmtime, WASMEdge, Cloudflare Workers, Fermyon Spin, Fastly Compute)     │
-│                                                                              │
-│    ┌────────────────────────────────────────────────────────────────────┐   │
-│    │                    Workflow Instance (.wasm)                        │   │
-│    │                                                                     │   │
-│    │  ┌─────────────────┐    ┌─────────────────┐    ┌────────────────┐  │   │
-│    │  │ Workflow Logic  │───►│ runtara-sdk     │───►│ wasi-http      │  │   │
-│    │  │ (generated)     │    │ (HTTP backend)  │    │ (HTTPS calls)  │  │   │
-│    │  └─────────────────┘    └─────────────────┘    └───────┬────────┘  │   │
-│    └────────────────────────────────────────────────────────┼───────────┘   │
-└─────────────────────────────────────────────────────────────┼───────────────┘
-                                                              │ HTTPS
-                                                              ▼
-                                          ┌───────────────────────────────────┐
-                                          │         runtara-core              │
-                                          │         + HTTP API                │
-                                          │                                   │
-                                          │  POST /api/v1/checkpoint          │
-                                          │  GET  /api/v1/signals             │
-                                          │  POST /api/v1/completed           │
-                                          │  POST /api/v1/suspended           │
-                                          └───────────────────────────────────┘
-```
-
-**Key Insight:** The .wasm only uses standard `wasi-http` - runs anywhere without modification.
-
-**HTTP API for runtara-core:**
+### Build Pipeline
 
 ```
-POST /api/v1/instances/{instance_id}/register
-POST /api/v1/instances/{instance_id}/checkpoint
-GET  /api/v1/instances/{instance_id}/signals
-POST /api/v1/instances/{instance_id}/completed
-POST /api/v1/instances/{instance_id}/suspended
-POST /api/v1/instances/{instance_id}/durable-sleep
+smo-runtime build.rs (NATIVE_BUILD=1):
+  ├─ cargo build smo-stdlib --target x86_64-unknown-linux-musl  → .native_cache/
+  └─ cargo build smo-stdlib --target wasm32-wasip2              → .wasm_cache/    (NEW)
 
-Headers:
-  X-Runtara-Tenant-Id: {tenant_id}
-  Authorization: Bearer {token}  # Optional, for multi-tenant
+At runtime (scenario compilation):
+  POST /scenarios/{id}/compile?target=native  → .data/.../scenario (ELF)
+  POST /scenarios/{id}/compile?target=wasi    → .data/.../scenario.wasm
 ```
 
-**SDK HTTP Backend (blocking, for WASI):**
+### WASM Scenario Execution
 
 ```rust
-// runtara-sdk/src/backend/http.rs
-
-pub struct HttpBackend {
-    base_url: String,
-    instance_id: String,
-    tenant_id: String,
+// New: WASM runner (alongside existing native runner)
+pub struct WasmRunner {
+    engine: wasmtime::Engine,
+    // Pre-configured with WASI P2 + wasi-http
 }
 
-impl HttpBackend {
-    pub fn from_env() -> Result<Self, SdkError> {
-        Ok(Self {
-            base_url: std::env::var("RUNTARA_HTTP_URL")
-                .map_err(|_| SdkError::Configuration("RUNTARA_HTTP_URL not set".into()))?,
-            instance_id: std::env::var("RUNTARA_INSTANCE_ID")?,
-            tenant_id: std::env::var("RUNTARA_TENANT_ID")?,
-        })
-    }
+impl WasmRunner {
+    pub async fn run_instance(
+        &self,
+        wasm_path: &Path,
+        instance_id: &str,
+        tenant_id: &str,
+    ) -> Result<Value> {
+        let mut store = wasmtime::Store::new(&self.engine, WasiCtx::new());
 
-    /// Blocking checkpoint via HTTPS (uses wasi-http internally)
-    pub fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult, SdkError> {
-        let url = format!("{}/api/v1/instances/{}/checkpoint", self.base_url, self.instance_id);
+        // Set environment variables
+        store.data_mut().env("RUNTARA_INSTANCE_ID", instance_id);
+        store.data_mut().env("RUNTARA_TENANT_ID", tenant_id);
+        store.data_mut().env("RUNTARA_SERVER_URL", &self.http_api_url);
 
-        let request = HttpRequest::post(&url)
-            .header("Content-Type", "application/json")
-            .header("X-Runtara-Tenant-Id", &self.tenant_id)
-            .body(serde_json::json!({
-                "checkpoint_id": checkpoint_id,
-                "state": base64::encode(state),
-            }))?;
+        // Allow outbound HTTP to runtara-core HTTP API
+        store.data_mut().allow_http(&self.http_api_url);
 
-        // This uses wasi-http under the hood
-        let response = http_client::send(request)?;
+        let module = wasmtime::Module::from_file(&self.engine, wasm_path)?;
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
 
-        if response.status() != 200 {
-            return Err(SdkError::Http(response.status()));
-        }
+        // Run _start (WASI entry point = main())
+        let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
+        start.call(&mut store, ())?;
 
-        let body: CheckpointResponse = serde_json::from_slice(response.body())?;
-        Ok(body.into())
-    }
-
-    pub fn poll_signals(&self) -> Result<Option<Signal>, SdkError> {
-        let url = format!("{}/api/v1/instances/{}/signals", self.base_url, self.instance_id);
-
-        let request = HttpRequest::get(&url)
-            .header("X-Runtara-Tenant-Id", &self.tenant_id)?;
-
-        let response = http_client::send(request)?;
-        // ...
-    }
-
-    pub fn completed(&self, result: &[u8]) -> Result<(), SdkError> {
-        let url = format!("{}/api/v1/instances/{}/completed", self.base_url, self.instance_id);
-        // POST with result body
-    }
-
-    pub fn suspended(&self) -> Result<(), SdkError> {
-        let url = format!("{}/api/v1/instances/{}/suspended", self.base_url, self.instance_id);
-        // POST
+        // Output delivered via sdk.completed() HTTP call, not file
+        Ok(())
     }
 }
 ```
-
-**Generated WASI Workflow Code:**
-
-```rust
-// Generated workflow (compiled to wasm32-wasip2)
-// NO special imports - only standard library + wasi-http
-
-fn main() {
-    // Read input from preopened directory (standard WASI)
-    let input = std::fs::read_to_string("/input/data.json")
-        .expect("Failed to read input");
-    let input: serde_json::Value = serde_json::from_str(&input).unwrap();
-
-    // Initialize SDK with HTTP backend (reads RUNTARA_HTTP_URL from env)
-    let sdk = runtara_sdk::HttpBackend::from_env()
-        .expect("Failed to initialize SDK");
-
-    // Register instance
-    sdk.register(None).expect("Failed to register");
-
-    // Execute workflow with checkpointing via HTTPS
-    let result = sdk.checkpoint("step-1", &state_bytes);
-    if let Some(existing) = result.existing_state() {
-        // Resume from checkpoint
-    }
-
-    // ... workflow logic ...
-
-    // Complete
-    sdk.completed(&output_bytes).expect("Failed to complete");
-
-    // Write output (standard WASI)
-    std::fs::write("/output/result.json", &output).unwrap();
-}
-```
-
-**Portability Matrix:**
-
-| Platform | Native | WASI + HTTP | Notes |
-|----------|--------|-------------|-------|
-| Linux/macOS server | ✅ QUIC | ✅ HTTP | Full support |
-| runtara-environment | ✅ QUIC | ✅ HTTP | Can run either |
-| Wasmtime CLI | ❌ | ✅ | Just `wasmtime run workflow.wasm` |
-| WASMEdge | ❌ | ✅ | Edge deployment |
-| Cloudflare Workers | ❌ | ✅ | Global edge |
-| Fermyon Spin | ❌ | ✅ | Serverless WASM |
-| Fastly Compute | ❌ | ✅ | CDN edge |
-| Docker + wasmtime | ❌ | ✅ | Containerized WASM |
-
-**runtara-core HTTP API Implementation:**
-
-```rust
-// Add to runtara-core/src/http_api.rs
-
-use axum::{Router, routing::{get, post}, Json, extract::Path};
-
-pub fn http_router(persistence: Arc<dyn Persistence>) -> Router {
-    Router::new()
-        .route("/api/v1/instances/:instance_id/register", post(register))
-        .route("/api/v1/instances/:instance_id/checkpoint", post(checkpoint))
-        .route("/api/v1/instances/:instance_id/signals", get(poll_signals))
-        .route("/api/v1/instances/:instance_id/completed", post(completed))
-        .route("/api/v1/instances/:instance_id/suspended", post(suspended))
-        .route("/api/v1/instances/:instance_id/durable-sleep", post(durable_sleep))
-        .with_state(persistence)
-}
-
-async fn checkpoint(
-    Path(instance_id): Path<String>,
-    headers: HeaderMap,
-    State(persistence): State<Arc<dyn Persistence>>,
-    Json(body): Json<CheckpointRequest>,
-) -> Result<Json<CheckpointResponse>, AppError> {
-    let tenant_id = headers.get("X-Runtara-Tenant-Id")
-        .ok_or(AppError::MissingTenant)?
-        .to_str()?;
-
-    // Reuse existing checkpoint logic from QUIC handler
-    let result = persistence.checkpoint(
-        &instance_id,
-        tenant_id,
-        &body.checkpoint_id,
-        &base64::decode(&body.state)?,
-    ).await?;
-
-    Ok(Json(CheckpointResponse::from(result)))
-}
-```
-
-**Environment Variables for WASI:**
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `RUNTARA_HTTP_URL` | Yes | Base URL for runtara-core HTTP API (e.g., `https://runtara.example.com`) |
-| `RUNTARA_INSTANCE_ID` | Yes | Instance identifier |
-| `RUNTARA_TENANT_ID` | Yes | Tenant identifier |
-
-**Benefits of HTTP Architecture:**
-- **True portability** - Same .wasm runs anywhere with wasi-http
-- **No custom host functions** - Only standard WASI interfaces
-- **Edge-ready** - Deploy to Cloudflare, Fermyon, Fastly without changes
-- **Simple debugging** - HTTP is easy to inspect, log, proxy
-- **Firewall-friendly** - HTTPS on port 443 works everywhere
-
-**Trade-offs vs QUIC:**
-
-| Aspect | QUIC (Native) | HTTP (WASI) |
-|--------|---------------|-------------|
-| Latency | Lower (0-RTT) | Higher (TLS handshake) |
-| Connection overhead | Multiplexed | Per-request |
-| Portability | Native only | Any WASI P2 runtime |
-| Debugging | Harder | Easy (curl, logs) |
-
-#### 4d. Alternative: Custom Host Functions
-
-For **runtara-environment managed** deployments where you want QUIC performance but still run WASI modules, a launcher approach can bridge QUIC to host functions:
-
-```
-┌─────────────────────┐        QUIC (UDP)         ┌─────────────────────────────────────┐
-│ runtara-environment │ ◄────────────────────────►│       WASI Launcher (native)        │
-│   (OCI runner)      │                           │  ┌─────────────────────────────────┐│
-└─────────────────────┘                           │  │ runtara-sdk (QUIC backend)      ││
-                                                  │  └─────────────┬───────────────────┘│
-                                                  │                │ Host Functions     │
-                                                  │  ┌─────────────▼───────────────────┐│
-                                                  │  │ Wasmtime Runtime                ││
-                                                  │  │  ┌───────────────────────────┐  ││
-                                                  │  │  │ Workflow Instance (.wasm) │  ││
-                                                  │  │  └───────────────────────────┘  ││
-                                                  │  └─────────────────────────────────┘│
-                                                  └─────────────────────────────────────┘
-```
-
-This approach requires:
-- Custom `runtara-wasi-launcher` binary with embedded Wasmtime
-- WIT interface defining runtara host functions
-- .wasm modules compiled with `wit-bindgen` for host function imports
-
-**When to use launcher vs HTTP:**
-
-| Use Case | Recommendation |
-|----------|----------------|
-| Edge platforms (Cloudflare, Fermyon) | HTTP - no launcher available |
-| runtara-environment managed | Either - launcher for QUIC perf, HTTP for simplicity |
-| Self-hosted Wasmtime | HTTP - simpler, no custom binary needed |
-| Low-latency requirements | Launcher with QUIC |
-| Maximum portability | HTTP - works everywhere |
-
-#### Recommended Approach
-
-1. **Communication:** Use **HTTP** for WASI SDK communication
-   - True portability: `wasmtime run ./scenario.wasm` works directly
-   - No special runners or launchers needed
-   - Works on all edge platforms (Cloudflare, Fermyon, Fastly)
-   - Easy debugging with curl, logs, proxies
-   - Standard wasi-http - supported by all WASI P2 runtimes
-
-2. **Native:** Keep **QUIC** for native workflows
-   - Existing protocol, proven performance
-   - No changes needed to current native implementation
-
-3. **WASM Target:** `wasm32-wasip2` for server-side execution
-   - Simpler code generation (similar to native)
-   - Better for workflow orchestration use cases
-   - Growing ecosystem (WASMEdge, Wasmtime, edge platforms)
-
-4. **Browser Target:** wasm-bindgen for browser use cases
-   - Interactive/UI scenarios
-   - Client-side workflow preview
-   - HTTP backend via fetch API
-
-**Transport Decision Matrix:**
-
-| Platform | Transport | Runner | Notes |
-|----------|-----------|--------|-------|
-| Native (Linux/macOS) | QUIC | Native binary | Best performance |
-| WASM (any runtime) | HTTP | `wasmtime run` | Maximum portability |
-| Edge (Cloudflare, Fermyon) | HTTP | Platform native | Just deploy .wasm |
-| Browser | HTTP | wasm-bindgen | fetch API |
-| Embedded | HTTP | Platform specific | If networking available |
-
-#### 4e. Signal Architecture (Cross-Platform Model)
-
-A key architectural insight that enables cross-platform support is the **pull-based signal model**:
-
-**Core Principle:**
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Signal Flow (All Platforms)                         │
-│                                                                             │
-│   Workflow Instance                                runtara-core             │
-│   ─────────────────                               ─────────────             │
-│                                                                             │
-│   1. checkpoint(state) ──────────────────────►   Store checkpoint          │
-│                                                   Check queued signals      │
-│   2. ◄─────────────────────────────────────────  Return CheckpointResult   │
-│      {                                           {existing_state,           │
-│        existing_state: Option<bytes>,              should_pause,            │
-│        should_pause: bool,                         should_cancel}           │
-│        should_cancel: bool,                                                 │
-│      }                                                                      │
-│                                                                             │
-│   External signal (pause/cancel) arrives ────►   Queue in database         │
-│                                                  (no push to workflow)      │
-│                                                                             │
-│   3. Next checkpoint() ──────────────────────►   Fetch queued signals      │
-│   4. ◄─────────────────────────────────────────  Return with signal info   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-**Key Properties:**
-
-1. **Workflow always initiates** - All communication is request/response initiated by the workflow
-2. **Core queues signals** - External signals (pause, cancel, resume) are stored in the database
-3. **Signals returned with response** - `CheckpointResult` already includes `should_pause` and `should_cancel` flags
-4. **No push mechanism required** - Core never needs to push to the workflow
-
-**Why This Enables Cross-Platform:**
-
-| Platform | Connection Type | Signal Detection |
-|----------|----------------|------------------|
-| Native (QUIC) | Multiplexed connection | Background polling (optimization) |
-| WASI (HTTP) | Per-request | Checkpoint response includes signals |
-| Browser (HTTP) | Per-request (fetch) | Response includes signals |
-| Embedded | Per-request | Response includes signals |
-
-**Native Background Polling (Optimization Only):**
-
-The native implementation CAN have a background task that polls for signals:
-```rust
-// Optional optimization - faster signal detection on native
-tokio::spawn(async move {
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = sdk.poll_signals().await;  // Update cached state
-    }
-});
-```
-
-But this is an **optimization**, not a requirement. The fundamental model works without it:
-- WASI/embedded don't have background threads - they rely on checkpoint responses
-- Native could work the same way - just slightly slower signal detection
-
-**Checkpoint Response Structure:**
-```rust
-pub struct CheckpointResult {
-    /// Previously saved state (for resume after crash/restart)
-    pub existing_state: Option<Vec<u8>>,
-    /// Pause signal queued - workflow should exit cleanly
-    pub should_pause: bool,
-    /// Cancel signal queued - workflow should abort
-    pub should_cancel: bool,
-}
-```
-
-This pull-based model is what makes HTTP sufficient for WASI - no WebSocket, no long-polling, just simple request/response. The workflow checks for signals implicitly on every checkpoint call.
-
-**Running WASM workflows:**
-
-```bash
-# Just plain wasmtime - no special runner needed
-RUNTARA_HTTP_URL=https://runtara.example.com \
-RUNTARA_INSTANCE_ID=my-instance \
-RUNTARA_TENANT_ID=my-tenant \
-wasmtime run \
-    --dir /input::/data/input \
-    --dir /output::/data/output \
-    ./scenario.wasm
-```
-
-### 5. Workflow Runtime Abstraction
-
-The runtime abstraction must handle:
-- **Parallelism** - Execute Split branches concurrently where supported
-- **Signal processing** - Check for pause/cancel/resume signals
-- **Checkpointing** - Save state between steps for durability
-- **Cancellation** - Stop workflow "in the middle" on async platforms
-
-#### 5a. WorkflowRuntime Trait
-
-```rust
-/// Platform-agnostic workflow runtime
-/// Handles step execution, signals, and checkpoints across platforms
-pub trait WorkflowRuntime: Send + Sync {
-    /// Signal check result
-    type SignalAction;
-
-    /// Execute multiple independent tasks (Split steps)
-    /// - Native: parallel via tokio JoinSet
-    /// - WASI/Embedded: sequential
-    fn execute_parallel<T, F>(&self, tasks: Vec<F>) -> Result<Vec<T>, WorkflowError>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static;
-
-    /// Pre-step hook: check signals before executing a step
-    /// Returns action: Continue, Pause, Cancel
-    fn pre_step(&self, step_id: &str) -> Result<SignalAction, WorkflowError>;
-
-    /// Post-step hook: checkpoint state and check signals after step completion
-    fn post_step(&self, step_id: &str, state: &[u8]) -> Result<SignalAction, WorkflowError>;
-
-    /// Check if cancellation has been requested (for async mid-step checking)
-    fn is_cancelled(&self) -> bool;
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum SignalAction {
-    Continue,           // Proceed with workflow
-    Pause,              // Exit cleanly, will resume later
-    Cancel,             // Abort workflow
-    Resume(Vec<u8>),    // Resume from checkpoint with state
-}
-```
-
-#### 5b. Native Implementation (Async with Background Signal Polling)
-
-```rust
-#[cfg(feature = "native")]
-pub struct TokioRuntime {
-    runtime: tokio::runtime::Handle,
-    sdk: Arc<RuntaraSdk>,
-    /// Shared cancellation flag set by signal polling task
-    cancelled: Arc<AtomicBool>,
-    /// Channel to receive signal updates
-    signal_rx: tokio::sync::watch::Receiver<Option<Signal>>,
-}
-
-#[cfg(feature = "native")]
-impl TokioRuntime {
-    pub fn new(sdk: Arc<RuntaraSdk>) -> Self {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let (signal_tx, signal_rx) = tokio::sync::watch::channel(None);
-
-        // Spawn background signal polling task
-        let sdk_clone = sdk.clone();
-        let cancelled_clone = cancelled.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                if let Ok(signal) = sdk_clone.poll_signals().await {
-                    if let Some(sig) = signal {
-                        if sig.is_cancel() {
-                            cancelled_clone.store(true, Ordering::SeqCst);
-                        }
-                        let _ = signal_tx.send(Some(sig));
-                    }
-                }
-            }
-        });
-
-        Self { runtime: tokio::runtime::Handle::current(), sdk, cancelled, signal_rx }
-    }
-}
-
-#[cfg(feature = "native")]
-impl WorkflowRuntime for TokioRuntime {
-    type SignalAction = SignalAction;
-
-    fn execute_parallel<T, F>(&self, tasks: Vec<F>) -> Result<Vec<T>, WorkflowError>
-    where F: FnOnce() -> T + Send + 'static, T: Send + 'static {
-        self.runtime.block_on(async {
-            let mut set = JoinSet::new();
-            for task in tasks {
-                set.spawn_blocking(task);
-            }
-
-            let mut results = Vec::with_capacity(set.len());
-            while let Some(result) = set.join_next().await {
-                // Check cancellation between task completions
-                if self.cancelled.load(Ordering::SeqCst) {
-                    set.abort_all();  // Cancel remaining tasks
-                    return Err(WorkflowError::Cancelled);
-                }
-                results.push(result.map_err(|_| WorkflowError::TaskPanicked)?);
-            }
-            Ok(results)
-        })
-    }
-
-    fn pre_step(&self, step_id: &str) -> Result<SignalAction, WorkflowError> {
-        // Check latest signal from background poller
-        if self.cancelled.load(Ordering::SeqCst) {
-            return Ok(SignalAction::Cancel);
-        }
-        if let Some(signal) = self.signal_rx.borrow().as_ref() {
-            if signal.is_pause() {
-                return Ok(SignalAction::Pause);
-            }
-        }
-        Ok(SignalAction::Continue)
-    }
-
-    fn post_step(&self, step_id: &str, state: &[u8]) -> Result<SignalAction, WorkflowError> {
-        // Checkpoint via SDK (async, but we block here)
-        self.runtime.block_on(async {
-            let result = self.sdk.checkpoint(step_id, state).await?;
-            if result.should_cancel() {
-                Ok(SignalAction::Cancel)
-            } else if result.should_pause() {
-                Ok(SignalAction::Pause)
-            } else if let Some(existing) = result.existing_state() {
-                Ok(SignalAction::Resume(existing.to_vec()))
-            } else {
-                Ok(SignalAction::Continue)
-            }
-        })
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
-    }
-}
-```
-
-#### 5c. WASI/Embedded Implementation (Blocking, Poll-Based Signals)
-
-```rust
-#[cfg(any(feature = "wasi", feature = "embedded"))]
-pub struct BlockingRuntime {
-    sdk: WasiSdk,  // or EmbeddedSdk
-}
-
-#[cfg(any(feature = "wasi", feature = "embedded"))]
-impl WorkflowRuntime for BlockingRuntime {
-    type SignalAction = SignalAction;
-
-    fn execute_parallel<T, F>(&self, tasks: Vec<F>) -> Result<Vec<T>, WorkflowError>
-    where F: FnOnce() -> T + Send + 'static, T: Send + 'static {
-        // Sequential execution - check signals between tasks
-        let mut results = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            // Check for cancellation before each task
-            if self.is_cancelled() {
-                return Err(WorkflowError::Cancelled);
-            }
-            results.push(task());
-        }
-        Ok(results)
-    }
-
-    fn pre_step(&self, step_id: &str) -> Result<SignalAction, WorkflowError> {
-        // Explicit signal poll (blocking HTTP call on WASI)
-        match self.sdk.poll_signals() {
-            Ok(Some(signal)) if signal.is_cancel() => Ok(SignalAction::Cancel),
-            Ok(Some(signal)) if signal.is_pause() => Ok(SignalAction::Pause),
-            _ => Ok(SignalAction::Continue),
-        }
-    }
-
-    fn post_step(&self, step_id: &str, state: &[u8]) -> Result<SignalAction, WorkflowError> {
-        // Blocking checkpoint call
-        let result = self.sdk.checkpoint(step_id, state)?;
-        if result.should_cancel() {
-            Ok(SignalAction::Cancel)
-        } else if result.should_pause() {
-            Ok(SignalAction::Pause)
-        } else if let Some(existing) = result.existing_state() {
-            Ok(SignalAction::Resume(existing.to_vec()))
-        } else {
-            Ok(SignalAction::Continue)
-        }
-    }
-
-    fn is_cancelled(&self) -> bool {
-        // Must poll explicitly - no background task
-        self.sdk.poll_signals()
-            .ok()
-            .flatten()
-            .map(|s| s.is_cancel())
-            .unwrap_or(false)
-    }
-}
-```
-
-#### 5d. Generated Code (Platform-Agnostic)
-
-```rust
-// Generated workflow execution - same code for all platforms
-fn execute_workflow(runtime: &impl WorkflowRuntime, input: Value) -> Result<Value, WorkflowError> {
-    let mut state = WorkflowState::new(input);
-
-    for step in &WORKFLOW_STEPS {
-        // Pre-step: check signals
-        match runtime.pre_step(&step.id)? {
-            SignalAction::Cancel => return Err(WorkflowError::Cancelled),
-            SignalAction::Pause => {
-                // Save state and exit cleanly
-                runtime.post_step(&step.id, &state.serialize())?;
-                return Err(WorkflowError::Paused);
-            }
-            SignalAction::Resume(saved) => {
-                state = WorkflowState::deserialize(&saved)?;
-                continue;  // Skip to next step
-            }
-            SignalAction::Continue => {}
-        }
-
-        // Execute step
-        let result = match &step.kind {
-            StepKind::Action(action) => execute_action(runtime, action, &state)?,
-            StepKind::Split(branches) => {
-                let tasks: Vec<_> = branches.iter()
-                    .map(|b| {
-                        let s = state.clone();
-                        move || execute_branch(b, &s)
-                    })
-                    .collect();
-                runtime.execute_parallel(tasks)?
-            }
-        };
-
-        state.apply_result(result);
-
-        // Post-step: checkpoint and check signals
-        match runtime.post_step(&step.id, &state.serialize())? {
-            SignalAction::Cancel => return Err(WorkflowError::Cancelled),
-            SignalAction::Pause => return Err(WorkflowError::Paused),
-            _ => {}
-        }
-    }
-
-    Ok(state.output())
-}
-```
-
-#### 5e. Cancellation Semantics by Platform
-
-| Platform | Signal Detection | Mid-Step Cancellation | Cancellation Granularity |
-|----------|------------------|----------------------|--------------------------|
-| Native (tokio) | Background async task polls every 500ms | Yes - `JoinSet::abort_all()` | Can cancel between parallel branch completions |
-| WASI | Explicit poll in pre_step/post_step | No - must complete current step | Between steps only |
-| Embedded | Explicit poll (if networking available) | No | Between steps only |
-
-**Native "stop in the middle" behavior:**
-- Background task sets `cancelled` flag asynchronously
-- `execute_parallel` checks flag between branch completions and calls `abort_all()`
-- Long-running single steps can check `is_cancelled()` periodically
-
-**WASI/Embedded graceful degradation:**
-- No background polling possible (no async runtime)
-- Signals checked explicitly at step boundaries
-- A long step must complete before cancellation takes effect
-- Acceptable tradeoff: workflows are designed as discrete steps
-
-#### 5f. Benefits
-
-- **Single code generation** - workflow logic identical across platforms
-- **Parallel where possible** - native uses tokio JoinSet for Split steps
-- **Signal-aware** - pre/post step hooks handle pause/cancel/resume uniformly
-- **Async cancellation on native** - can abort parallel branches mid-execution
-- **Graceful degradation** - WASI/embedded get same correctness, just less granular cancellation
-- **Checkpoint integration** - post_step combines checkpointing with signal checking (efficient)
-
-### 6. SDK Backend Abstraction
-
-The existing `SdkBackend` trait in `runtara-sdk/src/backend/mod.rs` provides the abstraction pattern:
-
-```rust
-#[async_trait]
-pub trait SdkBackend: Send + Sync {
-    async fn connect(&self) -> Result<()>;
-    async fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult>;
-    async fn durable_sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()>;
-    async fn suspended(&self) -> Result<()>;
-    async fn completed(&self, result: &[u8]) -> Result<()>;
-    // ...
-}
-```
-
-New backends to implement:
-
-| Backend | Storage | Communication |
-|---------|---------|---------------|
-| `QuicBackend` (existing) | Remote (runtara-core) | QUIC protocol |
-| `EmbeddedBackend` (existing) | Local database | Direct persistence |
-| `WasmBackend` (new) | localStorage/IndexedDB | HTTP/WebSocket |
-| `EmbeddedFlashBackend` (new) | Flash storage | None or limited |
-
----
-
-## Agent Platform Support Matrix
-
-| Agent | Native | WASI | Browser WASM | Embedded |
-|-------|--------|------|--------------|----------|
-| `utils` (random, timestamp, delay) | Full | Full | Full | Full |
-| `transform` (map-fields, etc.) | Full | Full | Full | Full |
-| `csv` (parse, generate) | Full | Full | Full | Full |
-| `xml` (parse, xpath) | Full | Full | Full | Full |
-| `text` (regex, string ops) | Full | Full | Full | Full |
-| `http` | Full (reqwest) | wasi-http | fetch API | Limited |
-| `sftp` | Full (ssh2) | Not available | Not available | Not available |
-| `file` | Full (std::fs) | WASI fs (preopened) | OPFS | Flash/RAM |
-| `crypto` | Full | Full | Web Crypto | Limited |
-| `compression` | Full | Full | Full | Full |
-| `datetime` | Full | Full | Full | Full |
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: WASI Support (Server-Side WASM)
+### Phase 1: Unified HTTP Protocol
 
-Target: `wasm32-wasip2` for WASMEdge, Wasmtime, edge platforms
+**Goal:** Replace QUIC with HTTP in the scenario binary path. Native scenarios use HTTP. No WASM yet.
 
-1. **Add feature flags** (`wasi`, `wasm-js`) to Cargo.toml files
-2. **WASI I/O adaptation:**
-   - Input/output via preopened directories (similar to native)
-   - stderr works naturally
-   - Environment variables for configuration
-3. **Create `WasiBackend`** for SDK:
-   - HTTP-based checkpointing via `wasi-http` or custom host functions
-   - Fallback: stateless mode (no checkpointing)
-4. **HTTP client for WASI** using `wasi-http` component model
-5. **Add `CompilationTarget::Wasi`** to compile.rs
-6. **Generate WASI-compatible main** - standard `fn main()` with WASI I/O
+1. **Instance HTTP API in runtara-core/smo-runtime**
+   - Expose existing instance handlers over HTTP (axum routes)
+   - Reuse handler logic from QUIC path (`handle_checkpoint`, `handle_poll_signals`, etc.)
+   - Add `POST /instances/{id}/register` with input delivery
+   - Add `POST /agents/{agent}/{capability}` for host-mediated agent execution
 
-### Phase 2: Browser WASM Support (wasm-bindgen)
+2. **HttpSdk backend**
+   - New `HttpSdk` in runtara-sdk using `ureq` (blocking HTTP)
+   - Implements same operations as `QuicBackend`
+   - Add `execute_capability()` method for host-mediated agents
 
-Target: `wasm32-unknown-unknown` for browsers/Node.js
+3. **Host-side agent execution service**
+   - Move agent execution from scenario binary to smo-runtime host
+   - Route agent requests to existing agent implementations (which keep using tokio, reqwest, sqlx)
+   - Connection/credential resolution on host side
 
-- JavaScript interop via wasm-bindgen
-- localStorage/IndexedDB for checkpoints
-- fetch API for HTTP
-- Web Worker support for background execution
+4. **Codegen: synchronous main()**
+   - Generate blocking `main()` instead of `async fn async_main()`
+   - Replace `tokio::time::sleep` with `std::thread::sleep`
+   - Replace `registry::execute_capability().await` with `sdk.execute_capability()`
+   - Keep pure computation agents (transform, csv, etc.) in-process
 
-### Phase 3: Advanced WASI P2 Features
+5. **Build pipeline: remove QUIC deps from scenario stdlib**
+   - Remove tokio, quinn, runtara-protocol from scenario link path
+   - Remove reqwest, ssh2, openssl from smo-stdlib
+   - Keep ureq as the only HTTP dependency
 
-- Component model composition (combine scenarios as components)
-- wasi-sockets for direct TCP/UDP (beyond HTTP)
-- Edge platform optimizations (Cloudflare, Fastly, Fermyon)
+6. **Verification**
+   - All existing tests pass with HTTP backend
+   - WaitForSignal works with HTTP polling
+   - Checkpoint/resume works over HTTP
+   - All agents work via host mediation
 
-### Phase 3: Embedded Support
+### Phase 2: WASM Compilation
 
-- Embassy runtime integration
-- No-std compatible agent subset
-- Flash storage for checkpoints
-- Minimal networking (if available)
+**Goal:** Compile scenarios to `wasm32-wasip2` and execute with Wasmtime.
+
+1. **WASM library cache**
+   - Add `wasm32-wasip2` target to `build.rs`
+   - Pre-compile stdlib to `.wasm` artifacts in `.wasm_cache/`
+
+2. **CompilationTarget::Wasi in compile.rs**
+   - Add WASM target support to `compile_scenario()`
+   - `rustc --target wasm32-wasip2 ...`
+
+3. **HttpClient: wasi-http backend**
+   - Platform-split `HttpClient` (ureq for native, wasi-http for WASM)
+   - Or: if ureq compiles to WASI (it uses std::net), just use ureq everywhere
+
+4. **WasmRunner in runtara-environment**
+   - Embed Wasmtime for executing `.wasm` scenarios
+   - Configure WASI P2 context (env vars, HTTP permissions)
+
+5. **API: compile target parameter**
+   - `POST /scenarios/{id}/compile?target=wasi`
+   - Store both native and WASM artifacts per version
+
+### Phase 3: Advanced Features
+
+1. **Browser WASM** (`wasm32-unknown-unknown` + wasm-bindgen)
+   - Scenario preview in frontend
+   - Interactive workflow testing
+
+2. **Generic database agent**
+   - `database` agent with `query`, `execute`, `batch` capabilities
+   - Host-side adapters for PostgreSQL, MySQL, ClickHouse, SQLite
+   - Connection management via existing connection model
+
+3. **Edge deployment**
+   - Deploy `.wasm` scenarios to Cloudflare Workers, Fermyon Spin
+   - HTTP API for runtara-core accessible from edge
+
+4. **QUIC removal**
+   - After HTTP is proven in production, remove QUIC from scenario path entirely
+   - `runtara-protocol` becomes internal-only (environment↔core)
 
 ---
 
 ## Files to Modify
 
+### Phase 1 (HTTP Protocol)
+
 | File | Changes |
 |------|---------|
-| `runtara-workflow-stdlib/Cargo.toml` | Feature flags for native/wasm/embedded |
-| `runtara-workflows/src/compile.rs` | `CompilationTarget` enum, target selection |
-| `runtara-workflows/src/codegen/ast/program.rs` | Platform-specific main generation |
-| `runtara-sdk/src/backend/mod.rs` | Export WasmBackend |
-| `runtara-agents/src/agents/http.rs` | Platform-abstracted HTTP client |
-| `runtara-agents/Cargo.toml` | Feature flags |
-| `runtara-sdk/Cargo.toml` | Add wasm feature |
+| `runtara-sdk/Cargo.toml` | Add `native` feature with `ureq`, keep `quic` as legacy |
+| `runtara-sdk/src/backend/http.rs` | **NEW:** `HttpSdk` implementation |
+| `runtara-sdk/src/backend/mod.rs` | Export `http` module |
+| `runtara-sdk/src/client.rs` | Use `HttpSdk` as default backend |
+| `runtara-workflow-stdlib/Cargo.toml` | Remove tokio, add ureq |
+| `runtara-workflows/src/codegen/ast/program.rs` | Generate sync `main()` |
+| `runtara-workflows/src/codegen/ast/steps/agent.rs` | Host-mediated execution |
+| `runtara-workflows/src/codegen/ast/steps/wait_for_signal.rs` | `std::thread::sleep` |
+| `smo-runtime/src/api/` | **NEW:** Instance HTTP API routes |
+| `smo-runtime/src/api/` | **NEW:** Agent execution endpoint |
+| `smo-stdlib/Cargo.toml` | Remove reqwest, sqlx, tokio deps |
+| `smo-stdlib/src/smo_agents/*.rs` | Thin wrappers calling `sdk.execute_capability()` |
 
-## New Files to Create
+### Phase 2 (WASM)
+
+| File | Changes |
+|------|---------|
+| `runtara-workflows/src/compile.rs` | `CompilationTarget::Wasi`, wasm32-wasip2 support |
+| `smo-runtime/build.rs` | WASM pre-compilation to `.wasm_cache/` |
+| `runtara-sdk/src/http_client.rs` | Platform-split: ureq / wasi-http |
+| `runtara-environment/src/runner/wasm.rs` | **NEW:** Wasmtime-based WASM runner |
+
+### New Files
 
 | Path | Purpose |
 |------|---------|
-| `runtara-sdk/src/backend/wasm.rs` | WASM checkpoint backend |
-| `runtara-workflow-stdlib/src/runtime/platform.rs` | Runtime platform abstraction trait |
-| `runtara-agents/src/http/client.rs` | HTTP client trait with platform implementations |
+| `runtara-sdk/src/backend/http.rs` | Blocking HTTP SDK backend |
+| `runtara-sdk/src/http_client.rs` | Platform-agnostic HTTP client (ureq / wasi-http) |
+| `smo-runtime/src/api/instance_http.rs` | Instance HTTP API (checkpoint, signals, etc.) |
+| `smo-runtime/src/api/agent_executor.rs` | Host-side agent execution service |
+| `runtara-environment/src/runner/wasm.rs` | WASM scenario runner (Wasmtime) |
 
 ---
 
 ## Verification
 
 ```bash
-# Native (existing)
-cargo test -p runtara-workflows
+# Phase 1: Native with HTTP (no QUIC)
+cargo test -p runtara-sdk --features native --no-default-features
+cargo test -p runtara-workflow-stdlib --features native --no-default-features
+cargo test -p smo-runtime  # Integration tests with HTTP backend
 
-# WASI compilation check (server-side WASM)
+# Phase 2: WASM compilation check
+rustup target add wasm32-wasip2
 cargo build -p runtara-workflow-stdlib \
     --target wasm32-wasip2 \
     --features wasi \
     --no-default-features
 
-# Browser WASM compilation check
-cargo build -p runtara-workflow-stdlib \
-    --target wasm32-unknown-unknown \
-    --features wasm-js \
-    --no-default-features
-
 # Feature isolation (no cross-feature leaks)
 cargo check -p runtara-workflow-stdlib --features native --no-default-features
 cargo check -p runtara-workflow-stdlib --features wasi --no-default-features
-cargo check -p runtara-workflow-stdlib --features wasm-js --no-default-features
+
+# Verify no tokio in scenario dependency tree
+cargo tree -p smo-stdlib --no-default-features | grep -c tokio  # should be 0
 ```
 
 ---
 
-## Step-by-Step Refactoring Guide
+## Appendix: Environment Variables
 
-This guide provides the exact sequence of changes to implement cross-platform support, starting with WASI.
+### Scenario Binary (native and WASM)
 
-### Prerequisites
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `RUNTARA_SERVER_URL` | Yes | HTTP base URL for host API (e.g., `http://127.0.0.1:7001`) |
+| `RUNTARA_INSTANCE_ID` | Yes | Instance UUID |
+| `RUNTARA_TENANT_ID` | Yes | Tenant identifier |
+| `SCENARIO_ID` | No | For tracing/logging |
+| `RUST_LOG` | No | Log level (default: `info`) |
 
-```bash
-# Install WASI target
-rustup target add wasm32-wasip2
+### Removed from Scenario (Host-Side Only)
 
-# Install browser WASM target (for later)
-rustup target add wasm32-unknown-unknown
-```
-
----
-
-### Step 1: Add Feature Flags to runtara-sdk
-
-**File:** `crates/runtara-sdk/Cargo.toml`
-
-**Why first:** SDK is the foundation - other crates depend on it.
-
-```toml
-# Before
-[features]
-default = ["quic"]
-quic = ["dep:runtara-protocol"]
-embedded = ["dep:runtara-core"]
-
-# After
-[features]
-default = ["quic"]
-quic = ["dep:runtara-protocol"]
-embedded = ["dep:runtara-core"]
-wasi = []      # WASI target - HTTP-based or stateless
-wasm-js = []   # Browser target - JS interop
-```
-
-**Verify:**
-```bash
-cargo check -p runtara-sdk --features quic --no-default-features
-cargo check -p runtara-sdk --features wasi --no-default-features
-```
+| Variable | Now where | Why |
+|----------|-----------|-----|
+| `RUNTARA_SERVER_ADDR` (QUIC) | Removed | HTTP replaces QUIC |
+| `CONNECTION_SERVICE_URL` | Host only | Connections resolved on host |
+| `DATABASE_URL` | Host only | Database access on host |
+| `OBJECT_MODEL_DATABASE_URL` | Host only | Object model on host |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Host only | Telemetry on host |
 
 ---
 
-### Step 2: Abstract Async Runtime in runtara-sdk
-
-**File:** `crates/runtara-sdk/src/lib.rs`
-
-**Why:** Standard tokio doesn't work on WASM (requires OS threads, epoll/kqueue).
-
-**WASI async options:**
-1. **Blocking I/O** - Works now, sufficient for sequential workflow steps
-2. **Component model async** - WASI P2's native async (different paradigm, future direction)
-
-For runtara workflows, blocking I/O is acceptable because:
-- Workflow steps execute sequentially with checkpoints between them
-- HTTP calls via wasi-http are naturally request/response
-- No need for concurrent I/O within a single step
-
-```rust
-// Add at top of lib.rs
-#[cfg(any(feature = "quic", feature = "embedded"))]
-use tokio::sync::Mutex;
-
-#[cfg(feature = "wasi")]
-use std::sync::Mutex;  // Blocking I/O for WASI
-
-#[cfg(feature = "wasm-js")]
-use std::cell::RefCell;  // Single-threaded in browser
-```
-
-**File:** `crates/runtara-sdk/src/backend/mod.rs`
-
-Add WASI backend module:
-
-```rust
-#[cfg(feature = "quic")]
-pub mod quic;
-
-#[cfg(feature = "embedded")]
-pub mod embedded;
-
-#[cfg(feature = "wasi")]
-pub mod wasi;
-
-#[cfg(feature = "wasm-js")]
-pub mod wasm_js;
-```
-
----
-
-### Step 3: Create WasiBackend
-
-**New file:** `crates/runtara-sdk/src/backend/wasi.rs`
-
-```rust
-//! WASI backend for runtara-sdk
-//!
-//! Uses HTTP for checkpointing when RUNTARA_CHECKPOINT_URL is set,
-//! otherwise operates in stateless mode.
-
-use crate::{CheckpointResult, SdkError};
-
-pub struct WasiBackend {
-    instance_id: String,
-    tenant_id: String,
-    checkpoint_url: Option<String>,
-}
-
-impl WasiBackend {
-    pub fn from_env() -> Result<Self, SdkError> {
-        let instance_id = std::env::var("RUNTARA_INSTANCE_ID")
-            .map_err(|_| SdkError::Configuration("RUNTARA_INSTANCE_ID not set".into()))?;
-        let tenant_id = std::env::var("RUNTARA_TENANT_ID")
-            .map_err(|_| SdkError::Configuration("RUNTARA_TENANT_ID not set".into()))?;
-        let checkpoint_url = std::env::var("RUNTARA_CHECKPOINT_URL").ok();
-
-        Ok(Self { instance_id, tenant_id, checkpoint_url })
-    }
-
-    pub fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult, SdkError> {
-        match &self.checkpoint_url {
-            Some(url) => self.checkpoint_via_http(url, checkpoint_id, state),
-            None => Ok(CheckpointResult::new_empty()),  // Stateless mode
-        }
-    }
-
-    fn checkpoint_via_http(&self, url: &str, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult, SdkError> {
-        // WASI P2: Use wasi-http for HTTP requests
-        // wasi:http/outgoing-handler provides fetch-like API
-        use wasi::http::outgoing_handler;
-        todo!("HTTP checkpointing via wasi-http")
-    }
-}
-```
-
-**Verify:**
-```bash
-cargo check -p runtara-sdk --target wasm32-wasip2 --features wasi --no-default-features
-```
-
----
-
-### Step 4: Add Feature Flags to runtara-agents
-
-**File:** `crates/runtara-agents/Cargo.toml`
-
-```toml
-# Before
-[dependencies]
-reqwest = { version = "0.12", ... }
-ssh2 = "0.9"
-
-# After
-[features]
-default = ["native"]
-native = ["reqwest", "ssh2", "openssl-sys"]
-wasi = []      # Limited agents, no SSH
-wasm-js = ["gloo-net"]
-
-[dependencies]
-# Make platform-specific deps optional
-reqwest = { version = "0.12", ..., optional = true }
-ssh2 = { version = "0.9", optional = true }
-openssl-sys = { version = "...", optional = true }
-gloo-net = { version = "0.6", optional = true }
-```
-
-**File:** `crates/runtara-agents/src/agents/http.rs`
-
-```rust
-#[cfg(feature = "native")]
-use reqwest::Client;
-
-#[capability(...)]
-pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
-    #[cfg(feature = "native")]
-    {
-        http_request_reqwest(input).await
-    }
-
-    #[cfg(feature = "wasi")]
-    {
-        http_request_wasi(input).await
-    }
-
-    #[cfg(feature = "wasm-js")]
-    {
-        http_request_gloo(input).await
-    }
-}
-
-#[cfg(feature = "native")]
-async fn http_request_reqwest(input: HttpRequestInput) -> Result<HttpResponse, String> {
-    // Existing implementation
-}
-
-#[cfg(feature = "wasi")]
-fn http_request_wasi(input: HttpRequestInput) -> Result<HttpResponse, String> {
-    // WASI P2 HTTP via wasi-http
-    // Uses wasi:http/outgoing-handler
-    use wasi::http::outgoing_handler;
-    todo!("WASI HTTP via wasi-http")
-}
-```
-
-**File:** `crates/runtara-agents/src/agents/sftp.rs`
-
-```rust
-// Gate entire module
-#![cfg(feature = "native")]
-
-// ... existing SFTP code ...
-```
-
-**Verify:**
-```bash
-cargo check -p runtara-agents --features native --no-default-features
-cargo check -p runtara-agents --target wasm32-wasip2 --features wasi --no-default-features
-```
-
----
-
-### Step 5: Add Feature Flags to runtara-workflow-stdlib
-
-**File:** `crates/runtara-workflow-stdlib/Cargo.toml`
-
-```toml
-[features]
-default = ["native"]
-
-native = [
-    "tokio/full",
-    "libc",
-    "ureq",
-    "runtara-sdk/quic",
-    "runtara-agents/native",
-]
-
-wasi = [
-    # No async runtime - blocking I/O for sequential workflows
-    "runtara-sdk/wasi",
-    "runtara-agents/wasi",
-]
-
-wasm-js = [
-    "wasm-bindgen",
-    "wasm-bindgen-futures",
-    "runtara-sdk/wasm-js",
-    "runtara-agents/wasm-js",
-]
-
-[dependencies]
-tokio = { version = "1", features = ["full"], optional = true }
-libc = { version = "0.2", optional = true }
-ureq = { version = "2.12", optional = true }
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-```
-
-**File:** `crates/runtara-workflow-stdlib/src/lib.rs`
-
-```rust
-// Conditional re-exports
-#[cfg(feature = "native")]
-pub use libc;
-
-#[cfg(feature = "native")]
-pub use tokio;
-
-// Platform-agnostic exports (always available)
-pub use runtara_agents;
-pub use runtara_sdk;
-pub use serde;
-pub use serde_json;
-```
-
-**Verify:**
-```bash
-cargo check -p runtara-workflow-stdlib --features native --no-default-features
-cargo check -p runtara-workflow-stdlib --target wasm32-wasip2 --features wasi --no-default-features
-```
-
----
-
-### Step 6: Add CompilationTarget to runtara-workflows
-
-**File:** `crates/runtara-workflows/src/compile.rs`
-
-```rust
-// Add after imports
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CompilationTarget {
-    #[default]
-    Native,
-    Wasi,
-    WasmJs,
-}
-
-impl CompilationTarget {
-    pub fn target_triple(&self) -> &'static str {
-        match self {
-            Self::Native => get_host_target(),
-            Self::Wasi => "wasm32-wasip2",
-            Self::WasmJs => "wasm32-unknown-unknown",
-        }
-    }
-
-    pub fn stdlib_feature(&self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Wasi => "wasi",
-            Self::WasmJs => "wasm-js",
-        }
-    }
-
-    pub fn file_extension(&self) -> &'static str {
-        match self {
-            Self::Native => "",  // ELF/Mach-O
-            Self::Wasi | Self::WasmJs => "wasm",
-        }
-    }
-}
-
-// Update compile_scenario signature
-pub fn compile_scenario(
-    scenario_id: &str,
-    version: i32,
-    graph: &ExecutionGraph,
-    target: CompilationTarget,  // NEW PARAMETER
-    // ... other params
-) -> Result<NativeCompilationResult, CompileError> {
-    let target_triple = target.target_triple();
-    let stdlib_feature = target.stdlib_feature();
-    // ... rest of implementation
-}
-```
-
-**Verify:**
-```bash
-cargo test -p runtara-workflows
-```
-
----
-
-### Step 7: Platform-Specific Code Generation
-
-**File:** `crates/runtara-workflows/src/codegen/ast/program.rs`
-
-Modify `emit_main` to generate different code per target:
-
-```rust
-fn emit_main(
-    graph: &ExecutionGraph,
-    ctx: &EmitContext,
-    target: CompilationTarget,  // NEW PARAMETER
-) -> TokenStream {
-    match target {
-        CompilationTarget::Native => emit_main_native(graph, ctx),
-        CompilationTarget::Wasi => emit_main_wasi(graph, ctx),
-        CompilationTarget::WasmJs => emit_main_wasm_js(graph, ctx),
-    }
-}
-
-fn emit_main_native(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
-    // Existing implementation with tokio runtime and libc::dup2
-    quote! {
-        fn main() -> std::process::ExitCode {
-            // ... existing code ...
-        }
-    }
-}
-
-fn emit_main_wasi(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
-    quote! {
-        // WASI: Blocking I/O (no async runtime needed for sequential workflows)
-        fn main() {
-            // Read input from preopened directory
-            let input_path = std::env::var("RUNTARA_INPUT_PATH")
-                .unwrap_or_else(|_| "/input/data.json".to_string());
-            let input = std::fs::read_to_string(&input_path)
-                .expect("Failed to read input");
-            let input: serde_json::Value = serde_json::from_str(&input)
-                .expect("Failed to parse input");
-
-            // Initialize SDK (blocking mode)
-            let sdk = runtara_workflow_stdlib::WasiSdk::from_env()
-                .expect("Failed to initialize SDK");
-
-            // Execute workflow steps sequentially (blocking)
-            let result = execute_workflow_blocking(&sdk, input);
-
-            // Write output
-            let output_path = std::env::var("RUNTARA_OUTPUT_PATH")
-                .unwrap_or_else(|_| "/output/result.json".to_string());
-            std::fs::write(&output_path, serde_json::to_string(&result).unwrap())
-                .expect("Failed to write output");
-        }
-    }
-}
-
-fn emit_main_wasm_js(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
-    quote! {
-        use wasm_bindgen::prelude::*;
-
-        #[wasm_bindgen]
-        pub fn run(input: JsValue) -> Result<JsValue, JsError> {
-            let input: serde_json::Value = serde_wasm_bindgen::from_value(input)?;
-            let result = execute_workflow_sync(input);
-            Ok(serde_wasm_bindgen::to_value(&result)?)
-        }
-    }
-}
-```
-
----
-
-### Step 8: Update Compilation Pipeline
-
-**File:** `crates/runtara-workflows/src/compile.rs`
-
-Update rustc invocation for different targets:
-
-```rust
-fn compile_with_rustc(
-    source_path: &Path,
-    output_path: &Path,
-    target: CompilationTarget,
-    deps_dir: &Path,
-    stdlib_path: &Path,
-) -> Result<(), CompileError> {
-    let mut cmd = Command::new("rustc");
-
-    cmd.arg(source_path)
-       .arg("-o").arg(output_path)
-       .arg("--edition=2024")
-       .arg("--crate-type=bin")
-       .arg(format!("--target={}", target.target_triple()))
-       .arg("-L").arg(format!("dependency={}", deps_dir.display()))
-       .arg("--extern").arg(format!("runtara_workflow_stdlib={}", stdlib_path.display()));
-
-    // Target-specific flags
-    match target {
-        CompilationTarget::Native => {
-            cmd.arg("-C").arg("target-feature=+crt-static");  // Static linking for musl
-        }
-        CompilationTarget::Wasi => {
-            // WASI doesn't need special flags for basic compilation
-        }
-        CompilationTarget::WasmJs => {
-            cmd.arg("-C").arg("panic=abort");  // WASM doesn't support unwinding
-        }
-    }
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        return Err(CompileError::RustcFailed(String::from_utf8_lossy(&output.stderr).into()));
-    }
-
-    Ok(())
-}
-```
-
----
-
-### Step 9: Pre-compile Stdlib for Each Target
-
-**File:** `crates/runtara-workflows/build.rs` (or separate script)
-
-```rust
-// Build stdlib for each supported target
-fn build_stdlib_for_target(target: &str, feature: &str) {
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "-p", "runtara-workflow-stdlib",
-            "--release",
-            "--target", target,
-            "--features", feature,
-            "--no-default-features",
-        ])
-        .status()
-        .expect("Failed to build stdlib");
-
-    assert!(status.success(), "Stdlib build failed for {}", target);
-}
-
-fn main() {
-    // Native (current host)
-    build_stdlib_for_target(get_host_target(), "native");
-
-    // WASI
-    build_stdlib_for_target("wasm32-wasip2", "wasi");
-
-    // Browser (optional)
-    // build_stdlib_for_target("wasm32-unknown-unknown", "wasm-js");
-}
-```
-
----
-
-### Step 10: Integration Test
-
-Create a test that compiles a scenario to WASI:
-
-**File:** `crates/runtara-workflows/tests/wasi_compilation.rs`
-
-```rust
-#[test]
-fn test_compile_to_wasi() {
-    let graph = create_simple_passthrough_graph();
-
-    let result = compile_scenario(
-        "test-scenario",
-        1,
-        &graph,
-        CompilationTarget::Wasi,
-        HashMap::new(),
-        HashMap::new(),
-        None,
-        None,
-    ).expect("Compilation should succeed");
-
-    assert!(result.binary_path.exists());
-    assert!(result.binary_path.extension().map_or(false, |e| e == "wasm"));
-
-    // Verify it's valid WASM
-    let bytes = std::fs::read(&result.binary_path).unwrap();
-    assert_eq!(&bytes[0..4], b"\0asm");  // WASM magic number
-}
-
-#[test]
-fn test_run_wasi_scenario_with_wasmtime() {
-    // Requires wasmtime CLI installed
-    let graph = create_simple_passthrough_graph();
-    let result = compile_scenario(..., CompilationTarget::Wasi, ...).unwrap();
-
-    // Create input file
-    let input_dir = tempdir().unwrap();
-    std::fs::write(input_dir.path().join("data.json"), r#"{"value": 42}"#).unwrap();
-
-    let output_dir = tempdir().unwrap();
-
-    let status = Command::new("wasmtime")
-        .arg("--dir").arg(format!("/input::{}", input_dir.path().display()))
-        .arg("--dir").arg(format!("/output::{}", output_dir.path().display()))
-        .arg(&result.binary_path)
-        .status()
-        .expect("wasmtime should run");
-
-    assert!(status.success());
-
-    let output: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(output_dir.path().join("result.json")).unwrap()
-    ).unwrap();
-    assert_eq!(output["value"], 42);
-}
-```
-
----
-
-### Refactoring Checklist
-
-| Step | Crate | Change | Verify Command |
-|------|-------|--------|----------------|
-| 1 | runtara-sdk | Add feature flags | `cargo check -p runtara-sdk --features wasi` |
-| 2 | runtara-sdk | Abstract async runtime | `cargo check --target wasm32-wasip2` |
-| 3 | runtara-sdk | Create WasiBackend | `cargo check --target wasm32-wasip2` |
-| 4 | runtara-agents | Feature-gate native deps | `cargo check -p runtara-agents --features wasi` |
-| 5 | runtara-workflow-stdlib | Add feature flags | `cargo check --target wasm32-wasip2 --features wasi` |
-| 6 | runtara-workflows | Add CompilationTarget | `cargo test -p runtara-workflows` |
-| 7 | runtara-workflows | Platform-specific codegen | `cargo test -p runtara-workflows` |
-| 8 | runtara-workflows | Update rustc pipeline | `cargo test -p runtara-workflows` |
-| 9 | build.rs | Pre-compile stdlib | Manual: build stdlib for WASI |
-| 10 | tests | Integration test | `cargo test --test wasi_compilation` |
-
----
-
-### Common Issues & Solutions
-
-**Issue:** `error: cannot find macro 'tokio::main'` on WASI
-
-**Solution:** WASI uses blocking I/O - no async runtime needed:
-```rust
-#[cfg(feature = "native")]
-#[tokio::main]
-async fn main() { ... }
-
-#[cfg(feature = "wasi")]
-fn main() { ... }  // Blocking I/O (sequential workflows don't need async)
-```
-
-**Issue:** `error: linking with 'rust-lld' failed` for WASI
-
-**Solution:** Ensure wasm32-wasip2 target is installed:
-```bash
-rustup target add wasm32-wasip2
-```
-
-**Issue:** `unresolved import 'std::os::unix'`
-
-**Solution:** Gate Unix-specific code:
-```rust
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-```
-
-**Issue:** SSH2/OpenSSL fails to compile for WASI
-
-**Solution:** These are native-only. Gate them:
-```rust
-#[cfg(feature = "native")]
-mod sftp;
-```
-
----
-
-## Design Rationale
-
-### Why Feature Flags?
-
-Feature flags allow:
-- Single codebase with platform-specific code paths
-- Compile-time exclusion of unsupported dependencies
-- Clear documentation of platform capabilities
-- Incremental adoption (native remains default)
-
-### Why WASI Preview 2?
-
-- **wasi-http** - Native HTTP client support for checkpointing and HTTP agent
-- **Similar to native** - File I/O, stderr, env vars work naturally
-- **No JavaScript dependency** - Pure WASM execution
-- **Edge computing ready** - Cloudflare Workers, Fastly Compute, Fermyon Spin
-- **Portable binaries** - Single .wasm file runs on any WASI-compliant runtime
-- **Component Model** - Better composability, typed interfaces between modules
-- **Standardization target** - P2 is where the ecosystem is converging
-
-### Why Keep runtara-environment Linux-Only?
-
-`runtara-environment` is the container orchestrator that:
-- Manages OCI containers via `crun`
-- Handles cgroups for resource limits
-- Uses pasta for container networking
-
-These are fundamentally Linux concepts. WASM/embedded scenarios don't need container orchestration - they run directly in their target environment.
-
-### Existing Pattern to Follow
-
-The `runtara-sdk` already has `quic` vs `embedded` features with the `SdkBackend` trait abstraction. This pattern proves the architecture works and should be extended for WASM support.
+## Appendix: Binary Size Comparison (Estimated)
+
+| Component | Current | After Phase 1 | After Phase 2 (WASM) |
+|-----------|---------|---------------|----------------------|
+| tokio | ~3 MB | 0 | 0 |
+| quinn + rustls + ring | ~2 MB | 0 | 0 |
+| reqwest + hyper | ~2 MB | 0 | 0 |
+| sqlx + postgres | ~1.5 MB | 0 | 0 |
+| openssl (vendored) | ~3 MB | 0 | 0 |
+| ssh2 + libssh2 | ~1 MB | 0 | 0 |
+| ureq | — | ~0.5 MB | 0 (wasi-http instead) |
+| Scenario logic + stdlib | ~2 MB | ~2 MB | ~1 MB |
+| **Total** | **~15 MB** | **~2.5 MB** | **~1 MB** |
