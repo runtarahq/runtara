@@ -261,6 +261,19 @@ impl OciRunner {
         if let Some(ref url) = self.config.connection_service_url {
             env.insert("CONNECTION_SERVICE_URL".to_string(), url.clone());
         }
+
+        // Forward SDK backend selection and HTTP URL if set in host environment.
+        // This allows scenarios to use HTTP instead of QUIC when configured.
+        if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
+            env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
+        }
+        if let Ok(url) = std::env::var("RUNTARA_HTTP_URL") {
+            env.insert("RUNTARA_HTTP_URL".to_string(), url);
+        }
+        if let Ok(port) = std::env::var("RUNTARA_CORE_HTTP_PORT") {
+            env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
+        }
+
         env
     }
 
