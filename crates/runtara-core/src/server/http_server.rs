@@ -635,6 +635,72 @@ async fn retry_handler(
     }
 }
 
+/// Instance status response
+#[derive(Debug, Serialize)]
+pub struct InstanceStatusResponse {
+    pub found: bool,
+    pub instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>, // base64
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// GET /api/v1/instances/{instance_id}/status
+async fn status_handler(
+    State(state): State<Arc<InstanceHandlerState>>,
+    Path(instance_id): Path<String>,
+) -> impl IntoResponse {
+    use runtara_protocol::instance_proto::GetInstanceStatusRequest;
+
+    let request = GetInstanceStatusRequest {
+        instance_id: instance_id.clone(),
+    };
+
+    match instance_handlers::handle_get_instance_status(&state, request).await {
+        Ok(resp) => {
+            let status_str = {
+                use runtara_protocol::instance_proto::InstanceStatus;
+                match InstanceStatus::try_from(resp.status) {
+                    Ok(InstanceStatus::StatusPending) => "pending",
+                    Ok(InstanceStatus::StatusRunning) => "running",
+                    Ok(InstanceStatus::StatusSuspended) => "suspended",
+                    Ok(InstanceStatus::StatusCompleted) => "completed",
+                    Ok(InstanceStatus::StatusFailed) => "failed",
+                    Ok(InstanceStatus::StatusCancelled) => "cancelled",
+                    _ => "unknown",
+                }
+            };
+
+            let output = resp.output.as_ref().map(|o| {
+                base64::engine::general_purpose::STANDARD.encode(o)
+            });
+
+            let found = status_str != "unknown" || resp.error.as_deref() != Some("Instance not found");
+
+            Json(InstanceStatusResponse {
+                found,
+                instance_id: resp.instance_id,
+                status: Some(status_str.to_string()),
+                checkpoint_id: resp.checkpoint_id,
+                output,
+                error: resp.error,
+            }).into_response()
+        }
+        Err(e) => {
+            error!("Status handler error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": e.to_string(),
+                "code": "STATUS_ERROR"
+            }))).into_response()
+        }
+    }
+}
+
 /// GET /health
 async fn health_handler(
     State(state): State<Arc<InstanceHandlerState>>,
@@ -676,6 +742,8 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
         .route("/api/v1/instances/{instance_id}/sleep", post(sleep_handler))
         // Retry tracking
         .route("/api/v1/instances/{instance_id}/retry", post(retry_handler))
+        // Instance status
+        .route("/api/v1/instances/{instance_id}/status", get(status_handler))
         // Health check
         .route("/health", get(health_handler))
         .with_state(state)

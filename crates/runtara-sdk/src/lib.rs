@@ -113,16 +113,16 @@
 //! if let Some(signal) = sdk.poll_signal().await? {
 //!     match signal.signal_type {
 //!         SignalType::Cancel => {
-//!             sdk.acknowledge_signal(SignalType::Cancel, true).await?;
+//!             sdk.acknowledge_signal(SignalType::Cancel).await?;
 //!             return Err(SdkError::Cancelled);
 //!         }
 //!         SignalType::Pause => {
 //!             sdk.checkpoint("paused", &state).await?;
-//!             sdk.acknowledge_signal(SignalType::Pause, true).await?;
+//!             sdk.acknowledge_signal(SignalType::Pause).await?;
 //!             sdk.suspended().await?;
 //!         }
 //!         SignalType::Resume => {
-//!             sdk.acknowledge_signal(SignalType::Resume, true).await?;
+//!             sdk.acknowledge_signal(SignalType::Resume).await?;
 //!         }
 //!     }
 //! }

@@ -3,30 +3,15 @@
 //! Main SDK client for instance communication with runtara-core.
 
 use std::time::Duration;
-#[cfg(feature = "quic")]
 use std::time::Instant;
 
-use tracing::{info, instrument};
-
-#[cfg(feature = "quic")]
-use runtara_protocol::instance_proto::{
-    self as proto, PollSignalsRequest, RpcRequest, RpcResponse, SignalAck, rpc_request,
-    rpc_response,
-};
+use tracing::{debug, info, instrument};
 
 use crate::backend::SdkBackend;
 #[cfg(feature = "quic")]
 use crate::config::SdkConfig;
-use crate::error::Result;
-#[cfg(feature = "quic")]
-use crate::error::SdkError;
-#[cfg(feature = "quic")]
-use crate::signals::from_proto_signal;
-use crate::types::{CheckpointResult, StatusResponse};
-#[cfg(feature = "quic")]
-use crate::types::{Signal, SignalType};
-#[cfg(feature = "quic")]
-use tracing::debug;
+use crate::error::{Result, SdkError};
+use crate::types::{CheckpointResult, Signal, SignalType, StatusResponse};
 
 /// High-level SDK client for instance communication with runtara-core.
 ///
@@ -80,18 +65,15 @@ use tracing::debug;
 /// sdk.completed(b"result").await?;
 /// ```
 pub struct RuntaraSdk {
-    /// Backend implementation (QUIC or embedded) - Arc for sharing with heartbeat task
+    /// Backend implementation (QUIC, HTTP, or embedded) - Arc for sharing with heartbeat task
     backend: std::sync::Arc<dyn SdkBackend>,
     /// Registration state
     registered: bool,
-    /// Last signal poll time (for rate limiting) - only used with QUIC
-    #[cfg(feature = "quic")]
+    /// Last signal poll time (for rate limiting)
     last_signal_poll: Instant,
-    /// Cached pending signal (if any) - only used with QUIC
-    #[cfg(feature = "quic")]
+    /// Cached pending signal (if any)
     pending_signal: Option<Signal>,
-    /// Signal poll interval (ms) - only used with QUIC
-    #[cfg(feature = "quic")]
+    /// Signal poll interval (ms)
     signal_poll_interval_ms: u64,
     /// Background heartbeat interval (ms). 0 = disabled.
     heartbeat_interval_ms: u64,
@@ -114,7 +96,7 @@ impl RuntaraSdk {
         Ok(Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            last_signal_poll: Instant::now() - Duration::from_secs(60), // Allow immediate first poll
+            last_signal_poll: Instant::now() - Duration::from_secs(60),
             pending_signal: None,
             signal_poll_interval_ms,
             heartbeat_interval_ms,
@@ -160,11 +142,8 @@ impl RuntaraSdk {
         Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            #[cfg(feature = "quic")]
             last_signal_poll: Instant::now() - Duration::from_secs(60),
-            #[cfg(feature = "quic")]
             pending_signal: None,
-            #[cfg(feature = "quic")]
             signal_poll_interval_ms: 1_000,
             heartbeat_interval_ms: 30_000,
         }
@@ -186,11 +165,8 @@ impl RuntaraSdk {
         Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            #[cfg(feature = "quic")]
             last_signal_poll: Instant::now() - Duration::from_secs(60),
-            #[cfg(feature = "quic")]
             pending_signal: None,
-            #[cfg(feature = "quic")]
             signal_poll_interval_ms: config.signal_poll_interval_ms,
             heartbeat_interval_ms: config.heartbeat_interval_ms,
         }
@@ -213,11 +189,8 @@ impl RuntaraSdk {
         Ok(Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            #[cfg(feature = "quic")]
             last_signal_poll: Instant::now() - Duration::from_secs(60),
-            #[cfg(feature = "quic")]
             pending_signal: None,
-            #[cfg(feature = "quic")]
             signal_poll_interval_ms,
             heartbeat_interval_ms,
         })
@@ -463,15 +436,12 @@ impl RuntaraSdk {
         self.backend.send_custom_event(subtype, payload).await
     }
 
-    // ========== Signals (QUIC only) ==========
+    // ========== Signals ==========
 
     /// Poll for pending signals.
     ///
     /// Rate-limited to avoid hammering the server.
     /// Returns `Some(Signal)` if a signal is pending, `None` otherwise.
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn poll_signal(&mut self) -> Result<Option<Signal>> {
         // Check cached signal first
@@ -489,140 +459,51 @@ impl RuntaraSdk {
     }
 
     /// Force poll for signals (ignoring rate limit).
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     pub async fn poll_signal_now(&mut self) -> Result<Option<Signal>> {
-        use crate::backend::quic::QuicBackend;
-
         self.last_signal_poll = Instant::now();
 
-        let backend = self
-            .backend
-            .as_any()
-            .downcast_ref::<QuicBackend>()
-            .ok_or_else(|| SdkError::Internal("poll_signal() requires QUIC backend".to_string()))?;
+        let (signal, custom) = self.backend.poll_signals(None).await?;
 
-        let request = PollSignalsRequest {
-            instance_id: self.backend.instance_id().to_string(),
-            checkpoint_id: None,
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::PollSignals(request)),
-        };
-
-        let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(rpc_response::Response::PollSignals(resp)) => {
-                if let Some(signal) = resp.signal {
-                    let sdk_signal = from_proto_signal(signal);
-                    debug!(signal_type = ?sdk_signal.signal_type, "Signal received");
-                    return Ok(Some(sdk_signal));
-                }
-
-                if let Some(custom) = resp.custom_signal {
-                    let sdk_signal = Signal {
-                        signal_type: SignalType::Resume, // custom signals are scoped; type unused here
-                        payload: custom.payload,
-                        checkpoint_id: Some(custom.checkpoint_id),
-                    };
-                    debug!("Custom signal received for checkpoint");
-                    return Ok(Some(sdk_signal));
-                }
-
-                Ok(None)
-            }
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected PollSignalsResponse".to_string(),
-            )),
+        if let Some(sig) = signal {
+            debug!(signal_type = ?sig.signal_type, "Signal received");
+            return Ok(Some(sig));
         }
+
+        if let Some(custom) = custom {
+            let sdk_signal = Signal {
+                signal_type: SignalType::Resume, // custom signals are scoped; type unused here
+                payload: custom.payload,
+                checkpoint_id: Some(custom.checkpoint_id),
+            };
+            debug!("Custom signal received for checkpoint");
+            return Ok(Some(sdk_signal));
+        }
+
+        Ok(None)
     }
 
     /// Poll for a custom signal scoped to a specific checkpoint/signal ID.
     ///
     /// This is used by WaitForSignal steps to wait for external signals.
     /// Returns the signal payload if a signal is pending, None otherwise.
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id(), signal_id = %signal_id))]
     pub async fn poll_custom_signal(&mut self, signal_id: &str) -> Result<Option<Vec<u8>>> {
-        use crate::backend::quic::QuicBackend;
+        let (_signal, custom) = self.backend.poll_signals(Some(signal_id)).await?;
 
-        let backend = self
-            .backend
-            .as_any()
-            .downcast_ref::<QuicBackend>()
-            .ok_or_else(|| {
-                SdkError::Internal("poll_custom_signal() requires QUIC backend".to_string())
-            })?;
-
-        let request = PollSignalsRequest {
-            instance_id: self.backend.instance_id().to_string(),
-            checkpoint_id: Some(signal_id.to_string()),
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::PollSignals(request)),
-        };
-
-        let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(rpc_response::Response::PollSignals(resp)) => {
-                if let Some(custom) = resp.custom_signal {
-                    debug!(signal_id = %signal_id, "Custom signal received");
-                    return Ok(Some(custom.payload));
-                }
-                Ok(None)
-            }
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected PollSignalsResponse".to_string(),
-            )),
+        if let Some(custom) = custom {
+            debug!(signal_id = %signal_id, "Custom signal received");
+            return Ok(Some(custom.payload));
         }
+        Ok(None)
     }
 
     /// Acknowledge a received signal.
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
     pub async fn acknowledge_signal(
         &self,
         signal_type: SignalType,
-        acknowledged: bool,
     ) -> Result<()> {
-        use crate::backend::quic::QuicBackend;
-
-        let backend = self
-            .backend
-            .as_any()
-            .downcast_ref::<QuicBackend>()
-            .ok_or_else(|| {
-                SdkError::Internal("acknowledge_signal() requires QUIC backend".to_string())
-            })?;
-
-        let request = SignalAck {
-            instance_id: self.backend.instance_id().to_string(),
-            signal_type: proto::SignalType::from(signal_type).into(),
-            acknowledged,
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::SignalAck(request)),
-        };
-
-        backend.client().send_fire_and_forget(&rpc_request).await?;
+        self.backend.acknowledge_signal(signal_type).await?;
         debug!("Signal acknowledged");
         Ok(())
     }
@@ -636,9 +517,6 @@ impl RuntaraSdk {
     ///     // process item...
     /// }
     /// ```
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     pub async fn check_cancelled(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             if signal.signal_type == SignalType::Cancel {
@@ -651,9 +529,6 @@ impl RuntaraSdk {
     }
 
     /// Check for pause and return error if paused.
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     pub async fn check_paused(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             if signal.signal_type == SignalType::Pause {
@@ -669,9 +544,6 @@ impl RuntaraSdk {
     ///
     /// This is a unified method that checks for both cancellation and pause signals.
     /// Use this in workflow steps to detect both types of interruption.
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     pub async fn check_signals(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal().await? {
             match signal.signal_type {
@@ -720,41 +592,8 @@ impl RuntaraSdk {
     }
 
     /// Get the status of another instance.
-    ///
-    /// Note: Only available with QUIC backend.
-    #[cfg(feature = "quic")]
     pub async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
-        use crate::backend::quic::QuicBackend;
-        use runtara_protocol::instance_proto::GetInstanceStatusRequest;
-
-        let backend = self
-            .backend
-            .as_any()
-            .downcast_ref::<QuicBackend>()
-            .ok_or_else(|| {
-                SdkError::Internal("get_instance_status() requires QUIC backend".to_string())
-            })?;
-
-        let request = GetInstanceStatusRequest {
-            instance_id: instance_id.to_string(),
-        };
-
-        let rpc_request = RpcRequest {
-            request: Some(rpc_request::Request::GetInstanceStatus(request)),
-        };
-
-        let rpc_response: RpcResponse = backend.client().request(&rpc_request).await?;
-
-        match rpc_response.response {
-            Some(rpc_response::Response::GetInstanceStatus(resp)) => Ok(StatusResponse::from(resp)),
-            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
-                code: e.code,
-                message: e.message,
-            }),
-            _ => Err(SdkError::UnexpectedResponse(
-                "expected GetInstanceStatusResponse".to_string(),
-            )),
-        }
+        self.backend.get_instance_status(instance_id).await
     }
 
     // ========== Helpers ==========

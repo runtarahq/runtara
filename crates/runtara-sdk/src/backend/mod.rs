@@ -26,7 +26,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
-use crate::types::{CheckpointResult, StatusResponse};
+use crate::types::{CheckpointResult, CustomSignal, Signal, SignalType, StatusResponse};
 
 /// Backend trait for SDK operations.
 ///
@@ -100,6 +100,23 @@ pub trait SdkBackend: Send + Sync {
 
     /// Get instance status.
     async fn get_status(&self) -> Result<StatusResponse>;
+
+    /// Poll for pending signals (instance-wide and/or custom).
+    ///
+    /// If `checkpoint_id` is `Some`, polls for a custom signal scoped to that checkpoint.
+    /// If `None`, polls for instance-wide signals (cancel/pause/resume).
+    ///
+    /// Returns `(instance_signal, custom_signal)`.
+    async fn poll_signals(
+        &self,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(Option<Signal>, Option<CustomSignal>)>;
+
+    /// Acknowledge a received signal.
+    async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()>;
+
+    /// Get the status of another instance by ID.
+    async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse>;
 
     /// Get the instance ID.
     fn instance_id(&self) -> &str;

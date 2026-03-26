@@ -404,7 +404,6 @@ pub fn trigger_cancellation() {
 ///     return Err("Instance cancelled".into());
 /// }
 /// ```
-#[cfg(feature = "quic")]
 pub async fn acknowledge_cancellation() {
     use crate::types::SignalType;
 
@@ -414,12 +413,12 @@ pub async fn acknowledge_cancellation() {
     // Send acknowledgment to core with timeout to prevent indefinite hang.
     // This can happen if:
     // 1. Multiple parallel durable functions try to acknowledge simultaneously
-    // 2. The QUIC connection is in a degraded state after stop signal
+    // 2. The connection is in a degraded state after stop signal
     // 3. The grace period expired and core took action on the connection
     if let Some(sdk_arc) = SDK_INSTANCE.get() {
         let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
             let sdk_guard = sdk_arc.lock().await;
-            sdk_guard.acknowledge_signal(SignalType::Cancel, true).await
+            sdk_guard.acknowledge_signal(SignalType::Cancel).await
         })
         .await;
 
@@ -429,13 +428,6 @@ pub async fn acknowledge_cancellation() {
             Err(_) => warn!("Timeout acknowledging cancellation signal - continuing with exit"),
         }
     }
-}
-
-/// Acknowledge cancellation (no-op without QUIC feature).
-#[cfg(not(feature = "quic"))]
-pub async fn acknowledge_cancellation() {
-    trigger_cancellation();
-    debug!("Cancellation acknowledged (QUIC disabled, no ack sent)");
 }
 
 /// Acknowledge a pause signal to runtara-core.
@@ -455,7 +447,6 @@ pub async fn acknowledge_cancellation() {
 ///     return Ok(());
 /// }
 /// ```
-#[cfg(feature = "quic")]
 pub async fn acknowledge_pause() {
     use crate::types::SignalType;
 
@@ -463,7 +454,7 @@ pub async fn acknowledge_pause() {
     if let Some(sdk_arc) = SDK_INSTANCE.get() {
         let ack_result = tokio::time::timeout(Duration::from_secs(5), async {
             let sdk_guard = sdk_arc.lock().await;
-            sdk_guard.acknowledge_signal(SignalType::Pause, true).await
+            sdk_guard.acknowledge_signal(SignalType::Pause).await
         })
         .await;
 
@@ -473,12 +464,6 @@ pub async fn acknowledge_pause() {
             Err(_) => warn!("Timeout acknowledging pause signal - continuing with suspend"),
         }
     }
-}
-
-/// Acknowledge pause (no-op without QUIC feature).
-#[cfg(not(feature = "quic"))]
-pub async fn acknowledge_pause() {
-    debug!("Pause acknowledged (QUIC disabled, no ack sent)");
 }
 
 #[cfg(test)]

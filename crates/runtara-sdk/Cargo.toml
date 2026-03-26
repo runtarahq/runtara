@@ -20,7 +20,7 @@ embedded = ["dep:runtara-core"]
 
 # HTTP-based communication with runtara-core (alternative to QUIC)
 # Uses reqwest for HTTP calls. For WASM transition and simpler deployments.
-http = ["dep:reqwest"]
+http = ["dep:reqwest", "dep:percent-encoding"]
 
 # WASI target - HTTP-based communication (wasm32-wasip2)
 # Uses wasi-http for checkpointing, blocking I/O for sequential workflows
@@ -38,7 +38,8 @@ runtara-protocol = { path = "../runtara-protocol", version = "1.0", optional = t
 runtara-core = { path = "../runtara-core", version = "1.0", optional = true }
 
 # HTTP client (optional, for http mode)
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
+percent-encoding = { version = "2", optional = true }
 
 # Macros
 runtara-sdk-macros = { path = "../runtara-sdk-macros", version = "1.0" }

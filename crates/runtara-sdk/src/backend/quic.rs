@@ -21,7 +21,7 @@ use crate::events::{
     build_completed_event, build_custom_event, build_failed_event, build_heartbeat_event,
     build_suspended_event,
 };
-use crate::types::{CheckpointResult, StatusResponse};
+use crate::types::{CheckpointResult, CustomSignal, Signal, SignalType, StatusResponse};
 
 /// QUIC-based backend for SDK operations.
 ///
@@ -391,6 +391,86 @@ impl SdkBackend for QuicBackend {
             }),
             _ => Err(SdkError::UnexpectedResponse(
                 "expected SleepResponse".to_string(),
+            )),
+        }
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn poll_signals(
+        &self,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(Option<Signal>, Option<CustomSignal>)> {
+        use runtara_protocol::instance_proto::PollSignalsRequest;
+
+        let request = PollSignalsRequest {
+            instance_id: self.instance_id.clone(),
+            checkpoint_id: checkpoint_id.map(|s| s.to_string()),
+        };
+
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::PollSignals(request)),
+        };
+
+        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
+
+        match rpc_response.response {
+            Some(rpc_response::Response::PollSignals(resp)) => {
+                let signal = resp.signal.map(crate::signals::from_proto_signal);
+                let custom = resp.custom_signal.map(|cs| CustomSignal {
+                    checkpoint_id: cs.checkpoint_id,
+                    payload: cs.payload,
+                });
+                Ok((signal, custom))
+            }
+            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected PollSignalsResponse".to_string(),
+            )),
+        }
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
+        use runtara_protocol::instance_proto::SignalAck;
+
+        let request = SignalAck {
+            instance_id: self.instance_id.clone(),
+            signal_type: proto::SignalType::from(signal_type).into(),
+            acknowledged: true,
+        };
+
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::SignalAck(request)),
+        };
+
+        self.client.send_fire_and_forget(&rpc_request).await?;
+        debug!("Signal acknowledged via QUIC");
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(instance_id = %self.instance_id))]
+    async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
+        let request = GetInstanceStatusRequest {
+            instance_id: instance_id.to_string(),
+        };
+
+        let rpc_request = RpcRequest {
+            request: Some(rpc_request::Request::GetInstanceStatus(request)),
+        };
+
+        let rpc_response: RpcResponse = self.client.request(&rpc_request).await?;
+
+        match rpc_response.response {
+            Some(rpc_response::Response::GetInstanceStatus(resp)) => Ok(StatusResponse::from(resp)),
+            Some(rpc_response::Response::Error(e)) => Err(SdkError::Server {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(SdkError::UnexpectedResponse(
+                "expected GetInstanceStatusResponse".to_string(),
             )),
         }
     }

@@ -303,9 +303,33 @@ struct SuccessResp {
     success: bool,
 }
 
+#[derive(Deserialize)]
+struct StatusResp {
+    found: bool,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    checkpoint_id: Option<String>,
+    #[serde(default)]
+    output: Option<String>, // base64
+    #[serde(default)]
+    error: Option<String>,
+}
+
 // ============================================================================
 // Helper: convert signal types
 // ============================================================================
+
+fn parse_instance_status(s: &str) -> InstanceStatus {
+    match s {
+        "pending" => InstanceStatus::Pending,
+        "running" => InstanceStatus::Running,
+        "suspended" => InstanceStatus::Suspended,
+        "completed" => InstanceStatus::Completed,
+        "failed" => InstanceStatus::Failed,
+        _ => InstanceStatus::Unknown,
+    }
+}
 
 fn parse_signal_type(s: &str) -> SignalType {
     match s {
@@ -322,6 +346,31 @@ fn signal_type_str(st: &SignalType) -> &'static str {
         SignalType::Pause => "pause",
         SignalType::Resume => "resume",
     }
+}
+
+/// Percent-encode a string for use in a URL path segment.
+/// Encodes characters that are not allowed in path segments (e.g., `/`, `:`, `?`, `#`).
+fn encode_url_path(s: &str) -> String {
+    use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+    // Encode everything that's not unreserved per RFC 3986, plus `/` and `:`
+    const PATH_SEGMENT: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'/')
+        .add(b':')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'@')
+        .add(b'[')
+        .add(b']')
+        .add(b'^')
+        .add(b'{')
+        .add(b'|')
+        .add(b'}');
+    utf8_percent_encode(s, PATH_SEGMENT).to_string()
 }
 
 fn decode_b64(s: &str) -> Vec<u8> {
@@ -580,14 +629,53 @@ impl SdkBackend for HttpBackend {
     }
 
     async fn get_status(&self) -> Result<StatusResponse> {
-        // Not yet exposed via HTTP API — return unknown
-        // TODO: Add GET /api/v1/instances/{id}/status endpoint
+        self.get_instance_status(&self.instance_id).await
+    }
+
+    async fn poll_signals(
+        &self,
+        checkpoint_id: Option<&str>,
+    ) -> Result<(Option<Signal>, Option<CustomSignal>)> {
+        let url = match checkpoint_id {
+            Some(cp_id) => format!(
+                "{}/api/v1/instances/{}/signals/{}",
+                self.base_url, self.instance_id, encode_url_path(cp_id)
+            ),
+            None => format!(
+                "{}/api/v1/instances/{}/signals",
+                self.base_url, self.instance_id
+            ),
+        };
+
+        let resp: PollSignalsResp = self.get(&url).await?;
+        let signal = resp.signal.as_ref().map(parse_signal);
+        let custom = resp.custom_signal.as_ref().map(parse_custom_signal);
+        Ok((signal, custom))
+    }
+
+    async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
+        let body = SignalAckBody {
+            signal_type: signal_type_str(&signal_type).to_string(),
+        };
+
+        let _: SuccessResp = self.post(&self.url("signals/ack"), &body).await?;
+        Ok(())
+    }
+
+    async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
+        let url = format!(
+            "{}/api/v1/instances/{}/status",
+            self.base_url, instance_id
+        );
+
+        let resp: StatusResp = self.get(&url).await?;
+
         Ok(StatusResponse {
-            found: false,
-            status: InstanceStatus::Unknown,
-            checkpoint_id: None,
-            output: None,
-            error: None,
+            found: resp.found,
+            status: parse_instance_status(&resp.status),
+            checkpoint_id: resp.checkpoint_id,
+            output: resp.output.as_deref().map(decode_b64),
+            error: resp.error,
         })
     }
 }

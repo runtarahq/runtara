@@ -15,7 +15,7 @@ use tracing::{debug, info, instrument};
 
 use super::SdkBackend;
 use crate::error::{Result, SdkError};
-use crate::types::{CheckpointResult, InstanceStatus, StatusResponse};
+use crate::types::{CheckpointResult, CustomSignal, InstanceStatus, Signal, SignalType, StatusResponse};
 
 /// Embedded backend for SDK operations.
 ///
@@ -344,6 +344,55 @@ impl SdkBackend for EmbeddedBackend {
         let instance = self
             .persistence
             .get_instance(&self.instance_id)
+            .await
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        match instance {
+            Some(record) => {
+                let status = match record.status.as_str() {
+                    "pending" => InstanceStatus::Pending,
+                    "running" => InstanceStatus::Running,
+                    "suspended" => InstanceStatus::Suspended,
+                    "completed" => InstanceStatus::Completed,
+                    "failed" => InstanceStatus::Failed,
+                    _ => InstanceStatus::Pending,
+                };
+
+                Ok(StatusResponse {
+                    found: true,
+                    status,
+                    checkpoint_id: record.checkpoint_id,
+                    output: record.output,
+                    error: record.error,
+                })
+            }
+            None => Ok(StatusResponse {
+                found: false,
+                status: InstanceStatus::Pending,
+                checkpoint_id: None,
+                output: None,
+                error: None,
+            }),
+        }
+    }
+
+    async fn poll_signals(
+        &self,
+        _checkpoint_id: Option<&str>,
+    ) -> Result<(Option<Signal>, Option<CustomSignal>)> {
+        // Signals not supported in embedded mode
+        Ok((None, None))
+    }
+
+    async fn acknowledge_signal(&self, _signal_type: SignalType) -> Result<()> {
+        // No-op in embedded mode
+        Ok(())
+    }
+
+    async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
+        let instance = self
+            .persistence
+            .get_instance(instance_id)
             .await
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
