@@ -21,6 +21,7 @@ native = [
     "dep:tokio",
     "dep:ureq",
     "runtara-sdk/quic",
+    "runtara-sdk/http",
     "runtara-agents/native",
 ]
 

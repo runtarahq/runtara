@@ -183,6 +183,10 @@ pub use types::{
 #[cfg(feature = "quic")]
 pub use config::SdkConfig;
 
+// HTTP-specific exports
+#[cfg(feature = "http")]
+pub use backend::http::HttpSdkConfig;
+
 // Global SDK registry for #[durable] macro
 pub use registry::{register_sdk, sdk, stop_heartbeat, try_sdk};
 

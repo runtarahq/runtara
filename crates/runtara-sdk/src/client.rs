@@ -196,6 +196,43 @@ impl RuntaraSdk {
         }
     }
 
+    // ========== HTTP Construction ==========
+
+    /// Create an SDK instance using the HTTP backend.
+    ///
+    /// This connects to runtara-core's HTTP instance API instead of QUIC.
+    /// No quinn/ring/TLS dependencies required.
+    #[cfg(feature = "http")]
+    pub fn new_http(config: crate::backend::http::HttpSdkConfig) -> Result<Self> {
+        use crate::backend::http::HttpBackend;
+
+        let signal_poll_interval_ms = config.signal_poll_interval_ms;
+        let heartbeat_interval_ms = config.heartbeat_interval_ms;
+        let backend = HttpBackend::new(&config)?;
+
+        Ok(Self {
+            backend: std::sync::Arc::new(backend),
+            registered: false,
+            #[cfg(feature = "quic")]
+            last_signal_poll: Instant::now() - Duration::from_secs(60),
+            #[cfg(feature = "quic")]
+            pending_signal: None,
+            #[cfg(feature = "quic")]
+            signal_poll_interval_ms,
+            heartbeat_interval_ms,
+        })
+    }
+
+    /// Create an HTTP SDK instance from environment variables.
+    ///
+    /// Required: `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`
+    /// Optional: `RUNTARA_HTTP_URL` (default: `http://127.0.0.1:8003`)
+    #[cfg(feature = "http")]
+    pub fn from_env_http() -> Result<Self> {
+        let config = crate::backend::http::HttpSdkConfig::from_env()?;
+        Self::new_http(config)
+    }
+
     // ========== Initialization ==========
 
     /// Initialize SDK: connect, register, and make available globally for #[durable].

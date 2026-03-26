@@ -14,6 +14,9 @@ pub mod quic;
 #[cfg(feature = "embedded")]
 pub mod embedded;
 
+#[cfg(feature = "http")]
+pub mod http;
+
 use std::time::Duration;
 
 #[cfg(feature = "quic")]
