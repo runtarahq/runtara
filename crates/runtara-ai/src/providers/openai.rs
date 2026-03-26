@@ -173,13 +173,11 @@ impl OpenAICompletionModel {
         }
 
         // Additional params (shallow merge)
-        if let Some(params) = request.additional_params {
-            if let Value::Object(map) = params {
-                if let Value::Object(ref mut body_map) = body {
-                    for (k, v) in map {
-                        body_map.insert(k, v);
-                    }
-                }
+        if let Some(Value::Object(map)) = request.additional_params
+            && let Value::Object(ref mut body_map) = body
+        {
+            for (k, v) in map {
+                body_map.insert(k, v);
             }
         }
 
@@ -198,10 +196,10 @@ impl OpenAICompletionModel {
         let mut contents: Vec<AssistantContent> = Vec::new();
 
         // Text content
-        if let Some(ref text) = choice.message.content {
-            if !text.is_empty() {
-                contents.push(AssistantContent::text(text));
-            }
+        if let Some(ref text) = choice.message.content
+            && !text.is_empty()
+        {
+            contents.push(AssistantContent::text(text));
         }
 
         // Tool calls
@@ -295,8 +293,8 @@ fn message_to_openai(msg: &Message) -> Vec<Value> {
                         let text = tr
                             .content
                             .iter()
-                            .filter_map(|c| match c {
-                                message::ToolResultContent::Text(t) => Some(t.text.clone()),
+                            .map(|c| match c {
+                                message::ToolResultContent::Text(t) => t.text.clone(),
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -319,16 +317,14 @@ fn message_to_openai(msg: &Message) -> Vec<Value> {
 
             // If there are plain text parts, emit a user message.
             if !text_parts.is_empty() {
-                if text_parts.len() == 1 {
-                    // Single text → use simple string content.
-                    if let Some(Value::Object(map)) = text_parts.first() {
-                        if let Some(Value::String(s)) = map.get("text") {
-                            out.push(json!({
-                                "role": "user",
-                                "content": s,
-                            }));
-                        }
-                    }
+                if text_parts.len() == 1
+                    && let Some(Value::Object(map)) = text_parts.first()
+                    && let Some(Value::String(s)) = map.get("text")
+                {
+                    out.push(json!({
+                        "role": "user",
+                        "content": s,
+                    }));
                 } else {
                     out.push(json!({
                         "role": "user",
