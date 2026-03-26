@@ -65,12 +65,7 @@ pub trait SdkBackend: Send + Sync {
     ///
     /// After calling this, the instance should exit. The environment will
     /// relaunch the instance when the wake time arrives.
-    fn sleep_until(
-        &self,
-        checkpoint_id: &str,
-        wake_at: DateTime<Utc>,
-        state: &[u8],
-    ) -> Result<()>;
+    fn sleep_until(&self, checkpoint_id: &str, wake_at: DateTime<Utc>, state: &[u8]) -> Result<()>;
 
     /// Send a custom event with arbitrary subtype and payload.
     ///
@@ -129,10 +124,5 @@ pub trait SdkBackend: Send + Sync {
     /// 3. On resume, calculates remaining time from stored sleep_until
     /// 4. Sleeps for the remaining duration
     /// 5. Clears sleep_until when done
-    fn durable_sleep(
-        &self,
-        duration: Duration,
-        checkpoint_id: &str,
-        state: &[u8],
-    ) -> Result<()>;
+    fn durable_sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()>;
 }

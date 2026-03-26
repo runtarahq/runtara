@@ -268,8 +268,7 @@ impl RuntaraSdk {
     /// - On resume, calculates remaining time and only sleeps for the remainder
     #[instrument(skip(self, state), fields(instance_id = %self.backend.instance_id(), duration_ms = duration.as_millis() as u64))]
     pub fn sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
-        self.backend
-            .durable_sleep(duration, checkpoint_id, state)
+        self.backend.durable_sleep(duration, checkpoint_id, state)
     }
 
     // ========== Events ==========
@@ -306,8 +305,7 @@ impl RuntaraSdk {
         wake_at: chrono::DateTime<chrono::Utc>,
         state: &[u8],
     ) -> Result<()> {
-        self.backend
-            .sleep_until(checkpoint_id, wake_at, state)
+        self.backend.sleep_until(checkpoint_id, wake_at, state)
     }
 
     /// Send a custom event with arbitrary subtype and payload.
@@ -470,7 +468,6 @@ impl RuntaraSdk {
     pub fn heartbeat_interval_ms(&self) -> u64 {
         self.heartbeat_interval_ms
     }
-
 }
 
 #[cfg(test)]

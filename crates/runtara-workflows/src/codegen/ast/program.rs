@@ -1645,10 +1645,7 @@ mod tests {
 
         assert!(code.contains("fn main ()"), "Should define main function");
         assert!(code.contains("ExitCode"), "Should return ExitCode");
-        assert!(
-            code.contains("fn main"),
-            "Should define main function"
-        );
+        assert!(code.contains("fn main"), "Should define main function");
         assert!(
             code.contains("RuntaraSdk :: from_env"),
             "Should initialize SDK from env"

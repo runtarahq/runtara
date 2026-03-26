@@ -207,8 +207,7 @@ impl<'de, T: Deserialize<'de> + Clone> Deserialize<'de> for OneOrMany<T> {
             where
                 M: de::MapAccess<'de>,
             {
-                let item =
-                    T::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                let item = T::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(OneOrMany::one(item))
             }
         }

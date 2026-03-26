@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+#![cfg(feature = "quic_tests")]
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! E2E tests for instance lifecycle.

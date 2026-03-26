@@ -12,7 +12,7 @@ use crate::completion::{
 use crate::message::{self, AssistantContent, Message, UserContent};
 use crate::one_or_many::OneOrMany;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -86,9 +86,9 @@ impl CompletionModel for OpenAICompletionModel {
             .map_err(|e| CompletionError::HttpError(e.to_string()))?;
 
         let status = response.status();
-        let response_text = response
-            .into_string()
-            .map_err(|e| CompletionError::HttpError(format!("Failed to read response body: {e}")))?;
+        let response_text = response.into_string().map_err(|e| {
+            CompletionError::HttpError(format!("Failed to read response body: {e}"))
+        })?;
 
         if status >= 400 {
             return Err(CompletionError::ProviderError(response_text));
@@ -104,10 +104,7 @@ impl CompletionModel for OpenAICompletionModel {
 
 impl OpenAICompletionModel {
     /// Build the JSON body for the OpenAI `/chat/completions` endpoint.
-    fn build_request_body(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Value, CompletionError> {
+    fn build_request_body(&self, request: CompletionRequest) -> Result<Value, CompletionError> {
         // Assemble the `messages` array.
         let mut messages: Vec<Value> = Vec::new();
 
@@ -197,8 +194,8 @@ impl OpenAICompletionModel {
         // Tool calls
         if let Some(ref tool_calls) = choice.message.tool_calls {
             for tc in tool_calls {
-                let arguments: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| {
+                let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or_else(|_| {
                         // If arguments isn't valid JSON, wrap as string
                         Value::String(tc.function.arguments.clone())
                     });
@@ -211,9 +208,7 @@ impl OpenAICompletionModel {
         }
 
         let choice = OneOrMany::many(contents).map_err(|_| {
-            CompletionError::ResponseError(
-                "Response contained neither text nor tool calls".into(),
-            )
+            CompletionError::ResponseError("Response contained neither text nor tool calls".into())
         })?;
 
         let usage = resp.usage.map(|u| Usage {

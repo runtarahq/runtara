@@ -17,8 +17,8 @@
 //! let result = with_cancellation(|| some_long_operation())?;
 //! ```
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use once_cell::sync::OnceCell;
 use tracing::{info, warn};
@@ -191,12 +191,10 @@ pub fn acknowledge_cancellation() {
     // Send acknowledgment to core
     if let Some(sdk_mutex) = SDK_INSTANCE.get() {
         match sdk_mutex.lock() {
-            Ok(sdk_guard) => {
-                match sdk_guard.acknowledge_signal(SignalType::Cancel) {
-                    Ok(()) => info!("Cancellation acknowledged to core"),
-                    Err(e) => warn!(error = %e, "Failed to acknowledge cancellation signal"),
-                }
-            }
+            Ok(sdk_guard) => match sdk_guard.acknowledge_signal(SignalType::Cancel) {
+                Ok(()) => info!("Cancellation acknowledged to core"),
+                Err(e) => warn!(error = %e, "Failed to acknowledge cancellation signal"),
+            },
             Err(e) => warn!(error = %e, "Failed to lock SDK for cancellation acknowledgment"),
         }
     }
@@ -225,12 +223,10 @@ pub fn acknowledge_pause() {
     // Send acknowledgment to core
     if let Some(sdk_mutex) = SDK_INSTANCE.get() {
         match sdk_mutex.lock() {
-            Ok(sdk_guard) => {
-                match sdk_guard.acknowledge_signal(SignalType::Pause) {
-                    Ok(()) => info!("Pause acknowledged to core"),
-                    Err(e) => warn!(error = %e, "Failed to acknowledge pause signal"),
-                }
-            }
+            Ok(sdk_guard) => match sdk_guard.acknowledge_signal(SignalType::Pause) {
+                Ok(()) => info!("Pause acknowledged to core"),
+                Err(e) => warn!(error = %e, "Failed to acknowledge pause signal"),
+            },
             Err(e) => warn!(error = %e, "Failed to lock SDK for pause acknowledgment"),
         }
     }

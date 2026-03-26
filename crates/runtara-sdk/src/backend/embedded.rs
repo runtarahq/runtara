@@ -79,16 +79,21 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn register(&self, _checkpoint_id: Option<&str>) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .register_instance(&self.instance_id, &self.tenant_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .register_instance(&self.instance_id, &self.tenant_id),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Update status to running
-        self.rt.block_on(
-            self.persistence
-                .update_instance_status(&self.instance_id, "running", Some(Utc::now()))
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.update_instance_status(
+                &self.instance_id,
+                "running",
+                Some(Utc::now()),
+            ))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!("Instance registered (embedded)");
         Ok(())
@@ -97,10 +102,13 @@ impl SdkBackend for EmbeddedBackend {
     #[instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id, state_size = state.len()))]
     fn checkpoint(&self, checkpoint_id: &str, state: &[u8]) -> Result<CheckpointResult> {
         // Check if checkpoint exists
-        let existing = self.rt.block_on(
-            self.persistence
-                .load_checkpoint(&self.instance_id, checkpoint_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        let existing = self
+            .rt
+            .block_on(
+                self.persistence
+                    .load_checkpoint(&self.instance_id, checkpoint_id),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         if let Some(checkpoint) = existing {
             debug!(
@@ -116,16 +124,20 @@ impl SdkBackend for EmbeddedBackend {
         }
 
         // Save new checkpoint
-        self.rt.block_on(
-            self.persistence
-                .save_checkpoint(&self.instance_id, checkpoint_id, state)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .save_checkpoint(&self.instance_id, checkpoint_id, state),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Update instance's current checkpoint
-        self.rt.block_on(
-            self.persistence
-                .update_instance_checkpoint(&self.instance_id, checkpoint_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .update_instance_checkpoint(&self.instance_id, checkpoint_id),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(checkpoint_id = %checkpoint_id, "New checkpoint saved");
 
@@ -139,10 +151,13 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id))]
     fn get_checkpoint(&self, checkpoint_id: &str) -> Result<Option<Vec<u8>>> {
-        let result = self.rt.block_on(
-            self.persistence
-                .load_checkpoint(&self.instance_id, checkpoint_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        let result = self
+            .rt
+            .block_on(
+                self.persistence
+                    .load_checkpoint(&self.instance_id, checkpoint_id),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         Ok(result.map(|c| c.state))
     }
@@ -159,9 +174,9 @@ impl SdkBackend for EmbeddedBackend {
             subtype: None,
         };
 
-        self.rt.block_on(
-            self.persistence.insert_event(&event)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.insert_event(&event))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!("Heartbeat recorded");
         Ok(())
@@ -169,10 +184,12 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len()))]
     fn completed(&self, output: &[u8]) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .complete_instance(&self.instance_id, Some(output), None)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .complete_instance(&self.instance_id, Some(output), None),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
             id: None,
@@ -184,9 +201,9 @@ impl SdkBackend for EmbeddedBackend {
             subtype: None,
         };
 
-        self.rt.block_on(
-            self.persistence.insert_event(&event)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.insert_event(&event))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!("Instance completed");
         Ok(())
@@ -194,10 +211,12 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn failed(&self, error: &str) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .complete_instance(&self.instance_id, None, Some(error))
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .complete_instance(&self.instance_id, None, Some(error)),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
             id: None,
@@ -209,9 +228,9 @@ impl SdkBackend for EmbeddedBackend {
             subtype: None,
         };
 
-        self.rt.block_on(
-            self.persistence.insert_event(&event)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.insert_event(&event))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!(error = %error, "Instance failed");
         Ok(())
@@ -219,10 +238,12 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn suspended(&self) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .update_instance_status(&self.instance_id, "suspended", None)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .update_instance_status(&self.instance_id, "suspended", None),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
             id: None,
@@ -234,44 +255,47 @@ impl SdkBackend for EmbeddedBackend {
             subtype: None,
         };
 
-        self.rt.block_on(
-            self.persistence.insert_event(&event)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.insert_event(&event))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!("Instance suspended");
         Ok(())
     }
 
     #[instrument(skip(self, state), fields(instance_id = %self.instance_id, checkpoint_id = %checkpoint_id))]
-    fn sleep_until(
-        &self,
-        checkpoint_id: &str,
-        wake_at: DateTime<Utc>,
-        state: &[u8],
-    ) -> Result<()> {
+    fn sleep_until(&self, checkpoint_id: &str, wake_at: DateTime<Utc>, state: &[u8]) -> Result<()> {
         // Save checkpoint first
-        self.rt.block_on(
-            self.persistence
-                .save_checkpoint(&self.instance_id, checkpoint_id, state)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .save_checkpoint(&self.instance_id, checkpoint_id, state),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Update checkpoint reference
-        self.rt.block_on(
-            self.persistence
-                .update_instance_checkpoint(&self.instance_id, checkpoint_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .update_instance_checkpoint(&self.instance_id, checkpoint_id),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Set sleep_until for wake scheduler
-        self.rt.block_on(
-            self.persistence
-                .set_instance_sleep(&self.instance_id, wake_at)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .set_instance_sleep(&self.instance_id, wake_at),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Mark as suspended
-        self.rt.block_on(
-            self.persistence
-                .update_instance_status(&self.instance_id, "suspended", None)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .update_instance_status(&self.instance_id, "suspended", None),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         // Record the event
         let event = EventRecord {
@@ -284,9 +308,9 @@ impl SdkBackend for EmbeddedBackend {
             subtype: Some("sleeping".to_string()),
         };
 
-        self.rt.block_on(
-            self.persistence.insert_event(&event)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.insert_event(&event))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         info!(wake_at = %wake_at, "Instance sleeping until wake time");
         Ok(())
@@ -304,9 +328,9 @@ impl SdkBackend for EmbeddedBackend {
             subtype: Some(subtype.to_string()),
         };
 
-        self.rt.block_on(
-            self.persistence.insert_event(&event)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.insert_event(&event))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(subtype = %subtype, "Custom event recorded");
         Ok(())
@@ -319,15 +343,14 @@ impl SdkBackend for EmbeddedBackend {
         attempt_number: u32,
         error_message: Option<&str>,
     ) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .save_retry_attempt(
-                    &self.instance_id,
-                    checkpoint_id,
-                    attempt_number as i32,
-                    error_message,
-                )
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.save_retry_attempt(
+                &self.instance_id,
+                checkpoint_id,
+                attempt_number as i32,
+                error_message,
+            ))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(attempt = attempt_number, "Retry attempt recorded");
         Ok(())
@@ -335,9 +358,10 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn get_status(&self) -> Result<StatusResponse> {
-        let instance = self.rt.block_on(
-            self.persistence.get_instance(&self.instance_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        let instance = self
+            .rt
+            .block_on(self.persistence.get_instance(&self.instance_id))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         match instance {
             Some(record) => {
@@ -382,9 +406,10 @@ impl SdkBackend for EmbeddedBackend {
     }
 
     fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
-        let instance = self.rt.block_on(
-            self.persistence.get_instance(instance_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        let instance = self
+            .rt
+            .block_on(self.persistence.get_instance(instance_id))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         match instance {
             Some(record) => {
@@ -425,10 +450,12 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn set_sleep_until(&self, sleep_until: DateTime<Utc>) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .set_instance_sleep(&self.instance_id, sleep_until)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(
+                self.persistence
+                    .set_instance_sleep(&self.instance_id, sleep_until),
+            )
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!(sleep_until = %sleep_until, "Sleep until set");
         Ok(())
@@ -436,10 +463,9 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn clear_sleep(&self) -> Result<()> {
-        self.rt.block_on(
-            self.persistence
-                .clear_instance_sleep(&self.instance_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        self.rt
+            .block_on(self.persistence.clear_instance_sleep(&self.instance_id))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         debug!("Sleep cleared");
         Ok(())
@@ -447,20 +473,16 @@ impl SdkBackend for EmbeddedBackend {
 
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn get_sleep_until(&self) -> Result<Option<DateTime<Utc>>> {
-        let instance = self.rt.block_on(
-            self.persistence.get_instance(&self.instance_id)
-        ).map_err(|e| SdkError::Internal(e.to_string()))?;
+        let instance = self
+            .rt
+            .block_on(self.persistence.get_instance(&self.instance_id))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         Ok(instance.and_then(|i| i.sleep_until))
     }
 
     #[instrument(skip(self, state), fields(instance_id = %self.instance_id, duration_ms = duration.as_millis() as u64))]
-    fn durable_sleep(
-        &self,
-        duration: Duration,
-        checkpoint_id: &str,
-        state: &[u8],
-    ) -> Result<()> {
+    fn durable_sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         let now = Utc::now();
         let wake_at =
             now + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::zero());
@@ -828,9 +850,11 @@ mod tests {
         backend.register(None).unwrap();
 
         // Verify instance was registered
-        let instance = backend.rt.block_on(
-            persistence.get_instance("test-instance")
-        ).unwrap().unwrap();
+        let instance = backend
+            .rt
+            .block_on(persistence.get_instance("test-instance"))
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.instance_id, "test-instance");
         assert_eq!(instance.tenant_id, "test-tenant");
         assert_eq!(instance.status, "running");
@@ -900,9 +924,11 @@ mod tests {
         backend.register(None).unwrap();
         backend.completed(b"result data").unwrap();
 
-        let instance = backend.rt.block_on(
-            persistence.get_instance("test-instance")
-        ).unwrap().unwrap();
+        let instance = backend
+            .rt
+            .block_on(persistence.get_instance("test-instance"))
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, "completed");
         assert_eq!(instance.output, Some(b"result data".to_vec()));
     }
@@ -915,9 +941,11 @@ mod tests {
         backend.register(None).unwrap();
         backend.failed("something went wrong").unwrap();
 
-        let instance = backend.rt.block_on(
-            persistence.get_instance("test-instance")
-        ).unwrap().unwrap();
+        let instance = backend
+            .rt
+            .block_on(persistence.get_instance("test-instance"))
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, "failed");
         assert_eq!(instance.error, Some("something went wrong".to_string()));
     }
@@ -930,9 +958,11 @@ mod tests {
         backend.register(None).unwrap();
         backend.suspended().unwrap();
 
-        let instance = backend.rt.block_on(
-            persistence.get_instance("test-instance")
-        ).unwrap().unwrap();
+        let instance = backend
+            .rt
+            .block_on(persistence.get_instance("test-instance"))
+            .unwrap()
+            .unwrap();
         assert_eq!(instance.status, "suspended");
     }
 

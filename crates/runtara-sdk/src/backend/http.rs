@@ -130,11 +130,7 @@ impl HttpBackend {
     }
 
     /// POST JSON to an endpoint and deserialize the response.
-    fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
-        &self,
-        url: &str,
-        body: &T,
-    ) -> Result<R> {
+    fn post<T: Serialize, R: for<'de> Deserialize<'de>>(&self, url: &str, body: &T) -> Result<R> {
         let json_value = serde_json::to_value(body)
             .map_err(|e| SdkError::Internal(format!("Failed to serialize request body: {}", e)))?;
 
@@ -147,9 +143,9 @@ impl HttpBackend {
             .send_json(json_value)
             .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
 
-        let result: R = response
-            .into_json()
-            .map_err(|e| SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e)))?;
+        let result: R = response.into_json().map_err(|e| {
+            SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e))
+        })?;
 
         Ok(result)
     }
@@ -164,9 +160,9 @@ impl HttpBackend {
             .call()
             .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
 
-        let result: R = response
-            .into_json()
-            .map_err(|e| SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e)))?;
+        let result: R = response.into_json().map_err(|e| {
+            SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e))
+        })?;
 
         Ok(result)
     }
@@ -515,8 +511,7 @@ impl SdkBackend for HttpBackend {
     }
 
     fn suspended(&self) -> Result<()> {
-        let resp: SuccessResp = self
-            .post(&self.url("suspended"), &serde_json::json!({}))?;
+        let resp: SuccessResp = self.post(&self.url("suspended"), &serde_json::json!({}))?;
 
         if resp.success {
             Ok(())
@@ -527,12 +522,7 @@ impl SdkBackend for HttpBackend {
         }
     }
 
-    fn sleep_until(
-        &self,
-        checkpoint_id: &str,
-        wake_at: DateTime<Utc>,
-        state: &[u8],
-    ) -> Result<()> {
+    fn sleep_until(&self, checkpoint_id: &str, wake_at: DateTime<Utc>, state: &[u8]) -> Result<()> {
         let now = Utc::now();
         let duration_ms = if wake_at > now {
             (wake_at - now).num_milliseconds() as u64
@@ -543,12 +533,7 @@ impl SdkBackend for HttpBackend {
         self.durable_sleep(Duration::from_millis(duration_ms), checkpoint_id, state)
     }
 
-    fn durable_sleep(
-        &self,
-        duration: Duration,
-        checkpoint_id: &str,
-        state: &[u8],
-    ) -> Result<()> {
+    fn durable_sleep(&self, duration: Duration, checkpoint_id: &str, state: &[u8]) -> Result<()> {
         let body = SleepBody {
             duration_ms: duration.as_millis() as u64,
             checkpoint_id: checkpoint_id.to_string(),

@@ -5,10 +5,10 @@
 //! Provides a `CompletionModel` trait and request builder that mirror
 //! the rig API surface but are fully synchronous (no async, no tokio).
 
+use crate::message::AssistantContent;
 use crate::message::Message;
 use crate::one_or_many::OneOrMany;
 use crate::types::ToolDefinition;
-use crate::message::AssistantContent;
 
 // ================================================================
 // Error type
@@ -55,7 +55,8 @@ pub trait CompletionModel {
     fn completion_request(&self, prompt: Message) -> CompletionRequestBuilder;
 
     /// Execute a completion request synchronously.
-    fn completion(&self, request: CompletionRequest) -> Result<CompletionResponse, CompletionError>;
+    fn completion(&self, request: CompletionRequest)
+    -> Result<CompletionResponse, CompletionError>;
 }
 
 // ================================================================

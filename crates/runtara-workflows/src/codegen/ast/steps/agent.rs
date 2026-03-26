@@ -864,10 +864,7 @@ mod tests {
         let code = tokens.to_string();
 
         // Verify durable function signature
-        assert!(
-            code.contains("fn "),
-            "Should define durable function"
-        );
+        assert!(code.contains("fn "), "Should define durable function");
         assert!(
             code.contains("cache_key : & str"),
             "Durable function should take cache_key"
