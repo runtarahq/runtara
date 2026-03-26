@@ -380,10 +380,7 @@ impl RuntaraSdk {
 
     /// Acknowledge a received signal.
     #[instrument(skip(self), fields(instance_id = %self.backend.instance_id()))]
-    pub async fn acknowledge_signal(
-        &self,
-        signal_type: SignalType,
-    ) -> Result<()> {
+    pub async fn acknowledge_signal(&self, signal_type: SignalType) -> Result<()> {
         self.backend.acknowledge_signal(signal_type).await?;
         debug!("Signal acknowledged");
         Ok(())

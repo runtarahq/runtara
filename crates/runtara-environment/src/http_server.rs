@@ -480,8 +480,12 @@ async fn handle_health_check(
         .into_response(),
         Err(e) => {
             error!("Health check error: {}", e);
-            error_response("HEALTH_CHECK_ERROR", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
-                .into_response()
+            error_response(
+                "HEALTH_CHECK_ERROR",
+                &e.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response()
         }
     }
 }
@@ -593,19 +597,17 @@ async fn handle_register_image_upload(
             "sha256" => {
                 sha256_expected = Some(field.text().await.unwrap_or_default());
             }
-            "binary" => {
-                match field.bytes().await {
-                    Ok(bytes) => binary_data = Some(bytes.to_vec()),
-                    Err(e) => {
-                        return error_response(
-                            "UPLOAD_ERROR",
-                            &format!("Failed to read binary field: {}", e),
-                            StatusCode::BAD_REQUEST,
-                        )
-                        .into_response();
-                    }
+            "binary" => match field.bytes().await {
+                Ok(bytes) => binary_data = Some(bytes.to_vec()),
+                Err(e) => {
+                    return error_response(
+                        "UPLOAD_ERROR",
+                        &format!("Failed to read binary field: {}", e),
+                        StatusCode::BAD_REQUEST,
+                    )
+                    .into_response();
                 }
-            }
+            },
             _ => {
                 // Ignore unknown fields
             }
@@ -688,8 +690,7 @@ async fn handle_register_image_upload(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ =
-            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755));
     }
 
     // Create OCI bundle if needed
@@ -699,9 +700,7 @@ async fn handle_register_image_upload(
         .unwrap_or(RunnerType::Oci);
 
     let bundle_path_str = if runner_type == RunnerType::Oci {
-        if let Err(e) =
-            crate::runner::oci::create_bundle_at_path(&bundle_path, &binary_path)
-        {
+        if let Err(e) = crate::runner::oci::create_bundle_at_path(&bundle_path, &binary_path) {
             let _ = std::fs::remove_dir_all(&images_dir);
             return error_response(
                 "BUNDLE_ERROR",
@@ -716,12 +715,9 @@ async fn handle_register_image_upload(
     };
 
     // Build image
-    let mut builder = crate::image_registry::ImageBuilder::new(
-        &tenant_id,
-        &name,
-        binary_path.to_string_lossy(),
-    )
-    .runner_type(runner_type);
+    let mut builder =
+        crate::image_registry::ImageBuilder::new(&tenant_id, &name, binary_path.to_string_lossy())
+            .runner_type(runner_type);
 
     if let Some(desc) = &description {
         builder = builder.description(desc);
@@ -780,7 +776,9 @@ async fn handle_list_images(
                 Err(e) => Err(e),
             }
         } else {
-            image_registry.list_by_tenant(tenant_id, limit, offset).await
+            image_registry
+                .list_by_tenant(tenant_id, limit, offset)
+                .await
         }
     } else {
         image_registry.list_all(limit, offset).await
@@ -1066,12 +1064,12 @@ async fn handle_get_instance_status(
                 created_at_ms: Some(inst.created_at.timestamp_millis()),
                 started_at_ms: inst.started_at.map(|t| t.timestamp_millis()),
                 finished_at_ms: inst.finished_at.map(|t| t.timestamp_millis()),
-                output: inst.output.map(|o| {
-                    base64::engine::general_purpose::STANDARD.encode(&o)
-                }),
-                input: inst.input.map(|i| {
-                    base64::engine::general_purpose::STANDARD.encode(&i)
-                }),
+                output: inst
+                    .output
+                    .map(|o| base64::engine::general_purpose::STANDARD.encode(&o)),
+                input: inst
+                    .input
+                    .map(|i| base64::engine::general_purpose::STANDARD.encode(&i)),
                 error: inst.error,
                 stderr: inst.stderr,
                 heartbeat_at_ms: inst.heartbeat_at.map(|t| t.timestamp_millis()),
@@ -1426,10 +1424,9 @@ async fn handle_get_checkpoint(
     Path((instance_id, checkpoint_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     // Percent-decode the checkpoint_id (it may contain special characters)
-    let checkpoint_id =
-        percent_encoding::percent_decode_str(&checkpoint_id)
-            .decode_utf8_lossy()
-            .to_string();
+    let checkpoint_id = percent_encoding::percent_decode_str(&checkpoint_id)
+        .decode_utf8_lossy()
+        .to_string();
 
     match state
         .persistence
@@ -1529,9 +1526,9 @@ async fn handle_list_events(
             instance_id: ev.instance_id,
             event_type: ev.event_type,
             checkpoint_id: ev.checkpoint_id,
-            payload: ev.payload.map(|p| {
-                base64::engine::general_purpose::STANDARD.encode(&p)
-            }),
+            payload: ev
+                .payload
+                .map(|p| base64::engine::general_purpose::STANDARD.encode(&p)),
             created_at_ms: ev.created_at.timestamp_millis(),
             subtype: ev.subtype,
         })
@@ -1940,10 +1937,10 @@ async fn handle_get_capability(
     match handlers::handle_get_capability(&state, req).await {
         Ok(resp) => {
             if resp.found {
-                let inputs = serde_json::from_slice::<Value>(&resp.inputs_json)
-                    .unwrap_or(Value::Null);
-                let capability = serde_json::from_slice::<Value>(&resp.capability_json)
-                    .unwrap_or(Value::Null);
+                let inputs =
+                    serde_json::from_slice::<Value>(&resp.inputs_json).unwrap_or(Value::Null);
+                let capability =
+                    serde_json::from_slice::<Value>(&resp.capability_json).unwrap_or(Value::Null);
 
                 Json(json!({
                     "found": true,
@@ -1952,11 +1949,7 @@ async fn handle_get_capability(
                 }))
                 .into_response()
             } else {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "found": false })),
-                )
-                    .into_response()
+                (StatusCode::NOT_FOUND, Json(json!({ "found": false }))).into_response()
             }
         }
         Err(e) => {
@@ -1993,7 +1986,10 @@ pub fn environment_http_router(state: Arc<EnvironmentHandlerState>) -> Router {
             get(handle_get_image).delete(handle_delete_image),
         )
         // Instance lifecycle
-        .route("/api/v1/instances", post(handle_start_instance).get(handle_list_instances))
+        .route(
+            "/api/v1/instances",
+            post(handle_start_instance).get(handle_list_instances),
+        )
         .route(
             "/api/v1/instances/{instance_id}",
             get(handle_get_instance_status),

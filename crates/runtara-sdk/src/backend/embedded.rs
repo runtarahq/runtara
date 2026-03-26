@@ -15,7 +15,9 @@ use tracing::{debug, info, instrument};
 
 use super::SdkBackend;
 use crate::error::{Result, SdkError};
-use crate::types::{CheckpointResult, CustomSignal, InstanceStatus, Signal, SignalType, StatusResponse};
+use crate::types::{
+    CheckpointResult, CustomSignal, InstanceStatus, Signal, SignalType, StatusResponse,
+};
 
 /// Embedded backend for SDK operations.
 ///

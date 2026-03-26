@@ -20,7 +20,9 @@ use tracing::{debug, info, warn};
 
 use crate::backend::SdkBackend;
 use crate::error::{Result, SdkError};
-use crate::types::{CheckpointResult, CustomSignal, InstanceStatus, Signal, SignalType, StatusResponse};
+use crate::types::{
+    CheckpointResult, CustomSignal, InstanceStatus, Signal, SignalType, StatusResponse,
+};
 
 /// Configuration for the HTTP backend.
 #[derive(Debug, Clone)]
@@ -404,12 +406,9 @@ impl SdkBackend for HttpBackend {
     async fn connect(&self) -> Result<()> {
         // HTTP is connectionless — verify reachability with a health check
         let url = format!("{}/health", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| SdkError::Internal(format!("Cannot reach runtara-core HTTP API: {}", e)))?;
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            SdkError::Internal(format!("Cannot reach runtara-core HTTP API: {}", e))
+        })?;
 
         if resp.status().is_success() {
             self.connected.store(true, Ordering::SeqCst);
@@ -486,7 +485,9 @@ impl SdkBackend for HttpBackend {
         let resp: CheckpointResp = self.post(&self.url("checkpoint"), &body).await?;
 
         if resp.found {
-            Ok(Some(resp.state.as_deref().map(decode_b64).unwrap_or_default()))
+            Ok(Some(
+                resp.state.as_deref().map(decode_b64).unwrap_or_default(),
+            ))
         } else {
             Ok(None)
         }
@@ -510,7 +511,9 @@ impl SdkBackend for HttpBackend {
         if resp.success {
             Ok(())
         } else {
-            Err(SdkError::UnexpectedResponse("Failed to report completion".into()))
+            Err(SdkError::UnexpectedResponse(
+                "Failed to report completion".into(),
+            ))
         }
     }
 
@@ -521,17 +524,23 @@ impl SdkBackend for HttpBackend {
         if resp.success {
             Ok(())
         } else {
-            Err(SdkError::UnexpectedResponse("Failed to report failure".into()))
+            Err(SdkError::UnexpectedResponse(
+                "Failed to report failure".into(),
+            ))
         }
     }
 
     async fn suspended(&self) -> Result<()> {
-        let resp: SuccessResp = self.post(&self.url("suspended"), &serde_json::json!({})).await?;
+        let resp: SuccessResp = self
+            .post(&self.url("suspended"), &serde_json::json!({}))
+            .await?;
 
         if resp.success {
             Ok(())
         } else {
-            Err(SdkError::UnexpectedResponse("Failed to report suspension".into()))
+            Err(SdkError::UnexpectedResponse(
+                "Failed to report suspension".into(),
+            ))
         }
     }
 
@@ -569,7 +578,9 @@ impl SdkBackend for HttpBackend {
         if resp.success {
             Ok(())
         } else {
-            Err(SdkError::UnexpectedResponse("Durable sleep request failed".into()))
+            Err(SdkError::UnexpectedResponse(
+                "Durable sleep request failed".into(),
+            ))
         }
     }
 
@@ -631,7 +642,9 @@ impl SdkBackend for HttpBackend {
         let url = match checkpoint_id {
             Some(cp_id) => format!(
                 "{}/api/v1/instances/{}/signals/{}",
-                self.base_url, self.instance_id, encode_url_path(cp_id)
+                self.base_url,
+                self.instance_id,
+                encode_url_path(cp_id)
             ),
             None => format!(
                 "{}/api/v1/instances/{}/signals",
@@ -655,10 +668,7 @@ impl SdkBackend for HttpBackend {
     }
 
     async fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse> {
-        let url = format!(
-            "{}/api/v1/instances/{}/status",
-            self.base_url, instance_id
-        );
+        let url = format!("{}/api/v1/instances/{}/status", self.base_url, instance_id);
 
         let resp: StatusResp = self.get(&url).await?;
 

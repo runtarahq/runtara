@@ -324,7 +324,6 @@ pub enum SdkError {
     Internal(String),
 }
 
-
 /// Type alias for SDK results.
 pub type Result<T> = std::result::Result<T, SdkError>;
 

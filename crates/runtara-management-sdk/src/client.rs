@@ -23,8 +23,8 @@ use crate::types::{
     ListInstancesResult, ListStepSummariesOptions, ListStepSummariesResult, MetricsBucket,
     MetricsGranularity, RegisterImageOptions, RegisterImageResult, RegisterImageStreamOptions,
     RunnerType, ScopeInfo, SignalType, StartInstanceOptions, StartInstanceResult, StepStatus,
-    StepSummary, StopInstanceOptions, TenantMetricsResult, TestCapabilityOptions,
-    TestCapabilityResult, TerminationReason,
+    StepSummary, StopInstanceOptions, TenantMetricsResult, TerminationReason,
+    TestCapabilityOptions, TestCapabilityResult,
 };
 
 // ============================================================================
@@ -465,9 +465,7 @@ impl ManagementSdk {
                 let message = err_body
                     .error
                     .unwrap_or_else(|| format!("HTTP {} error", status));
-                let code = err_body
-                    .code
-                    .unwrap_or_else(|| status.as_str().to_string());
+                let code = err_body.code.unwrap_or_else(|| status.as_str().to_string());
                 SdkError::Server { code, message }
             }
             Err(_) => SdkError::Server {
@@ -533,9 +531,7 @@ impl ManagementSdk {
             image_id: json.image_id.unwrap_or_default(),
             image_name: json.image_name.unwrap_or_default(),
             tenant_id: json.tenant_id.unwrap_or_default(),
-            status: instance_status_from_string(
-                json.status.as_deref().unwrap_or("unknown"),
-            ),
+            status: instance_status_from_string(json.status.as_deref().unwrap_or("unknown")),
             checkpoint_id: json.checkpoint_id,
             created_at: json
                 .created_at_ms
@@ -713,10 +709,7 @@ impl ManagementSdk {
 
         let resp = self
             .client
-            .post(self.url(&format!(
-                "/api/v1/instances/{}/stop",
-                options.instance_id
-            )))
+            .post(self.url(&format!("/api/v1/instances/{}/stop", options.instance_id)))
             .json(&body)
             .send()
             .await?;
@@ -804,12 +797,12 @@ impl ManagementSdk {
             .send()
             .await?;
 
-        let json: RegisterImageJson =
-            if resp.status().is_success() || resp.status().as_u16() == 400 {
-                resp.json().await?
-            } else {
-                return Err(Self::parse_error_response(resp).await);
-            };
+        let json: RegisterImageJson = if resp.status().is_success() || resp.status().as_u16() == 400
+        {
+            resp.json().await?
+        } else {
+            return Err(Self::parse_error_response(resp).await);
+        };
 
         Ok(RegisterImageResult {
             success: json.success,
@@ -845,7 +838,10 @@ impl ManagementSdk {
             form = form.text("description", description);
         }
 
-        form = form.text("runner_type", runner_type_to_string(options.runner_type).to_string());
+        form = form.text(
+            "runner_type",
+            runner_type_to_string(options.runner_type).to_string(),
+        );
 
         if let Some(metadata) = options.metadata {
             form = form.text("metadata", serde_json::to_string(&metadata)?);
@@ -868,12 +864,12 @@ impl ManagementSdk {
             .send()
             .await?;
 
-        let json: RegisterImageJson =
-            if resp.status().is_success() || resp.status().as_u16() == 400 {
-                resp.json().await?
-            } else {
-                return Err(Self::parse_error_response(resp).await);
-            };
+        let json: RegisterImageJson = if resp.status().is_success() || resp.status().as_u16() == 400
+        {
+            resp.json().await?
+        } else {
+            return Err(Self::parse_error_response(resp).await);
+        };
 
         Ok(RegisterImageResult {
             success: json.success,
@@ -1031,10 +1027,7 @@ impl ManagementSdk {
 
         let resp = self
             .client
-            .post(self.url(&format!(
-                "/api/v1/instances/{}/signals",
-                instance_id
-            )))
+            .post(self.url(&format!("/api/v1/instances/{}/signals", instance_id)))
             .json(&body)
             .send()
             .await?;
@@ -1093,10 +1086,7 @@ impl ManagementSdk {
 
         let resp = self
             .client
-            .post(self.url(&format!(
-                "/api/v1/instances/{}/signals/custom",
-                instance_id
-            )))
+            .post(self.url(&format!("/api/v1/instances/{}/signals/custom", instance_id)))
             .json(&body)
             .send()
             .await?;
@@ -1163,10 +1153,7 @@ impl ManagementSdk {
 
         let resp = self
             .client
-            .get(self.url(&format!(
-                "/api/v1/instances/{}/checkpoints",
-                instance_id
-            )))
+            .get(self.url(&format!("/api/v1/instances/{}/checkpoints", instance_id)))
             .query(&query)
             .send()
             .await?;
@@ -1206,9 +1193,11 @@ impl ManagementSdk {
         debug!("Getting checkpoint");
 
         // Percent-encode the checkpoint_id since it may contain slashes
-        let encoded_checkpoint_id =
-            percent_encoding::utf8_percent_encode(checkpoint_id, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
+        let encoded_checkpoint_id = percent_encoding::utf8_percent_encode(
+            checkpoint_id,
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+        .to_string();
 
         let resp = self
             .client
@@ -1335,10 +1324,7 @@ impl ManagementSdk {
             .into_iter()
             .map(|ev| {
                 // Decode base64 payload as JSON if present
-                let payload = ev
-                    .payload
-                    .as_deref()
-                    .and_then(decode_base64_json);
+                let payload = ev.payload.as_deref().and_then(decode_base64_json);
 
                 EventSummary {
                     id: ev.id,
@@ -1622,10 +1608,7 @@ impl ManagementSdk {
 
         let resp = self
             .client
-            .get(self.url(&format!(
-                "/api/v1/tenants/{}/metrics",
-                options.tenant_id
-            )))
+            .get(self.url(&format!("/api/v1/tenants/{}/metrics", options.tenant_id)))
             .query(&query)
             .send()
             .await?;

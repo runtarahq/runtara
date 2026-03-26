@@ -61,13 +61,8 @@ async fn test_background_heartbeat_task() {
     let persistence = create_test_persistence().await;
 
     // Create SDK with a very short heartbeat interval for testing (100ms)
-    let mut sdk = RuntaraSdk::with_embedded_backend(
-        persistence.clone(),
-        &instance_id,
-        tenant_id,
-        1_000,
-        100,
-    );
+    let mut sdk =
+        RuntaraSdk::with_embedded_backend(persistence.clone(), &instance_id, tenant_id, 1_000, 100);
 
     // Connect and register with the core
     sdk.connect().await.expect("Failed to connect");
@@ -129,13 +124,8 @@ async fn test_heartbeats_continue_during_slow_sdk_operation() {
     let persistence = create_test_persistence().await;
 
     // Create SDK with 100ms heartbeat interval
-    let mut sdk_instance = RuntaraSdk::with_embedded_backend(
-        persistence.clone(),
-        &instance_id,
-        tenant_id,
-        1_000,
-        100,
-    );
+    let mut sdk_instance =
+        RuntaraSdk::with_embedded_backend(persistence.clone(), &instance_id, tenant_id, 1_000, 100);
     sdk_instance.connect().await.expect("Failed to connect");
     sdk_instance
         .register(None)

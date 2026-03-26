@@ -21,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
-use crate::instance_handlers::{
-    self, InstanceHandlerState,
-};
+use crate::instance_handlers::{self, InstanceHandlerState};
 
 // ============================================================================
 // JSON request/response types (mirror the protobuf types)
@@ -198,20 +196,32 @@ async fn register_handler(
     match instance_handlers::handle_register_instance(&state, request).await {
         Ok(resp) => {
             if resp.success {
-                Json(RegisterResponse { success: true, error: None }).into_response()
+                Json(RegisterResponse {
+                    success: true,
+                    error: None,
+                })
+                .into_response()
             } else {
-                (StatusCode::BAD_REQUEST, Json(RegisterResponse {
-                    success: false,
-                    error: Some(resp.error),
-                })).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(RegisterResponse {
+                        success: false,
+                        error: Some(resp.error),
+                    }),
+                )
+                    .into_response()
             }
         }
         Err(e) => {
             error!("Register handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "REGISTER_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "REGISTER_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -228,10 +238,14 @@ async fn checkpoint_handler(
     let state_bytes = match base64::engine::general_purpose::STANDARD.decode(&body.state) {
         Ok(b) => b,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": format!("Invalid base64 state: {}", e),
-                "code": "INVALID_STATE"
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Invalid base64 state: {}", e),
+                    "code": "INVALID_STATE"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -276,14 +290,19 @@ async fn checkpoint_handler(
                 signal,
                 custom_signal,
                 last_error,
-            }).into_response()
+            })
+            .into_response()
         }
         Err(e) => {
             error!("Checkpoint handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "CHECKPOINT_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "CHECKPOINT_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -320,14 +339,22 @@ async fn poll_signals_handler(
                 },
             });
 
-            Json(PollSignalsResponse { signal, custom_signal }).into_response()
+            Json(PollSignalsResponse {
+                signal,
+                custom_signal,
+            })
+            .into_response()
         }
         Err(e) => {
             error!("Poll signals error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "POLL_SIGNALS_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "POLL_SIGNALS_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -358,14 +385,19 @@ async fn poll_custom_signal_handler(
             Json(PollSignalsResponse {
                 signal: None,
                 custom_signal,
-            }).into_response()
+            })
+            .into_response()
         }
         Err(e) => {
             error!("Poll custom signal error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "POLL_CUSTOM_SIGNAL_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "POLL_CUSTOM_SIGNAL_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -378,7 +410,8 @@ async fn instance_event_handler(
 ) -> impl IntoResponse {
     use runtara_protocol::instance_proto::InstanceEvent;
 
-    let payload = body.payload
+    let payload = body
+        .payload
         .as_deref()
         .map(|p| base64::engine::general_purpose::STANDARD.decode(p))
         .transpose();
@@ -386,10 +419,14 @@ async fn instance_event_handler(
     let payload = match payload {
         Ok(p) => p.unwrap_or_default(),
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": format!("Invalid base64 payload: {}", e),
-                "code": "INVALID_PAYLOAD"
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Invalid base64 payload: {}", e),
+                    "code": "INVALID_PAYLOAD"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -408,18 +445,26 @@ async fn instance_event_handler(
                 Json(SuccessResponse { success: true }).into_response()
             } else {
                 let error = resp.error.unwrap_or_else(|| "Unknown error".to_string());
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                    "success": false,
-                    "error": error,
-                }))).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "success": false,
+                        "error": error,
+                    })),
+                )
+                    .into_response()
             }
         }
         Err(e) => {
             error!("Instance event error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "EVENT_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "EVENT_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -432,7 +477,8 @@ async fn completed_handler(
 ) -> impl IntoResponse {
     use runtara_protocol::instance_proto::{InstanceEvent, InstanceEventType};
 
-    let payload = body.get("output")
+    let payload = body
+        .get("output")
         .and_then(|v| v.as_str())
         .map(|s| base64::engine::general_purpose::STANDARD.decode(s))
         .transpose();
@@ -440,10 +486,14 @@ async fn completed_handler(
     let payload = match payload {
         Ok(p) => p.unwrap_or_default(),
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": format!("Invalid base64 output: {}", e),
-                "code": "INVALID_OUTPUT"
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Invalid base64 output: {}", e),
+                    "code": "INVALID_OUTPUT"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -460,10 +510,14 @@ async fn completed_handler(
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => {
             error!("Completed handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "COMPLETED_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "COMPLETED_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -476,7 +530,8 @@ async fn failed_handler(
 ) -> impl IntoResponse {
     use runtara_protocol::instance_proto::{InstanceEvent, InstanceEventType};
 
-    let error_msg = body.get("error")
+    let error_msg = body
+        .get("error")
         .and_then(|v| v.as_str())
         .unwrap_or("Unknown error");
 
@@ -493,10 +548,14 @@ async fn failed_handler(
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => {
             error!("Failed handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "FAILED_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "FAILED_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -521,10 +580,14 @@ async fn suspended_handler(
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => {
             error!("Suspended handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "SUSPENDED_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "SUSPENDED_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -540,10 +603,14 @@ async fn sleep_handler(
     let state_bytes = match base64::engine::general_purpose::STANDARD.decode(&body.state) {
         Ok(b) => b,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": format!("Invalid base64 state: {}", e),
-                "code": "INVALID_STATE"
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Invalid base64 state: {}", e),
+                    "code": "INVALID_STATE"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -558,10 +625,14 @@ async fn sleep_handler(
         Ok(_) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => {
             error!("Sleep handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "SLEEP_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "SLEEP_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -579,10 +650,14 @@ async fn signal_ack_handler(
         "pause" => SignalType::SignalPause as i32,
         "resume" => SignalType::SignalResume as i32,
         _ => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "error": format!("Unknown signal type: {}", body.signal_type),
-                "code": "INVALID_SIGNAL_TYPE"
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Unknown signal type: {}", body.signal_type),
+                    "code": "INVALID_SIGNAL_TYPE"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -596,10 +671,14 @@ async fn signal_ack_handler(
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => {
             warn!("Signal ack error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "SIGNAL_ACK_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "SIGNAL_ACK_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -625,10 +704,14 @@ async fn retry_handler(
         Ok(()) => Json(SuccessResponse { success: true }).into_response(),
         Err(e) => {
             warn!("Retry attempt error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "RETRY_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "RETRY_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -674,11 +757,13 @@ async fn status_handler(
                 }
             };
 
-            let output = resp.output.as_ref().map(|o| {
-                base64::engine::general_purpose::STANDARD.encode(o)
-            });
+            let output = resp
+                .output
+                .as_ref()
+                .map(|o| base64::engine::general_purpose::STANDARD.encode(o));
 
-            let found = status_str != "unknown" || resp.error.as_deref() != Some("Instance not found");
+            let found =
+                status_str != "unknown" || resp.error.as_deref() != Some("Instance not found");
 
             Json(InstanceStatusResponse {
                 found,
@@ -687,30 +772,37 @@ async fn status_handler(
                 checkpoint_id: resp.checkpoint_id,
                 output,
                 error: resp.error,
-            }).into_response()
+            })
+            .into_response()
         }
         Err(e) => {
             error!("Status handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "error": e.to_string(),
-                "code": "STATUS_ERROR"
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "STATUS_ERROR"
+                })),
+            )
+                .into_response()
         }
     }
 }
 
 /// GET /health
-async fn health_handler(
-    State(state): State<Arc<InstanceHandlerState>>,
-) -> impl IntoResponse {
+async fn health_handler(State(state): State<Arc<InstanceHandlerState>>) -> impl IntoResponse {
     let db_ok = state.persistence.health_check_db().await.unwrap_or(false);
     if db_ok {
         Json(json!({"status": "healthy"})).into_response()
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
-            "status": "unhealthy",
-            "error": "database check failed"
-        }))).into_response()
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "unhealthy",
+                "error": "database check failed"
+            })),
+        )
+            .into_response()
     }
 }
 
@@ -724,24 +816,54 @@ async fn health_handler(
 pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
     Router::new()
         // Instance lifecycle
-        .route("/api/v1/instances/{instance_id}/register", post(register_handler))
+        .route(
+            "/api/v1/instances/{instance_id}/register",
+            post(register_handler),
+        )
         // Checkpointing
-        .route("/api/v1/instances/{instance_id}/checkpoint", post(checkpoint_handler))
+        .route(
+            "/api/v1/instances/{instance_id}/checkpoint",
+            post(checkpoint_handler),
+        )
         // Signal polling
-        .route("/api/v1/instances/{instance_id}/signals", get(poll_signals_handler))
-        .route("/api/v1/instances/{instance_id}/signals/{signal_id}", get(poll_custom_signal_handler))
-        .route("/api/v1/instances/{instance_id}/signals/ack", post(signal_ack_handler))
+        .route(
+            "/api/v1/instances/{instance_id}/signals",
+            get(poll_signals_handler),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/signals/{signal_id}",
+            get(poll_custom_signal_handler),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/signals/ack",
+            post(signal_ack_handler),
+        )
         // Instance events (completion, failure, suspension)
-        .route("/api/v1/instances/{instance_id}/completed", post(completed_handler))
-        .route("/api/v1/instances/{instance_id}/failed", post(failed_handler))
-        .route("/api/v1/instances/{instance_id}/suspended", post(suspended_handler))
-        .route("/api/v1/instances/{instance_id}/events", post(instance_event_handler))
+        .route(
+            "/api/v1/instances/{instance_id}/completed",
+            post(completed_handler),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/failed",
+            post(failed_handler),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/suspended",
+            post(suspended_handler),
+        )
+        .route(
+            "/api/v1/instances/{instance_id}/events",
+            post(instance_event_handler),
+        )
         // Sleep/wake
         .route("/api/v1/instances/{instance_id}/sleep", post(sleep_handler))
         // Retry tracking
         .route("/api/v1/instances/{instance_id}/retry", post(retry_handler))
         // Instance status
-        .route("/api/v1/instances/{instance_id}/status", get(status_handler))
+        .route(
+            "/api/v1/instances/{instance_id}/status",
+            get(status_handler),
+        )
         // Health check
         .route("/health", get(health_handler))
         .with_state(state)
