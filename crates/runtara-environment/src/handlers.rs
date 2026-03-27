@@ -416,16 +416,21 @@ pub async fn handle_start_instance(
         });
     }
 
-    // Ensure bundle exists
-    let bundle_path = match &image.bundle_path {
-        Some(path) => PathBuf::from(path),
-        None => {
-            error!(image_id = %request.image_id, "Image has no bundle path");
-            return Ok(StartInstanceResponse {
-                success: false,
-                instance_id: String::new(),
-                error: Some(format!("Image '{}' has no bundle", request.image_id)),
-            });
+    // Ensure bundle/binary path exists
+    // WASM images use binary_path directly; OCI images use bundle_path
+    let bundle_path = if image.runner_type == RunnerType::Wasm {
+        PathBuf::from(&image.binary_path)
+    } else {
+        match &image.bundle_path {
+            Some(path) => PathBuf::from(path),
+            None => {
+                error!(image_id = %request.image_id, "Image has no bundle path");
+                return Ok(StartInstanceResponse {
+                    success: false,
+                    instance_id: String::new(),
+                    error: Some(format!("Image '{}' has no bundle", request.image_id)),
+                });
+            }
         }
     };
 
