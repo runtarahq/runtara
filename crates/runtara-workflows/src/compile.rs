@@ -154,6 +154,7 @@ fn extract_first_error(stderr: &str) -> Option<String> {
 ///
 /// This must match the target used in build.rs when precompiling libraries.
 /// We use musl on Linux for static linking (scenarios run in minimal containers).
+#[allow(dead_code)]
 fn get_host_target() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -307,9 +308,6 @@ pub struct CompilationInput {
     /// If provided, generated code will fetch connections from this service.
     /// Expected endpoint: GET {url}/{tenant_id}/{connection_id}
     pub connection_service_url: Option<String>,
-    /// Target triple for compilation. Defaults to host target.
-    /// Set to "wasm32-wasip2" for WASM compilation.
-    pub target: Option<String>,
 }
 
 /// Result of native binary compilation.
@@ -379,7 +377,6 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         debug_mode,
         child_scenarios,
         connection_service_url,
-        target,
     } = input;
 
     // Validate workflow for security, correctness, and configuration
@@ -424,8 +421,9 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         ));
     }
 
-    // Resolve target triple
-    let resolved_target = target.unwrap_or_else(|| get_host_target().to_string());
+    // Resolve target triple from RUNTARA_COMPILE_TARGET env var (default: wasm32-wasip2)
+    let resolved_target =
+        std::env::var("RUNTARA_COMPILE_TARGET").unwrap_or_else(|_| "wasm32-wasip2".to_string());
     let is_wasm = resolved_target.contains("wasm");
 
     // Get native library paths (target-aware)
