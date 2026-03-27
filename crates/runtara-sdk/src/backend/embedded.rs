@@ -615,6 +615,8 @@ mod tests {
                     output: inst.output.clone(),
                     error: inst.error.clone(),
                     sleep_until: inst.sleep_until,
+                    termination_reason: None,
+                    exit_code: None,
                 }))
         }
 
@@ -832,6 +834,24 @@ mod tests {
             &self,
             _instance_id: &str,
             _filter: &runtara_core::persistence::ListEventsFilter,
+        ) -> CoreResult<i64> {
+            Ok(0)
+        }
+
+        async fn list_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &runtara_core::persistence::ListStepSummariesFilter,
+            _limit: i64,
+            _offset: i64,
+        ) -> CoreResult<Vec<runtara_core::persistence::StepSummaryRecord>> {
+            Ok(vec![])
+        }
+
+        async fn count_step_summaries(
+            &self,
+            _instance_id: &str,
+            _filter: &runtara_core::persistence::ListStepSummariesFilter,
         ) -> CoreResult<i64> {
             Ok(0)
         }
