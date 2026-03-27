@@ -1850,6 +1850,7 @@ mod tests {
                     attributes: vec!["url".to_string(), "status_code".to_string()],
                 },
             ],
+            tags: vec![],
         };
 
         let json = serde_json::to_value(&info).unwrap();
@@ -1888,6 +1889,7 @@ mod tests {
             rate_limited: false,
             compensation_hint: None,
             known_errors: vec![],
+            tags: vec![],
         };
 
         let json = serde_json::to_value(&info).unwrap();
