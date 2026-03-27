@@ -202,6 +202,11 @@ impl WasmRunner {
             env.insert("RUNTARA_OBJECT_MODEL_URL".to_string(), url);
         }
 
+        // Forward agent service URL for native-only capability execution (xlsx, sftp, compression)
+        if let Ok(url) = std::env::var("RUNTARA_AGENT_SERVICE_URL") {
+            env.insert("RUNTARA_AGENT_SERVICE_URL".to_string(), url);
+        }
+
         // Forward tenant ID for internal API authentication
         if let Ok(tid) = std::env::var("RUNTARA_TENANT_ID") {
             env.insert("RUNTARA_TENANT_ID".to_string(), tid);
