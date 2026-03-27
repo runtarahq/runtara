@@ -835,10 +835,10 @@ async fn handle_get_image(
     match image_registry.get(&image_id).await {
         Ok(Some(img)) => {
             // Tenant isolation
-            if let Some(ref tenant_id) = query.tenant_id {
-                if img.tenant_id != *tenant_id {
-                    return Json(json!({ "found": false })).into_response();
-                }
+            if let Some(ref tenant_id) = query.tenant_id
+                && img.tenant_id != *tenant_id
+            {
+                return Json(json!({ "found": false })).into_response();
             }
 
             Json(json!({
@@ -887,8 +887,9 @@ async fn handle_delete_image(
     match image_registry.get(&image_id).await {
         Ok(Some(img)) => {
             // Tenant isolation
-            if let Some(ref tenant_id) = query.tenant_id {
-                if img.tenant_id != *tenant_id {
+            if let Some(ref tenant_id) = query.tenant_id
+                && img.tenant_id != *tenant_id
+            {
                     return (
                         StatusCode::NOT_FOUND,
                         Json(json!({
@@ -897,7 +898,6 @@ async fn handle_delete_image(
                         })),
                     )
                         .into_response();
-                }
             }
 
             if let Err(e) = image_registry.delete(&image_id).await {
