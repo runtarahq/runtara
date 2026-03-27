@@ -16,8 +16,8 @@ default = ["http", "embedded"]
 embedded = ["dep:runtara-core", "dep:tokio"]
 
 # HTTP-based communication with runtara-core
-# Uses ureq for HTTP calls. For WASM transition and simpler deployments.
-http = ["dep:ureq", "dep:percent-encoding"]
+# Uses runtara-http for HTTP calls. For WASM transition and simpler deployments.
+http = ["dep:runtara-http", "dep:percent-encoding"]
 
 # WASI target - HTTP-based communication (wasm32-wasip2)
 # Uses wasi-http for checkpointing, blocking I/O for sequential workflows
@@ -32,7 +32,7 @@ wasm-js = []
 runtara-core = { path = "../runtara-core", version = "1.0", optional = true }
 
 # HTTP client (optional, for http mode)
-ureq = { version = "2", features = ["json", "tls"], optional = true }
+runtara-http = { workspace = true, optional = true }
 percent-encoding = { version = "2", optional = true }
 
 # Macros

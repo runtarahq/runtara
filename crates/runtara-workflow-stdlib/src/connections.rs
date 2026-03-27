@@ -159,16 +159,17 @@ pub fn fetch_connection(
         }
     }
 
-    let response = ureq::get(&url)
-        .timeout(Duration::from_secs(30))
+    let client = runtara_http::HttpClient::with_timeout(Duration::from_secs(30));
+    let response = client
+        .request("GET", &url)
         .call()
         .map_err(|e| ConnectionError::FetchError(e.to_string()))?;
 
-    if response.status() == 404 {
+    if response.status == 404 {
         return Err(ConnectionError::NotFound(connection_id.to_string()));
     }
 
-    if response.status() == 429 {
+    if response.status == 429 {
         // Rate limited by connection service itself
         let retry_after = response
             .header("Retry-After")
@@ -180,10 +181,10 @@ pub fn fetch_connection(
         });
     }
 
-    if response.status() != 200 {
+    if response.status != 200 {
         return Err(ConnectionError::FetchError(format!(
             "HTTP {}",
-            response.status()
+            response.status
         )));
     }
 

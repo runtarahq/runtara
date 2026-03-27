@@ -1,0 +1,15 @@
+[package]
+name = "runtara-http"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP client abstraction for runtara — native (ureq) and WASI backends"
+keywords = ["http", "wasi", "client"]
+categories = ["web-programming::http-client"]
+
+[dependencies]
+ureq = { version = "2", features = ["json", "tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"

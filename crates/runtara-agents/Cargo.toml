@@ -22,7 +22,7 @@ default = ["native"]
 
 # Native platform - full agent support with all dependencies
 native = [
-    "dep:ureq",
+    "dep:runtara-http",
     "dep:ssh2",
     "dep:openssl",
 ]
@@ -55,7 +55,7 @@ regex = "1"
 strum = { version = "0.26", features = ["derive"] }
 # Native implementations
 rand = "0.8"
-ureq = { version = "2", features = ["json", "tls"], optional = true }
+runtara-http = { workspace = true, optional = true }
 urlencoding = "2.1"
 ssh2 = { version = "0.9", optional = true }
 # Vendored OpenSSL for musl static builds (required by ssh2/libssh2-sys)

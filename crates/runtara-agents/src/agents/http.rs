@@ -17,7 +17,6 @@ use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::Read as _;
 use strum::VariantNames;
 
 // ============================================================================
@@ -455,112 +454,77 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
         }
     }
 
-    // Create ureq agent with timeout
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_millis(input.timeout_ms))
-        .build();
+    // Create HTTP client with timeout
+    let client =
+        runtara_http::HttpClient::with_timeout(std::time::Duration::from_millis(input.timeout_ms));
 
     // Build request based on method
     let method_str = input.method.as_str();
-    let mut request = agent.request(method_str, &url);
+    let mut request = client.request(method_str, &url);
 
     // Add headers
     for (key, value) in &headers {
-        request = request.set(key, value);
+        request = request.header(key, value);
     }
 
-    // Add body and send
-    let result = match input.method {
-        HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => {
-            request.call()
-        }
+    // Add body for methods that support it
+    request = match input.method {
+        HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => request,
         HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
             if let Some(body_str) = input.body.to_string_body() {
                 // Set content-type if not already set
                 if !headers.contains_key("Content-Type") && !headers.contains_key("content-type") {
-                    request = request.set("Content-Type", "application/json");
+                    request = request.header("Content-Type", "application/json");
                 }
-                request.send_string(&body_str)
+                request.body_bytes(body_str.as_bytes())
             } else {
-                request.call()
+                request
             }
         }
     };
 
-    // Handle response or error
-    let response = match result {
+    // Execute request
+    let response = match request.call() {
         Ok(resp) => resp,
-        Err(ureq::Error::Status(status_code, resp)) => {
-            // Non-2xx response — ureq treats these as errors
-            let mut response_headers = HashMap::new();
-            for name in resp.headers_names() {
-                if let Some(value) = resp.header(&name) {
-                    response_headers.insert(name, value.to_string());
-                }
-            }
-
-            if input.fail_on_error {
-                let body_text = resp.into_string().unwrap_or_default();
-                let err = http_error(status_code, &body_text).with_attr("url", &input.url);
-                return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
-            }
-
-            // Return as normal response with non-success status
-            let body = read_response_body_from_string(
-                resp.into_string().unwrap_or_default(),
-                &input.response_type,
-            );
-
-            return Ok(HttpResponse {
-                status_code,
-                headers: response_headers,
-                body,
-                success: false,
-            });
+        Err(runtara_http::HttpError::Transport(e)) => {
+            let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
+                .with_attr("url", &input.url);
+            return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
         }
-        Err(ureq::Error::Transport(e)) => {
+        Err(e) => {
             let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
                 .with_attr("url", &input.url);
             return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
         }
     };
 
-    let status_code = response.status();
+    let status_code = response.status;
     let success = (200..300).contains(&status_code);
 
     // Extract headers
-    let mut response_headers = HashMap::new();
-    for name in response.headers_names() {
-        if let Some(value) = response.header(&name) {
-            response_headers.insert(name, value.to_string());
-        }
+    let response_headers: HashMap<String, String> = response.headers.clone().into_iter().collect();
+
+    // Handle non-2xx with fail_on_error
+    if !success && input.fail_on_error {
+        let body_text = String::from_utf8_lossy(&response.body).to_string();
+        let err = http_error(status_code, &body_text).with_attr("url", &input.url);
+        return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
     }
 
     // Read body based on response type
     let body = match input.response_type {
         ResponseType::Json => {
-            let text = response
-                .into_string()
-                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            let text = String::from_utf8_lossy(&response.body).to_string();
             match serde_json::from_str(&text) {
                 Ok(json_value) => HttpResponseBody::Json(json_value),
                 Err(_) => HttpResponseBody::Text(text),
             }
         }
         ResponseType::Text => {
-            let text = response
-                .into_string()
-                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            let text = String::from_utf8_lossy(&response.body).to_string();
             HttpResponseBody::Text(text)
         }
-        ResponseType::Binary => {
-            let mut bytes = Vec::new();
-            response
-                .into_reader()
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("Failed to read response body: {}", e))?;
-            HttpResponseBody::Binary(bytes)
-        }
+        ResponseType::Binary => HttpResponseBody::Binary(response.body),
     };
 
     Ok(HttpResponse {
@@ -569,18 +533,6 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
         body,
         success,
     })
-}
-
-/// Helper to parse a response body string into the appropriate HttpResponseBody type
-fn read_response_body_from_string(text: String, response_type: &ResponseType) -> HttpResponseBody {
-    match response_type {
-        ResponseType::Json => match serde_json::from_str(&text) {
-            Ok(json_value) => HttpResponseBody::Json(json_value),
-            Err(_) => HttpResponseBody::Text(text),
-        },
-        ResponseType::Text => HttpResponseBody::Text(text),
-        ResponseType::Binary => HttpResponseBody::Binary(text.into_bytes()),
-    }
 }
 
 /// URL encoding helper module

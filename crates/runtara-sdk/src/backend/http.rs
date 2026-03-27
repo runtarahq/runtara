@@ -95,22 +95,22 @@ impl HttpSdkConfig {
 
 /// HTTP backend for the SDK.
 ///
-/// Uses `ureq::Agent` for HTTP calls to runtara-core's HTTP instance API.
+/// Uses `runtara_http::HttpClient` for HTTP calls to runtara-core's HTTP instance API.
 /// All operations are request-response over HTTP/JSON with base64-encoded binary data.
 pub struct HttpBackend {
     instance_id: String,
     tenant_id: String,
     base_url: String,
-    client: ureq::Agent,
+    client: runtara_http::HttpClient,
     connected: AtomicBool,
 }
 
 impl HttpBackend {
     /// Create a new HTTP backend from config.
     pub fn new(config: &HttpSdkConfig) -> Result<Self> {
-        let client = ureq::AgentBuilder::new()
-            .timeout(Duration::from_millis(config.request_timeout_ms))
-            .build();
+        let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(
+            config.request_timeout_ms,
+        ));
 
         Ok(Self {
             instance_id: config.instance_id.clone(),
@@ -136,12 +136,21 @@ impl HttpBackend {
 
         let response = self
             .client
-            .post(url)
-            .set("Content-Type", "application/json")
-            .set("X-Runtara-Tenant-Id", &self.tenant_id)
-            .set("X-Runtara-Instance-Id", &self.instance_id)
-            .send_json(json_value)
+            .request("POST", url)
+            .header("Content-Type", "application/json")
+            .header("X-Runtara-Tenant-Id", &self.tenant_id)
+            .header("X-Runtara-Instance-Id", &self.instance_id)
+            .body_json(&json_value)
+            .call()
             .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
+
+        if response.status >= 400 {
+            let body_text = String::from_utf8_lossy(&response.body).to_string();
+            return Err(SdkError::Internal(format!(
+                "HTTP request failed with status {}: {}",
+                response.status, body_text
+            )));
+        }
 
         let result: R = response.into_json().map_err(|e| {
             SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e))
@@ -154,11 +163,19 @@ impl HttpBackend {
     fn get<R: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<R> {
         let response = self
             .client
-            .get(url)
-            .set("X-Runtara-Tenant-Id", &self.tenant_id)
-            .set("X-Runtara-Instance-Id", &self.instance_id)
+            .request("GET", url)
+            .header("X-Runtara-Tenant-Id", &self.tenant_id)
+            .header("X-Runtara-Instance-Id", &self.instance_id)
             .call()
             .map_err(|e| SdkError::Internal(format!("HTTP request failed: {}", e)))?;
+
+        if response.status >= 400 {
+            let body_text = String::from_utf8_lossy(&response.body).to_string();
+            return Err(SdkError::Internal(format!(
+                "HTTP request failed with status {}: {}",
+                response.status, body_text
+            )));
+        }
 
         let result: R = response.into_json().map_err(|e| {
             SdkError::UnexpectedResponse(format!("Failed to parse response: {}", e))
@@ -174,11 +191,12 @@ impl HttpBackend {
 
         match self
             .client
-            .post(url)
-            .set("Content-Type", "application/json")
-            .set("X-Runtara-Tenant-Id", &self.tenant_id)
-            .set("X-Runtara-Instance-Id", &self.instance_id)
-            .send_json(json_value)
+            .request("POST", url)
+            .header("Content-Type", "application/json")
+            .header("X-Runtara-Tenant-Id", &self.tenant_id)
+            .header("X-Runtara-Instance-Id", &self.instance_id)
+            .body_json(&json_value)
+            .call()
         {
             Ok(_) => {}
             Err(e) => {
@@ -386,18 +404,18 @@ impl SdkBackend for HttpBackend {
     fn connect(&self) -> Result<()> {
         // HTTP is connectionless — verify reachability with a health check
         let url = format!("{}/health", self.base_url);
-        let resp = self.client.get(&url).call().map_err(|e| {
+        let resp = self.client.request("GET", &url).call().map_err(|e| {
             SdkError::Internal(format!("Cannot reach runtara-core HTTP API: {}", e))
         })?;
 
-        if resp.status() >= 200 && resp.status() < 300 {
+        if resp.status >= 200 && resp.status < 300 {
             self.connected.store(true, Ordering::SeqCst);
             info!(base_url = %self.base_url, "Connected to runtara-core HTTP API");
             Ok(())
         } else {
             Err(SdkError::Config(format!(
                 "Health check returned {}",
-                resp.status()
+                resp.status
             )))
         }
     }

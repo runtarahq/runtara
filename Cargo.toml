@@ -11,6 +11,7 @@ members = [
     "crates/runtara-workflows",
     "crates/runtara-agents",
     "crates/runtara-ai",
+    "crates/runtara-http",
     "crates/runtara-workflow-stdlib",
     "crates/runtara-agent-macro",
     # Agent testing
@@ -28,6 +29,7 @@ keywords = ["durable", "workflow", "checkpoint", "execution"]
 categories = ["asynchronous", "development-tools"]
 
 [workspace.dependencies]
+runtara-http = { path = "crates/runtara-http", version = "1.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

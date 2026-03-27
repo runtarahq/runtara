@@ -25,7 +25,7 @@ const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 pub struct Client {
     api_key: String,
     base_url: String,
-    http: ureq::Agent,
+    http: runtara_http::HttpClient,
 }
 
 impl Client {
@@ -39,7 +39,7 @@ impl Client {
         Self {
             api_key: api_key.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: ureq::Agent::new(),
+            http: runtara_http::HttpClient::new(),
         }
     }
 
@@ -76,32 +76,29 @@ impl CompletionModel for OpenAICompletionModel {
 
         let url = format!("{}/chat/completions", self.client.base_url);
 
-        let response = match self
+        let response = self
             .client
             .http
-            .post(&url)
-            .set("Authorization", &format!("Bearer {}", self.client.api_key))
-            .set("Content-Type", "application/json")
-            .send_json(&body)
-        {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(code, resp)) => {
-                let error_body = resp.into_string().unwrap_or_default();
-                tracing::error!(
-                    target: "runtara_ai",
-                    status = code,
-                    body = %error_body,
-                    "OpenAI API error"
-                );
-                return Err(CompletionError::ProviderError(format!(
-                    "OpenAI API returned {}: {}",
-                    code, error_body
-                )));
-            }
-            Err(e) => {
-                return Err(CompletionError::HttpError(e.to_string()));
-            }
-        };
+            .request("POST", &url)
+            .header("Authorization", &format!("Bearer {}", self.client.api_key))
+            .header("Content-Type", "application/json")
+            .body_json(&body)
+            .call()
+            .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+
+        if response.status >= 400 {
+            let error_body = String::from_utf8_lossy(&response.body).to_string();
+            tracing::error!(
+                target: "runtara_ai",
+                status = response.status,
+                body = %error_body,
+                "OpenAI API error"
+            );
+            return Err(CompletionError::ProviderError(format!(
+                "OpenAI API returned {}: {}",
+                response.status, error_body
+            )));
+        }
 
         let response_text = response.into_string().map_err(|e| {
             CompletionError::HttpError(format!("Failed to read response body: {e}"))
