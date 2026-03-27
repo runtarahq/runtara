@@ -890,14 +890,14 @@ async fn handle_delete_image(
             if let Some(ref tenant_id) = query.tenant_id
                 && img.tenant_id != *tenant_id
             {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({
-                            "success": false,
-                            "error": format!("Image '{}' not found", image_id)
-                        })),
-                    )
-                        .into_response();
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({
+                        "success": false,
+                        "error": format!("Image '{}' not found", image_id)
+                    })),
+                )
+                    .into_response();
             }
 
             if let Err(e) = image_registry.delete(&image_id).await {
