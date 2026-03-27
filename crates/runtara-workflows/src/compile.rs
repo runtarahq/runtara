@@ -574,11 +574,11 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         .arg("-C")
         .arg(format!("codegen-units={}", codegen_units));
 
-    // WASM-specific: LTO requires rlibs compiled with -C embed-bitcode=yes.
-    // Enable only if RUNTARA_LTO is explicitly set (the native lib must be
-    // rebuilt with: RUSTFLAGS="-C embed-bitcode=yes" to support LTO).
+    // WASM: enable LTO for cross-crate dead code elimination.
+    // The build script compiles rlibs with -C embed-bitcode=yes to support this.
     if is_wasm {
-        if let Ok(lto_level) = std::env::var("RUNTARA_LTO") {
+        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| "thin".to_string());
+        if lto_level != "off" {
             cmd.arg("-C").arg(format!("lto={}", lto_level));
         }
     }
