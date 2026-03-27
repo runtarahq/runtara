@@ -484,7 +484,7 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     };
 
     // Execute request
-    let response = match request.call() {
+    let response = match request.call_agent() {
         Ok(resp) => resp,
         Err(runtara_http::HttpError::Transport(e)) => {
             let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))

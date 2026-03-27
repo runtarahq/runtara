@@ -137,29 +137,28 @@ impl RequestBuilder {
     /// When the `RUNTARA_HTTP_PROXY_URL` environment variable is set, the request
     /// is serialized as JSON and POSTed to the proxy endpoint instead of being
     /// executed directly.
+    /// Execute the request directly (no proxy). Used by SDK and internal APIs.
     pub fn call(self) -> Result<HttpResponse, HttpError> {
-        // Route through proxy only when X-Runtara-Connection-Id header is set.
-        // This is opt-in: agents that need credential injection set the header,
-        // SDK/internal calls never set it and always go direct.
-        static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
-        let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
-
-        let has_connection = self
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-id"));
-
-        if has_connection {
-            if let Some(proxy) = proxy_url {
-                return self.call_via_proxy(proxy);
-            }
-        }
-
-        // Direct call (no connection header or no proxy configured)
         #[cfg(not(target_family = "wasm"))]
         return native::execute(self);
         #[cfg(target_family = "wasm")]
         return wasi_backend::execute(self);
+    }
+
+    /// Execute the request through the HTTP proxy (if configured).
+    /// Used by agent capabilities — the proxy handles credential injection
+    /// and URL rewriting for requests with X-Runtara-Connection-Id.
+    /// Falls back to direct call if no proxy is configured.
+    pub fn call_agent(self) -> Result<HttpResponse, HttpError> {
+        static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
+        let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
+
+        if let Some(proxy) = proxy_url {
+            return self.call_via_proxy(proxy);
+        }
+
+        // No proxy configured — fall back to direct call
+        self.call()
     }
 
     /// Execute the request by forwarding it through an HTTP proxy.

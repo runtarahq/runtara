@@ -107,7 +107,7 @@ impl CompletionModel for OpenAICompletionModel {
                 .header("X-Runtara-Connection-Id", &self.client.connection_id)
                 .header("Content-Type", "application/json")
                 .body_json(&body)
-                .call()
+                .call_agent()
                 .map_err(|e| CompletionError::HttpError(e.to_string()))?
         } else {
             // Direct mode: full URL + API key
