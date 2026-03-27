@@ -574,13 +574,13 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         .arg("-C")
         .arg(format!("codegen-units={}", codegen_units));
 
-    // WASM-specific optimizations for binary size reduction
+    // WASM-specific: LTO requires rlibs compiled with -C embed-bitcode=yes.
+    // Enable only if RUNTARA_LTO is explicitly set (the native lib must be
+    // rebuilt with: RUSTFLAGS="-C embed-bitcode=yes" to support LTO).
     if is_wasm {
-        // Enable LTO for WASM to allow cross-crate dead code elimination.
-        // Combined with __scenario_dispatch (which only references used capabilities),
-        // this lets LLVM strip unreferenced capability code from the binary.
-        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| "thin".to_string());
-        cmd.arg("-C").arg(format!("lto={}", lto_level));
+        if let Ok(lto_level) = std::env::var("RUNTARA_LTO") {
+            cmd.arg("-C").arg(format!("lto={}", lto_level));
+        }
     }
 
     // Skip strip and crt-static for WASM targets
