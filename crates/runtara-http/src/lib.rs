@@ -213,12 +213,17 @@ impl RequestBuilder {
             .push(("Content-Type".to_string(), "application/json".to_string()));
 
         // Forward tenant ID header (X-Org-Id)
+        // Try from original request headers first, then from RUNTARA_TENANT_ID env var
         if let Some(tenant) = self
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-org-id"))
         {
             proxy_request.headers.push(tenant.clone());
+        } else if let Ok(tenant_id) = std::env::var("RUNTARA_TENANT_ID") {
+            proxy_request
+                .headers
+                .push(("X-Org-Id".to_string(), tenant_id));
         }
 
         // Execute directly (bypass proxy check to avoid recursion)
