@@ -49,6 +49,10 @@ pub struct ConnectionRequestContext<'a> {
 /// Response from the connection service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionResponse {
+    /// Connection ID (for proxy-based credential injection)
+    #[serde(default)]
+    pub connection_id: String,
+
     /// Connection credentials and configuration
     pub parameters: Value,
 
@@ -192,7 +196,13 @@ pub fn fetch_connection(
         .into_string()
         .map_err(|e| ConnectionError::FetchError(e.to_string()))?;
 
-    serde_json::from_str(&body).map_err(|e| ConnectionError::InvalidResponse(e.to_string()))
+    let mut conn: ConnectionResponse =
+        serde_json::from_str(&body).map_err(|e| ConnectionError::InvalidResponse(e.to_string()))?;
+    // Ensure connection_id is set (server may not include it)
+    if conn.connection_id.is_empty() {
+        conn.connection_id = connection_id.to_string();
+    }
+    Ok(conn)
 }
 
 impl RateLimitState {

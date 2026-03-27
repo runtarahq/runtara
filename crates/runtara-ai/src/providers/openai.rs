@@ -21,26 +21,51 @@ const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 // ================================================================
 
 /// An OpenAI-compatible API client.
+///
+/// Supports two modes:
+/// - **Direct**: uses `api_key` + `base_url` to call the API directly
+/// - **Proxy**: uses `connection_id` header with relative paths; a proxy
+///   resolves credentials and base URL from the connection
 #[derive(Clone)]
 pub struct Client {
+    /// API key for direct mode (empty when using proxy)
     api_key: String,
+    /// Base URL for direct mode (empty when using proxy)
     base_url: String,
+    /// Connection ID for proxy mode (empty when using direct)
+    connection_id: String,
     http: runtara_http::HttpClient,
 }
 
 impl Client {
-    /// Create a client pointing at the official OpenAI API.
+    /// Create a client pointing at the official OpenAI API (direct mode).
     pub fn new(api_key: &str) -> Self {
         Self::from_url(api_key, OPENAI_API_BASE_URL)
     }
 
-    /// Create a client pointing at a custom base URL.
+    /// Create a client pointing at a custom base URL (direct mode).
     pub fn from_url(api_key: &str, base_url: &str) -> Self {
         Self {
             api_key: api_key.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
+            connection_id: String::new(),
             http: runtara_http::HttpClient::new(),
         }
+    }
+
+    /// Create a client that uses the proxy pattern (connection_id header + relative paths).
+    pub fn from_connection_id(connection_id: &str) -> Self {
+        Self {
+            api_key: String::new(),
+            base_url: String::new(),
+            connection_id: connection_id.to_string(),
+            http: runtara_http::HttpClient::new(),
+        }
+    }
+
+    /// Whether this client uses the proxy pattern.
+    fn uses_proxy(&self) -> bool {
+        !self.connection_id.is_empty()
     }
 
     /// Get a completion model handle for the given model ID.
@@ -74,17 +99,28 @@ impl CompletionModel for OpenAICompletionModel {
     ) -> Result<CompletionResponse, CompletionError> {
         let body = self.build_request_body(request)?;
 
-        let url = format!("{}/chat/completions", self.client.base_url);
-
-        let response = self
-            .client
-            .http
-            .request("POST", &url)
-            .header("Authorization", &format!("Bearer {}", self.client.api_key))
-            .header("Content-Type", "application/json")
-            .body_json(&body)
-            .call()
-            .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+        let response = if self.client.uses_proxy() {
+            // Proxy mode: relative path + connection_id header
+            self.client
+                .http
+                .request("POST", "/v1/chat/completions")
+                .header("X-Runtara-Connection-Id", &self.client.connection_id)
+                .header("Content-Type", "application/json")
+                .body_json(&body)
+                .call()
+                .map_err(|e| CompletionError::HttpError(e.to_string()))?
+        } else {
+            // Direct mode: full URL + API key
+            let url = format!("{}/chat/completions", self.client.base_url);
+            self.client
+                .http
+                .request("POST", &url)
+                .header("Authorization", &format!("Bearer {}", self.client.api_key))
+                .header("Content-Type", "application/json")
+                .body_json(&body)
+                .call()
+                .map_err(|e| CompletionError::HttpError(e.to_string()))?
+        };
 
         if response.status >= 400 {
             let error_body = String::from_utf8_lossy(&response.body).to_string();

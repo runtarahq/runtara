@@ -702,6 +702,7 @@ pub fn emit(
                         &__compact_key,
                         __ai_integration_id.clone(),
                         __ai_conn_params.clone(),
+                        __ai_connection_id.clone(),
                         __ai_model_id.clone(),
                         "You are a conversation summarizer. Produce a concise summary preserving key facts.".to_string(),
                         __summary_prompt,
@@ -1020,6 +1021,7 @@ pub fn emit(
             // Store connection info for passing to durable LLM calls
             let __ai_integration_id = __ai_conn.integration_id.clone();
             let __ai_conn_params = serde_json::json!(__ai_conn.parameters);
+            let __ai_connection_id = __ai_conn.connection_id.clone();
             let __ai_model_id: Option<String> = #model_tokens.map(|s: &str| s.to_string());
             let __ai_max_tokens: Option<u64> = #max_tokens_tokens;
             let __ai_output_schema_json: Option<String> = #output_schema_tokens;
@@ -1078,6 +1080,7 @@ pub fn emit(
                 cache_key: &str,
                 integration_id: String,
                 conn_params: serde_json::Value,
+                connection_id: String,
                 model_id: Option<String>,
                 system_prompt: String,
                 user_prompt: String,
@@ -1093,8 +1096,9 @@ pub fn emit(
                 use #stdlib::ai::types::ToolDefinition as _TD;
                 use #stdlib::ai::message::Message as _Msg;
 
-                let __m = #stdlib::ai::provider::create_completion_model(
-                    &integration_id, &conn_params, model_id.as_deref(),
+                let __conn_id_opt = if connection_id.is_empty() { None } else { Some(connection_id.as_str()) };
+                let __m = #stdlib::ai::provider::create_completion_model_with_connection(
+                    &integration_id, &conn_params, model_id.as_deref(), __conn_id_opt,
                 ).map_err(|e| format!("LLM model creation failed: {}", e))?;
 
                 let __hist: Vec<_Msg> = serde_json::from_value(chat_history_json)
@@ -1173,6 +1177,7 @@ pub fn emit(
                     &__llm_cache_key,
                     __ai_integration_id.clone(),
                     __ai_conn_params.clone(),
+                    __ai_connection_id.clone(),
                     __ai_model_id.clone(),
                     __system_prompt.clone(),
                     __iter_prompt,

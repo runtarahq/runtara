@@ -14,6 +14,9 @@ use serde_json::Value;
 /// Raw connection data injected by workflow runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawConnection {
+    /// Connection ID (for proxy-based credential injection)
+    #[serde(default)]
+    pub connection_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_subtype: Option<String>,
     /// Connection type identifier that maps to a connection schema (e.g., bearer, api_key, sftp)

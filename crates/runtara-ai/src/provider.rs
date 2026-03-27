@@ -21,27 +21,47 @@ pub enum ProviderError {
 
 /// Create an OpenAI completion model from connection parameters.
 ///
-/// Extracts `api_key` and optional `base_url` from the connection parameters,
-/// creates an OpenAI client, and returns the specified model.
+/// Supports two modes:
+/// - **Proxy** (preferred): if `connection_id` is provided, uses the proxy pattern
+///   with relative paths and `X-Runtara-Connection-Id` header
+/// - **Direct** (fallback): extracts `api_key` and optional `base_url` from parameters
 ///
 /// # Arguments
-/// * `parameters` - Connection parameters JSON (must contain `api_key`)
+/// * `parameters` - Connection parameters JSON (must contain `api_key` in direct mode)
 /// * `model` - Model identifier (e.g., "gpt-4o"). Defaults to "gpt-4o" if None.
+/// * `connection_id` - Optional connection ID for proxy mode
 pub fn create_openai_model(
     parameters: &Value,
     model: Option<&str>,
 ) -> Result<openai::OpenAICompletionModel, ProviderError> {
-    let api_key = parameters
-        .get("api_key")
-        .and_then(|v| v.as_str())
-        .ok_or(ProviderError::MissingApiKey)?;
+    create_openai_model_with_connection(parameters, model, None)
+}
 
-    let base_url = parameters.get("base_url").and_then(|v| v.as_str());
-
-    let client = if let Some(base_url) = base_url {
-        openai::Client::from_url(api_key, base_url)
+/// Create an OpenAI completion model, optionally using the proxy pattern.
+pub fn create_openai_model_with_connection(
+    parameters: &Value,
+    model: Option<&str>,
+    connection_id: Option<&str>,
+) -> Result<openai::OpenAICompletionModel, ProviderError> {
+    let client = if let Some(conn_id) = connection_id
+        && !conn_id.is_empty()
+    {
+        // Proxy mode: connection_id header + relative paths
+        openai::Client::from_connection_id(conn_id)
     } else {
-        openai::Client::new(api_key)
+        // Direct mode: api_key + base_url
+        let api_key = parameters
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .ok_or(ProviderError::MissingApiKey)?;
+
+        let base_url = parameters.get("base_url").and_then(|v| v.as_str());
+
+        if let Some(base_url) = base_url {
+            openai::Client::from_url(api_key, base_url)
+        } else {
+            openai::Client::new(api_key)
+        }
     };
 
     let model_id = model.unwrap_or("gpt-4o");
@@ -91,9 +111,19 @@ pub fn create_completion_model(
     parameters: &Value,
     model: Option<&str>,
 ) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
+    create_completion_model_with_connection(integration_id, parameters, model, None)
+}
+
+/// Dispatch to the appropriate LLM provider, optionally using the proxy pattern.
+pub fn create_completion_model_with_connection(
+    integration_id: &str,
+    parameters: &Value,
+    model: Option<&str>,
+    connection_id: Option<&str>,
+) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
     match integration_id {
         "openai_api_key" => {
-            let m = create_openai_model(parameters, model)?;
+            let m = create_openai_model_with_connection(parameters, model, connection_id)?;
             Ok(Box::new(m))
         }
         other => Err(ProviderError::UnsupportedProvider(other.to_string())),

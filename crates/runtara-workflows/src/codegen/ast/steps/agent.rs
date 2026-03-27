@@ -500,6 +500,7 @@ fn emit_connection_fetch(
             if let serde_json::Value::Object(ref mut map) = inputs {
                 map.insert("connection_id".to_string(), serde_json::Value::String(#conn_id.to_string()));
                 map.insert("_connection".to_string(), serde_json::json!({
+                    "connection_id": #conn_id,
                     "parameters": __conn_response.parameters,
                     "integration_id": __conn_response.integration_id,
                     "connection_subtype": __conn_response.connection_subtype
