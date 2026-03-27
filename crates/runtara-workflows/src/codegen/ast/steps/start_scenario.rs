@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_with_embedded_child_structured_cancellation() {
+    fn test_emit_with_embedded_child_sync_execution() {
         let step = create_named_step("start-child", "Execute Child", "child-scenario-id");
         let child_graph = create_child_graph("Child Graph");
         let mut ctx = create_ctx_with_child("start-child", "child-scenario-id", child_graph, false);
@@ -1065,22 +1065,10 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Should emit structured error for interruption (cancel or pause)
+        // Child scenario executes synchronously (no async with_cancellation)
         assert!(
-            code.contains("STEP_INTERRUPTED"),
-            "Should include STEP_INTERRUPTED error code"
-        );
-        assert!(
-            code.contains("interruptionReason"),
-            "Should include interruption reason"
-        );
-        assert!(
-            code.contains("\"transient\""),
-            "Interruption should be transient category"
-        );
-        assert!(
-            code.contains("\"info\""),
-            "Interruption should be info severity"
+            code.contains("in_scope"),
+            "Should use span.in_scope for sync execution"
         );
     }
 

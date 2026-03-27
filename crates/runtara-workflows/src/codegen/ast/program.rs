@@ -1300,9 +1300,7 @@ mod tests {
         assert!(code.contains("prelude"), "Should import prelude");
         // tokio no longer imported — generated workflows are synchronous
         assert!(code.contains("tracing"), "Should import tracing");
-        assert!(
-            // Instrument trait no longer imported — generated workflows use sync span scoping
-        );
+        // Instrument trait no longer imported — generated workflows use sync span scoping
     }
 
     #[test]

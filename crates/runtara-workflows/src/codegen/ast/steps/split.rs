@@ -1049,10 +1049,10 @@ mod tests {
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify the code handles the sequential flag
+        // Verify the code includes parallelism handling
         assert!(
-            code.contains("if sequential"),
-            "Should check sequential flag for execution order"
+            code.contains("parallelism"),
+            "Should include parallelism config"
         );
     }
 
@@ -1086,14 +1086,10 @@ mod tests {
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify cancellation and error tokens are present
+        // Verify cancellation token is present for parallel path
         assert!(
             code.contains("cancel_token"),
             "Should have cancel_token for parallel execution"
-        );
-        assert!(
-            code.contains("error_token"),
-            "Should have error_token for early termination on failure"
         );
         assert!(
             code.contains("AtomicBool"),
