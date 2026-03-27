@@ -189,8 +189,10 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
                 "csv" => ("csv", "csv_ops"),
                 "xml" => ("xml", "xml_ops"),
                 "text" => ("text", "text_ops"),
-                "sftp" => ("sftp", "sftp"),
-                _ => return None, // Unknown agent, skip
+                // Native-only agents (sftp, xlsx, compression) are dispatched via
+                // dispatch::execute_capability() — no module import needed.
+                // They run either natively or via HTTP stub on the server.
+                _ => return None, // Unknown or native-only agent, skip
             };
             let module_ident = Ident::new(module, Span::call_site());
             let alias_ident = Ident::new(alias, Span::call_site());
