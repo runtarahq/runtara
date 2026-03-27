@@ -9,7 +9,12 @@ keywords = ["http", "wasi", "client"]
 categories = ["web-programming::http-client"]
 
 [dependencies]
-ureq = { version = "2", features = ["json", "tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ureq = { version = "2", features = ["json", "tls"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasi = { version = "0.14", features = ["std"] }

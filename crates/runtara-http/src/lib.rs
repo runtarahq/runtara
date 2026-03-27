@@ -5,25 +5,32 @@
 //! Provides a blocking HTTP client that works on both native (via ureq)
 //! and WASI (via wasi-http, future) targets.
 
+#[cfg(not(target_family = "wasm"))]
 mod native;
-
+#[cfg(not(target_family = "wasm"))]
 pub use native::NativeHttpClient as HttpClient;
+
+#[cfg(target_family = "wasm")]
+mod wasi_backend;
+#[cfg(target_family = "wasm")]
+pub use wasi_backend::WasiHttpClient as HttpClient;
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 /// Builder for an HTTP request.
 pub struct RequestBuilder {
-    method: String,
-    url: String,
-    headers: Vec<(String, String)>,
-    query_params: Vec<(String, String)>,
-    body: Option<Body>,
-    timeout: Option<Duration>,
-    agent: Option<ureq::Agent>,
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) query_params: Vec<(String, String)>,
+    pub(crate) body: Option<Body>,
+    pub(crate) timeout: Option<Duration>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) agent: Option<ureq::Agent>,
 }
 
-enum Body {
+pub(crate) enum Body {
     Json(serde_json::Value),
     Bytes(Vec<u8>),
 }
@@ -77,7 +84,7 @@ impl HttpResponse {
 }
 
 impl RequestBuilder {
-    fn new(method: &str, url: &str) -> Self {
+    pub(crate) fn new(method: &str, url: &str) -> Self {
         Self {
             method: method.to_string(),
             url: url.to_string(),
@@ -85,6 +92,7 @@ impl RequestBuilder {
             query_params: Vec::new(),
             body: None,
             timeout: None,
+            #[cfg(not(target_family = "wasm"))]
             agent: None,
         }
     }
@@ -125,7 +133,14 @@ impl RequestBuilder {
     /// All valid HTTP responses are returned as `Ok(HttpResponse)`.
     /// Only transport-level failures return `Err`.
     pub fn call(self) -> Result<HttpResponse, HttpError> {
-        native::execute(self)
+        #[cfg(not(target_family = "wasm"))]
+        {
+            native::execute(self)
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            wasi_backend::execute(self)
+        }
     }
 }
 
