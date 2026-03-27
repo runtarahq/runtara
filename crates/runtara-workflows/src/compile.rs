@@ -590,6 +590,8 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     if deps_dir.exists() {
         cmd.arg("-L")
             .arg(format!("dependency={}", deps_dir.display()));
+        // Also add as native search path for .a files (e.g., wit-bindgen-rt's cabi_realloc)
+        cmd.arg("-L").arg(format!("native={}", deps_dir.display()));
     }
 
     // Add native library path (parent of scenario lib)
