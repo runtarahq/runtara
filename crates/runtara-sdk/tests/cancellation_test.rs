@@ -452,8 +452,14 @@ async fn test_parallel_split_cancellation_pattern() {
 
     let _completed = completed_count.load(Ordering::SeqCst);
 
-    assert!(!successes.is_empty(), "At least some items should have completed");
-    assert!(!failures.is_empty(), "Some items should have been cancelled/skipped");
+    assert!(
+        !successes.is_empty(),
+        "At least some items should have completed"
+    );
+    assert!(
+        !failures.is_empty(),
+        "Some items should have been cancelled/skipped"
+    );
 }
 
 // ============================================================================
