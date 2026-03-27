@@ -16,9 +16,8 @@ crate-type = ["rlib"]
 [features]
 default = ["native"]
 
-# Native platform - HTTP transport (sync execution)
+# Native platform - includes C-dependent agents (xlsx, sftp, compression)
 native = [
-    "dep:runtara-http",
     "runtara-sdk/http",
     "runtara-agents/native",
 ]
@@ -60,7 +59,7 @@ serde_json = { workspace = true }
 tokio = { version = "1", features = ["full"], optional = true }
 
 # HTTP client for connection fetching (native only)
-runtara-http = { workspace = true, optional = true }
+runtara-http = { workspace = true }
 
 # Template rendering for MappingValue::Template
 minijinja = "2.5"
