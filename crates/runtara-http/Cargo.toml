@@ -9,6 +9,7 @@ keywords = ["http", "wasi", "client"]
 categories = ["web-programming::http-client"]
 
 [dependencies]
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"

@@ -16,6 +16,7 @@ mod wasi_backend;
 pub use wasi_backend::WasiHttpClient as HttpClient;
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Builder for an HTTP request.
@@ -132,16 +133,166 @@ impl RequestBuilder {
     /// Note: Unlike ureq, this does NOT treat non-2xx as errors.
     /// All valid HTTP responses are returned as `Ok(HttpResponse)`.
     /// Only transport-level failures return `Err`.
+    ///
+    /// When the `RUNTARA_HTTP_PROXY_URL` environment variable is set, the request
+    /// is serialized as JSON and POSTed to the proxy endpoint instead of being
+    /// executed directly.
     pub fn call(self) -> Result<HttpResponse, HttpError> {
-        #[cfg(not(target_family = "wasm"))]
-        {
-            native::execute(self)
+        // Check for proxy mode
+        static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
+        let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
+
+        if let Some(proxy) = proxy_url {
+            return self.call_via_proxy(proxy);
         }
+
+        // Direct call
+        #[cfg(not(target_family = "wasm"))]
+        return native::execute(self);
         #[cfg(target_family = "wasm")]
+        return wasi_backend::execute(self);
+    }
+
+    /// Execute the request by forwarding it through an HTTP proxy.
+    ///
+    /// The original request is serialized as JSON and POSTed to the proxy URL.
+    /// The proxy response is deserialized back into an `HttpResponse`.
+    fn call_via_proxy(self, proxy_url: &str) -> Result<HttpResponse, HttpError> {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+
+        // Extract connection_id from headers if present
+        let connection_id = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-id"))
+            .map(|(_, v)| v.clone());
+
+        // Remove X-Runtara-* headers from forwarded headers
+        let clean_headers: Vec<(String, String)> = self
+            .headers
+            .iter()
+            .filter(|(k, _)| !k.to_lowercase().starts_with("x-runtara-"))
+            .cloned()
+            .collect();
+
+        // Build the full URL with query params
+        let full_url = build_url_with_query(&self.url, &self.query_params);
+
+        // Serialize body
+        let (body_json, body_raw, _body_type) = match &self.body {
+            Some(Body::Json(v)) => (Some(v.clone()), None::<String>, "json"),
+            Some(Body::Bytes(b)) => (None, Some(BASE64.encode(b)), "binary"),
+            None => (None, None, "none"),
+        };
+
+        // Build proxy request payload
+        let proxy_body = serde_json::json!({
+            "method": self.method,
+            "url": full_url,
+            "headers": headers_to_map(&clean_headers),
+            "body": body_json,
+            "body_raw": body_raw,
+            "connection_id": connection_id,
+            "timeout_ms": self.timeout.map(|t| t.as_millis() as u64),
+        });
+
+        // Create a new request to the proxy
+        let mut proxy_request = RequestBuilder::new("POST", proxy_url);
+        proxy_request.body = Some(Body::Json(proxy_body));
+        proxy_request
+            .headers
+            .push(("Content-Type".to_string(), "application/json".to_string()));
+
+        // Forward tenant ID header (X-Org-Id)
+        if let Some(tenant) = self
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-org-id"))
         {
-            wasi_backend::execute(self)
+            proxy_request.headers.push(tenant.clone());
+        }
+
+        // Execute directly (bypass proxy check to avoid recursion)
+        #[cfg(not(target_family = "wasm"))]
+        let proxy_response = native::execute(proxy_request)?;
+        #[cfg(target_family = "wasm")]
+        let proxy_response = wasi_backend::execute(proxy_request)?;
+
+        // Parse proxy response
+        let resp_json: serde_json::Value = serde_json::from_slice(&proxy_response.body)
+            .map_err(|e| HttpError::Transport(format!("Failed to parse proxy response: {}", e)))?;
+
+        // Reconstruct HttpResponse
+        let status = resp_json["status"].as_u64().unwrap_or(502) as u16;
+        let resp_headers: HashMap<String, String> = resp_json["headers"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Decode body — prefer body_raw (base64) if present, otherwise body (JSON)
+        let body = if let Some(raw) = resp_json["body_raw"].as_str() {
+            BASE64.decode(raw).map_err(|e| {
+                HttpError::Transport(format!("Invalid base64 in proxy response: {e}"))
+            })?
+        } else if let Some(body_val) = resp_json.get("body") {
+            if body_val.is_null() {
+                Vec::new()
+            } else {
+                serde_json::to_vec(body_val).unwrap_or_default()
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok(HttpResponse {
+            status,
+            body,
+            headers: resp_headers,
+        })
+    }
+}
+
+/// Build a full URL by appending query parameters.
+fn build_url_with_query(url: &str, query_params: &[(String, String)]) -> String {
+    if query_params.is_empty() {
+        return url.to_string();
+    }
+    let qs: String = query_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if url.contains('?') {
+        format!("{url}&{qs}")
+    } else {
+        format!("{url}?{qs}")
+    }
+}
+
+/// Simple percent-encoding for query parameter keys/values.
+fn url_encode(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => result.push(c),
+            _ => {
+                for byte in c.to_string().as_bytes() {
+                    result.push_str(&format!("%{byte:02X}"));
+                }
+            }
         }
     }
+    result
+}
+
+/// Convert a header list to a map (last value wins for duplicate keys).
+fn headers_to_map(headers: &[(String, String)]) -> HashMap<String, String> {
+    headers.iter().cloned().collect()
 }
 
 #[cfg(test)]

@@ -185,6 +185,18 @@ impl WasmRunner {
             env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
         }
 
+        // HTTP proxy URL for routing all outbound HTTP through smo-runtime
+        if let Ok(url) = std::env::var("RUNTARA_HTTP_PROXY_URL") {
+            env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), url);
+        } else {
+            // Default: smo-runtime's internal proxy endpoint
+            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
+            env.insert(
+                "RUNTARA_HTTP_PROXY_URL".to_string(),
+                format!("http://127.0.0.1:{}/api/internal/proxy", port),
+            );
+        }
+
         // Forward object model internal API URL for smo-stdlib agents
         if let Ok(url) = std::env::var("RUNTARA_OBJECT_MODEL_URL") {
             env.insert("RUNTARA_OBJECT_MODEL_URL".to_string(), url);
