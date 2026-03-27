@@ -18,7 +18,6 @@ default = ["native"]
 
 # Native platform - includes C-dependent agents (xlsx, sftp, compression)
 native = [
-    "runtara-sdk/http",
     "runtara-agents/native",
 ]
 
@@ -49,7 +48,7 @@ telemetry = [
 # Core dependencies
 runtara-agents = { path = "../runtara-agents", version = "1.0", default-features = false }
 runtara-ai = { path = "../runtara-ai", version = "1.0" }
-runtara-sdk = { path = "../runtara-sdk", version = "1.0", default-features = false }
+runtara-sdk = { path = "../runtara-sdk", version = "1.0", default-features = false, features = ["http"] }
 
 # Re-exported for workflows
 serde = { workspace = true }
