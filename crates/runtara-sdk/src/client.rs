@@ -94,7 +94,7 @@ impl RuntaraSdk {
         Ok(Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            last_signal_poll: Instant::now() - Duration::from_secs(60),
+            last_signal_poll: Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now),
             pending_signal: None,
             signal_poll_interval_ms,
             heartbeat_interval_ms,
@@ -132,7 +132,7 @@ impl RuntaraSdk {
         Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            last_signal_poll: Instant::now() - Duration::from_secs(60),
+            last_signal_poll: Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now),
             pending_signal: None,
             signal_poll_interval_ms: 1_000,
             heartbeat_interval_ms: 30_000,
@@ -158,7 +158,7 @@ impl RuntaraSdk {
         Self {
             backend: std::sync::Arc::new(backend),
             registered: false,
-            last_signal_poll: Instant::now() - Duration::from_secs(60),
+            last_signal_poll: Instant::now().checked_sub(Duration::from_secs(60)).unwrap_or_else(Instant::now),
             pending_signal: None,
             signal_poll_interval_ms,
             heartbeat_interval_ms,
