@@ -138,15 +138,24 @@ impl RequestBuilder {
     /// is serialized as JSON and POSTed to the proxy endpoint instead of being
     /// executed directly.
     pub fn call(self) -> Result<HttpResponse, HttpError> {
-        // Check for proxy mode
+        // Route through proxy only when X-Runtara-Connection-Id header is set.
+        // This is opt-in: agents that need credential injection set the header,
+        // SDK/internal calls never set it and always go direct.
         static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
         let proxy_url = PROXY_URL.get_or_init(|| std::env::var("RUNTARA_HTTP_PROXY_URL").ok());
 
-        if let Some(proxy) = proxy_url {
-            return self.call_via_proxy(proxy);
+        let has_connection = self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-runtara-connection-id"));
+
+        if has_connection {
+            if let Some(proxy) = proxy_url {
+                return self.call_via_proxy(proxy);
+            }
         }
 
-        // Direct call
+        // Direct call (no connection header or no proxy configured)
         #[cfg(not(target_family = "wasm"))]
         return native::execute(self);
         #[cfg(target_family = "wasm")]
