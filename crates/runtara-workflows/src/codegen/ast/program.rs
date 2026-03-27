@@ -206,7 +206,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
 
         use std::sync::Arc;
         use std::process::ExitCode;
-        // prelude includes: RuntimeContext, Deserialize, Serialize, serde_json, registry, SDK types
+        // prelude includes: RuntimeContext, Deserialize, Serialize, serde_json, registry, dispatch, SDK types
         use #stdlib_ident::prelude::*;
         use #stdlib_ident::tracing;
         #hashmap_import

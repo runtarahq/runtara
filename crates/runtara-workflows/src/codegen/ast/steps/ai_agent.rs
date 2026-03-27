@@ -1066,7 +1066,7 @@ pub fn emit(
                 capability_id: &str,
                 tool_name: &str,
             ) -> std::result::Result<serde_json::Value, String> {
-                registry::execute_capability(agent_id, capability_id, inputs)
+                dispatch::execute_capability(agent_id, capability_id, inputs)
             }
 
             // Durable wrapper for LLM completion calls.

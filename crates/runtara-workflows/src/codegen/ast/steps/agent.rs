@@ -288,7 +288,7 @@ fn emit_durable_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            registry::execute_capability(agent_id, capability_id, inputs)
+            dispatch::execute_capability(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -389,7 +389,7 @@ fn emit_durable_rate_limited_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            registry::execute_capability(agent_id, capability_id, inputs)
+            dispatch::execute_capability(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -553,8 +553,8 @@ mod tests {
             "Should use #[durable] macro"
         );
         assert!(
-            code.contains("registry :: execute_capability"),
-            "Should call registry::execute_capability"
+            code.contains("dispatch :: execute_capability"),
+            "Should call dispatch::execute_capability"
         );
     }
 

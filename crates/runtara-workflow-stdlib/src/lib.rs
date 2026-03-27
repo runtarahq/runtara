@@ -63,6 +63,10 @@ pub mod template;
 // Child scenario input validation (runtime)
 pub mod child_input_validation;
 
+// Capability dispatch for generated scenario binaries
+// Product stdlibs can override with static dispatch tables
+pub mod dispatch;
+
 // Prelude for convenient imports
 pub mod prelude {
     // Runtime types
@@ -92,8 +96,11 @@ pub mod prelude {
     pub use serde::{Deserialize, Serialize};
     pub use serde_json;
 
-    // Agent registry
+    // Agent registry (server-side, inventory-based)
     pub use runtara_agents::registry;
+
+    // Capability dispatch (static dispatch for scenario binaries)
+    pub use crate::dispatch;
 
     // Child input validation for StartScenario steps
     pub use crate::child_input_validation::{
