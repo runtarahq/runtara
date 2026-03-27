@@ -557,10 +557,13 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // (some production environments may have -D warnings set globally)
     cmd.env_remove("RUSTFLAGS");
 
-    // Default opt-level=0: skips LLVM optimization passes entirely (~2x faster compilation).
+    // Default opt-level=0 for native: skips LLVM optimization passes entirely (~2x faster compilation).
     // The generated code is all function calls into pre-optimized library code, so
     // opt-level>0 only optimizes glue code with negligible runtime benefit.
-    let opt_level = std::env::var("RUNTARA_OPT_LEVEL").unwrap_or_else(|_| "0".to_string());
+    // For WASM: default to opt-level=s (optimize for size) since binary size is critical
+    // and dead code elimination needs optimization passes to work effectively.
+    let default_opt = if is_wasm { "s" } else { "0" };
+    let opt_level = std::env::var("RUNTARA_OPT_LEVEL").unwrap_or_else(|_| default_opt.to_string());
     let codegen_units = std::env::var("RUNTARA_CODEGEN_UNITS").unwrap_or_else(|_| "1".to_string());
 
     cmd.arg(format!("--target={}", target))
@@ -570,6 +573,15 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         .arg(format!("opt-level={}", opt_level))
         .arg("-C")
         .arg(format!("codegen-units={}", codegen_units));
+
+    // WASM-specific optimizations for binary size reduction
+    if is_wasm {
+        // Enable LTO for WASM to allow cross-crate dead code elimination.
+        // Combined with __scenario_dispatch (which only references used capabilities),
+        // this lets LLVM strip unreferenced capability code from the binary.
+        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| "thin".to_string());
+        cmd.arg("-C").arg(format!("lto={}", lto_level));
+    }
 
     // Skip strip and crt-static for WASM targets
     if !is_wasm {

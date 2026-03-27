@@ -288,7 +288,7 @@ fn emit_durable_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            dispatch::execute_capability(agent_id, capability_id, inputs)
+            __scenario_dispatch(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -389,7 +389,7 @@ fn emit_durable_rate_limited_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            dispatch::execute_capability(agent_id, capability_id, inputs)
+            __scenario_dispatch(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -554,8 +554,8 @@ mod tests {
             "Should use #[durable] macro"
         );
         assert!(
-            code.contains("dispatch :: execute_capability"),
-            "Should call dispatch::execute_capability"
+            code.contains("__scenario_dispatch"),
+            "Should call __scenario_dispatch"
         );
     }
 
@@ -821,7 +821,7 @@ mod tests {
 
         // Core agent logic should still be present
         assert!(
-            code.contains("execute_capability"),
+            code.contains("__scenario_dispatch"),
             "Should have capability execution"
         );
         assert!(

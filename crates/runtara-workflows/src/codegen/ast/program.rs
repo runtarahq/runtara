@@ -79,6 +79,244 @@ fn collect_used_agents_recursive(
     }
 }
 
+/// Collect all (agent_id, capability_id) pairs used in an ExecutionGraph, recursively.
+///
+/// This is more granular than `collect_used_agents` — it collects specific capabilities
+/// so the codegen can generate a scenario-specific dispatch function that only references
+/// the exact capabilities used, dramatically reducing WASM binary size through dead code
+/// elimination.
+///
+/// This traverses:
+/// - AgentStep: collects (agent_id, capability_id)
+/// - AiAgentStep: collects memory capabilities (load-memory, save-memory) from memory edge targets,
+///   and capabilities from tool edge targets (Agent steps used as AI tools)
+/// - SplitStep/WhileStep: recursively traverses subgraph
+/// - StartScenario: recursively traverses child graphs from EmitContext
+fn collect_used_capabilities(
+    graph: &ExecutionGraph,
+    ctx: &EmitContext,
+) -> HashSet<(String, String)> {
+    let mut caps = HashSet::new();
+    collect_used_capabilities_recursive(graph, ctx, &mut caps);
+    caps
+}
+
+fn collect_used_capabilities_recursive(
+    graph: &ExecutionGraph,
+    ctx: &EmitContext,
+    caps: &mut HashSet<(String, String)>,
+) {
+    for step in graph.steps.values() {
+        match step {
+            Step::Agent(agent_step) => {
+                caps.insert((
+                    agent_step.agent_id.to_lowercase(),
+                    agent_step.capability_id.clone(),
+                ));
+            }
+            Step::AiAgent(ai_step) => {
+                // Collect capabilities from AI agent tool edges (Agent step targets)
+                for edge in &graph.execution_plan {
+                    if edge.from_step != ai_step.id {
+                        continue;
+                    }
+                    if let Some(label) = &edge.label {
+                        if label == "memory" {
+                            // Memory edge: the target Agent step provides load-memory and save-memory
+                            if let Some(Step::Agent(mem_agent)) = graph.steps.get(&edge.to_step) {
+                                caps.insert((
+                                    mem_agent.agent_id.to_lowercase(),
+                                    "load-memory".to_string(),
+                                ));
+                                caps.insert((
+                                    mem_agent.agent_id.to_lowercase(),
+                                    "save-memory".to_string(),
+                                ));
+                            }
+                        } else if label != "next" {
+                            // Tool edge: the target Agent step's capability is dispatched
+                            if let Some(Step::Agent(tool_agent)) = graph.steps.get(&edge.to_step) {
+                                caps.insert((
+                                    tool_agent.agent_id.to_lowercase(),
+                                    tool_agent.capability_id.clone(),
+                                ));
+                            }
+                            // StartScenario tool targets don't use dispatch — they call
+                            // child scenario functions directly, so no capability to collect.
+                        }
+                    }
+                }
+            }
+            Step::Split(split_step) => {
+                collect_used_capabilities_recursive(&split_step.subgraph, ctx, caps);
+            }
+            Step::StartScenario(start_step) => {
+                if let Some(child_graph) = ctx.get_child_scenario_by_step_id(&start_step.id) {
+                    collect_used_capabilities_recursive(child_graph, ctx, caps);
+                }
+            }
+            Step::While(while_step) => {
+                collect_used_capabilities_recursive(&while_step.subgraph, ctx, caps);
+            }
+            Step::Finish(_)
+            | Step::Conditional(_)
+            | Step::Switch(_)
+            | Step::Log(_)
+            | Step::Connection(_)
+            | Step::Error(_)
+            | Step::Filter(_)
+            | Step::GroupBy(_)
+            | Step::Delay(_)
+            | Step::WaitForSignal(_) => {}
+        }
+    }
+}
+
+/// Map an agent_id to its Rust module path within the stdlib crate.
+///
+/// Returns the module path segment after `smo_stdlib::` (or the configured stdlib name).
+/// For runtara-agents: the module is under `agents::` (re-exported from the prelude).
+/// For smo-stdlib agents: the module is under `smo_agents::`.
+///
+/// Returns `None` for unknown agents — the codegen will generate a fallback error arm.
+fn agent_module_path(agent_id: &str) -> Option<&'static str> {
+    match agent_id {
+        // runtara-agents (re-exported via stdlib prelude as `agents::`)
+        "utils" => Some("agents::utils"),
+        "transform" => Some("agents::transform"),
+        "http" => Some("agents::http"),
+        "csv" => Some("agents::csv"),
+        "text" => Some("agents::text"),
+        "xml" => Some("agents::xml"),
+        "datetime" => Some("agents::datetime"),
+        "file" => Some("agents::file"),
+        "crypto" => Some("agents::crypto"),
+        // Native-only runtara-agents (use stub in WASM)
+        "sftp" => Some("agents::sftp"),
+        "xlsx" => Some("agents::xlsx"),
+        "compression" => Some("agents::compression"),
+        // smo-stdlib agents
+        "openai" => Some("smo_agents::openai"),
+        "shopify" => Some("smo_agents::shopify"),
+        "slack" => Some("smo_agents::slack"),
+        "stripe" => Some("smo_agents::stripe"),
+        "hubspot" => Some("smo_agents::hubspot"),
+        "mailgun" => Some("smo_agents::mailgun"),
+        "bedrock" => Some("smo_agents::bedrock"),
+        "ai_tools" => Some("smo_agents::ai_tools"),
+        "hdm_commerce" => Some("smo_agents::hdm_commerce"),
+        "object_model" => Some("smo_agents::object_model"),
+        "s3_storage" => Some("smo_agents::s3_storage"),
+        "smo-test" | "smo_test" => Some("smo_agents::test_agent"),
+        _ => None,
+    }
+}
+
+/// Check if a given agent module requires the native feature flag.
+/// These agents use C libraries (libssh2, libxlsxwriter, etc.) that cannot
+/// be compiled to WASM, so in non-native builds they use HTTP stubs.
+fn is_native_only_agent(agent_id: &str) -> bool {
+    matches!(agent_id, "sftp" | "xlsx" | "compression")
+}
+
+/// Derive the executor static name from a capability_id.
+///
+/// Convention: `__CAPABILITY_EXECUTOR_{CAPABILITY_ID_SCREAMING_SNAKE_CASE}`
+/// where hyphens are replaced with underscores and everything is uppercased.
+///
+/// Example: "openai-chat-completion" -> "__CAPABILITY_EXECUTOR_OPENAI_CHAT_COMPLETION"
+fn executor_static_name(capability_id: &str) -> String {
+    let upper = capability_id.replace('-', "_").to_uppercase();
+    format!("__CAPABILITY_EXECUTOR_{}", upper)
+}
+
+/// Emit a scenario-specific dispatch function that only references capabilities
+/// actually used by this scenario.
+///
+/// Instead of calling `dispatch::execute_capability()` which pulls ALL 230+ capabilities
+/// into the binary, each scenario gets a `__scenario_dispatch()` that matches only on
+/// the capabilities it uses and calls executor statics directly.
+fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
+    let stdlib_name = get_stdlib_crate_name();
+    let stdlib_ident = Ident::new(&stdlib_name, Span::call_site());
+
+    let used_caps = collect_used_capabilities(graph, ctx);
+
+    if used_caps.is_empty() {
+        // No capabilities used — generate a simple always-error function
+        return quote! {
+            #[allow(dead_code)]
+            fn __scenario_dispatch(
+                module: &str,
+                capability_id: &str,
+                input: serde_json::Value,
+            ) -> std::result::Result<serde_json::Value, String> {
+                Err(format!("Unknown capability: {}:{}", module, capability_id))
+            }
+        };
+    }
+
+    // Build match arms for each used capability
+    let match_arms: Vec<TokenStream> = used_caps
+        .iter()
+        .filter_map(|(agent_id, capability_id)| {
+            let module_path = agent_module_path(agent_id)?;
+            let exec_name = executor_static_name(capability_id);
+            let exec_ident = Ident::new(&exec_name, Span::call_site());
+
+            // Build the module path as a token stream
+            let path_segments: Vec<Ident> = module_path
+                .split("::")
+                .map(|s| Ident::new(s, Span::call_site()))
+                .collect();
+
+            let agent_id_str = agent_id.as_str();
+            let cap_id_str = capability_id.as_str();
+
+            if is_native_only_agent(agent_id) {
+                // Native-only: use cfg to switch between direct call and HTTP stub
+                Some(quote! {
+                    (#agent_id_str, #cap_id_str) => {
+                        #[cfg(feature = "native")]
+                        {
+                            (#stdlib_ident::#(#path_segments)::*::#exec_ident.execute)(input)
+                        }
+                        #[cfg(not(feature = "native"))]
+                        {
+                            dispatch::native_agent_stub(#agent_id_str, #cap_id_str, input)
+                        }
+                    }
+                })
+            } else {
+                // Normal capability: direct executor call
+                Some(quote! {
+                    (#agent_id_str, #cap_id_str) => {
+                        (#stdlib_ident::#(#path_segments)::*::#exec_ident.execute)(input)
+                    }
+                })
+            }
+        })
+        .collect();
+
+    quote! {
+        /// Scenario-specific dispatch function.
+        /// Only references capabilities actually used by this scenario, enabling
+        /// dead code elimination to dramatically reduce binary size.
+        #[allow(dead_code)]
+        fn __scenario_dispatch(
+            module: &str,
+            capability_id: &str,
+            input: serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, String> {
+            let module_lower = module.to_lowercase();
+            match (module_lower.as_str(), capability_id) {
+                #(#match_arms)*
+                _ => Err(format!("Unknown capability: {}:{}", module, capability_id))
+            }
+        }
+    }
+}
+
 /// Emit the complete program.
 ///
 /// # Errors
@@ -91,6 +329,7 @@ pub fn emit_program(
     let imports = emit_imports(graph, ctx);
     let constants = emit_constants(ctx);
     let input_structs = emit_input_structs();
+    let scenario_dispatch = emit_scenario_dispatch(graph, ctx);
     let main_fn = emit_main(graph);
     let execute_workflow = emit_execute_workflow(graph, ctx)?;
 
@@ -98,6 +337,7 @@ pub fn emit_program(
         #imports
         #constants
         #input_structs
+        #scenario_dispatch
         #main_fn
         #execute_workflow
     })
@@ -190,7 +430,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
                 "xml" => ("xml", "xml_ops"),
                 "text" => ("text", "text_ops"),
                 // Native-only agents (sftp, xlsx, compression) are dispatched via
-                // dispatch::execute_capability() — no module import needed.
+                // __scenario_dispatch() — no module import needed.
                 // They run either natively or via HTTP stub on the server.
                 _ => return None, // Unknown or native-only agent, skip
             };
