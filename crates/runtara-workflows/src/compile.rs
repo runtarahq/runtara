@@ -307,6 +307,9 @@ pub struct CompilationInput {
     /// If provided, generated code will fetch connections from this service.
     /// Expected endpoint: GET {url}/{tenant_id}/{connection_id}
     pub connection_service_url: Option<String>,
+    /// Target triple for compilation. Defaults to host target.
+    /// Set to "wasm32-wasip2" for WASM compilation.
+    pub target: Option<String>,
 }
 
 /// Result of native binary compilation.
@@ -350,8 +353,11 @@ fn get_rustc_compile_dir(tenant_id: &str, workflow_id: &str, version: u32) -> Pa
 }
 
 /// Get the native library information (runtime, agents, deps)
-fn get_native_libs() -> io::Result<crate::agents_library::NativeLibraryInfo> {
-    crate::agents_library::get_native_library()
+fn get_native_libs(target: Option<&str>) -> io::Result<crate::agents_library::NativeLibraryInfo> {
+    match target {
+        Some(t) if t.contains("wasm") => crate::agents_library::get_wasm_native_library(),
+        _ => crate::agents_library::get_native_library(),
+    }
 }
 
 /// Compile a scenario to a native Linux binary
@@ -373,6 +379,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         debug_mode,
         child_scenarios,
         connection_service_url,
+        target,
     } = input;
 
     // Validate workflow for security, correctness, and configuration
@@ -417,8 +424,16 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         ));
     }
 
-    // Get native library paths
-    let native_libs = get_native_libs()?;
+    // Resolve target triple
+    let resolved_target = target.unwrap_or_else(|| get_host_target().to_string());
+    let is_wasm = resolved_target.contains("wasm");
+
+    // Get native library paths (target-aware)
+    let native_libs = get_native_libs(if is_wasm {
+        Some(&resolved_target)
+    } else {
+        None
+    })?;
 
     // Create build directory
     let setup_start = std::time::Instant::now();
@@ -513,25 +528,28 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         "Setup completed (dirs + codegen + write)"
     );
 
-    // Determine binary output path
-    let binary_output_path = build_dir.join("scenario");
+    // Determine binary output path (WASM uses .wasm extension)
+    let binary_name = if is_wasm { "scenario.wasm" } else { "scenario" };
+    let binary_output_path = build_dir.join(binary_name);
 
     // Compile with rustc to native binary
     let compilation_start = std::time::Instant::now();
 
     // Log the CWD for debugging path resolution issues
     let cwd = std::env::current_dir().unwrap_or_default();
+    let mode = if is_wasm { "wasm" } else { "native" };
+    let target = &resolved_target;
     info!(
         scenario_id = %scenario_id,
         version = version,
-        mode = "native",
+        mode = mode,
+        target = %target,
         cwd = %cwd.display(),
         build_dir = %build_dir.display(),
         "Starting scenario compilation"
     );
 
-    // Build rustc command for native binary
-    let target = get_host_target();
+    // Build rustc command
     let mut cmd = Command::new("rustc");
 
     // Set explicit working directory to avoid CWD issues in async contexts
@@ -555,15 +573,18 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         .arg("-C")
         .arg(format!("codegen-units={}", codegen_units));
 
-    // Strip symbols to reduce binary size (skip in debug mode for stack traces)
-    if !debug_mode {
-        cmd.arg("-C").arg("strip=symbols");
-    }
+    // Skip strip and crt-static for WASM targets
+    if !is_wasm {
+        // Strip symbols to reduce binary size (skip in debug mode for stack traces)
+        if !debug_mode {
+            cmd.arg("-C").arg("strip=symbols");
+        }
 
-    // Use static CRT linking on Linux (musl) for fully static binaries
-    #[cfg(target_os = "linux")]
-    {
-        cmd.arg("-C").arg("target-feature=+crt-static");
+        // Use static CRT linking on Linux (musl) for fully static binaries
+        #[cfg(target_os = "linux")]
+        {
+            cmd.arg("-C").arg("target-feature=+crt-static");
+        }
     }
 
     // Add library search paths
@@ -578,9 +599,9 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         cmd.arg("-L").arg(format!("native={}", lib_dir.display()));
     }
 
-    // Add OpenSSL library paths for macOS (Homebrew)
+    // Add OpenSSL library paths for macOS (Homebrew) — not needed for WASM
     #[cfg(target_os = "macos")]
-    {
+    if !is_wasm {
         // Try common Homebrew OpenSSL locations
         let openssl_paths = [
             "/opt/homebrew/opt/openssl/lib", // ARM64
@@ -604,7 +625,8 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         native_libs.scenario_lib_path.display()
     ));
 
-    // Determine the dylib extension for the current platform
+    // Determine the dylib extension for the current host platform
+    // (proc-macro dylibs are always compiled for the host, even when cross-compiling)
     #[cfg(target_os = "macos")]
     let dylib_ext = "dylib";
     #[cfg(target_os = "linux")]
@@ -650,8 +672,9 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         tenant_id = %tenant_id,
         scenario_id = %scenario_id,
         version = version,
+        mode = mode,
         command = %cmd_str,
-        "Invoking rustc for native compilation"
+        "Invoking rustc for scenario compilation"
     );
     let rustc_start = std::time::Instant::now();
     let output = cmd.output().map_err(|e| {

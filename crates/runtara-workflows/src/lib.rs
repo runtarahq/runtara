@@ -93,7 +93,9 @@ pub mod paths;
 pub mod validation;
 
 // Re-export main types
-pub use agents_library::{NativeLibraryInfo, get_native_library, get_stdlib_name};
+pub use agents_library::{
+    NativeLibraryInfo, get_native_library, get_stdlib_name, get_wasm_native_library,
+};
 pub use compile::{
     ChildDependency, ChildScenarioInput, CompilationInput, NativeCompilationResult,
     compile_scenario, translate_scenario, workflow_has_side_effects,

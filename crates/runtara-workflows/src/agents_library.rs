@@ -22,6 +22,9 @@ pub struct NativeLibraryInfo {
 /// Global cache for the compiled native library info
 static NATIVE_LIBRARY: OnceLock<NativeLibraryInfo> = OnceLock::new();
 
+/// Global cache for the compiled WASM library info
+static WASM_LIBRARY: OnceLock<NativeLibraryInfo> = OnceLock::new();
+
 /// Get the stdlib crate name from environment or default.
 ///
 /// Products extending runtara can set `RUNTARA_STDLIB_NAME` to use their own
@@ -90,6 +93,124 @@ fn get_native_library_dir() -> PathBuf {
 
     // Final fallback
     PathBuf::from(".data/library_cache/native")
+}
+
+/// Get the pre-compiled WASM native library directory
+///
+/// Checks `RUNTARA_WASM_LIBRARY_DIR` first, then falls back to well-known
+/// locations mirroring the native library search but in wasm-specific paths.
+fn get_wasm_library_dir() -> PathBuf {
+    // First check if explicitly set via environment variable
+    if let Ok(cache_dir) = std::env::var("RUNTARA_WASM_LIBRARY_DIR") {
+        let path = PathBuf::from(cache_dir);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // Fall back to RUNTARA_NATIVE_LIBRARY_DIR (caller may have set it to a WASM dir)
+    if let Ok(cache_dir) = std::env::var("RUNTARA_NATIVE_LIBRARY_DIR") {
+        let path = PathBuf::from(cache_dir);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // Try installed location (for deb packages)
+    let installed_path = PathBuf::from("/usr/share/runtara/library_cache/wasm");
+    if installed_path.exists() {
+        return installed_path;
+    }
+
+    // Use the deduplicated copy in target/native_cache_wasm
+    let deduplicated_path = PathBuf::from("target/native_cache_wasm");
+    if deduplicated_path.exists() {
+        return deduplicated_path;
+    }
+
+    // For development, check DATA_DIR
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
+    let data_path = PathBuf::from(data_dir).join("library_cache").join("wasm");
+    if data_path.exists() {
+        return data_path;
+    }
+
+    // Final fallback
+    PathBuf::from("target/native_cache_wasm")
+}
+
+/// Load the pre-compiled WASM library
+fn load_wasm_library() -> io::Result<NativeLibraryInfo> {
+    let lib_dir = get_wasm_library_dir();
+
+    if !lib_dir.exists() {
+        return Err(io::Error::other(format!(
+            "Pre-compiled WASM library not found. Expected at: {:?}\n\n\
+             To build it, run:\n  ./scripts/build_native_library.sh --target wasm32-wasip2\n\n\
+             Or set RUNTARA_WASM_LIBRARY_DIR to point to a pre-compiled WASM stdlib.",
+            lib_dir
+        )));
+    }
+
+    // Find the unified workflow stdlib library .rlib file
+    let stdlib_name = get_stdlib_name();
+    let scenario_lib_path = lib_dir.join(format!("lib{}.rlib", stdlib_name));
+
+    if !scenario_lib_path.exists() {
+        return Err(io::Error::other(format!(
+            "{} WASM library not found at: {:?}",
+            stdlib_name, scenario_lib_path
+        )));
+    }
+
+    // WASM deps directory
+    let deps_dir = lib_dir.join("deps");
+
+    if !deps_dir.exists() {
+        return Err(io::Error::other(format!(
+            "WASM deps directory not found at: {:?}",
+            deps_dir
+        )));
+    }
+
+    tracing::debug!(
+        scenario_lib = %scenario_lib_path.display(),
+        deps_dir = %deps_dir.display(),
+        "Loaded pre-compiled WASM library"
+    );
+
+    Ok(NativeLibraryInfo {
+        scenario_lib_path,
+        deps_dir,
+    })
+}
+
+/// Get the compiled WASM library information
+///
+/// This loads the pre-compiled library for wasm32-wasip2 target.
+/// Subsequent calls return the cached information.
+///
+/// # Returns
+/// Library information including path to .rlib file and dependencies directory
+pub fn get_wasm_native_library() -> io::Result<NativeLibraryInfo> {
+    // Check if already initialized
+    if let Some(info) = WASM_LIBRARY.get() {
+        return Ok(info.clone());
+    }
+
+    // Load the pre-compiled library
+    let info = load_wasm_library()?;
+
+    // Cache it
+    let _ = WASM_LIBRARY.set(info.clone());
+
+    info!(
+        scenario_lib = %info.scenario_lib_path.display(),
+        deps_dir = %info.deps_dir.display(),
+        "WASM library ready (pre-compiled for wasm32-wasip2)"
+    );
+
+    Ok(info)
 }
 
 /// Load the pre-compiled native library
