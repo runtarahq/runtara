@@ -9,6 +9,7 @@
 //! reused across all scenario compilations.
 
 // Re-export all agent modules from agents/ subdirectory
+#[cfg(feature = "native")]
 #[path = "agents/compression.rs"]
 pub mod compression;
 #[path = "agents/crypto.rs"]
@@ -23,6 +24,7 @@ pub mod extractors;
 pub mod file;
 #[path = "agents/http.rs"]
 pub mod http;
+#[cfg(feature = "native")]
 #[path = "agents/sftp.rs"]
 pub mod sftp;
 #[path = "agents/text.rs"]
@@ -31,6 +33,7 @@ pub mod text;
 pub mod transform;
 #[path = "agents/utils.rs"]
 pub mod utils;
+#[cfg(feature = "native")]
 #[path = "agents/xlsx.rs"]
 pub mod xlsx;
 #[path = "agents/xml.rs"]
