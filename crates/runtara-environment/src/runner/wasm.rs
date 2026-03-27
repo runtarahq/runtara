@@ -115,12 +115,11 @@ impl WasmRunner {
         &self.config.data_dir
     }
 
-    /// Resolve the WASM binary path from the bundle path.
+    /// Resolve the WASM binary path.
     ///
-    /// OCI bundles store the binary at `{bundle_path}/rootfs/binary`.
-    /// For WASM execution, we expect a `.wasm` file at the same location.
-    fn resolve_wasm_path(&self, bundle_path: &Path) -> PathBuf {
-        bundle_path.join("rootfs").join("binary")
+    /// For WASM images, the path is the binary file directly (not an OCI bundle).
+    fn resolve_wasm_path(&self, binary_path: &Path) -> PathBuf {
+        binary_path.to_path_buf()
     }
 
     /// Build environment variables for the scenario process.
