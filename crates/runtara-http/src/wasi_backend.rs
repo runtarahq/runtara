@@ -342,16 +342,10 @@ fn read_incoming_body(
     // Drop the stream before finishing the body
     drop(stream);
 
-    // Finish the incoming body — this returns a FutureTrailers resource.
-    // We must subscribe, poll, consume, and drop it to free all WASI resource
-    // table entries. Simply dropping an unresolved FutureTrailers leaks entries.
-    let trailers_future = wasi::http::types::IncomingBody::finish(incoming_body);
-    let trailers_pollable = trailers_future.subscribe();
-    poll(&[&trailers_pollable]);
-    drop(trailers_pollable);
-    // Consume the trailers result (we don't care about the value)
-    let _ = trailers_future.get();
-    drop(trailers_future);
+    // Finish the incoming body — consumes it and returns FutureTrailers.
+    // Just drop it — polling for trailers can block indefinitely.
+    // The large max-resources limit prevents resource table exhaustion.
+    let _trailers = wasi::http::types::IncomingBody::finish(incoming_body);
 
     Ok(body)
 }

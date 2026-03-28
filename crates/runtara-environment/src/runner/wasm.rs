@@ -134,6 +134,9 @@ impl WasmRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
+        // Disable tracing in WASM scenarios to prevent stderr buffer
+        // blocking. The WASI stderr can block when internal buffers fill.
+        env.insert("RUST_LOG".to_string(), "off".to_string());
         env.insert(
             "RUNTARA_HTTP_URL".to_string(),
             format!("http://{}", runtara_core_addr),
@@ -234,6 +237,7 @@ impl WasmRunner {
         cmd.arg("--wasi").arg("inherit-network");
         cmd.arg("--wasi").arg("http-outgoing-body-buffer-chunks=4096");
         cmd.arg("--wasi").arg("http-outgoing-body-chunk-size=1048576");
+        cmd.arg("--wasi").arg("max-resources=100000");
 
         // Preopened directory: map host run_dir to /data inside the guest
         cmd.arg("--dir")
@@ -391,15 +395,13 @@ impl WasmRunner {
             }
         };
 
-        let stderr_handle = child.stderr.take();
-
         let result = self
             .wait_with_cancellation(
                 &mut child,
                 instance_id,
                 cancel_token,
                 timeout,
-                stderr_handle,
+                run_dir,
             )
             .await;
 
@@ -414,10 +416,8 @@ impl WasmRunner {
         instance_id: &str,
         cancel_token: Option<CancelToken>,
         timeout_duration: Duration,
-        stderr_handle: Option<tokio::process::ChildStderr>,
+        run_dir: &Path,
     ) -> Result<()> {
-        use tokio::io::AsyncReadExt;
-
         let poll_interval = Duration::from_millis(100);
         let start = std::time::Instant::now();
 
@@ -447,13 +447,13 @@ impl WasmRunner {
                     } else {
                         let exit_code = status.code().unwrap_or(-1);
 
-                        let stderr = if let Some(mut handle) = stderr_handle {
-                            let mut buf = String::new();
-                            let _ = handle.read_to_string(&mut buf).await;
-                            buf.trim().to_string()
-                        } else {
-                            String::new()
-                        };
+                        // Read stderr from log file (stderr is written to file, not piped)
+                        let stderr_path = run_dir.join("stderr.log");
+                        let stderr = fs::read_to_string(&stderr_path)
+                            .await
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
 
                         error!(instance_id = %instance_id, exit_code = exit_code, stderr = %stderr, "WASM process failed");
                         return Err(RunnerError::ExitCode { exit_code, stderr });
@@ -504,6 +504,7 @@ impl WasmRunner {
         cmd.arg("--wasi").arg("inherit-network");
         cmd.arg("--wasi").arg("http-outgoing-body-buffer-chunks=4096");
         cmd.arg("--wasi").arg("http-outgoing-body-chunk-size=1048576");
+        cmd.arg("--wasi").arg("max-resources=100000");
 
         // Preopened directory
         cmd.arg("--dir")
