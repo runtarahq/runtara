@@ -232,6 +232,8 @@ impl WasmRunner {
         // WASI configuration
         cmd.arg("--wasi").arg("http");
         cmd.arg("--wasi").arg("inherit-network");
+        cmd.arg("--wasi").arg("http-outgoing-body-buffer-chunks=4096");
+        cmd.arg("--wasi").arg("http-outgoing-body-chunk-size=1048576");
 
         // Preopened directory: map host run_dir to /data inside the guest
         cmd.arg("--dir")
@@ -500,6 +502,8 @@ impl WasmRunner {
         // WASI configuration
         cmd.arg("--wasi").arg("http");
         cmd.arg("--wasi").arg("inherit-network");
+        cmd.arg("--wasi").arg("http-outgoing-body-buffer-chunks=4096");
+        cmd.arg("--wasi").arg("http-outgoing-body-chunk-size=1048576");
 
         // Preopened directory
         cmd.arg("--dir")

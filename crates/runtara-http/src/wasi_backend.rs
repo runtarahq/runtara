@@ -251,17 +251,26 @@ pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError
     let status = incoming_response.status();
 
     let headers = {
-        let fields = incoming_response.headers();
+        let resp_fields = incoming_response.headers();
         let mut map = HashMap::new();
-        for (name, value) in fields.entries() {
+        for (name, value) in resp_fields.entries() {
             let val = String::from_utf8_lossy(&value).to_string();
             map.insert(name.to_lowercase(), val);
         }
+        // Explicitly drop WASI Fields resource to free resource table entry
+        drop(resp_fields);
         map
     };
 
     // -- Read response body ---------------------------------------------------
     let body = read_incoming_body(&incoming_response)?;
+
+    // Explicitly drop WASI resources in child-first order to free resource
+    // table entries. Without this, repeated HTTP calls (e.g., WaitForSignal
+    // polling) exhaust wasmtime's resource table ("resource table has no free
+    // keys").
+    drop(incoming_response);
+    drop(future_resp);
 
     Ok(HttpResponse {
         status,
@@ -275,10 +284,13 @@ pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError
 fn block_on_future_response(
     future_resp: &FutureIncomingResponse,
 ) -> Result<wasi::http::types::IncomingResponse, HttpError> {
-    // Poll until the response is ready
+    // Subscribe once — reuse the same Pollable to avoid resource table churn
+    let pollable = future_resp.subscribe();
     loop {
         match future_resp.get() {
             Some(result) => {
+                // Drop pollable before returning to free the resource table entry
+                drop(pollable);
                 // Outer Result: from the future itself
                 let inner = result.map_err(|()| {
                     HttpError::Transport("Future response already consumed".to_string())
@@ -288,7 +300,6 @@ fn block_on_future_response(
             }
             None => {
                 // Not ready yet — block via poll
-                let pollable = future_resp.subscribe();
                 poll(&[&pollable]);
             }
         }
@@ -331,8 +342,16 @@ fn read_incoming_body(
     // Drop the stream before finishing the body
     drop(stream);
 
-    // Finish the incoming body (consumes it, returns FutureTrailers which we ignore)
-    let _trailers = wasi::http::types::IncomingBody::finish(incoming_body);
+    // Finish the incoming body — this returns a FutureTrailers resource.
+    // We must subscribe, poll, consume, and drop it to free all WASI resource
+    // table entries. Simply dropping an unresolved FutureTrailers leaks entries.
+    let trailers_future = wasi::http::types::IncomingBody::finish(incoming_body);
+    let trailers_pollable = trailers_future.subscribe();
+    poll(&[&trailers_pollable]);
+    drop(trailers_pollable);
+    // Consume the trailers result (we don't care about the value)
+    let _ = trailers_future.get();
+    drop(trailers_future);
 
     Ok(body)
 }
