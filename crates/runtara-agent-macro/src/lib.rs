@@ -387,9 +387,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                         secure: #mod_secure,
                     };
 
-                inventory::submit! {
-                    &#module_meta_ident
-                }
+                #[cfg(not(target_family = "wasm"))]
+                const _: () = { inventory::submit! { &#module_meta_ident }; };
             })
         } else {
             None
@@ -527,9 +526,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             tags: #tags_token,
         };
 
-        inventory::submit! {
-            &#meta_ident
-        }
+        #[cfg(not(target_family = "wasm"))]
+        const _: () = { inventory::submit! { &#meta_ident }; };
 
         #executor_wrapper
 
@@ -541,9 +539,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             execute: #executor_fn_ident,
         };
 
-        inventory::submit! {
-            &#executor_ident
-        }
+        #[cfg(not(target_family = "wasm"))]
+        const _: () = { inventory::submit! { &#executor_ident }; };
 
         #module_registration
     };
@@ -702,9 +699,8 @@ pub fn derive_capability_input(input: TokenStream) -> TokenStream {
             fields: &[#(#field_metas),*],
         };
 
-        inventory::submit! {
-            &#meta_ident
-        }
+        #[cfg(not(target_family = "wasm"))]
+        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)
@@ -966,9 +962,8 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             oauth_config: #oauth_config_token,
         };
 
-        inventory::submit! {
-            &#meta_ident
-        }
+        #[cfg(not(target_family = "wasm"))]
+        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)
@@ -1135,9 +1130,8 @@ pub fn derive_capability_output(input: TokenStream) -> TokenStream {
             fields: &[#(#field_metas),*],
         };
 
-        inventory::submit! {
-            &#meta_ident
-        }
+        #[cfg(not(target_family = "wasm"))]
+        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)
@@ -1239,9 +1233,8 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
             schema_fn: #schema_fn_ident,
         };
 
-        inventory::submit! {
-            &#meta_ident
-        }
+        #[cfg(not(target_family = "wasm"))]
+        const _: () = { inventory::submit! { &#meta_ident }; };
     };
 
     TokenStream::from(expanded)

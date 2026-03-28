@@ -577,7 +577,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // WASM: enable LTO for cross-crate dead code elimination.
     // The build script compiles rlibs with -C embed-bitcode=yes to support this.
     if is_wasm {
-        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| "thin".to_string());
+        let lto_level = std::env::var("RUNTARA_LTO").unwrap_or_else(|_| "fat".to_string());
         if lto_level != "off" {
             cmd.arg("-C").arg(format!("lto={}", lto_level));
         }

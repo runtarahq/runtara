@@ -8,201 +8,209 @@
 //!
 //! This approach keeps schema_types.rs clean while still achieving
 //! the goal of single-source-of-truth: the step struct IS the schema.
+//!
+//! On WASM targets, inventory registrations are skipped so LTO can strip
+//! unused agent code from WASM binaries.
 
-use crate::agent_meta::StepTypeMeta;
-use crate::{
-    AgentStep, AiAgentStep, ConditionalStep, ConnectionStep, ErrorStep, FilterStep, FinishStep,
-    GroupByStep, LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep, WhileStep,
-};
+// All step registration code is native-only — WASM builds don't use inventory.
+#[cfg(not(target_family = "wasm"))]
+mod native {
+    use crate::agent_meta::StepTypeMeta;
+    use crate::{
+        AgentStep, AiAgentStep, ConditionalStep, ConnectionStep, ErrorStep, FilterStep, FinishStep,
+        GroupByStep, LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep,
+        WhileStep,
+    };
 
-// ============================================================================
-// Schema Generator Functions
-// ============================================================================
+    // ========================================================================
+    // Schema Generator Functions
+    // ========================================================================
 
-fn schema_finish_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(FinishStep)
+    fn schema_finish_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(FinishStep)
+    }
+
+    fn schema_agent_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(AgentStep)
+    }
+
+    fn schema_conditional_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(ConditionalStep)
+    }
+
+    fn schema_split_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(SplitStep)
+    }
+
+    fn schema_switch_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(SwitchStep)
+    }
+
+    fn schema_start_scenario_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(StartScenarioStep)
+    }
+
+    fn schema_while_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(WhileStep)
+    }
+
+    fn schema_log_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(LogStep)
+    }
+
+    fn schema_connection_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(ConnectionStep)
+    }
+
+    fn schema_error_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(ErrorStep)
+    }
+
+    fn schema_filter_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(FilterStep)
+    }
+
+    fn schema_group_by_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(GroupByStep)
+    }
+
+    fn schema_wait_for_signal_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(WaitForSignalStep)
+    }
+
+    fn schema_ai_agent_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(AiAgentStep)
+    }
+
+    // ========================================================================
+    // Step Type Metadata Registrations
+    // ========================================================================
+
+    static FINISH_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Finish",
+        display_name: "Finish",
+        description: "Exit point - defines scenario outputs",
+        category: "control",
+        schema_fn: schema_finish_step,
+    };
+
+    static AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Agent",
+        display_name: "Agent",
+        description: "Executes an operator operation",
+        category: "execution",
+        schema_fn: schema_agent_step,
+    };
+
+    static CONDITIONAL_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Conditional",
+        display_name: "Conditional",
+        description: "Evaluates conditions and branches execution",
+        category: "control",
+        schema_fn: schema_conditional_step,
+    };
+
+    static SPLIT_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Split",
+        display_name: "Split",
+        description: "Iterates over an array, executing subgraph for each item",
+        category: "control",
+        schema_fn: schema_split_step,
+    };
+
+    static SWITCH_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Switch",
+        display_name: "Switch",
+        description: "Multi-way branch based on value matching",
+        category: "control",
+        schema_fn: schema_switch_step,
+    };
+
+    static START_SCENARIO_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "StartScenario",
+        display_name: "Start Scenario",
+        description: "Executes a nested child scenario",
+        category: "execution",
+        schema_fn: schema_start_scenario_step,
+    };
+
+    static WHILE_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "While",
+        display_name: "While Loop",
+        description: "Repeats execution while condition is true",
+        category: "control",
+        schema_fn: schema_while_step,
+    };
+
+    static LOG_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Log",
+        display_name: "Log",
+        description: "Emit custom log/debug events",
+        category: "utility",
+        schema_fn: schema_log_step,
+    };
+
+    static CONNECTION_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Connection",
+        display_name: "Connection",
+        description: "Acquire a connection for secure agents",
+        category: "utility",
+        schema_fn: schema_connection_step,
+    };
+
+    static ERROR_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Error",
+        display_name: "Error",
+        description: "Emit a structured error and terminate workflow",
+        category: "control",
+        schema_fn: schema_error_step,
+    };
+
+    static FILTER_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "Filter",
+        display_name: "Filter",
+        description: "Filter an array using a condition expression",
+        category: "control",
+        schema_fn: schema_filter_step,
+    };
+
+    static GROUP_BY_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "GroupBy",
+        display_name: "Group By",
+        description: "Group array items by a property key",
+        category: "control",
+        schema_fn: schema_group_by_step,
+    };
+
+    static WAIT_FOR_SIGNAL_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "WaitForSignal",
+        display_name: "Wait for Signal",
+        description: "Wait for an external signal before continuing execution",
+        category: "control",
+        schema_fn: schema_wait_for_signal_step,
+    };
+
+    static AI_AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "AiAgent",
+        display_name: "AI Agent",
+        description: "LLM-driven agent that selects and calls tools in a loop",
+        category: "execution",
+        schema_fn: schema_ai_agent_step,
+    };
+
+    // Register all step types with inventory
+    inventory::submit! { &FINISH_STEP_META }
+    inventory::submit! { &AGENT_STEP_META }
+    inventory::submit! { &CONDITIONAL_STEP_META }
+    inventory::submit! { &SPLIT_STEP_META }
+    inventory::submit! { &SWITCH_STEP_META }
+    inventory::submit! { &START_SCENARIO_STEP_META }
+    inventory::submit! { &WHILE_STEP_META }
+    inventory::submit! { &LOG_STEP_META }
+    inventory::submit! { &CONNECTION_STEP_META }
+    inventory::submit! { &ERROR_STEP_META }
+    inventory::submit! { &FILTER_STEP_META }
+    inventory::submit! { &GROUP_BY_STEP_META }
+    inventory::submit! { &WAIT_FOR_SIGNAL_STEP_META }
+    inventory::submit! { &AI_AGENT_STEP_META }
 }
-
-fn schema_agent_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(AgentStep)
-}
-
-fn schema_conditional_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(ConditionalStep)
-}
-
-fn schema_split_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(SplitStep)
-}
-
-fn schema_switch_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(SwitchStep)
-}
-
-fn schema_start_scenario_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(StartScenarioStep)
-}
-
-fn schema_while_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(WhileStep)
-}
-
-fn schema_log_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(LogStep)
-}
-
-fn schema_connection_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(ConnectionStep)
-}
-
-fn schema_error_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(ErrorStep)
-}
-
-fn schema_filter_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(FilterStep)
-}
-
-fn schema_group_by_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(GroupByStep)
-}
-
-fn schema_wait_for_signal_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(WaitForSignalStep)
-}
-
-fn schema_ai_agent_step() -> schemars::schema::RootSchema {
-    schemars::schema_for!(AiAgentStep)
-}
-
-// ============================================================================
-// Step Type Metadata Registrations
-// ============================================================================
-
-static FINISH_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Finish",
-    display_name: "Finish",
-    description: "Exit point - defines scenario outputs",
-    category: "control",
-    schema_fn: schema_finish_step,
-};
-
-static AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Agent",
-    display_name: "Agent",
-    description: "Executes an operator operation",
-    category: "execution",
-    schema_fn: schema_agent_step,
-};
-
-static CONDITIONAL_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Conditional",
-    display_name: "Conditional",
-    description: "Evaluates conditions and branches execution",
-    category: "control",
-    schema_fn: schema_conditional_step,
-};
-
-static SPLIT_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Split",
-    display_name: "Split",
-    description: "Iterates over an array, executing subgraph for each item",
-    category: "control",
-    schema_fn: schema_split_step,
-};
-
-static SWITCH_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Switch",
-    display_name: "Switch",
-    description: "Multi-way branch based on value matching",
-    category: "control",
-    schema_fn: schema_switch_step,
-};
-
-static START_SCENARIO_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "StartScenario",
-    display_name: "Start Scenario",
-    description: "Executes a nested child scenario",
-    category: "execution",
-    schema_fn: schema_start_scenario_step,
-};
-
-static WHILE_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "While",
-    display_name: "While Loop",
-    description: "Repeats execution while condition is true",
-    category: "control",
-    schema_fn: schema_while_step,
-};
-
-static LOG_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Log",
-    display_name: "Log",
-    description: "Emit custom log/debug events",
-    category: "utility",
-    schema_fn: schema_log_step,
-};
-
-static CONNECTION_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Connection",
-    display_name: "Connection",
-    description: "Acquire a connection for secure agents",
-    category: "utility",
-    schema_fn: schema_connection_step,
-};
-
-static ERROR_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Error",
-    display_name: "Error",
-    description: "Emit a structured error and terminate workflow",
-    category: "control",
-    schema_fn: schema_error_step,
-};
-
-static FILTER_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "Filter",
-    display_name: "Filter",
-    description: "Filter an array using a condition expression",
-    category: "control",
-    schema_fn: schema_filter_step,
-};
-
-static GROUP_BY_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "GroupBy",
-    display_name: "Group By",
-    description: "Group array items by a property key",
-    category: "control",
-    schema_fn: schema_group_by_step,
-};
-
-static WAIT_FOR_SIGNAL_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "WaitForSignal",
-    display_name: "Wait for Signal",
-    description: "Wait for an external signal before continuing execution",
-    category: "control",
-    schema_fn: schema_wait_for_signal_step,
-};
-
-static AI_AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
-    id: "AiAgent",
-    display_name: "AI Agent",
-    description: "LLM-driven agent that selects and calls tools in a loop",
-    category: "execution",
-    schema_fn: schema_ai_agent_step,
-};
-
-// Register all step types with inventory
-inventory::submit! { &FINISH_STEP_META }
-inventory::submit! { &AGENT_STEP_META }
-inventory::submit! { &CONDITIONAL_STEP_META }
-inventory::submit! { &SPLIT_STEP_META }
-inventory::submit! { &SWITCH_STEP_META }
-inventory::submit! { &START_SCENARIO_STEP_META }
-inventory::submit! { &WHILE_STEP_META }
-inventory::submit! { &LOG_STEP_META }
-inventory::submit! { &CONNECTION_STEP_META }
-inventory::submit! { &ERROR_STEP_META }
-inventory::submit! { &FILTER_STEP_META }
-inventory::submit! { &GROUP_BY_STEP_META }
-inventory::submit! { &WAIT_FOR_SIGNAL_STEP_META }
-inventory::submit! { &AI_AGENT_STEP_META }

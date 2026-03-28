@@ -48,10 +48,12 @@ pub trait HttpConnectionExtractor: Send + Sync {
     fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String>;
 }
 
-// Collect all extractors via inventory
+// Collect all extractors via inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static dyn HttpConnectionExtractor);
 
 /// Returns all integration_ids that have a registered `HttpConnectionExtractor`.
+#[cfg(not(target_family = "wasm"))]
 pub fn get_http_extractor_ids() -> Vec<&'static str> {
     inventory::iter::<&'static dyn HttpConnectionExtractor>
         .into_iter()
@@ -59,9 +61,16 @@ pub fn get_http_extractor_ids() -> Vec<&'static str> {
         .collect()
 }
 
+/// Returns all integration_ids (empty on WASM).
+#[cfg(target_family = "wasm")]
+pub fn get_http_extractor_ids() -> Vec<&'static str> {
+    vec![]
+}
+
 /// Extract HTTP connection config from a raw connection
 ///
 /// Looks up the appropriate extractor based on `integration_id` and applies it.
+#[cfg(not(target_family = "wasm"))]
 pub fn extract_http_config(
     integration_id: &str,
     parameters: &Value,
@@ -80,5 +89,18 @@ pub fn extract_http_config(
         inventory::iter::<&'static dyn HttpConnectionExtractor>()
             .map(|e| e.integration_id())
             .collect::<Vec<_>>()
+    ))
+}
+
+/// Extract HTTP connection config (not available on WASM).
+#[cfg(target_family = "wasm")]
+pub fn extract_http_config(
+    integration_id: &str,
+    _parameters: &Value,
+    _rate_limit_config: Option<Value>,
+) -> Result<HttpConnectionConfig, String> {
+    Err(format!(
+        "inventory not available in WASM: extract_http_config for '{}'",
+        integration_id
     ))
 }

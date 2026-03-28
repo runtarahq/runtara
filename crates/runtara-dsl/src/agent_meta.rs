@@ -28,10 +28,12 @@ pub struct CapabilityExecutor {
     pub execute: CapabilityExecutorFn,
 }
 
-// Register CapabilityExecutor with inventory
+// Register CapabilityExecutor with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static CapabilityExecutor);
 
 /// Execute a capability by module and capability_id using inventory-registered executors.
+#[cfg(not(target_family = "wasm"))]
 pub fn execute_capability(
     module: &str,
     capability_id: &str,
@@ -46,6 +48,19 @@ pub fn execute_capability(
     }
 
     Err(format!("Unknown capability: {}:{}", module, capability_id))
+}
+
+/// Execute a capability (not available on WASM).
+#[cfg(target_family = "wasm")]
+pub fn execute_capability(
+    module: &str,
+    capability_id: &str,
+    _input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    Err(format!(
+        "inventory not available in WASM: {}:{}",
+        module, capability_id
+    ))
 }
 
 /// Hint for how to compensate (undo) a capability's effects.
@@ -107,7 +122,8 @@ pub mod capability_tags {
     pub const MEMORY_WRITE: &str = "memory:write";
 }
 
-// Register CapabilityMeta with inventory
+// Register CapabilityMeta with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static CapabilityMeta);
 
 /// Error category for capability errors
@@ -191,7 +207,8 @@ pub struct InputTypeMeta {
     pub fields: &'static [InputFieldMeta],
 }
 
-// Register InputTypeMeta with inventory
+// Register InputTypeMeta with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static InputTypeMeta);
 
 /// Metadata for an output field
@@ -230,28 +247,50 @@ pub struct OutputTypeMeta {
     pub fields: &'static [OutputFieldMeta],
 }
 
-// Register OutputTypeMeta with inventory
+// Register OutputTypeMeta with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static OutputTypeMeta);
 
 /// Get all registered capability metadata
+#[cfg(not(target_family = "wasm"))]
 pub fn get_all_capabilities() -> impl Iterator<Item = &'static CapabilityMeta> {
     inventory::iter::<&'static CapabilityMeta>
         .into_iter()
         .copied()
 }
 
+/// Get all registered capability metadata (empty on WASM).
+#[cfg(target_family = "wasm")]
+pub fn get_all_capabilities() -> std::iter::Empty<&'static CapabilityMeta> {
+    std::iter::empty()
+}
+
 /// Get all registered input type metadata
+#[cfg(not(target_family = "wasm"))]
 pub fn get_all_input_types() -> impl Iterator<Item = &'static InputTypeMeta> {
     inventory::iter::<&'static InputTypeMeta>
         .into_iter()
         .copied()
 }
 
+/// Get all registered input type metadata (empty on WASM).
+#[cfg(target_family = "wasm")]
+pub fn get_all_input_types() -> std::iter::Empty<&'static InputTypeMeta> {
+    std::iter::empty()
+}
+
 /// Get all registered output type metadata
+#[cfg(not(target_family = "wasm"))]
 pub fn get_all_output_types() -> impl Iterator<Item = &'static OutputTypeMeta> {
     inventory::iter::<&'static OutputTypeMeta>
         .into_iter()
         .copied()
+}
+
+/// Get all registered output type metadata (empty on WASM).
+#[cfg(target_family = "wasm")]
+pub fn get_all_output_types() -> std::iter::Empty<&'static OutputTypeMeta> {
+    std::iter::empty()
 }
 
 /// Find input type metadata by type name
@@ -456,7 +495,8 @@ pub struct AgentModuleConfig {
     pub secure: bool,
 }
 
-// Register AgentModuleConfig with inventory
+// Register AgentModuleConfig with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static AgentModuleConfig);
 
 /// Built-in agent module configurations
@@ -588,6 +628,7 @@ pub fn get_all_agent_modules() -> Vec<&'static AgentModuleConfig> {
     }
 
     // Add inventory-registered modules (skip if id already exists)
+    #[cfg(not(target_family = "wasm"))]
     for module in inventory::iter::<&'static AgentModuleConfig> {
         if seen_ids.insert(module.id) {
             modules.push(*module);
@@ -624,14 +665,22 @@ pub struct StepTypeMeta {
     pub schema_fn: SchemaGeneratorFn,
 }
 
-// Register StepTypeMeta with inventory
+// Register StepTypeMeta with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static StepTypeMeta);
 
 /// Get all registered step type metadata
+#[cfg(not(target_family = "wasm"))]
 pub fn get_all_step_types() -> impl Iterator<Item = &'static StepTypeMeta> {
     inventory::iter::<&'static StepTypeMeta>
         .into_iter()
         .copied()
+}
+
+/// Get all registered step type metadata (empty on WASM).
+#[cfg(target_family = "wasm")]
+pub fn get_all_step_types() -> std::iter::Empty<&'static StepTypeMeta> {
+    std::iter::empty()
 }
 
 /// Find step type metadata by id
@@ -922,14 +971,22 @@ pub struct ConnectionTypeMeta {
     pub oauth_config: Option<&'static OAuthConfig>,
 }
 
-// Register ConnectionTypeMeta with inventory
+// Register ConnectionTypeMeta with inventory (skipped on WASM targets)
+#[cfg(not(target_family = "wasm"))]
 inventory::collect!(&'static ConnectionTypeMeta);
 
 /// Get all registered connection type metadata
+#[cfg(not(target_family = "wasm"))]
 pub fn get_all_connection_types() -> impl Iterator<Item = &'static ConnectionTypeMeta> {
     inventory::iter::<&'static ConnectionTypeMeta>
         .into_iter()
         .copied()
+}
+
+/// Get all registered connection type metadata (empty on WASM).
+#[cfg(target_family = "wasm")]
+pub fn get_all_connection_types() -> std::iter::Empty<&'static ConnectionTypeMeta> {
+    std::iter::empty()
 }
 
 /// Find connection type metadata by integration_id
