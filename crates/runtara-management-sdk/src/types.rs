@@ -107,6 +107,8 @@ pub enum TerminationReason {
     Paused,
     /// Suspended for durable sleep.
     Sleeping,
+    /// Instance was running but not tracked by any Environment (e.g., after restart).
+    Orphaned,
 }
 
 impl TerminationReason {
@@ -121,6 +123,7 @@ impl TerminationReason {
             "cancelled" => Some(Self::Cancelled),
             "paused" => Some(Self::Paused),
             "sleeping" => Some(Self::Sleeping),
+            "orphaned" => Some(Self::Orphaned),
             _ => None,
         }
     }
@@ -136,6 +139,7 @@ impl TerminationReason {
             Self::Cancelled => "cancelled",
             Self::Paused => "paused",
             Self::Sleeping => "sleeping",
+            Self::Orphaned => "orphaned",
         }
     }
 }

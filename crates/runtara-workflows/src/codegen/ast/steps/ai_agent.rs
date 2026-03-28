@@ -137,26 +137,19 @@ pub fn emit(
     let memory_provider_code = if let Some(target_step_id) = memory_edge {
         if let Some(Step::Agent(agent_step)) = graph.steps.get(target_step_id) {
             let agent_id = &agent_step.agent_id;
-            let mem_step_id = &agent_step.id;
+            let _mem_step_id = &agent_step.id;
 
             // Connection fetch for memory provider (if it has one)
             let mem_conn_code = if let Some(ref conn_id) = agent_step.connection_id {
                 let conn_id_str = conn_id.as_str();
                 quote! {
-                    let __mem_conn_service_url = get_connection_service_url()
-                        .ok_or_else(|| format!("Memory provider '{}': CONNECTION_SERVICE_URL required", #mem_step_id))?;
-                    let __mem_conn_ctx = ConnectionRequestContext {
-                        tag: Some("memory_provider"),
-                        step_id: Some(#mem_step_id),
-                        scenario_id: std::env::var("SCENARIO_ID").ok().as_deref(),
-                        instance_id: std::env::var("RUNTARA_INSTANCE_ID").ok().as_deref(),
+                    let __mem_conn = ConnectionResponse {
+                        connection_id: #conn_id_str.to_string(),
+                        integration_id: String::new(),
+                        parameters: serde_json::Value::Object(serde_json::Map::new()),
+                        connection_subtype: None,
+                        rate_limit: None,
                     };
-                    let __mem_conn = fetch_connection(
-                        __mem_conn_service_url,
-                        TENANT_ID,
-                        #conn_id_str,
-                        Some(&__mem_conn_ctx)
-                    ).map_err(|e| format!("Memory provider '{}': connection fetch failed: {}", #mem_step_id, e))?;
                     let __mem_connection_json = serde_json::json!({
                         "parameters": __mem_conn.parameters,
                         "integration_id": __mem_conn.integration_id,
@@ -180,29 +173,17 @@ pub fn emit(
     // Connection ID
     let connection_id = step.connection_id.as_deref();
 
-    // Generate connection fetching code
+    // Connection setup — credentials are NEVER fetched into the scenario binary.
+    // The proxy (RUNTARA_HTTP_PROXY_URL) injects credentials server-side.
+    // We only need the connection_id to pass via the X-Runtara-Connection-Id header.
     let connection_fetch = if let Some(conn_id) = connection_id {
         quote! {
-            let __ai_conn = {
-                let __conn_service_url = get_connection_service_url()
-                    .ok_or_else(|| format!("AI Agent step '{}': CONNECTION_SERVICE_URL required", #step_id))?;
-
-                let __conn_scenario_id = std::env::var("SCENARIO_ID").ok();
-                let __conn_instance_id = std::env::var("RUNTARA_INSTANCE_ID").ok();
-                let __conn_ctx = ConnectionRequestContext {
-                    tag: Some("ai_agent"),
-                    step_id: Some(#step_id),
-                    scenario_id: __conn_scenario_id.as_deref(),
-                    instance_id: __conn_instance_id.as_deref(),
-                };
-
-                fetch_connection(
-                    __conn_service_url,
-                    TENANT_ID,
-                    #conn_id,
-                    Some(&__conn_ctx)
-                ).map_err(|e| format!("AI Agent step '{}': failed to fetch connection '{}': {}",
-                    #step_id, #conn_id, e))?
+            let __ai_conn = ConnectionResponse {
+                connection_id: #conn_id.to_string(),
+                integration_id: String::new(),
+                parameters: serde_json::Value::Object(serde_json::Map::new()),
+                connection_subtype: None,
+                rate_limit: None,
             };
         }
     } else {
@@ -1642,27 +1623,19 @@ fn emit_agent_tool_arm(
 ) -> TokenStream {
     let agent_id = &agent_step.agent_id;
     let capability_id = &agent_step.capability_id;
-    let tool_step_id = &agent_step.id;
+    let _tool_step_id = &agent_step.id;
 
     // Generate connection fetch for the tool step if needed
     let tool_conn_code = if let Some(ref conn_id) = agent_step.connection_id {
         let conn_id_str = conn_id.as_str();
         quote! {
-            // Fetch connection for tool step
-            let __tool_conn_service_url = get_connection_service_url()
-                .ok_or_else(|| format!("Tool step '{}': CONNECTION_SERVICE_URL required", #tool_step_id))?;
-            let __tool_conn_ctx = ConnectionRequestContext {
-                tag: Some(concat!(#agent_id, "_", #capability_id)),
-                step_id: Some(#tool_step_id),
-                scenario_id: std::env::var("SCENARIO_ID").ok().as_deref(),
-                instance_id: std::env::var("RUNTARA_INSTANCE_ID").ok().as_deref(),
+            let __tool_conn = ConnectionResponse {
+                connection_id: #conn_id_str.to_string(),
+                integration_id: String::new(),
+                parameters: serde_json::Value::Object(serde_json::Map::new()),
+                connection_subtype: None,
+                rate_limit: None,
             };
-            let __tool_conn = fetch_connection(
-                __tool_conn_service_url,
-                TENANT_ID,
-                #conn_id_str,
-                Some(&__tool_conn_ctx)
-            ).map_err(|e| format!("Tool step '{}': connection fetch failed: {}", #tool_step_id, e))?;
 
             if let serde_json::Value::Object(ref mut map) = __tool_inputs {
                 map.insert("connection_id".to_string(), serde_json::Value::String(#conn_id_str.to_string()));

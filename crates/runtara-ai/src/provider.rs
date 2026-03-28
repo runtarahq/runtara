@@ -115,12 +115,24 @@ pub fn create_completion_model(
 }
 
 /// Dispatch to the appropriate LLM provider, optionally using the proxy pattern.
+///
+/// When `connection_id` is set, the proxy handles credential injection and
+/// provider routing server-side. The client just sends requests with the
+/// connection ID header — the proxy resolves the actual provider, API key, etc.
 pub fn create_completion_model_with_connection(
     integration_id: &str,
     parameters: &Value,
     model: Option<&str>,
     connection_id: Option<&str>,
 ) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
+    // When connection_id is set, always use proxy mode.
+    // The proxy handles credential injection and provider routing.
+    if connection_id.is_some_and(|id| !id.is_empty()) {
+        let m = create_openai_model_with_connection(parameters, model, connection_id)?;
+        return Ok(Box::new(m));
+    }
+
+    // Direct mode (no connection_id) — dispatch by integration_id
     match integration_id {
         "openai_api_key" => {
             let m = create_openai_model_with_connection(parameters, model, connection_id)?;
