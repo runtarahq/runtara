@@ -211,9 +211,18 @@ pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError
             let stream = outgoing_body.write().map_err(|()| {
                 HttpError::Transport("Failed to get body output stream".to_string())
             })?;
-            stream
-                .blocking_write_and_flush(bytes)
-                .map_err(|e| HttpError::Transport(format!("Failed to write body: {e}")))?;
+            // WASI limits blocking_write_and_flush to 4096 bytes per call.
+            // Write in chunks to handle larger payloads.
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let end = (offset + 4096).min(bytes.len());
+                stream
+                    .blocking_write_and_flush(&bytes[offset..end])
+                    .map_err(|e| {
+                        HttpError::Transport(format!("Failed to write body chunk: {e}"))
+                    })?;
+                offset = end;
+            }
             // stream must be dropped before finishing the body
         }
         OutgoingBody::finish(outgoing_body, None)
