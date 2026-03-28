@@ -202,17 +202,46 @@ pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError
         .set_path_with_query(Some(&parsed.path_and_query))
         .map_err(|()| HttpError::Transport("Failed to set path".to_string()))?;
 
-    // -- Write request body ---------------------------------------------------
-    if let Some(bytes) = &body_bytes {
-        let outgoing_body = request
-            .body()
-            .map_err(|()| HttpError::Transport("Failed to get outgoing body".to_string()))?;
+    // -- Get body handle BEFORE sending (but write AFTER) --------------------
+    // wasmtime uses a bounded channel (capacity 2) between the WASM guest and
+    // the HTTP handler. Writing body chunks before handle() causes a deadlock:
+    // the second blocking_write_and_flush blocks on backpressure that can only
+    // be relieved once the HTTP connection starts consuming data — but the
+    // connection hasn't started because handle() hasn't been called yet.
+    // See: https://github.com/bytecodealliance/wasmtime/issues/9653
+    //
+    // Solution: get the body handle before handle(), call handle() to start the
+    // connection, THEN write the body chunks.
+    let outgoing_body = if body_bytes.is_some() {
+        Some(
+            request
+                .body()
+                .map_err(|()| HttpError::Transport("Failed to get outgoing body".to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    // -- Build request options (timeouts) ------------------------------------
+    let options = builder.timeout.map(|t| {
+        let opts = RequestOptions::new();
+        let nanos = t.as_nanos() as u64;
+        let _ = opts.set_connect_timeout(Some(nanos));
+        let _ = opts.set_first_byte_timeout(Some(nanos));
+        let _ = opts.set_between_bytes_timeout(Some(nanos));
+        opts
+    });
+
+    // -- Send the request (starts the HTTP connection) ------------------------
+    let future_resp: FutureIncomingResponse = outgoing_handler::handle(request, options)
+        .map_err(|e| HttpError::Transport(format!("outgoing-handler error: {e}")))?;
+
+    // -- Now write the body (connection is consuming, no backpressure deadlock)
+    if let (Some(bytes), Some(outgoing_body)) = (&body_bytes, outgoing_body) {
         {
             let stream = outgoing_body.write().map_err(|()| {
                 HttpError::Transport("Failed to get body output stream".to_string())
             })?;
-            // WASI limits blocking_write_and_flush to 4096 bytes per call.
-            // Write in chunks to handle larger payloads.
             let mut offset = 0;
             while offset < bytes.len() {
                 let end = (offset + 4096).min(bytes.len());
@@ -223,26 +252,10 @@ pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError
                     })?;
                 offset = end;
             }
-            // stream must be dropped before finishing the body
         }
         OutgoingBody::finish(outgoing_body, None)
             .map_err(|e| HttpError::Transport(format!("Failed to finish outgoing body: {e}")))?;
     }
-
-    // -- Build request options (timeouts) ------------------------------------
-    let options = builder.timeout.map(|t| {
-        let opts = RequestOptions::new();
-        let nanos = t.as_nanos() as u64;
-        // Best-effort: ignore errors if the runtime doesn't support these
-        let _ = opts.set_connect_timeout(Some(nanos));
-        let _ = opts.set_first_byte_timeout(Some(nanos));
-        let _ = opts.set_between_bytes_timeout(Some(nanos));
-        opts
-    });
-
-    // -- Send the request -----------------------------------------------------
-    let future_resp: FutureIncomingResponse = outgoing_handler::handle(request, options)
-        .map_err(|e| HttpError::Transport(format!("outgoing-handler error: {e}")))?;
 
     // -- Block on the response ------------------------------------------------
     let incoming_response = block_on_future_response(&future_resp)?;

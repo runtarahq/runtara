@@ -134,9 +134,8 @@ impl WasmRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
-        // Disable tracing in WASM scenarios to prevent stderr buffer
-        // blocking. The WASI stderr can block when internal buffers fill.
-        env.insert("RUST_LOG".to_string(), "off".to_string());
+        // Suppress verbose tracing in WASM scenarios to reduce stderr output.
+        env.insert("RUST_LOG".to_string(), "warn".to_string());
         env.insert(
             "RUNTARA_HTTP_URL".to_string(),
             format!("http://{}", runtara_core_addr),
