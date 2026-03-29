@@ -769,6 +769,53 @@ async fn status_handler(
     }
 }
 
+/// GET /api/v1/instances/{instance_id}/input
+async fn input_handler(
+    State(state): State<Arc<InstanceHandlerState>>,
+    Path(instance_id): Path<String>,
+) -> impl IntoResponse {
+    match state.persistence.get_instance(&instance_id).await {
+        Ok(Some(inst)) => {
+            if let Some(input_bytes) = inst.input {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&input_bytes);
+                Json(json!({
+                    "found": true,
+                    "instance_id": instance_id,
+                    "input": encoded,
+                }))
+                .into_response()
+            } else {
+                Json(json!({
+                    "found": true,
+                    "instance_id": instance_id,
+                    "input": null,
+                }))
+                .into_response()
+            }
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "found": false,
+                "instance_id": instance_id,
+                "error": "Instance not found",
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Input handler error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": e.to_string(),
+                    "code": "INPUT_ERROR"
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// GET /health
 async fn health_handler(State(state): State<Arc<InstanceHandlerState>>) -> impl IntoResponse {
     let db_ok = state.persistence.health_check_db().await.unwrap_or(false);
@@ -844,6 +891,8 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
             "/api/v1/instances/{instance_id}/status",
             get(status_handler),
         )
+        // Instance input
+        .route("/api/v1/instances/{instance_id}/input", get(input_handler))
         // Health check
         .route("/health", get(health_handler))
         .with_state(state)

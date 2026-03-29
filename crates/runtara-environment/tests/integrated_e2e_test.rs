@@ -323,7 +323,7 @@ impl IntegratedTestContext {
             connection_service_url: None,
         };
 
-        OciRunner::new(runner_config)
+        OciRunner::new(runner_config, self.persistence.clone())
     }
 }
 

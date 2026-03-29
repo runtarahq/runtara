@@ -137,7 +137,7 @@
 //! - [`handlers`]: Environment protocol request handlers
 //! - [`image_registry`]: Image storage and retrieval
 //! - [`container_registry`]: Running container tracking
-//! - [`instance_output`]: Reading output.json from completed instances
+//! - [`instance_output`]: Instance output types (legacy, used by SDK)
 //! - [`runner`]: Container/process execution backends
 //! - [`http_server`]: HTTP server implementation
 //! - [`wake_scheduler`]: Durable sleep wake scheduling
@@ -175,7 +175,7 @@ pub mod image_registry;
 /// Running container tracking and management.
 pub mod container_registry;
 
-/// Reading and parsing instance output.json files.
+/// Instance output types (legacy, used by SDK).
 pub mod instance_output;
 
 /// Container/process execution backends (OCI, Native, Wasm).

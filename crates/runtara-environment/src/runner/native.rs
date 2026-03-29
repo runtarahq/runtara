@@ -5,19 +5,21 @@
 //! Launches instance binaries as plain child processes without container isolation.
 //! Intended for development on platforms where OCI runtimes are not available (macOS, Windows).
 //!
-//! Input/output is exchanged via files in the data directory (same as OCI runner):
-//! - Input: {DATA_DIR}/{tenant_id}/runs/{instance_id}/input.json
-//! - Output: {DATA_DIR}/{tenant_id}/runs/{instance_id}/output.json
+//! Input is provided via files; output is read from runtara-core persistence
+//! (the SDK reports completion/failure via HTTP).
 
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
+
+use runtara_core::persistence::Persistence;
 
 use crate::runner::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
@@ -76,17 +78,16 @@ impl NativeRunnerConfig {
 /// (crun, runc) are not available.
 pub struct NativeRunner {
     config: NativeRunnerConfig,
+    persistence: Arc<dyn Persistence>,
 }
 
 impl NativeRunner {
     /// Create a new native runner.
-    pub fn new(config: NativeRunnerConfig) -> Self {
-        Self { config }
-    }
-
-    /// Create from environment variables.
-    pub fn from_env() -> Self {
-        Self::new(NativeRunnerConfig::from_env())
+    pub fn new(config: NativeRunnerConfig, persistence: Arc<dyn Persistence>) -> Self {
+        Self {
+            config,
+            persistence,
+        }
     }
 
     /// Get the data directory.
@@ -112,19 +113,6 @@ impl NativeRunner {
         env.insert(
             "RUNTARA_SERVER_ADDR".to_string(),
             runtara_core_addr.to_string(),
-        );
-
-        // Workspace directory for ephemeral file storage
-        let workspace_dir = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id)
-            .join("workspace");
-        env.insert(
-            "RUNTARA_WORKSPACE_DIR".to_string(),
-            workspace_dir.to_string_lossy().to_string(),
         );
 
         if self.config.skip_cert_verification {
@@ -173,8 +161,8 @@ impl NativeRunner {
         bundle_path.join("rootfs").join("binary")
     }
 
-    /// Store input in file for instance to read.
-    async fn store_input(&self, tenant_id: &str, instance_id: &str, input: &Value) -> Result<()> {
+    /// Ensure the run directory exists for stderr capture.
+    async fn ensure_run_dir(&self, tenant_id: &str, instance_id: &str) -> Result<()> {
         let run_dir = self
             .config
             .data_dir
@@ -184,60 +172,54 @@ impl NativeRunner {
 
         fs::create_dir_all(&run_dir).await?;
 
-        // Create workspace directory for ephemeral file storage
-        let workspace_dir = run_dir.join("workspace");
-        fs::create_dir_all(&workspace_dir).await?;
-
-        let input_path = run_dir.join("input.json");
-        let value = serde_json::to_string_pretty(input)?;
-        fs::write(&input_path, &value).await?;
-
-        debug!(instance_id = %instance_id, path = %input_path.display(), "Stored input to file");
+        debug!(instance_id = %instance_id, "Run directory created");
         Ok(())
     }
 
-    /// Load output from file (written by instance).
-    async fn load_output(&self, tenant_id: &str, instance_id: &str) -> Result<Value> {
-        let output_path = self
+    /// Load output from runtara-core persistence.
+    ///
+    /// The SDK reports completion/failure to runtara-core via HTTP during execution.
+    /// By the time the process exits, the instance record is already persisted.
+    async fn load_output(&self, instance_id: &str) -> Result<Value> {
+        match self.persistence.get_instance(instance_id).await {
+            Ok(Some(inst)) => match inst.status.as_str() {
+                "completed" => {
+                    if let Some(output_bytes) = inst.output {
+                        serde_json::from_slice(&output_bytes).map_err(|e| {
+                            RunnerError::Other(format!("Failed to parse output: {}", e))
+                        })
+                    } else {
+                        Ok(Value::Null)
+                    }
+                }
+                "failed" => {
+                    let error = inst.error.unwrap_or_else(|| "Unknown error".to_string());
+                    Err(RunnerError::Other(error))
+                }
+                "cancelled" => Err(RunnerError::Cancelled),
+                status => Err(RunnerError::Other(format!(
+                    "Unexpected instance status after exit: {}",
+                    status
+                ))),
+            },
+            Ok(None) => Err(RunnerError::OutputNotFound(instance_id.to_string())),
+            Err(e) => Err(RunnerError::Other(format!(
+                "Failed to query instance status: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Load stderr from log file for diagnostics.
+    async fn load_stderr(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
+        let stderr_path = self
             .config
             .data_dir
             .join(tenant_id)
             .join("runs")
             .join(instance_id)
-            .join("output.json");
+            .join("stderr.log");
 
-        match fs::read_to_string(&output_path).await {
-            Ok(json) => {
-                let output: Value = serde_json::from_str(&json)?;
-                Ok(output)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(RunnerError::OutputNotFound(instance_id.to_string()))
-            }
-            Err(e) => Err(RunnerError::Io(e)),
-        }
-    }
-
-    /// Load error from error.json or stderr.log file.
-    async fn load_error(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
-        let run_dir = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id);
-
-        // Try error.json first
-        let error_path = run_dir.join("error.json");
-        if let Ok(json) = fs::read_to_string(&error_path).await
-            && let Ok(value) = serde_json::from_str::<Value>(&json)
-            && let Some(error) = value.get("error").and_then(|e| e.as_str())
-        {
-            return Some(error.to_string());
-        }
-
-        // Fallback to stderr.log
-        let stderr_path = run_dir.join("stderr.log");
         if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
             let stderr_trimmed = stderr_content.trim();
             if !stderr_trimmed.is_empty() {
@@ -259,7 +241,7 @@ impl NativeRunner {
                     } else {
                         preview
                     };
-                    return Some(format!("Execution failed:\n{}", truncated));
+                    return Some(truncated);
                 }
             }
         }
@@ -473,8 +455,8 @@ impl Runner for NativeRunner {
             ));
         }
 
-        // Store input to file for the instance to read
-        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+        // Ensure run directory exists for stderr capture
+        self.ensure_run_dir(&options.tenant_id, &options.instance_id)
             .await?;
 
         // Build environment variables
@@ -501,10 +483,9 @@ impl Runner for NativeRunner {
 
         match result {
             Ok(()) => {
-                match self
-                    .load_output(&options.tenant_id, &options.instance_id)
-                    .await
-                {
+                // Process exited successfully — read output from runtara-core persistence.
+                // The SDK's completed() call persists before process exit (synchronous HTTP).
+                match self.load_output(&options.instance_id).await {
                     Ok(output) => Ok(LaunchResult {
                         instance_id: options.instance_id.clone(),
                         success: true,
@@ -514,36 +495,29 @@ impl Runner for NativeRunner {
                         duration_ms,
                         metrics,
                     }),
-                    Err(e) => {
-                        let stderr = self
-                            .load_error(&options.tenant_id, &options.instance_id)
-                            .await;
-                        Ok(LaunchResult {
-                            instance_id: options.instance_id.clone(),
-                            success: false,
-                            output: None,
-                            error: Some(format!("Failed to load output: {}", e)),
-                            stderr,
-                            duration_ms,
-                            metrics,
-                        })
-                    }
+                    Err(e) => Ok(LaunchResult {
+                        instance_id: options.instance_id.clone(),
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to load output: {}", e)),
+                        stderr: None,
+                        duration_ms,
+                        metrics,
+                    }),
                 }
             }
             Err(e) => {
-                let stderr = self
-                    .load_error(&options.tenant_id, &options.instance_id)
-                    .await;
-                let error_msg = match &stderr {
-                    Some(msg) => msg.clone(),
-                    None => e.to_string(),
+                // Process failed — check if the SDK reported an error to runtara-core
+                let error_msg = match self.load_output(&options.instance_id).await {
+                    Err(RunnerError::Other(msg)) => msg,
+                    _ => e.to_string(),
                 };
                 Ok(LaunchResult {
                     instance_id: options.instance_id.clone(),
                     success: false,
                     output: None,
                     error: Some(error_msg),
-                    stderr,
+                    stderr: None,
                     duration_ms,
                     metrics,
                 })
@@ -559,8 +533,8 @@ impl Runner for NativeRunner {
             ));
         }
 
-        // Store input to file
-        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+        // Ensure run directory exists for stderr capture
+        self.ensure_run_dir(&options.tenant_id, &options.instance_id)
             .await?;
 
         // Build environment variables
@@ -601,20 +575,14 @@ impl Runner for NativeRunner {
         &self,
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics) {
-        let output = self
-            .load_output(&handle.tenant_id, &handle.instance_id)
-            .await
-            .ok();
-
-        let error = if output.is_none() {
-            self.load_error(&handle.tenant_id, &handle.instance_id)
-                .await
-        } else {
-            None
-        };
+        // Output is read from runtara-core by the container monitor, not from files.
+        // collect_result only provides stderr for diagnostics.
+        let stderr = self
+            .load_stderr(&handle.tenant_id, &handle.instance_id)
+            .await;
 
         // No cgroup metrics for native processes
-        (output, error, ContainerMetrics::default())
+        (None, stderr, ContainerMetrics::default())
     }
 
     async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {

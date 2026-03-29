@@ -1331,6 +1331,7 @@ mod tests {
             created_at: Utc::now(),
             started_at: None,
             finished_at: None,
+            input: None,
             output: None,
             error: None,
             sleep_until: None,

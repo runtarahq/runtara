@@ -3,19 +3,21 @@
 //! WebAssembly runner using wasmtime.
 //!
 //! Launches WASM scenario binaries via the `wasmtime` CLI with WASI support.
-//! Input/output is exchanged via files in the data directory (same as NativeRunner):
-//! - Input: {DATA_DIR}/{tenant_id}/runs/{instance_id}/input.json
-//! - Output: {DATA_DIR}/{tenant_id}/runs/{instance_id}/output.json
+//! Output is read from runtara-core persistence (the SDK reports completion/failure
+//! via HTTP). No filesystem I/O is needed for input or output.
 
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::fs;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
+
+use runtara_core::persistence::Persistence;
 
 use crate::runner::{
     CancelToken, ContainerMetrics, LaunchOptions, LaunchResult, Result, Runner, RunnerError,
@@ -27,7 +29,7 @@ use crate::runner::{
 pub struct WasmRunnerConfig {
     /// Path to the wasmtime binary.
     pub wasmtime_path: PathBuf,
-    /// Data directory for instance I/O.
+    /// Data directory for stderr capture.
     pub data_dir: PathBuf,
     /// Default execution timeout.
     pub default_timeout: Duration,
@@ -93,21 +95,20 @@ impl WasmRunnerConfig {
 /// WebAssembly runner.
 ///
 /// Executes WASM scenario binaries via wasmtime with WASI HTTP and network support.
-/// The WASM module gets a preopened `/data` directory mapped to the host data directory
-/// for reading input.json and writing output.json.
+/// Output is read from runtara-core persistence after process exit (the SDK reports
+/// completion/failure via HTTP to runtara-core during execution).
 pub struct WasmRunner {
     config: WasmRunnerConfig,
+    persistence: Arc<dyn Persistence>,
 }
 
 impl WasmRunner {
     /// Create a new WASM runner.
-    pub fn new(config: WasmRunnerConfig) -> Self {
-        Self { config }
-    }
-
-    /// Create from environment variables.
-    pub fn from_env() -> Self {
-        Self::new(WasmRunnerConfig::from_env())
+    pub fn new(config: WasmRunnerConfig, persistence: Arc<dyn Persistence>) -> Self {
+        Self {
+            config,
+            persistence,
+        }
     }
 
     /// Get the data directory.
@@ -144,15 +145,6 @@ impl WasmRunner {
             "RUNTARA_SERVER_ADDR".to_string(),
             runtara_core_addr.to_string(),
         );
-
-        // Output path inside the WASM guest filesystem
-        env.insert(
-            "SCENARIO_OUTPUT".to_string(),
-            "/data/output.json".to_string(),
-        );
-
-        // Error output path inside the WASM guest filesystem
-        env.insert("SCENARIO_ERROR".to_string(), "/data/error.json".to_string());
 
         if self.config.skip_cert_verification {
             env.insert(
@@ -212,27 +204,19 @@ impl WasmRunner {
     }
 
     /// Build the wasmtime command with all flags.
-    fn build_command(
-        &self,
-        wasm_path: &Path,
-        env: &HashMap<String, String>,
-        run_dir: &Path,
-    ) -> Command {
+    fn build_command(&self, wasm_path: &Path, env: &HashMap<String, String>) -> Command {
         let mut cmd = Command::new(&self.config.wasmtime_path);
 
         cmd.arg("run");
 
-        // WASI configuration
+        // WASI configuration — HTTP networking only, no filesystem access
         cmd.arg("--wasi").arg("http");
         cmd.arg("--wasi").arg("inherit-network");
-        cmd.arg("--wasi").arg("http-outgoing-body-buffer-chunks=4096");
-        cmd.arg("--wasi").arg("http-outgoing-body-chunk-size=1048576");
+        cmd.arg("--wasi")
+            .arg("http-outgoing-body-buffer-chunks=4096");
+        cmd.arg("--wasi")
+            .arg("http-outgoing-body-chunk-size=1048576");
         cmd.arg("--wasi").arg("max-resources=100000");
-
-        // Preopened directory: map host run_dir to /data inside the guest
-        // wasmtime syntax: HOST_DIR::GUEST_DIR
-        cmd.arg("--dir")
-            .arg(format!("{}::/data", run_dir.display()));
 
         // Pass environment variables via --env flags
         for (key, value) in env {
@@ -248,65 +232,51 @@ impl WasmRunner {
         cmd
     }
 
-    /// Create run directory for instance stderr/output capture.
-    async fn store_input(&self, tenant_id: &str, instance_id: &str, _input: &Value) -> Result<()> {
-        let run_dir = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id);
-
+    /// Create run directory for stderr capture.
+    async fn ensure_run_dir(&self, tenant_id: &str, instance_id: &str) -> Result<()> {
+        let run_dir = self.run_dir(tenant_id, instance_id);
         fs::create_dir_all(&run_dir).await?;
-
-        // Input is stored as the initial checkpoint in runtara-core, not as a file.
-        // The SDK reads it from RUNTARA_HTTP_URL.
         debug!(instance_id = %instance_id, "Run directory created");
         Ok(())
     }
 
-    /// Load output from file (written by instance).
-    async fn load_output(&self, tenant_id: &str, instance_id: &str) -> Result<Value> {
-        let output_path = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id)
-            .join("output.json");
-
-        match fs::read_to_string(&output_path).await {
-            Ok(json) => {
-                let output: Value = serde_json::from_str(&json)?;
-                Ok(output)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(RunnerError::OutputNotFound(instance_id.to_string()))
-            }
-            Err(e) => Err(RunnerError::Io(e)),
+    /// Load output from runtara-core persistence.
+    ///
+    /// The SDK reports completion/failure to runtara-core via HTTP during execution.
+    /// By the time the process exits, the instance record is already persisted.
+    async fn load_output(&self, instance_id: &str) -> Result<Value> {
+        match self.persistence.get_instance(instance_id).await {
+            Ok(Some(inst)) => match inst.status.as_str() {
+                "completed" => {
+                    if let Some(output_bytes) = inst.output {
+                        serde_json::from_slice(&output_bytes).map_err(|e| {
+                            RunnerError::Other(format!("Failed to parse output: {}", e))
+                        })
+                    } else {
+                        Ok(Value::Null)
+                    }
+                }
+                "failed" => {
+                    let error = inst.error.unwrap_or_else(|| "Unknown error".to_string());
+                    Err(RunnerError::Other(error))
+                }
+                "cancelled" => Err(RunnerError::Cancelled),
+                status => Err(RunnerError::Other(format!(
+                    "Unexpected instance status after exit: {}",
+                    status
+                ))),
+            },
+            Ok(None) => Err(RunnerError::OutputNotFound(instance_id.to_string())),
+            Err(e) => Err(RunnerError::Other(format!(
+                "Failed to query instance status: {}",
+                e
+            ))),
         }
     }
 
-    /// Load error from error.json or stderr.log file.
-    async fn load_error(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
-        let run_dir = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id);
-
-        // Try error.json first
-        let error_path = run_dir.join("error.json");
-        if let Ok(json) = fs::read_to_string(&error_path).await
-            && let Ok(value) = serde_json::from_str::<Value>(&json)
-            && let Some(error) = value.get("error").and_then(|e| e.as_str())
-        {
-            return Some(error.to_string());
-        }
-
-        // Fallback to stderr.log
-        let stderr_path = run_dir.join("stderr.log");
+    /// Load stderr from log file for diagnostics.
+    async fn load_stderr(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
+        let stderr_path = self.run_dir(tenant_id, instance_id).join("stderr.log");
         if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
             let stderr_trimmed = stderr_content.trim();
             if !stderr_trimmed.is_empty() {
@@ -328,7 +298,7 @@ impl WasmRunner {
                     } else {
                         preview
                     };
-                    return Some(format!("Execution failed:\n{}", truncated));
+                    return Some(truncated);
                 }
             }
         }
@@ -350,7 +320,6 @@ impl WasmRunner {
         &self,
         wasm_path: &Path,
         env: &HashMap<String, String>,
-        run_dir: &Path,
         instance_id: &str,
         cancel_token: Option<CancelToken>,
         timeout: Duration,
@@ -362,7 +331,7 @@ impl WasmRunner {
             "Launching WASM process via wasmtime"
         );
 
-        let mut cmd = self.build_command(wasm_path, env, run_dir);
+        let mut cmd = self.build_command(wasm_path, env);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -380,13 +349,15 @@ impl WasmRunner {
             }
         };
 
+        let stderr_handle = child.stderr.take();
+
         let result = self
             .wait_with_cancellation(
                 &mut child,
                 instance_id,
                 cancel_token,
                 timeout,
-                run_dir,
+                stderr_handle,
             )
             .await;
 
@@ -401,8 +372,10 @@ impl WasmRunner {
         instance_id: &str,
         cancel_token: Option<CancelToken>,
         timeout_duration: Duration,
-        run_dir: &Path,
+        stderr_handle: Option<tokio::process::ChildStderr>,
     ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
         let poll_interval = Duration::from_millis(100);
         let start = std::time::Instant::now();
 
@@ -432,13 +405,13 @@ impl WasmRunner {
                     } else {
                         let exit_code = status.code().unwrap_or(-1);
 
-                        // Read stderr from log file (stderr is written to file, not piped)
-                        let stderr_path = run_dir.join("stderr.log");
-                        let stderr = fs::read_to_string(&stderr_path)
-                            .await
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string();
+                        let stderr = if let Some(mut handle) = stderr_handle {
+                            let mut buf = String::new();
+                            let _ = handle.read_to_string(&mut buf).await;
+                            buf.trim().to_string()
+                        } else {
+                            String::new()
+                        };
 
                         error!(instance_id = %instance_id, exit_code = exit_code, stderr = %stderr, "WASM process failed");
                         return Err(RunnerError::ExitCode { exit_code, stderr });
@@ -484,16 +457,14 @@ impl WasmRunner {
 
         cmd.arg("run");
 
-        // WASI configuration
+        // WASI configuration — HTTP networking only, no filesystem access
         cmd.arg("--wasi").arg("http");
         cmd.arg("--wasi").arg("inherit-network");
-        cmd.arg("--wasi").arg("http-outgoing-body-buffer-chunks=4096");
-        cmd.arg("--wasi").arg("http-outgoing-body-chunk-size=1048576");
+        cmd.arg("--wasi")
+            .arg("http-outgoing-body-buffer-chunks=4096");
+        cmd.arg("--wasi")
+            .arg("http-outgoing-body-chunk-size=1048576");
         cmd.arg("--wasi").arg("max-resources=100000");
-
-        // Preopened directory
-        cmd.arg("--dir")
-            .arg(format!("/data::{}", run_dir.display()));
 
         // Pass environment variables
         for (key, value) in env {
@@ -554,10 +525,6 @@ impl Runner for WasmRunner {
             return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
         }
 
-        // Store input to file for the instance to read
-        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
-            .await?;
-
         let run_dir = self.run_dir(&options.tenant_id, &options.instance_id);
 
         // Build environment variables
@@ -575,7 +542,6 @@ impl Runner for WasmRunner {
             .run_process(
                 &wasm_path,
                 &env,
-                &run_dir,
                 &options.instance_id,
                 cancel_token,
                 options.timeout,
@@ -586,10 +552,9 @@ impl Runner for WasmRunner {
 
         match result {
             Ok(()) => {
-                match self
-                    .load_output(&options.tenant_id, &options.instance_id)
-                    .await
-                {
+                // Process exited successfully — read output from runtara-core persistence.
+                // The SDK's completed() call persists before process exit (synchronous HTTP).
+                match self.load_output(&options.instance_id).await {
                     Ok(output) => Ok(LaunchResult {
                         instance_id: options.instance_id.clone(),
                         success: true,
@@ -599,36 +564,29 @@ impl Runner for WasmRunner {
                         duration_ms,
                         metrics,
                     }),
-                    Err(e) => {
-                        let stderr = self
-                            .load_error(&options.tenant_id, &options.instance_id)
-                            .await;
-                        Ok(LaunchResult {
-                            instance_id: options.instance_id.clone(),
-                            success: false,
-                            output: None,
-                            error: Some(format!("Failed to load output: {}", e)),
-                            stderr,
-                            duration_ms,
-                            metrics,
-                        })
-                    }
+                    Err(e) => Ok(LaunchResult {
+                        instance_id: options.instance_id.clone(),
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to load output: {}", e)),
+                        stderr: None,
+                        duration_ms,
+                        metrics,
+                    }),
                 }
             }
             Err(e) => {
-                let stderr = self
-                    .load_error(&options.tenant_id, &options.instance_id)
-                    .await;
-                let error_msg = match &stderr {
-                    Some(msg) => msg.clone(),
-                    None => e.to_string(),
+                // Process failed — check if the SDK reported an error to runtara-core
+                let error_msg = match self.load_output(&options.instance_id).await {
+                    Err(RunnerError::Other(msg)) => msg,
+                    _ => e.to_string(),
                 };
                 Ok(LaunchResult {
                     instance_id: options.instance_id.clone(),
                     success: false,
                     output: None,
                     error: Some(error_msg),
-                    stderr,
+                    stderr: None,
                     duration_ms,
                     metrics,
                 })
@@ -642,8 +600,8 @@ impl Runner for WasmRunner {
             return Err(RunnerError::BinaryNotFound(wasm_path.display().to_string()));
         }
 
-        // Store input to file
-        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+        // Create run directory for stderr capture
+        self.ensure_run_dir(&options.tenant_id, &options.instance_id)
             .await?;
 
         let run_dir = self.run_dir(&options.tenant_id, &options.instance_id);
@@ -693,20 +651,14 @@ impl Runner for WasmRunner {
         &self,
         handle: &RunnerHandle,
     ) -> (Option<Value>, Option<String>, ContainerMetrics) {
-        let output = self
-            .load_output(&handle.tenant_id, &handle.instance_id)
-            .await
-            .ok();
-
-        let error = if output.is_none() {
-            self.load_error(&handle.tenant_id, &handle.instance_id)
-                .await
-        } else {
-            None
-        };
+        // Output is read from runtara-core by the container monitor, not from files.
+        // collect_result only provides stderr for diagnostics.
+        let stderr = self
+            .load_stderr(&handle.tenant_id, &handle.instance_id)
+            .await;
 
         // No cgroup metrics for WASM processes
-        (output, error, ContainerMetrics::default())
+        (None, stderr, ContainerMetrics::default())
     }
 
     async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {

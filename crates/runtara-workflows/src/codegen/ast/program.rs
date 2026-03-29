@@ -68,7 +68,6 @@ fn collect_used_agents_recursive(
             | Step::Conditional(_)
             | Step::Switch(_)
             | Step::Log(_)
-
             | Step::Error(_)
             | Step::Filter(_)
             | Step::GroupBy(_)
@@ -162,7 +161,6 @@ fn collect_used_capabilities_recursive(
             | Step::Conditional(_)
             | Step::Switch(_)
             | Step::Log(_)
-
             | Step::Error(_)
             | Step::Filter(_)
             | Step::GroupBy(_)
@@ -572,8 +570,8 @@ fn emit_scenario_variables(graph: &ExecutionGraph) -> TokenStream {
 /// 2. Registers SDK globally for #[durable] functions
 /// 3. Loads inputs from environment
 /// 4. Executes the workflow asynchronously
-/// 5. Reports completion/failure/cancellation status to Core
-/// 6. Writes output.json for Environment to read
+/// 5. Reports completion/failure/cancellation status to Core via SDK
+/// 6. Environment reads output from Core persistence after process exit
 fn emit_main(graph: &ExecutionGraph) -> TokenStream {
     // Generate variables as compile-time constants from graph.variables
     let variables_init = emit_scenario_variables(graph);
@@ -615,13 +613,21 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
             // Register SDK globally for #[durable] functions
             register_sdk(sdk_instance);
 
-            // Load input from /data/input.json (mounted by OCI runner)
+            // Load input from runtara-core via SDK.
             // Input has structure: {"data": {...}, "variables": {...}}
             // We extract data and variables fields, merging runtime variables with compile-time ones
-            let input_json: serde_json::Value = std::fs::read_to_string("/data/input.json")
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
+            let input_json: serde_json::Value = {
+                let sdk_guard = sdk().lock().unwrap();
+                match sdk_guard.load_input() {
+                    Ok(Some(bytes)) => serde_json::from_slice(&bytes)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    Ok(None) => serde_json::json!({}),
+                    Err(e) => {
+                        tracing::warn!("Failed to load input from Core: {}", e);
+                        serde_json::json!({})
+                    }
+                }
+            };
 
             // Extract data field from input (or empty object if not present)
             let data = input_json.get("data").cloned().unwrap_or_else(|| serde_json::json!({}));
@@ -775,11 +781,7 @@ fn emit_step_execution(
     // Steps that cannot have onError handling (they don't fail or handle errors differently)
     let can_have_on_error = matches!(
         step,
-        Step::Agent(_)
-            | Step::Split(_)
-            | Step::StartScenario(_)
-            | Step::While(_)
-
+        Step::Agent(_) | Step::Split(_) | Step::StartScenario(_) | Step::While(_)
     );
 
     if can_have_on_error && !on_error_edges.is_empty() {
@@ -1974,15 +1976,12 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_main_processes_input_json() {
+    fn test_emit_main_loads_input_from_sdk() {
         let graph = create_minimal_finish_graph("finish");
         let tokens = emit_main(&graph);
         let code = tokens.to_string();
 
-        assert!(
-            code.contains("/data/input.json"),
-            "Should read from /data/input.json"
-        );
+        assert!(code.contains("load_input"), "Should load input via SDK");
         assert!(
             code.contains(". get (\"data\")"),
             "Should extract data field"

@@ -107,7 +107,7 @@ impl Persistence for SqlitePersistence {
             r#"
             SELECT instance_id, tenant_id, definition_version,
                    status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error, sleep_until
+                   created_at, started_at, finished_at, input, output, error, sleep_until
             FROM instances
             WHERE instance_id = ?
             "#,

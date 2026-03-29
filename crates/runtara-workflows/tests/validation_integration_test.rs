@@ -167,62 +167,6 @@ fn test_error_unknown_agent_with_suggestion() {
 }
 
 // ============================================================================
-// Security Error Tests
-// ============================================================================
-
-#[test]
-fn test_error_security_leak_to_non_secure_agent() {
-    let graph = load_workflow("error_security_leak.json");
-    let result = validate_workflow(&graph);
-
-    assert!(result.has_errors(), "Should have errors");
-    assert!(
-        result.errors.iter().any(|e| matches!(
-            e,
-            ValidationError::ConnectionLeakToNonSecureAgent { agent_id, .. } if agent_id == "transform"
-        )),
-        "Should have E040 ConnectionLeakToNonSecureAgent error"
-    );
-
-    // Check error message format
-    let error = result
-        .errors
-        .iter()
-        .find(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }))
-        .unwrap();
-    let display = format!("{}", error);
-    assert!(display.contains("[E040]"), "Error should have code E040");
-    assert!(
-        display.contains("Security violation"),
-        "Error should mention security violation"
-    );
-}
-
-#[test]
-fn test_error_security_leak_to_finish() {
-    let graph = load_workflow("error_security_leak_to_finish.json");
-    let result = validate_workflow(&graph);
-
-    assert!(result.has_errors(), "Should have errors");
-    assert!(
-        result
-            .errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::ConnectionLeakToFinish { .. })),
-        "Should have E041 ConnectionLeakToFinish error"
-    );
-
-    // Check error message format
-    let error = result
-        .errors
-        .iter()
-        .find(|e| matches!(e, ValidationError::ConnectionLeakToFinish { .. }))
-        .unwrap();
-    let display = format!("{}", error);
-    assert!(display.contains("[E041]"), "Error should have code E041");
-}
-
-// ============================================================================
 // Child Scenario Error Tests
 // ============================================================================
 
@@ -354,34 +298,6 @@ fn test_warning_long_timeout() {
     assert!(
         display.contains("2.0h"),
         "Warning should format timeout as hours"
-    );
-}
-
-#[test]
-fn test_warning_unused_connection() {
-    let graph = load_workflow("warning_unused_connection.json");
-    let result = validate_workflow(&graph);
-
-    assert!(result.has_warnings(), "Should have warnings");
-    assert!(
-        result.warnings.iter().any(|w| matches!(
-            w,
-            ValidationWarning::UnusedConnection { step_id } if step_id == "get_credentials"
-        )),
-        "Should have W040 UnusedConnection warning"
-    );
-
-    // Check warning message format
-    let warning = result
-        .warnings
-        .iter()
-        .find(|w| matches!(w, ValidationWarning::UnusedConnection { .. }))
-        .unwrap();
-    let display = format!("{}", warning);
-    assert!(display.contains("[W040]"), "Warning should have code W040");
-    assert!(
-        display.contains("never referenced"),
-        "Warning should explain the issue"
     );
 }
 

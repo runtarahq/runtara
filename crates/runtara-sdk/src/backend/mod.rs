@@ -101,6 +101,12 @@ pub trait SdkBackend: Send + Sync {
     /// Get the status of another instance by ID.
     fn get_instance_status(&self, instance_id: &str) -> Result<StatusResponse>;
 
+    /// Load the instance input data from runtara-core.
+    ///
+    /// Returns the raw input bytes stored via `store_instance_input` during launch.
+    /// Returns `None` if no input was stored.
+    fn load_input(&self) -> Result<Option<Vec<u8>>>;
+
     /// Get the instance ID.
     fn instance_id(&self) -> &str;
 

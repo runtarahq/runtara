@@ -27,9 +27,6 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@v4
 
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
 
@@ -114,26 +111,6 @@ jobs:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
               run: cargo publish -p runtara-agent-macro --allow-dirty
 
-    publish-protocol:
-        name: Publish runtara-protocol
-        runs-on: ubuntu-latest
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
-              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Publish
-              env:
-                  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-protocol --allow-dirty
-
     publish-sdk-macros:
         name: Publish runtara-sdk-macros
         runs-on: ubuntu-latest
@@ -156,15 +133,13 @@ jobs:
     publish-core:
         name: Publish runtara-core
         runs-on: ubuntu-latest
-        needs: [publish-protocol]
+        needs: [publish-dsl]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
             - name: Get version from tag
               id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
             - name: Update versions from tag
@@ -200,15 +175,13 @@ jobs:
     publish-sdk:
         name: Publish runtara-sdk
         runs-on: ubuntu-latest
-        needs: [publish-protocol, publish-sdk-macros, publish-core]
+        needs: [publish-sdk-macros, publish-core]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
             - name: Get version from tag
               id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
             - name: Update versions from tag
@@ -252,8 +225,6 @@ jobs:
             - name: Get version from tag
               id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
             - name: Update versions from tag
@@ -268,15 +239,13 @@ jobs:
     publish-management-sdk:
         name: Publish runtara-management-sdk
         runs-on: ubuntu-latest
-        needs: [publish-protocol]
+        needs: [publish-core]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
             - name: Get version from tag
               id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
             - name: Update versions from tag
@@ -298,8 +267,6 @@ jobs:
             - name: Get version from tag
               id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
             - name: Update versions from tag

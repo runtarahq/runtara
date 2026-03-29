@@ -2130,7 +2130,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_ai_agent_connection_fetch() {
+    fn test_emit_ai_agent_connection_id_injection() {
         let graph = create_simple_graph_with_ai_agent();
         let mut ctx = EmitContext::new(false);
         let step = create_ai_agent_step("ai_agent");
@@ -2138,7 +2138,10 @@ mod tests {
         let tokens = emit(&step, &mut ctx, &graph).unwrap();
         let code = tokens.to_string();
 
-        assert!(code.contains("fetch_connection"), "Should fetch connection");
+        assert!(
+            code.contains("connection_id"),
+            "Should inject connection_id into inputs"
+        );
         assert!(code.contains("conn-openai"), "Should use connection ID");
     }
 

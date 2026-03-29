@@ -13,6 +13,8 @@
 // Link runtara-agents to register agent capability metadata via inventory.
 use runtara_agents as _;
 
+use runtara_core::persistence::Persistence;
+use runtara_core::persistence::postgres::PostgresPersistence;
 use runtara_dsl::{ExecutionGraph, FinishStep, ImmediateValue, MappingValue, Step};
 use runtara_environment::runner::oci::{
     BundleConfig, BundleManager, NetworkMode, OciRunner, OciRunnerConfig,
@@ -21,8 +23,20 @@ use runtara_environment::runner::{LaunchOptions, Runner};
 use runtara_workflows::compile::{CompilationInput, compile_scenario};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+
+async fn test_persistence() -> Arc<dyn Persistence> {
+    let db_url =
+        std::env::var("TEST_RUNTARA_DATABASE_URL").expect("TEST_RUNTARA_DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to test database");
+    Arc::new(PostgresPersistence::new(pool))
+}
 use uuid::Uuid;
 
 /// Helper macro to skip tests if prerequisites are not met.
@@ -189,7 +203,8 @@ async fn test_launch_detached_captures_spawned_pid() {
         connection_service_url: None,
     };
 
-    let runner = OciRunner::new(runner_config);
+    let persistence = test_persistence().await;
+    let runner = OciRunner::new(runner_config, persistence);
 
     let launch_options = LaunchOptions {
         instance_id: instance_id.clone(),
@@ -298,7 +313,8 @@ async fn test_launch_detached_with_pasta_captures_pid() {
         connection_service_url: None,
     };
 
-    let runner = OciRunner::new(runner_config);
+    let persistence = test_persistence().await;
+    let runner = OciRunner::new(runner_config, persistence);
 
     let launch_options = LaunchOptions {
         instance_id: instance_id.clone(),

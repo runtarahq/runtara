@@ -638,22 +638,14 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Should include connection fetching code
+        // Should inject connection_id into inputs for proxy-based credential resolution
         assert!(
-            code.contains("get_connection_service_url"),
-            "Should fetch connection service URL"
-        );
-        assert!(
-            code.contains("fetch_connection"),
-            "Should call fetch_connection"
+            code.contains("connection_id"),
+            "Should inject connection_id into inputs"
         );
         assert!(
             code.contains("\"my-connection\""),
-            "Should include connection ID"
-        );
-        assert!(
-            code.contains("_connection"),
-            "Should inject _connection into inputs"
+            "Should include connection ID value"
         );
     }
 
@@ -992,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_agent_connection_request_context() {
+    fn test_emit_agent_connection_id_injection() {
         let mut ctx = EmitContext::new(false);
         let step = AgentStep {
             id: "agent-conn-ctx".to_string(),
@@ -1010,42 +1002,18 @@ mod tests {
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
+        // Proxy-based credential resolution: connection_id is injected into inputs
         assert!(
-            code.contains("ConnectionRequestContext"),
-            "Should create ConnectionRequestContext"
+            code.contains("connection_id"),
+            "Should inject connection_id into inputs"
         );
         assert!(
-            code.contains("SCENARIO_ID"),
-            "Should read SCENARIO_ID env var"
+            code.contains("\"my-connection\""),
+            "Should include the connection ID value"
         );
         assert!(
-            code.contains("RUNTARA_INSTANCE_ID"),
-            "Should read RUNTARA_INSTANCE_ID env var"
-        );
-    }
-
-    #[test]
-    fn test_emit_agent_connection_context_uses_agent_capability_tag() {
-        let mut ctx = EmitContext::new(false);
-        let step = AgentStep {
-            id: "agent-tag".to_string(),
-            name: Some("Tag Test".to_string()),
-            agent_id: "shopify_graphql".to_string(),
-            capability_id: "execute_query".to_string(),
-            connection_id: Some("shopify-conn".to_string()),
-            input_mapping: None,
-            max_retries: None,
-            retry_delay: None,
-            timeout: None,
-            compensation: None,
-        };
-
-        let tokens = emit(&step, &mut ctx).unwrap();
-        let code = tokens.to_string();
-
-        assert!(
-            code.contains("shopify_graphql_execute_query"),
-            "Should use agent_id_capability_id as tag"
+            code.contains("_with_conn"),
+            "Should create inputs variant with connection"
         );
     }
 }

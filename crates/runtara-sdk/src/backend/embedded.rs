@@ -440,6 +440,15 @@ impl SdkBackend for EmbeddedBackend {
         }
     }
 
+    fn load_input(&self) -> Result<Option<Vec<u8>>> {
+        let instance = self
+            .rt
+            .block_on(self.persistence.get_instance(&self.instance_id))
+            .map_err(|e| SdkError::Internal(e.to_string()))?;
+
+        Ok(instance.and_then(|r| r.input))
+    }
+
     fn instance_id(&self) -> &str {
         &self.instance_id
     }
@@ -557,6 +566,7 @@ mod tests {
         tenant_id: String,
         status: String,
         checkpoint_id: Option<String>,
+        input: Option<Vec<u8>>,
         output: Option<Vec<u8>>,
         error: Option<String>,
         sleep_until: Option<DateTime<Utc>>,
@@ -586,6 +596,7 @@ mod tests {
                     tenant_id: tenant_id.to_string(),
                     status: "pending".to_string(),
                     checkpoint_id: None,
+                    input: None,
                     output: None,
                     error: None,
                     sleep_until: None,
@@ -612,6 +623,7 @@ mod tests {
                     created_at: chrono::Utc::now(),
                     started_at: Some(chrono::Utc::now()),
                     finished_at: None,
+                    input: inst.input.clone(),
                     output: inst.output.clone(),
                     error: inst.error.clone(),
                     sleep_until: inst.sleep_until,

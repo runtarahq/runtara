@@ -285,6 +285,14 @@ impl RuntaraSdk {
         self.backend.heartbeat()
     }
 
+    /// Load instance input from runtara-core.
+    ///
+    /// Returns the raw input bytes stored during instance launch.
+    /// Returns `None` if no input was stored.
+    pub fn load_input(&self) -> Result<Option<Vec<u8>>> {
+        self.backend.load_input()
+    }
+
     /// Send a completed event with output.
     #[instrument(skip(self, output), fields(instance_id = %self.backend.instance_id(), output_size = output.len()))]
     pub fn completed(&self, output: &[u8]) -> Result<()> {

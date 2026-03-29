@@ -3,14 +3,11 @@
 //! Background worker for cleaning up old run directories.
 //!
 //! Run directories (`{DATA_DIR}/{tenant_id}/runs/{instance_id}/`) contain:
-//! - `input.json` - Input data for the instance
-//! - `output.json` - Output written by the workflow
 //! - `stderr.log` - Captured stderr from the container
 //! - `config.json` - Per-instance OCI configuration
 //!
 //! These directories are not cleaned up immediately after execution to allow
-//! for debugging and to avoid race conditions with output processing.
-//! Instead, this worker periodically scans for old directories and removes them.
+//! for debugging. This worker periodically scans for old directories and removes them.
 
 use std::path::PathBuf;
 use std::sync::Arc;

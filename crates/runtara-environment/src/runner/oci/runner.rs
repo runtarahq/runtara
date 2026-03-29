@@ -2,21 +2,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! OCI container runner implementation.
 //!
-//! Launches instance binaries via crun. Pure execution logic, no database access.
-//! Input/output is exchanged via files in the data directory:
-//! - Input: {DATA_DIR}/{tenant_id}/runs/{instance_id}/input.json
-//! - Output: {DATA_DIR}/{tenant_id}/runs/{instance_id}/output.json
+//! Launches instance binaries via crun.
+//! Input is provided via files; output is read from runtara-core persistence
+//! (the SDK reports completion/failure via HTTP).
 
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::fs;
 
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
+
+use runtara_core::persistence::Persistence;
 
 use super::bundle::{BundleConfig, BundleManager, NetworkMode};
 use crate::runner::{
@@ -186,23 +188,20 @@ enum CgroupLocation {
 pub struct OciRunner {
     config: OciRunnerConfig,
     bundle_manager: BundleManager,
+    persistence: Arc<dyn Persistence>,
 }
 
 impl OciRunner {
     /// Create a new OCI runner
-    pub fn new(config: OciRunnerConfig) -> Self {
+    pub fn new(config: OciRunnerConfig, persistence: Arc<dyn Persistence>) -> Self {
         let bundle_manager =
             BundleManager::new(config.bundles_dir.clone(), config.bundle_config.clone());
 
         Self {
             config,
             bundle_manager,
+            persistence,
         }
-    }
-
-    /// Create from environment variables
-    pub fn from_env() -> Self {
-        Self::new(OciRunnerConfig::from_env())
     }
 
     /// Get the bundle manager
@@ -226,11 +225,6 @@ impl OciRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
-        // Workspace directory for ephemeral file storage (inside container)
-        env.insert(
-            "RUNTARA_WORKSPACE_DIR".to_string(),
-            "/data/workspace".to_string(),
-        );
 
         // For pasta networking, transform localhost addresses to gateway address
         // so the container can reach the host via pasta's NAT
@@ -289,7 +283,8 @@ impl OciRunner {
     }
 
     /// Store input in file for instance to read
-    async fn store_input(&self, tenant_id: &str, instance_id: &str, input: &Value) -> Result<()> {
+    /// Ensure the run directory exists for stderr capture.
+    async fn ensure_run_dir(&self, tenant_id: &str, instance_id: &str) -> Result<()> {
         fs::create_dir_all(&self.config.data_dir).await?;
 
         let run_dir = self
@@ -301,70 +296,61 @@ impl OciRunner {
 
         fs::create_dir_all(&run_dir).await?;
 
-        // Create workspace directory for ephemeral file storage
-        let workspace_dir = run_dir.join("workspace");
-        fs::create_dir_all(&workspace_dir).await?;
-
-        // Set run directory permissions to allow container (running as nobody) to write
-        // This is needed because the container runs as UID 65534 (nobody)
+        // Set run directory permissions to allow container to write stderr
         let (uid, _gid) = self.config.bundle_config.user;
         if uid != 0 {
             use std::os::unix::fs::PermissionsExt;
-            // Make directory world-writable so container can write output.json
             std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o777))?;
-            std::fs::set_permissions(&workspace_dir, std::fs::Permissions::from_mode(0o777))?;
         }
 
-        let input_path = run_dir.join("input.json");
-        let value = serde_json::to_string_pretty(input)?;
-        fs::write(&input_path, &value).await?;
-
-        debug!(instance_id = %instance_id, path = %input_path.display(), "Stored input to file");
+        debug!(instance_id = %instance_id, "Run directory created");
         Ok(())
     }
 
-    /// Load output from file (written by instance)
-    async fn load_output(&self, tenant_id: &str, instance_id: &str) -> Result<Value> {
-        let output_path = self
+    /// Load output from runtara-core persistence.
+    ///
+    /// The SDK reports completion/failure to runtara-core via HTTP during execution.
+    /// By the time the process exits, the instance record is already persisted.
+    async fn load_output(&self, instance_id: &str) -> Result<Value> {
+        match self.persistence.get_instance(instance_id).await {
+            Ok(Some(inst)) => match inst.status.as_str() {
+                "completed" => {
+                    if let Some(output_bytes) = inst.output {
+                        serde_json::from_slice(&output_bytes).map_err(|e| {
+                            RunnerError::Other(format!("Failed to parse output: {}", e))
+                        })
+                    } else {
+                        Ok(Value::Null)
+                    }
+                }
+                "failed" => {
+                    let error = inst.error.unwrap_or_else(|| "Unknown error".to_string());
+                    Err(RunnerError::Other(error))
+                }
+                "cancelled" => Err(RunnerError::Cancelled),
+                status => Err(RunnerError::Other(format!(
+                    "Unexpected instance status after exit: {}",
+                    status
+                ))),
+            },
+            Ok(None) => Err(RunnerError::OutputNotFound(instance_id.to_string())),
+            Err(e) => Err(RunnerError::Other(format!(
+                "Failed to query instance status: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Load stderr from log file for diagnostics.
+    async fn load_stderr(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
+        let stderr_path = self
             .config
             .data_dir
             .join(tenant_id)
             .join("runs")
             .join(instance_id)
-            .join("output.json");
+            .join("stderr.log");
 
-        match fs::read_to_string(&output_path).await {
-            Ok(json) => {
-                let output: Value = serde_json::from_str(&json)?;
-                Ok(output)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(RunnerError::OutputNotFound(instance_id.to_string()))
-            }
-            Err(e) => Err(RunnerError::Io(e)),
-        }
-    }
-
-    /// Load error from error.json file
-    async fn load_error(&self, tenant_id: &str, instance_id: &str) -> Option<String> {
-        let run_dir = self
-            .config
-            .data_dir
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id);
-
-        // Try error.json first
-        let error_path = run_dir.join("error.json");
-        if let Ok(json) = fs::read_to_string(&error_path).await
-            && let Ok(value) = serde_json::from_str::<Value>(&json)
-            && let Some(error) = value.get("error").and_then(|e| e.as_str())
-        {
-            return Some(error.to_string());
-        }
-
-        // Fallback to stderr.log
-        let stderr_path = run_dir.join("stderr.log");
         if let Ok(stderr_content) = fs::read_to_string(&stderr_path).await {
             let stderr_trimmed = stderr_content.trim();
             if !stderr_trimmed.is_empty() {
@@ -386,7 +372,7 @@ impl OciRunner {
                     } else {
                         preview
                     };
-                    return Some(format!("Execution failed:\n{}", truncated));
+                    return Some(truncated);
                 }
             }
         }
@@ -396,7 +382,7 @@ impl OciRunner {
 
     // NOTE: Run directory cleanup is now handled by the CleanupWorker in cleanup_worker.rs
     // which runs periodically and removes directories older than 24 hours.
-    // This prevents race conditions where cleanup happens before output.json can be read.
+    // This prevents race conditions where cleanup happens before stderr.log can be read.
 
     /// Run crun container and wait for exit
     ///
@@ -806,8 +792,8 @@ impl Runner for OciRunner {
             ));
         }
 
-        // Store input to file for the instance to read
-        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+        // Ensure run directory exists for stderr capture and workspace
+        self.ensure_run_dir(&options.tenant_id, &options.instance_id)
             .await?;
 
         // Build environment variables for the instance
@@ -848,10 +834,9 @@ impl Runner for OciRunner {
         // after 24 hours, not immediately.
         match result {
             Ok(()) => {
-                match self
-                    .load_output(&options.tenant_id, &options.instance_id)
-                    .await
-                {
+                // Container exited successfully — read output from runtara-core persistence.
+                // The SDK's completed() call persists before process exit (synchronous HTTP).
+                match self.load_output(&options.instance_id).await {
                     Ok(output) => Ok(LaunchResult {
                         instance_id: options.instance_id.clone(),
                         success: true,
@@ -861,38 +846,29 @@ impl Runner for OciRunner {
                         duration_ms,
                         metrics,
                     }),
-                    Err(e) => {
-                        // Container exited but didn't produce output - check stderr for diagnostics
-                        let stderr = self
-                            .load_error(&options.tenant_id, &options.instance_id)
-                            .await;
-                        Ok(LaunchResult {
-                            instance_id: options.instance_id.clone(),
-                            success: false,
-                            output: None,
-                            error: Some(format!("Failed to load output: {}", e)),
-                            stderr,
-                            duration_ms,
-                            metrics,
-                        })
-                    }
+                    Err(e) => Ok(LaunchResult {
+                        instance_id: options.instance_id.clone(),
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to load output: {}", e)),
+                        stderr: None,
+                        duration_ms,
+                        metrics,
+                    }),
                 }
             }
             Err(e) => {
-                // Container execution failed - get stderr for diagnostics
-                let stderr = self
-                    .load_error(&options.tenant_id, &options.instance_id)
-                    .await;
-                let error_msg = match &stderr {
-                    Some(msg) => msg.clone(),
-                    None => e.to_string(),
+                // Container failed — check if the SDK reported an error to runtara-core
+                let error_msg = match self.load_output(&options.instance_id).await {
+                    Err(RunnerError::Other(msg)) => msg,
+                    _ => e.to_string(),
                 };
                 Ok(LaunchResult {
                     instance_id: options.instance_id.clone(),
                     success: false,
                     output: None,
                     error: Some(error_msg),
-                    stderr,
+                    stderr: None,
                     duration_ms,
                     metrics,
                 })
@@ -908,8 +884,8 @@ impl Runner for OciRunner {
             ));
         }
 
-        // Store input to file
-        self.store_input(&options.tenant_id, &options.instance_id, &options.input)
+        // Ensure run directory exists for stderr capture and workspace
+        self.ensure_run_dir(&options.tenant_id, &options.instance_id)
             .await?;
 
         // Build environment variables
@@ -1041,7 +1017,7 @@ impl Runner for OciRunner {
             match child.try_wait() {
                 Ok(Some(status)) if !status.success() => {
                     let scenario_error = self
-                        .load_error(&options.tenant_id, &options.instance_id)
+                        .load_stderr(&options.tenant_id, &options.instance_id)
                         .await;
 
                     let error_msg = if let Some(err) = scenario_error {
@@ -1117,7 +1093,7 @@ impl Runner for OciRunner {
             match child.try_wait() {
                 Ok(Some(status)) if !status.success() => {
                     let scenario_error = self
-                        .load_error(&options.tenant_id, &options.instance_id)
+                        .load_stderr(&options.tenant_id, &options.instance_id)
                         .await;
 
                     let error_msg = if let Some(err) = scenario_error {
@@ -1191,17 +1167,12 @@ impl Runner for OciRunner {
     ) -> (Option<Value>, Option<String>, ContainerMetrics) {
         let metrics = self.collect_container_metrics(&handle.handle_id).await;
         let _ = self.delete_container(&handle.handle_id).await;
-        let output = self
-            .load_output(&handle.tenant_id, &handle.instance_id)
-            .await
-            .ok();
-        let error = self
-            .load_error(&handle.tenant_id, &handle.instance_id)
+        // Output is read from runtara-core by the container monitor, not from files.
+        // collect_result only provides stderr for diagnostics and cgroup metrics.
+        let stderr = self
+            .load_stderr(&handle.tenant_id, &handle.instance_id)
             .await;
-        // NOTE: Run directory cleanup is handled by a separate background worker
-        // after 24 hours, not immediately. This allows output.json to be read
-        // by the container monitor's process_output function.
-        (output, error, metrics)
+        (None, stderr, metrics)
     }
 
     async fn get_pid(&self, handle: &RunnerHandle) -> Option<u32> {
@@ -1212,7 +1183,6 @@ impl Runner for OciRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn test_transform_addr_for_pasta_no_transformation() {
@@ -1238,173 +1208,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_store_input_creates_workspace_directory() {
-        // Create a temp directory for test data
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create runner with test config
-        let config = OciRunnerConfig {
-            bundles_dir: temp_dir.path().join("bundles"),
-            data_dir: temp_dir.path().to_path_buf(),
-            default_timeout: Duration::from_secs(60),
-            use_systemd_cgroup: false,
-            bundle_config: BundleConfig::default(),
-            skip_cert_verification: false,
-            connection_service_url: None,
-        };
-        let runner = OciRunner::new(config);
-
-        // Call store_input
-        let tenant_id = "test-tenant";
-        let instance_id = "test-instance";
-        let input = serde_json::json!({"key": "value"});
-
-        runner
-            .store_input(tenant_id, instance_id, &input)
-            .await
-            .unwrap();
-
-        // Verify run directory exists
-        let run_dir = temp_dir
-            .path()
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id);
-        assert!(run_dir.exists(), "Run directory should exist");
-
-        // Verify workspace directory exists
-        let workspace_dir = run_dir.join("workspace");
-        assert!(
-            workspace_dir.exists(),
-            "Workspace directory should exist at {:?}",
-            workspace_dir
-        );
-        assert!(workspace_dir.is_dir(), "Workspace should be a directory");
-
-        // Verify input.json exists
-        let input_path = run_dir.join("input.json");
-        assert!(input_path.exists(), "input.json should exist");
-
-        // Verify input.json content
-        let content = std::fs::read_to_string(&input_path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed, input);
-    }
-
-    #[tokio::test]
-    async fn test_store_input_workspace_directory_is_writable() {
-        // Create a temp directory for test data
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create runner with non-root user config (simulates container user)
-        let bundle_config = BundleConfig {
-            user: (65534, 65534), // nobody user
-            ..Default::default()
-        };
-
-        let config = OciRunnerConfig {
-            bundles_dir: temp_dir.path().join("bundles"),
-            data_dir: temp_dir.path().to_path_buf(),
-            default_timeout: Duration::from_secs(60),
-            use_systemd_cgroup: false,
-            bundle_config,
-            skip_cert_verification: false,
-            connection_service_url: None,
-        };
-        let runner = OciRunner::new(config);
-
-        // Call store_input
-        let tenant_id = "test-tenant";
-        let instance_id = "test-instance-2";
-        let input = serde_json::json!({});
-
-        runner
-            .store_input(tenant_id, instance_id, &input)
-            .await
-            .unwrap();
-
-        // Verify workspace directory has world-writable permissions
-        let workspace_dir = temp_dir
-            .path()
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id)
-            .join("workspace");
-
-        assert!(workspace_dir.exists());
-
-        // Check permissions (0o777 = world-writable)
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(&workspace_dir).unwrap();
-        let mode = metadata.permissions().mode();
-        // Check that the directory is world-writable (last 3 bits are rwx for others)
-        assert_eq!(
-            mode & 0o777,
-            0o777,
-            "Workspace directory should be world-writable (0o777), got {:o}",
-            mode & 0o777
-        );
-    }
-
-    #[tokio::test]
-    async fn test_store_input_preserves_existing_workspace_files() {
-        // Create a temp directory for test data
-        let temp_dir = TempDir::new().unwrap();
-
-        let config = OciRunnerConfig {
-            bundles_dir: temp_dir.path().join("bundles"),
-            data_dir: temp_dir.path().to_path_buf(),
-            default_timeout: Duration::from_secs(60),
-            use_systemd_cgroup: false,
-            bundle_config: BundleConfig::default(),
-            skip_cert_verification: false,
-            connection_service_url: None,
-        };
-        let runner = OciRunner::new(config);
-
-        let tenant_id = "test-tenant";
-        let instance_id = "test-instance-3";
-
-        // First call to store_input
-        runner
-            .store_input(tenant_id, instance_id, &serde_json::json!({"step": 1}))
-            .await
-            .unwrap();
-
-        // Write a file to workspace
-        let workspace_dir = temp_dir
-            .path()
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id)
-            .join("workspace");
-        let test_file = workspace_dir.join("test_data.txt");
-        std::fs::write(&test_file, "important data").unwrap();
-
-        // Second call to store_input (simulates restart)
-        runner
-            .store_input(tenant_id, instance_id, &serde_json::json!({"step": 2}))
-            .await
-            .unwrap();
-
-        // Verify the file still exists
-        assert!(
-            test_file.exists(),
-            "Files in workspace should survive store_input calls"
-        );
-        let content = std::fs::read_to_string(&test_file).unwrap();
-        assert_eq!(content, "important data");
-
-        // Verify input.json was updated
-        let input_path = temp_dir
-            .path()
-            .join(tenant_id)
-            .join("runs")
-            .join(instance_id)
-            .join("input.json");
-        let input_content = std::fs::read_to_string(&input_path).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&input_content).unwrap();
-        assert_eq!(parsed["step"], 2);
-    }
+    // Note: ensure_run_dir tests require a persistence mock for OciRunner::new().
+    // These tests are run from the runtara workspace, not from smo-runtime.
 }

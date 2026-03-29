@@ -55,12 +55,16 @@ async fn main() -> anyhow::Result<()> {
     runtara_environment::migrations::run(&pool).await?;
     info!("Migrations completed");
 
-    // Create OCI runner
-    let runner = Arc::new(OciRunner::from_env());
-    info!(runner_type = runner.runner_type(), "Runner initialized");
-
     // Create shared persistence for checkpoints, events, signals
-    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let persistence: Arc<dyn runtara_core::persistence::Persistence> =
+        Arc::new(PostgresPersistence::new(pool.clone()));
+
+    // Create OCI runner (uses persistence to read instance output)
+    let runner = Arc::new(OciRunner::new(
+        runtara_environment::runner::oci::OciRunnerConfig::from_env(),
+        persistence.clone(),
+    ));
+    info!(runner_type = runner.runner_type(), "Runner initialized");
 
     // Parse core bind address if provided
     let core_bind_addr: Option<std::net::SocketAddr> = config.core_addr.parse().ok();

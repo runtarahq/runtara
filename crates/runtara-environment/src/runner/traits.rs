@@ -152,8 +152,8 @@ pub type CancelToken = Arc<AtomicBool>;
 /// Runners are responsible for launching and managing instance binaries.
 /// Different implementations can use OCI containers, native processes, WASM, etc.
 ///
-/// Runners are PURE execution engines - they do NOT access the database.
-/// Database operations (registration, status updates) are handled by the caller.
+/// Runners read instance output from persistence (runtara-core) after process exit.
+/// Database writes (registration, status updates) are handled by the caller.
 #[async_trait]
 pub trait Runner: Send + Sync {
     /// Runner type identifier (e.g., "oci", "native", "wasm")

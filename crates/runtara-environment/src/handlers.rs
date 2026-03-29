@@ -16,7 +16,6 @@ use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
 use crate::error::Result;
 use crate::image_registry::{ImageBuilder, ImageRegistry, RunnerType};
-use crate::instance_output::{InstanceOutput, InstanceOutputStatus, output_file_path};
 use crate::runner::oci::create_bundle_at_path;
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
 
@@ -1147,8 +1146,8 @@ pub struct TestCapabilityResponse {
 
 /// Handle test capability request.
 ///
-/// This runs the test harness binary in an OCI container, passing the test request
-/// via /data/input.json and reading the result from /data/output.json.
+/// This runs the test harness binary in an OCI container. The test request is stored
+/// in runtara-core and read via SDK. Results come from the runner's LaunchResult.
 pub async fn handle_test_capability(
     state: &EnvironmentHandlerState,
     request: TestCapabilityRequest,
@@ -1178,7 +1177,7 @@ pub async fn handle_test_capability(
             }
         };
 
-    // Build test request JSON for input.json
+    // Build test request JSON
     let test_input = serde_json::json!({
         "agent_id": request.agent_id,
         "capability_id": request.capability_id,
@@ -1222,41 +1221,24 @@ pub async fn handle_test_capability(
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
     match launch_result {
-        Ok(_) => {
-            // Read output from output.json
-            let output_path = output_file_path(&state.data_dir, &request.tenant_id, &instance_id);
-            match InstanceOutput::read_from_file(&output_path).await {
-                Ok(output) => match output.status {
-                    InstanceOutputStatus::Completed => Ok(TestCapabilityResponse {
-                        success: true,
-                        output: output.result,
-                        error: None,
-                        execution_time_ms,
-                    }),
-                    InstanceOutputStatus::Failed => Ok(TestCapabilityResponse {
-                        success: false,
-                        output: None,
-                        error: output
-                            .error
-                            .or(Some("Capability execution failed".to_string())),
-                        execution_time_ms,
-                    }),
-                    _ => Ok(TestCapabilityResponse {
-                        success: false,
-                        output: None,
-                        error: Some(format!("Unexpected status: {:?}", output.status)),
-                        execution_time_ms,
-                    }),
-                },
-                Err(e) => {
-                    warn!(error = %e, "Failed to read test output");
-                    Ok(TestCapabilityResponse {
-                        success: false,
-                        output: None,
-                        error: Some(format!("Failed to read test output: {}", e)),
-                        execution_time_ms,
-                    })
-                }
+        Ok(result) => {
+            // runner.run() reads output from runtara-core persistence
+            if result.success {
+                Ok(TestCapabilityResponse {
+                    success: true,
+                    output: result.output,
+                    error: None,
+                    execution_time_ms,
+                })
+            } else {
+                Ok(TestCapabilityResponse {
+                    success: false,
+                    output: None,
+                    error: result
+                        .error
+                        .or(Some("Capability execution failed".to_string())),
+                    execution_time_ms,
+                })
             }
         }
         Err(e) => {

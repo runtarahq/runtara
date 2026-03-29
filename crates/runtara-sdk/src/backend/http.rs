@@ -314,6 +314,12 @@ struct StatusResp {
     error: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct InputResp {
+    #[serde(default)]
+    input: Option<String>, // base64
+}
+
 // ============================================================================
 // Helper: convert signal types
 // ============================================================================
@@ -664,6 +670,16 @@ impl SdkBackend for HttpBackend {
             output: resp.output.as_deref().map(decode_b64),
             error: resp.error,
         })
+    }
+
+    fn load_input(&self) -> Result<Option<Vec<u8>>> {
+        let url = format!(
+            "{}/api/v1/instances/{}/input",
+            self.base_url, self.instance_id
+        );
+
+        let resp: InputResp = self.get(&url)?;
+        Ok(resp.input.as_deref().map(decode_b64))
     }
 }
 

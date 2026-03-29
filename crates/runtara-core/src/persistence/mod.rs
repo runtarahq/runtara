@@ -33,6 +33,9 @@ pub struct InstanceRecord {
     pub started_at: Option<DateTime<Utc>>,
     /// When the instance finished (completed, failed, or cancelled).
     pub finished_at: Option<DateTime<Utc>>,
+    /// Input data provided at launch time.
+    #[sqlx(default)]
+    pub input: Option<Vec<u8>>,
     /// Output data from successful completion.
     pub output: Option<Vec<u8>>,
     /// Error message from failure.

@@ -17,9 +17,8 @@
 mod native {
     use crate::agent_meta::StepTypeMeta;
     use crate::{
-        AgentStep, AiAgentStep, ConditionalStep, ErrorStep, FilterStep, FinishStep,
-        GroupByStep, LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep,
-        WhileStep,
+        AgentStep, AiAgentStep, ConditionalStep, ErrorStep, FilterStep, FinishStep, GroupByStep,
+        LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep, WhileStep,
     };
 
     // ========================================================================
@@ -57,8 +56,6 @@ mod native {
     fn schema_log_step() -> schemars::schema::RootSchema {
         schemars::schema_for!(LogStep)
     }
-
-
 
     fn schema_error_step() -> schemars::schema::RootSchema {
         schemars::schema_for!(ErrorStep)
