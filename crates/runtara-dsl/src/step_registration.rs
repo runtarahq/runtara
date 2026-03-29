@@ -17,7 +17,7 @@
 mod native {
     use crate::agent_meta::StepTypeMeta;
     use crate::{
-        AgentStep, AiAgentStep, ConditionalStep, ConnectionStep, ErrorStep, FilterStep, FinishStep,
+        AgentStep, AiAgentStep, ConditionalStep, ErrorStep, FilterStep, FinishStep,
         GroupByStep, LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep,
         WhileStep,
     };
@@ -58,9 +58,7 @@ mod native {
         schemars::schema_for!(LogStep)
     }
 
-    fn schema_connection_step() -> schemars::schema::RootSchema {
-        schemars::schema_for!(ConnectionStep)
-    }
+
 
     fn schema_error_step() -> schemars::schema::RootSchema {
         schemars::schema_for!(ErrorStep)
@@ -150,14 +148,6 @@ mod native {
         schema_fn: schema_log_step,
     };
 
-    static CONNECTION_STEP_META: StepTypeMeta = StepTypeMeta {
-        id: "Connection",
-        display_name: "Connection",
-        description: "Acquire a connection for secure agents",
-        category: "utility",
-        schema_fn: schema_connection_step,
-    };
-
     static ERROR_STEP_META: StepTypeMeta = StepTypeMeta {
         id: "Error",
         display_name: "Error",
@@ -207,7 +197,7 @@ mod native {
     inventory::submit! { &START_SCENARIO_STEP_META }
     inventory::submit! { &WHILE_STEP_META }
     inventory::submit! { &LOG_STEP_META }
-    inventory::submit! { &CONNECTION_STEP_META }
+
     inventory::submit! { &ERROR_STEP_META }
     inventory::submit! { &FILTER_STEP_META }
     inventory::submit! { &GROUP_BY_STEP_META }

@@ -329,10 +329,6 @@ fn count_steps(
                 "While"
             }
             Step::Log(_) => "Log",
-            Step::Connection(_) => {
-                *connection_count += 1;
-                "Connection"
-            }
             Step::Error(_) => "Error",
             Step::Filter(_) => "Filter",
             Step::GroupBy(_) => "GroupBy",

@@ -68,7 +68,7 @@ fn collect_used_agents_recursive(
             | Step::Conditional(_)
             | Step::Switch(_)
             | Step::Log(_)
-            | Step::Connection(_)
+
             | Step::Error(_)
             | Step::Filter(_)
             | Step::GroupBy(_)
@@ -162,7 +162,7 @@ fn collect_used_capabilities_recursive(
             | Step::Conditional(_)
             | Step::Switch(_)
             | Step::Log(_)
-            | Step::Connection(_)
+
             | Step::Error(_)
             | Step::Filter(_)
             | Step::GroupBy(_)
@@ -779,7 +779,7 @@ fn emit_step_execution(
             | Step::Split(_)
             | Step::StartScenario(_)
             | Step::While(_)
-            | Step::Connection(_)
+
     );
 
     if can_have_on_error && !on_error_edges.is_empty() {

@@ -408,103 +408,37 @@ fn emit_durable_rate_limited_call(
     }
 }
 
-/// Emit code to fetch connection from external service and inject into inputs.
+/// Inject connection_id into agent inputs for proxy-based credential resolution.
 ///
-/// Returns a tuple of (connection_fetch_code, final_inputs_ident).
-/// If no connection_id or no service URL, returns empty code and the original inputs var.
+/// Returns a tuple of (injection_code, final_inputs_ident).
+/// If no connection_id, returns empty code and the original inputs var.
+/// Credentials are never fetched into the binary — the proxy handles injection.
 fn emit_connection_fetch(
-    step_id: &str,
+    _step_id: &str,
     connection_id: Option<&str>,
-    ctx: &EmitContext,
+    _ctx: &EmitContext,
     inputs_var: &proc_macro2::Ident,
-    with_rate_limit_handling: bool,
-    agent_id: &str,
-    capability_id: &str,
+    _with_rate_limit_handling: bool,
+    _agent_id: &str,
+    _capability_id: &str,
 ) -> (TokenStream, proc_macro2::Ident) {
-    // If no connection_id or no service URL configured, just use original inputs
+    // If no connection_id, just use original inputs
     let Some(conn_id) = connection_id else {
         return (quote! {}, inputs_var.clone());
     };
 
-    // connection_service_url must be configured when connection_id is specified
-    // Generate code that checks at runtime (since URL can come from env var)
-    let _ = &ctx.connection_service_url; // Acknowledge we checked it, but defer to runtime
-
-    // Generate connection fetch code with rate limit handling
+    // Inject connection_id into inputs — the proxy handles credential resolution.
+    // Credentials are NEVER fetched into the scenario binary.
     let final_inputs = proc_macro2::Ident::new(
         &format!("{}_with_conn", inputs_var),
         proc_macro2::Span::call_site(),
     );
 
-    let rate_limit_code = if with_rate_limit_handling {
-        quote! {
-            // Check rate limit state and wait if needed
-            if let Some(ref rl) = __conn_response.rate_limit {
-                if rl.is_limited {
-                    let wait_duration = rl.wait_duration();
-                    tracing::debug!("Step {} connection {} is rate limited, waiting {:?}",
-                        #step_id, #conn_id, wait_duration);
-
-                    // Use durable sleep so we survive crashes while waiting
-                    {
-                        let __sdk = sdk().lock().unwrap();
-                        __sdk.durable_sleep(wait_duration)
-                            .map_err(|e| format!("Step {} rate limit sleep failed: {}", #step_id, e))?;
-                    }
-
-                    // Re-fetch connection after waiting
-                    __conn_response = fetch_connection(
-                        __conn_service_url,
-                        TENANT_ID,
-                        #conn_id,
-                        Some(&__conn_ctx)
-                    ).map_err(|e| format!("Step {} failed to re-fetch connection {}: {}",
-                        #step_id, #conn_id, e))?;
-                }
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let tag = format!("{}_{}", agent_id, capability_id);
-
     let code = quote! {
         let #final_inputs = {
-            // Fetch connection from external service
-            let __conn_service_url = get_connection_service_url()
-                .ok_or_else(|| format!("Step {} requires CONNECTION_SERVICE_URL to be configured", #step_id))?;
-
-            // Build request context for connection usage tracking
-            let __conn_scenario_id = std::env::var("SCENARIO_ID").ok();
-            let __conn_instance_id = std::env::var("RUNTARA_INSTANCE_ID").ok();
-            let __conn_ctx = ConnectionRequestContext {
-                tag: Some(#tag),
-                step_id: Some(#step_id),
-                scenario_id: __conn_scenario_id.as_deref(),
-                instance_id: __conn_instance_id.as_deref(),
-            };
-
-            let mut __conn_response = fetch_connection(
-                __conn_service_url,
-                TENANT_ID,
-                #conn_id,
-                Some(&__conn_ctx)
-            ).map_err(|e| format!("Step {} failed to fetch connection {}: {}",
-                #step_id, #conn_id, e))?;
-
-            #rate_limit_code
-
-            // Inject connection parameters into inputs
             let mut inputs = #inputs_var.clone();
             if let serde_json::Value::Object(ref mut map) = inputs {
                 map.insert("connection_id".to_string(), serde_json::Value::String(#conn_id.to_string()));
-                map.insert("_connection".to_string(), serde_json::json!({
-                    "connection_id": #conn_id,
-                    "parameters": __conn_response.parameters,
-                    "integration_id": __conn_response.integration_id,
-                    "connection_subtype": __conn_response.connection_subtype
-                }));
             }
             inputs
         };

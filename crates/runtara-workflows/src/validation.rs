@@ -6,7 +6,6 @@
 //! - Graph structure is valid (entry point exists, no unreachable steps)
 //! - References point to valid steps
 //! - Agents and capabilities exist
-//! - Connection data doesn't leak to non-secure agents
 //! - Configuration values are reasonable
 //! - Data and variable references are properly defined
 //! - Child scenario inputs match their schemas
@@ -22,9 +21,7 @@
 //! | 2.5 | Execution order validation |
 //! | 3 | Agent/capability validation |
 //! | 4 | Configuration warnings |
-//! | 5 | Connection validation |
-//! | 6 | Security validation (connection leakage) |
-//! | 7 | Child scenario validation (version format) |
+//! | 5 | Child scenario validation (version format) |
 //! | 7.5 | Data and variable reference validation |
 //! | 8 | Step name validation (duplicates) |
 //! | 9 | Compensation validation (warnings) |
@@ -49,10 +46,6 @@
 //! | E020 | UnknownAgent | Agent doesn't exist |
 //! | E021 | UnknownCapability | Capability doesn't exist |
 //! | E022 | MissingRequiredInput | Required agent input missing |
-//! | E030 | UnknownIntegration | Connection integration unknown |
-//! | E040 | ConnectionLeakToNonSecureAgent | Connection data exposed to non-secure agent |
-//! | E041 | ConnectionLeakToFinish | Connection data exposed in Finish step |
-//! | E042 | ConnectionLeakToLog | Connection data exposed in Log step |
 //! | E043 | InvalidChildVersion | Invalid child scenario version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -162,32 +155,6 @@ pub enum ValidationError {
         agent_id: String,
         capability_id: String,
         input_name: String,
-    },
-
-    // === Connection Errors ===
-    /// Unknown integration ID for connection step.
-    UnknownIntegration {
-        step_id: String,
-        integration_id: String,
-        available_integrations: Vec<String>,
-    },
-
-    // === Security Errors ===
-    /// Connection data is referenced by a non-secure agent.
-    ConnectionLeakToNonSecureAgent {
-        connection_step_id: String,
-        agent_step_id: String,
-        agent_id: String,
-    },
-    /// Connection data is referenced by a Finish step.
-    ConnectionLeakToFinish {
-        connection_step_id: String,
-        finish_step_id: String,
-    },
-    /// Connection data is referenced by a Log step.
-    ConnectionLeakToLog {
-        connection_step_id: String,
-        log_step_id: String,
     },
 
     // === Child Scenario Errors ===
@@ -430,62 +397,6 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E022] Step '{}': capability '{}:{}' requires input '{}' but it is not provided",
                     step_id, agent_id, capability_id, input_name
-                )
-            }
-
-            // Connection Errors
-            ValidationError::UnknownIntegration {
-                step_id,
-                integration_id,
-                available_integrations,
-            } => {
-                let suggestion = find_similar_name(integration_id, available_integrations);
-                let suggestion_text = suggestion
-                    .map(|s| format!(". Did you mean '{}'?", s))
-                    .unwrap_or_default();
-                write!(
-                    f,
-                    "[E030] Connection step '{}' uses unknown integration '{}'{}\n       Available integrations: {}",
-                    step_id,
-                    integration_id,
-                    suggestion_text,
-                    available_integrations.join(", ")
-                )
-            }
-
-            // Security Errors
-            ValidationError::ConnectionLeakToNonSecureAgent {
-                connection_step_id,
-                agent_step_id,
-                agent_id,
-            } => {
-                write!(
-                    f,
-                    "[E040] Security violation: Connection step '{}' outputs are referenced by non-secure agent '{}' (step '{}'). \
-                     Connection data can only be passed to secure agents (http, sftp).",
-                    connection_step_id, agent_id, agent_step_id
-                )
-            }
-            ValidationError::ConnectionLeakToFinish {
-                connection_step_id,
-                finish_step_id,
-            } => {
-                write!(
-                    f,
-                    "[E041] Security violation: Connection step '{}' outputs are referenced by Finish step '{}'. \
-                     Connection data cannot be included in workflow outputs.",
-                    connection_step_id, finish_step_id
-                )
-            }
-            ValidationError::ConnectionLeakToLog {
-                connection_step_id,
-                log_step_id,
-            } => {
-                write!(
-                    f,
-                    "[E042] Security violation: Connection step '{}' outputs are referenced by Log step '{}'. \
-                     Connection data cannot be logged.",
-                    connection_step_id, log_step_id
                 )
             }
 
@@ -830,8 +741,6 @@ pub enum ValidationWarning {
         timeout_ms: u64,
         recommended_max_ms: u64,
     },
-    /// Connection step is defined but never referenced.
-    UnusedConnection { step_id: String },
     /// Step references its own outputs (potential issue except in loops).
     SelfReference {
         step_id: String,
@@ -959,13 +868,6 @@ impl std::fmt::Display for ValidationWarning {
                     format_duration(*recommended_max_ms)
                 )
             }
-            ValidationWarning::UnusedConnection { step_id } => {
-                write!(
-                    f,
-                    "[W040] Connection step '{}' is defined but never referenced by any agent",
-                    step_id
-                )
-            }
             ValidationWarning::SelfReference {
                 step_id,
                 reference_path,
@@ -1042,13 +944,7 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 4: Configuration warnings
     validate_configuration(graph, &mut result);
 
-    // Phase 5: Connection validation
-    validate_connections(graph, &mut result);
-
-    // Phase 6: Security validation (connection leakage)
-    validate_security(graph, &mut result);
-
-    // Phase 7: Child scenario validation
+    // Phase 5: Child scenario validation
     validate_child_scenarios(graph, &mut result);
 
     // Phase 7.5: Reference validation (data.* and variables.* definitions)
@@ -1612,7 +1508,6 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
         Step::Conditional(_)
         | Step::Switch(_)
         | Step::While(_)
-        | Step::Connection(_)
         | Step::Delay(_)
         | Step::WaitForSignal(_)
         | Step::AiAgent(_) => {}
@@ -2046,194 +1941,7 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 }
 
 // ============================================================================
-// Phase 5: Connection Validation
-// ============================================================================
-
-fn validate_connections(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    // Get available integrations
-    let available_integrations: Vec<String> = runtara_dsl::agent_meta::get_all_connection_types()
-        .map(|c| c.integration_id.to_string())
-        .collect();
-
-    // Collect all connection step IDs
-    let mut connection_step_ids: HashSet<String> = HashSet::new();
-
-    for (step_id, step) in &graph.steps {
-        if let Step::Connection(conn_step) = step {
-            connection_step_ids.insert(step_id.clone());
-
-            // Validate integration ID exists
-            if runtara_dsl::agent_meta::find_connection_type(&conn_step.integration_id).is_none() {
-                result.errors.push(ValidationError::UnknownIntegration {
-                    step_id: step_id.clone(),
-                    integration_id: conn_step.integration_id.clone(),
-                    available_integrations: available_integrations.clone(),
-                });
-            }
-        }
-    }
-
-    // Check for unused connections
-    if !connection_step_ids.is_empty() {
-        let referenced_connections = collect_referenced_connections(graph);
-
-        for conn_id in &connection_step_ids {
-            if !referenced_connections.contains(conn_id) {
-                result.warnings.push(ValidationWarning::UnusedConnection {
-                    step_id: conn_id.clone(),
-                });
-            }
-        }
-    }
-
-    // Recursively validate subgraphs
-    for step in graph.steps.values() {
-        match step {
-            Step::Split(split_step) => {
-                validate_connections(&split_step.subgraph, result);
-            }
-            Step::While(while_step) => {
-                validate_connections(&while_step.subgraph, result);
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Collect all connection step IDs referenced in the graph.
-fn collect_referenced_connections(graph: &ExecutionGraph) -> HashSet<String> {
-    let mut referenced = HashSet::new();
-
-    for step in graph.steps.values() {
-        let mappings = collect_step_mappings(step);
-
-        for mapping in mappings {
-            for value in mapping.values() {
-                // Extract all step references from this mapping value (including nested composites)
-                for step_id in extract_step_ids_from_mapping_value(value) {
-                    referenced.insert(step_id);
-                }
-            }
-        }
-
-        // Recursively check subgraphs
-        match step {
-            Step::Split(split_step) => {
-                referenced.extend(collect_referenced_connections(&split_step.subgraph));
-            }
-            Step::While(while_step) => {
-                referenced.extend(collect_referenced_connections(&while_step.subgraph));
-            }
-            _ => {}
-        }
-    }
-
-    referenced
-}
-
-// ============================================================================
-// Phase 6: Security Validation
-// ============================================================================
-
-fn validate_security(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    // Collect all connection step IDs
-    let connection_step_ids: HashSet<String> = graph
-        .steps
-        .iter()
-        .filter_map(|(id, step)| {
-            if matches!(step, Step::Connection(_)) {
-                Some(id.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // If no connection steps, nothing to validate
-    if connection_step_ids.is_empty() {
-        return;
-    }
-
-    // Check each step for connection data leakage
-    for (step_id, step) in &graph.steps {
-        match step {
-            Step::Agent(agent_step) => {
-                // Check if agent is secure
-                let is_secure = runtara_dsl::agent_meta::find_agent_module(&agent_step.agent_id)
-                    .map(|m| m.secure)
-                    .unwrap_or(false);
-
-                if !is_secure {
-                    // Check input mapping for connection references
-                    if let Some(mapping) = &agent_step.input_mapping {
-                        for conn_id in find_connection_references(mapping, &connection_step_ids) {
-                            result
-                                .errors
-                                .push(ValidationError::ConnectionLeakToNonSecureAgent {
-                                    connection_step_id: conn_id,
-                                    agent_step_id: step_id.clone(),
-                                    agent_id: agent_step.agent_id.clone(),
-                                });
-                        }
-                    }
-                }
-            }
-            Step::Finish(finish_step) => {
-                // Connection data cannot be in workflow outputs
-                if let Some(mapping) = &finish_step.input_mapping {
-                    for conn_id in find_connection_references(mapping, &connection_step_ids) {
-                        result.errors.push(ValidationError::ConnectionLeakToFinish {
-                            connection_step_id: conn_id,
-                            finish_step_id: step_id.clone(),
-                        });
-                    }
-                }
-            }
-            Step::Log(log_step) => {
-                // Connection data cannot be logged
-                if let Some(mapping) = &log_step.context {
-                    for conn_id in find_connection_references(mapping, &connection_step_ids) {
-                        result.errors.push(ValidationError::ConnectionLeakToLog {
-                            connection_step_id: conn_id,
-                            log_step_id: step_id.clone(),
-                        });
-                    }
-                }
-            }
-            Step::Split(split_step) => {
-                // Recursively validate subgraph
-                validate_security(&split_step.subgraph, result);
-            }
-            Step::While(while_step) => {
-                // Recursively validate subgraph
-                validate_security(&while_step.subgraph, result);
-            }
-            Step::Error(error_step) => {
-                // Connection data cannot be in error context
-                if let Some(mapping) = &error_step.context {
-                    for conn_id in find_connection_references(mapping, &connection_step_ids) {
-                        result.errors.push(ValidationError::ConnectionLeakToLog {
-                            connection_step_id: conn_id,
-                            log_step_id: step_id.clone(),
-                        });
-                    }
-                }
-            }
-            Step::Conditional(_)
-            | Step::Switch(_)
-            | Step::StartScenario(_)
-            | Step::Connection(_)
-            | Step::Filter(_)
-            | Step::GroupBy(_)
-            | Step::Delay(_)
-            | Step::WaitForSignal(_)
-            | Step::AiAgent(_) => {}
-        }
-    }
-}
-
-// ============================================================================
-// Phase 7: Child Scenario Validation
+// Phase 5: Child Scenario Validation
 // ============================================================================
 
 fn validate_child_scenarios(graph: &ExecutionGraph, result: &mut ValidationResult) {
@@ -2315,7 +2023,6 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::StartScenario(s) => s.name.as_ref(),
             Step::While(s) => s.name.as_ref(),
             Step::Log(s) => s.name.as_ref(),
-            Step::Connection(s) => s.name.as_ref(),
             Step::Error(s) => s.name.as_ref(),
             Step::Filter(s) => s.name.as_ref(),
             Step::GroupBy(s) => s.name.as_ref(),
@@ -2648,25 +2355,6 @@ fn extract_variable_name_from_reference(ref_path: &str) -> Option<String> {
     None
 }
 
-/// Find connection step IDs referenced in an input mapping.
-fn find_connection_references(
-    mapping: &InputMapping,
-    connection_step_ids: &HashSet<String>,
-) -> Vec<String> {
-    let mut found = Vec::new();
-
-    for value in mapping.values() {
-        // Extract all step references from this mapping value (including nested composites)
-        for step_id in extract_step_ids_from_mapping_value(value) {
-            if connection_step_ids.contains(&step_id) {
-                found.push(step_id);
-            }
-        }
-    }
-
-    found
-}
-
 /// Get the step type name for error messages.
 fn get_step_type_name(step: &Step) -> &'static str {
     match step {
@@ -2678,7 +2366,6 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::StartScenario(_) => "StartScenario",
         Step::While(_) => "While",
         Step::Log(_) => "Log",
-        Step::Connection(_) => "Connection",
         Step::Error(_) => "Error",
         Step::Filter(_) => "Filter",
         Step::GroupBy(_) => "GroupBy",
@@ -3005,9 +2692,6 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_input_mapping(context, &mut refs);
             }
         }
-        Step::Connection(_) => {
-            // Connection steps don't have user-provided references to validate
-        }
         Step::AiAgent(ai_agent_step) => {
             if let Some(ref config) = ai_agent_step.config {
                 extract_references_from_mapping_value(&config.system_prompt, &mut refs);
@@ -3194,21 +2878,12 @@ fn validate_template_syntax(template_str: &str) -> Option<String> {
 mod tests {
     use super::*;
     use runtara_dsl::{
-        AgentStep, ConnectionStep, FinishStep, LogLevel, LogStep, ReferenceValue, StartScenarioStep,
+        AgentStep, FinishStep, LogLevel, LogStep, ReferenceValue, StartScenarioStep,
     };
 
     // Link runtara-agents so that the inventory crate can find registered capabilities
     #[allow(unused_imports)]
     use runtara_agents as _;
-
-    fn create_connection_step(id: &str) -> Step {
-        Step::Connection(ConnectionStep {
-            id: id.to_string(),
-            name: None,
-            connection_id: "test-conn".to_string(),
-            integration_id: "bearer".to_string(),
-        })
-    }
 
     fn create_agent_step(id: &str, agent_id: &str, mapping: Option<InputMapping>) -> Step {
         // Use a real capability for the agent
@@ -3370,190 +3045,6 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::InvalidReferencePath { .. }))
-        );
-    }
-
-    // === Security Tests ===
-
-    #[test]
-    fn test_no_connection_steps_passes() {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", None),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "agent");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "agent".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph);
-        // This test verifies that security validation passes when there are no connection steps.
-        // Agent validation may fail due to inventory not being populated in test context,
-        // but that's not what this test is checking.
-        let security_errors = result.errors.iter().any(|e| {
-            matches!(
-                e,
-                ValidationError::ConnectionLeakToNonSecureAgent { .. }
-                    | ValidationError::ConnectionLeakToFinish { .. }
-                    | ValidationError::ConnectionLeakToLog { .. }
-            )
-        });
-        assert!(!security_errors, "Expected no security errors");
-    }
-
-    #[test]
-    fn test_connection_to_secure_agent_passes() {
-        let mut steps = HashMap::new();
-        steps.insert("conn".to_string(), create_connection_step("conn"));
-
-        let mut mapping = HashMap::new();
-        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "http_call".to_string(),
-            create_agent_step("http_call", "http", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "http_call".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "http_call".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        // No security errors (may have other errors like unknown capability)
-        assert!(
-            !result
-                .errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }))
-        );
-    }
-
-    #[test]
-    fn test_connection_to_non_secure_agent_fails() {
-        let mut steps = HashMap::new();
-        steps.insert("conn".to_string(), create_connection_step("conn"));
-
-        let mut mapping = HashMap::new();
-        mapping.insert("data".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "transform".to_string(),
-            create_agent_step("transform", "transform", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "transform".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "transform".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        assert!(result.errors.iter().any(|e| matches!(
-            e,
-            ValidationError::ConnectionLeakToNonSecureAgent { agent_id, .. } if agent_id == "transform"
-        )));
-    }
-
-    #[test]
-    fn test_connection_to_finish_fails() {
-        let mut steps = HashMap::new();
-        steps.insert("conn".to_string(), create_connection_step("conn"));
-
-        let mut mapping = HashMap::new();
-        mapping.insert("credentials".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "finish".to_string(),
-            create_finish_step("finish", Some(mapping)),
-        );
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![runtara_dsl::ExecutionPlanEdge {
-            from_step: "conn".to_string(),
-            to_step: "finish".to_string(),
-            label: None,
-            condition: None,
-            priority: None,
-        }];
-
-        let result = validate_workflow(&graph);
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::ConnectionLeakToFinish { .. }))
-        );
-    }
-
-    #[test]
-    fn test_connection_to_log_fails() {
-        let mut steps = HashMap::new();
-        steps.insert("conn".to_string(), create_connection_step("conn"));
-
-        let mut mapping = HashMap::new();
-        mapping.insert(
-            "secret".to_string(),
-            ref_value("steps.conn.outputs.parameters"),
-        );
-        steps.insert("log".to_string(), create_log_step("log", Some(mapping)));
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "log".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "log".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::ConnectionLeakToLog { .. }))
         );
     }
 
@@ -3771,8 +3262,9 @@ mod tests {
     #[test]
     fn test_validation_result_with_warnings() {
         let mut result = ValidationResult::default();
-        result.warnings.push(ValidationWarning::UnusedConnection {
+        result.warnings.push(ValidationWarning::SelfReference {
             step_id: "test".to_string(),
+            reference_path: "steps.test.outputs".to_string(),
         });
         assert!(result.is_ok()); // Warnings don't prevent compilation
         assert!(!result.has_errors());
@@ -3785,8 +3277,9 @@ mod tests {
         result1.errors.push(ValidationError::EmptyWorkflow);
 
         let mut result2 = ValidationResult::default();
-        result2.warnings.push(ValidationWarning::UnusedConnection {
-            step_id: "conn".to_string(),
+        result2.warnings.push(ValidationWarning::SelfReference {
+            step_id: "step".to_string(),
+            reference_path: "steps.step.outputs".to_string(),
         });
 
         result1.merge(result2);
@@ -3844,20 +3337,6 @@ mod tests {
         assert!(display.contains("Did you mean 'http'?"));
     }
 
-    #[test]
-    fn test_error_display_security_violation() {
-        let error = ValidationError::ConnectionLeakToNonSecureAgent {
-            connection_step_id: "conn".to_string(),
-            agent_step_id: "transform_step".to_string(),
-            agent_id: "transform".to_string(),
-        };
-        let display = format!("{}", error);
-        assert!(display.contains("[E040]"));
-        assert!(display.contains("Security violation"));
-        assert!(display.contains("conn"));
-        assert!(display.contains("transform"));
-    }
-
     // === Warning Display Tests ===
 
     #[test]
@@ -3884,17 +3363,6 @@ mod tests {
         assert!(display.contains("[W034]"));
         assert!(display.contains("2.0h"));
         assert!(display.contains("1.0h"));
-    }
-
-    #[test]
-    fn test_warning_display_unused_connection() {
-        let warning = ValidationWarning::UnusedConnection {
-            step_id: "my_conn".to_string(),
-        };
-        let display = format!("{}", warning);
-        assert!(display.contains("[W040]"));
-        assert!(display.contains("my_conn"));
-        assert!(display.contains("never referenced"));
     }
 
     #[test]
@@ -4826,427 +4294,6 @@ mod tests {
         assert!(
             !result.has_errors(),
             "Empty context should not cause errors"
-        );
-    }
-
-    // ============================================================================
-    // Connection Step Tests
-    // ============================================================================
-
-    fn create_connection_step_with_type(
-        id: &str,
-        connection_id: &str,
-        integration_id: &str,
-    ) -> Step {
-        Step::Connection(ConnectionStep {
-            id: id.to_string(),
-            name: None,
-            connection_id: connection_id.to_string(),
-            integration_id: integration_id.to_string(),
-        })
-    }
-
-    #[test]
-    fn test_connection_step_valid_bearer() {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "conn".to_string(),
-            create_connection_step_with_type("conn", "my-api", "bearer"),
-        );
-
-        let mut mapping = HashMap::new();
-        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "http_call".to_string(),
-            create_agent_step("http_call", "http", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "http_call".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "http_call".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        // Bearer connection to HTTP agent should pass
-        let security_errors = result
-            .errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
-        assert!(
-            !security_errors,
-            "Bearer connection to HTTP should be secure"
-        );
-    }
-
-    #[test]
-    fn test_connection_step_valid_api_key() {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "conn".to_string(),
-            create_connection_step_with_type("conn", "my-api", "api_key"),
-        );
-
-        let mut mapping = HashMap::new();
-        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "http_call".to_string(),
-            create_agent_step("http_call", "http", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "http_call".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "http_call".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        let security_errors = result
-            .errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
-        assert!(
-            !security_errors,
-            "API key connection to HTTP should be secure"
-        );
-    }
-
-    #[test]
-    fn test_connection_step_valid_basic_auth() {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "conn".to_string(),
-            create_connection_step_with_type("conn", "my-service", "basic_auth"),
-        );
-
-        let mut mapping = HashMap::new();
-        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "http_call".to_string(),
-            create_agent_step("http_call", "http", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "http_call".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "http_call".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        let security_errors = result
-            .errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
-        assert!(
-            !security_errors,
-            "Basic auth connection to HTTP should be secure"
-        );
-    }
-
-    #[test]
-    fn test_connection_step_valid_sftp() {
-        let mut steps = HashMap::new();
-        steps.insert(
-            "conn".to_string(),
-            create_connection_step_with_type("conn", "sftp-server", "sftp"),
-        );
-
-        let mut mapping = HashMap::new();
-        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
-        steps.insert(
-            "sftp_call".to_string(),
-            create_agent_step("sftp_call", "sftp", Some(mapping)),
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "sftp_call".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "sftp_call".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        let security_errors = result
-            .errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
-        assert!(
-            !security_errors,
-            "SFTP connection to SFTP agent should be secure"
-        );
-    }
-
-    #[test]
-    fn test_connection_step_unused_warning() {
-        let mut steps = HashMap::new();
-        // Connection step that's not used by any agent
-        steps.insert(
-            "conn".to_string(),
-            create_connection_step_with_type("conn", "unused-api", "bearer"),
-        );
-        steps.insert(
-            "agent".to_string(),
-            create_agent_step("agent", "transform", None), // No connection reference
-        );
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn".to_string(),
-                to_step: "agent".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "agent".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        // Should have unused connection warning
-        assert!(result.warnings.iter().any(|w| {
-            matches!(w, ValidationWarning::UnusedConnection { step_id } if step_id == "conn")
-        }));
-    }
-
-    #[test]
-    fn test_connection_multiple_connections() {
-        let mut steps = HashMap::new();
-
-        // Two connection steps
-        steps.insert(
-            "conn1".to_string(),
-            create_connection_step_with_type("conn1", "api-1", "bearer"),
-        );
-        steps.insert(
-            "conn2".to_string(),
-            create_connection_step_with_type("conn2", "api-2", "api_key"),
-        );
-
-        // Two HTTP agents using different connections
-        let mut mapping1 = HashMap::new();
-        mapping1.insert("_connection".to_string(), ref_value("steps.conn1.outputs"));
-        steps.insert(
-            "call1".to_string(),
-            create_agent_step("call1", "http", Some(mapping1)),
-        );
-
-        let mut mapping2 = HashMap::new();
-        mapping2.insert("_connection".to_string(), ref_value("steps.conn2.outputs"));
-        steps.insert(
-            "call2".to_string(),
-            create_agent_step("call2", "http", Some(mapping2)),
-        );
-
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "conn1");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn1".to_string(),
-                to_step: "conn2".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "conn2".to_string(),
-                to_step: "call1".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "call1".to_string(),
-                to_step: "call2".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "call2".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        // Multiple connections should be valid
-        let security_errors = result.errors.iter().any(|e| {
-            matches!(
-                e,
-                ValidationError::ConnectionLeakToNonSecureAgent { .. }
-                    | ValidationError::ConnectionLeakToFinish { .. }
-                    | ValidationError::ConnectionLeakToLog { .. }
-            )
-        });
-        assert!(
-            !security_errors,
-            "Multiple valid connections should not cause security errors"
-        );
-
-        // No unused connection warnings
-        let unused_warnings = result
-            .warnings
-            .iter()
-            .any(|w| matches!(w, ValidationWarning::UnusedConnection { .. }));
-        assert!(
-            !unused_warnings,
-            "Used connections should not trigger unused warning"
-        );
-    }
-
-    #[test]
-    fn test_connection_in_while_subgraph_to_secure_agent() {
-        use runtara_dsl::{ConditionExpression, ImmediateValue, MappingValue};
-
-        let mut steps = HashMap::new();
-
-        steps.insert(
-            "init".to_string(),
-            create_agent_step("init", "transform", None),
-        );
-
-        // Subgraph with connection step and HTTP agent
-        let mut subgraph_steps = HashMap::new();
-        subgraph_steps.insert(
-            "conn".to_string(),
-            create_connection_step_with_type("conn", "rate-limited-api", "bearer"),
-        );
-        let mut mapping = HashMap::new();
-        mapping.insert("_connection".to_string(), ref_value("steps.conn.outputs"));
-        subgraph_steps.insert(
-            "call".to_string(),
-            create_agent_step("call", "http", Some(mapping)),
-        );
-        subgraph_steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let subgraph = ExecutionGraph {
-            name: None,
-            description: None,
-            steps: subgraph_steps,
-            entry_point: "conn".to_string(),
-            execution_plan: vec![
-                runtara_dsl::ExecutionPlanEdge {
-                    from_step: "conn".to_string(),
-                    to_step: "call".to_string(),
-                    label: None,
-                    condition: None,
-                    priority: None,
-                },
-                runtara_dsl::ExecutionPlanEdge {
-                    from_step: "call".to_string(),
-                    to_step: "finish".to_string(),
-                    label: None,
-                    condition: None,
-                    priority: None,
-                },
-            ],
-            variables: HashMap::new(),
-            input_schema: HashMap::new(),
-            output_schema: HashMap::new(),
-            notes: None,
-            nodes: None,
-            edges: None,
-        };
-
-        let condition = ConditionExpression::Value(MappingValue::Immediate(ImmediateValue {
-            value: serde_json::json!(true),
-        }));
-
-        steps.insert(
-            "loop".to_string(),
-            create_while_step("loop", condition, subgraph, Some(10)),
-        );
-
-        steps.insert("finish".to_string(), create_finish_step("finish", None));
-
-        let mut graph = create_basic_graph(steps, "init");
-        graph.execution_plan = vec![
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "init".to_string(),
-                to_step: "loop".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-            runtara_dsl::ExecutionPlanEdge {
-                from_step: "loop".to_string(),
-                to_step: "finish".to_string(),
-                label: None,
-                condition: None,
-                priority: None,
-            },
-        ];
-
-        let result = validate_workflow(&graph);
-        // Connection in subgraph to secure agent should be valid
-        let security_errors = result
-            .errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::ConnectionLeakToNonSecureAgent { .. }));
-        assert!(
-            !security_errors,
-            "Connection in subgraph to HTTP should be secure"
         );
     }
 

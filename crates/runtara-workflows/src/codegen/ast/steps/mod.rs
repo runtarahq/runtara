@@ -9,7 +9,6 @@ pub mod agent;
 pub mod ai_agent;
 pub mod branching;
 pub mod conditional;
-pub mod connection;
 pub mod delay;
 pub mod error;
 pub mod filter;
@@ -58,7 +57,6 @@ impl StepEmitter for Step {
             Step::StartScenario(s) => start_scenario::emit(s, ctx),
             Step::While(s) => while_loop::emit(s, ctx),
             Step::Log(s) => log::emit(s, ctx),
-            Step::Connection(s) => connection::emit(s, ctx),
             Step::Error(s) => error::emit(s, ctx),
             Step::Filter(s) => filter::emit(s, ctx),
             Step::GroupBy(s) => group_by::emit(s, ctx),
@@ -80,7 +78,6 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::StartScenario(_) => "StartScenario",
         Step::While(_) => "While",
         Step::Log(_) => "Log",
-        Step::Connection(_) => "Connection",
         Step::Error(_) => "Error",
         Step::Filter(_) => "Filter",
         Step::GroupBy(_) => "GroupBy",
@@ -101,7 +98,6 @@ pub fn step_id(step: &Step) -> &str {
         Step::StartScenario(s) => &s.id,
         Step::While(s) => &s.id,
         Step::Log(s) => &s.id,
-        Step::Connection(s) => &s.id,
         Step::Error(s) => &s.id,
         Step::Filter(s) => &s.id,
         Step::GroupBy(s) => &s.id,
@@ -122,7 +118,6 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::StartScenario(s) => s.name.as_deref(),
         Step::While(s) => s.name.as_deref(),
         Step::Log(s) => s.name.as_deref(),
-        Step::Connection(s) => s.name.as_deref(),
         Step::Error(s) => s.name.as_deref(),
         Step::Filter(s) => s.name.as_deref(),
         Step::GroupBy(s) => s.name.as_deref(),

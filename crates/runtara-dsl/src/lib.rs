@@ -434,10 +434,6 @@ mod tests {
         );
         assert!(step_ids.contains(&"While"), "Missing While step type");
         assert!(step_ids.contains(&"Log"), "Missing Log step type");
-        assert!(
-            step_ids.contains(&"Connection"),
-            "Missing Connection step type"
-        );
         assert!(step_ids.contains(&"Error"), "Missing Error step type");
     }
 
@@ -461,7 +457,7 @@ mod tests {
                         step.step_type
                     );
                 }
-                "Log" | "Connection" => {
+                "Log" => {
                     assert_eq!(
                         step.category, "utility",
                         "{} should be utility category",
@@ -1615,25 +1611,6 @@ mod tests {
         assert_eq!(config.get("maxIterations").unwrap(), 10);
         // WhileConfig uses "timeout" not "timeoutMs"
         assert_eq!(config.get("timeout").unwrap(), 5000);
-    }
-
-    // ========================================================================
-    // ConnectionStep Tests
-    // ========================================================================
-
-    #[test]
-    fn test_connection_step_serialization() {
-        let step = ConnectionStep {
-            id: "conn1".to_string(),
-            name: Some("API Connection".to_string()),
-            connection_id: "my-api-key".to_string(),
-            integration_id: "http_bearer".to_string(),
-        };
-
-        let json = serde_json::to_value(&step).unwrap();
-        assert_eq!(json.get("id").unwrap(), "conn1");
-        assert_eq!(json.get("connectionId").unwrap(), "my-api-key");
-        assert_eq!(json.get("integrationId").unwrap(), "http_bearer");
     }
 
     // ========================================================================
