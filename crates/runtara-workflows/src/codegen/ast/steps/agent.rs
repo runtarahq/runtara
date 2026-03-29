@@ -412,7 +412,7 @@ fn emit_durable_rate_limited_call(
 ///
 /// Returns a tuple of (injection_code, final_inputs_ident).
 /// If no connection_id, returns empty code and the original inputs var.
-/// Credentials are never fetched into the binary — the proxy handles injection.
+/// Credentials are resolved server-side by the HTTP proxy using the connection_id.
 fn emit_connection_fetch(
     _step_id: &str,
     connection_id: Option<&str>,
@@ -427,18 +427,24 @@ fn emit_connection_fetch(
         return (quote! {}, inputs_var.clone());
     };
 
-    // Inject connection_id into inputs — the proxy handles credential resolution.
-    // Credentials are NEVER fetched into the scenario binary.
     let final_inputs = proc_macro2::Ident::new(
         &format!("{}_with_conn", inputs_var),
         proc_macro2::Span::call_site(),
     );
 
+    // Inject both connection_id and _connection with connection_id populated.
+    // Agents use _connection.connection_id to set X-Runtara-Connection-Id header,
+    // and the proxy resolves credentials server-side.
     let code = quote! {
         let #final_inputs = {
             let mut inputs = #inputs_var.clone();
             if let serde_json::Value::Object(ref mut map) = inputs {
                 map.insert("connection_id".to_string(), serde_json::Value::String(#conn_id.to_string()));
+                map.insert("_connection".to_string(), serde_json::json!({
+                    "connection_id": #conn_id,
+                    "integration_id": "",
+                    "parameters": {}
+                }));
             }
             inputs
         };

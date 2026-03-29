@@ -201,7 +201,6 @@ fn print_analysis(graph: &ExecutionGraph) {
     // Count step types
     let mut step_counts: HashMap<&str, usize> = HashMap::new();
     let mut agent_counts: HashMap<String, usize> = HashMap::new();
-    let mut connection_count = 0;
     let mut child_scenario_count = 0;
     let mut has_side_effects = false;
 
@@ -209,7 +208,6 @@ fn print_analysis(graph: &ExecutionGraph) {
         graph,
         &mut step_counts,
         &mut agent_counts,
-        &mut connection_count,
         &mut child_scenario_count,
         &mut has_side_effects,
     );
@@ -238,9 +236,6 @@ fn print_analysis(graph: &ExecutionGraph) {
     println!();
 
     // Print additional info
-    if connection_count > 0 {
-        println!("Connections: {}", connection_count);
-    }
     if child_scenario_count > 0 {
         println!("Child scenarios: {}", child_scenario_count);
     }
@@ -283,7 +278,6 @@ fn count_steps(
     graph: &ExecutionGraph,
     step_counts: &mut HashMap<&'static str, usize>,
     agent_counts: &mut HashMap<String, usize>,
-    connection_count: &mut usize,
     child_scenario_count: &mut usize,
     has_side_effects: &mut bool,
 ) {
@@ -305,7 +299,6 @@ fn count_steps(
                     &split.subgraph,
                     step_counts,
                     agent_counts,
-                    connection_count,
                     child_scenario_count,
                     has_side_effects,
                 );
@@ -322,7 +315,6 @@ fn count_steps(
                     &while_step.subgraph,
                     step_counts,
                     agent_counts,
-                    connection_count,
                     child_scenario_count,
                     has_side_effects,
                 );
