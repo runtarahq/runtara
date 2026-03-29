@@ -239,8 +239,9 @@ impl WasmRunner {
         cmd.arg("--wasi").arg("max-resources=100000");
 
         // Preopened directory: map host run_dir to /data inside the guest
+        // wasmtime syntax: HOST_DIR::GUEST_DIR
         cmd.arg("--dir")
-            .arg(format!("/data::{}", run_dir.display()));
+            .arg(format!("{}::/data", run_dir.display()));
 
         // Pass environment variables via --env flags
         for (key, value) in env {
