@@ -145,12 +145,6 @@ impl WasmRunner {
             runtara_core_addr.to_string(),
         );
 
-        // Workspace directory inside the WASM guest filesystem
-        env.insert(
-            "RUNTARA_WORKSPACE_DIR".to_string(),
-            "/data/workspace".to_string(),
-        );
-
         // Input path inside the WASM guest filesystem
         env.insert("SCENARIO_INPUT".to_string(), "/data/input.json".to_string());
 
@@ -267,10 +261,6 @@ impl WasmRunner {
             .join(instance_id);
 
         fs::create_dir_all(&run_dir).await?;
-
-        // Create workspace directory for ephemeral file storage
-        let workspace_dir = run_dir.join("workspace");
-        fs::create_dir_all(&workspace_dir).await?;
 
         let input_path = run_dir.join("input.json");
         let value = serde_json::to_string_pretty(input)?;
