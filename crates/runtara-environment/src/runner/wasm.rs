@@ -145,10 +145,7 @@ impl WasmRunner {
             runtara_core_addr.to_string(),
         );
 
-        // Input path inside the WASM guest filesystem
-        env.insert("SCENARIO_INPUT".to_string(), "/data/input.json".to_string());
-
-        // Output path inside the WASM guest filesystem (for the guest to know where to write)
+        // Output path inside the WASM guest filesystem
         env.insert(
             "SCENARIO_OUTPUT".to_string(),
             "/data/output.json".to_string(),
@@ -251,8 +248,8 @@ impl WasmRunner {
         cmd
     }
 
-    /// Store input in file for instance to read.
-    async fn store_input(&self, tenant_id: &str, instance_id: &str, input: &Value) -> Result<()> {
+    /// Create run directory for instance stderr/output capture.
+    async fn store_input(&self, tenant_id: &str, instance_id: &str, _input: &Value) -> Result<()> {
         let run_dir = self
             .config
             .data_dir
@@ -262,11 +259,9 @@ impl WasmRunner {
 
         fs::create_dir_all(&run_dir).await?;
 
-        let input_path = run_dir.join("input.json");
-        let value = serde_json::to_string_pretty(input)?;
-        fs::write(&input_path, &value).await?;
-
-        debug!(instance_id = %instance_id, path = %input_path.display(), "Stored input to file");
+        // Input is stored as the initial checkpoint in runtara-core, not as a file.
+        // The SDK reads it from RUNTARA_HTTP_URL.
+        debug!(instance_id = %instance_id, "Run directory created");
         Ok(())
     }
 
