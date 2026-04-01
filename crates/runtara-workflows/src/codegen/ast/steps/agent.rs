@@ -12,7 +12,9 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_agent_span_start, emit_step_debug_end, emit_step_debug_start};
+use super::{
+    emit_agent_span_start, emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start,
+};
 use runtara_dsl::AgentStep;
 use runtara_dsl::agent_meta::get_all_capabilities;
 
@@ -150,9 +152,19 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Generate tracing span for OpenTelemetry
     let span_def = emit_agent_span_start(step_id, step_name, agent_id, capability_id);
 
+    // Breakpoint check after input mapping — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Agent", ctx, Some(&step_inputs_var))
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         let #source_var = #build_source;
         let #step_inputs_var = #base_inputs_code;
+
+        // Breakpoint (after input mapping, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_def
@@ -725,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_agent_debug_mode_enabled() {
+    fn test_emit_agent_track_events_enabled() {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let step = create_agent_step("agent-debug", "utils", "noop");
 
@@ -744,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_agent_debug_mode_disabled() {
+    fn test_emit_agent_track_events_disabled() {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let step = create_agent_step("agent-no-debug", "utils", "noop");
 

@@ -784,15 +784,20 @@ pub async fn handle_resume_instance(
         });
     }
 
-    // Ensure bundle exists
-    let bundle_path = match &image.bundle_path {
-        Some(path) => PathBuf::from(path),
-        None => {
-            error!(image_id = %image_id, "Image has no bundle path");
-            return Ok(ResumeInstanceResponse {
-                success: false,
-                error: Some(format!("Image '{}' has no bundle", image_id)),
-            });
+    // Ensure bundle/binary path exists
+    // WASM images use binary_path directly; OCI images use bundle_path
+    let bundle_path = if image.runner_type == RunnerType::Wasm {
+        PathBuf::from(&image.binary_path)
+    } else {
+        match &image.bundle_path {
+            Some(path) => PathBuf::from(path),
+            None => {
+                error!(image_id = %image_id, "Image has no bundle path");
+                return Ok(ResumeInstanceResponse {
+                    success: false,
+                    error: Some(format!("Image '{}' has no bundle", image_id)),
+                });
+            }
         }
     };
 
@@ -1042,60 +1047,81 @@ pub fn spawn_container_monitor(
                     }
                 }
 
-                // Check Core status to determine if this is a crash or normal termination
-                // This replaces the output.json processing - SDK events are the single source of truth
-                match db::get_instance(&pool, &instance_id).await {
-                    Ok(Some(inst)) => {
-                        let status = inst.status.as_str();
-                        if matches!(status, "completed" | "failed" | "cancelled" | "suspended") {
-                            // Core already has terminal status - normal termination via SDK
+                // Guard: check that this monitor is still the active one for this instance.
+                // When an instance is resumed, a NEW monitor is spawned for the new process.
+                // The OLD monitor (for the previous PID) may still be running and must not
+                // interfere with the new execution.
+                let container_registry = ContainerRegistry::new(pool.clone());
+                let is_stale_monitor = match container_registry.get(&instance_id).await {
+                    Ok(Some(current)) => {
+                        // If the registered container has a different handle_id,
+                        // this monitor is stale (instance was resumed with a new process)
+                        current.container_id != handle.handle_id
+                    }
+                    _ => false,
+                };
+
+                if is_stale_monitor {
+                    info!(
+                        instance_id = %instance_id,
+                        monitor_handle = %handle.handle_id,
+                        "Stale monitor detected — instance was resumed with a new process, skipping crash check"
+                    );
+                } else {
+                    // Check Core status via the same persistence layer that the SDK writes to.
+                    let current_status = persistence.get_instance(&instance_id).await;
+                    match current_status {
+                        Ok(Some(inst))
+                            if matches!(
+                                inst.status.as_str(),
+                                "completed" | "failed" | "cancelled" | "suspended"
+                            ) =>
+                        {
+                            // SDK already reported terminal status — normal termination
                             info!(
                                 instance_id = %instance_id,
-                                status = %status,
+                                status = %inst.status,
                                 "Instance completed normally (SDK reported)"
                             );
-                        } else {
-                            // Core still shows "running" but PID is gone - process crashed
-                            // without sending SDK completion event
-                            warn!(
-                                instance_id = %instance_id,
-                                status = %status,
-                                pid = ?pid,
-                                "Process terminated without SDK event - marking as crashed"
-                            );
-                            if let Err(e) = persistence
+                        }
+                        _ => {
+                            // Status is still "running" or instance not found — process crashed
+                            match persistence
                                 .complete_instance_with_termination_if_running(
                                     &instance_id,
                                     "failed",
-                                    Some("crashed"), // termination_reason
-                                    None,            // exit_code
-                                    None,            // output
-                                    Some("Process terminated without SDK event"), // error
-                                    stderr.as_deref(), // stderr
-                                    None,            // checkpoint_id
+                                    Some("crashed"),
+                                    None,
+                                    None,
+                                    Some("Process terminated without SDK event"),
+                                    stderr.as_deref(),
+                                    None,
                                 )
                                 .await
                             {
-                                error!(
-                                    instance_id = %instance_id,
-                                    error = %e,
-                                    "Failed to mark instance as crashed"
-                                );
+                                Ok(applied) => {
+                                    if applied {
+                                        warn!(
+                                            instance_id = %instance_id,
+                                            pid = ?pid,
+                                            "Process terminated without SDK event - marked as crashed"
+                                        );
+                                    } else {
+                                        info!(
+                                            instance_id = %instance_id,
+                                            "Instance SDK event arrived just in time"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(
+                                        instance_id = %instance_id,
+                                        error = %e,
+                                        "Failed to mark instance as crashed"
+                                    );
+                                }
                             }
                         }
-                    }
-                    Ok(None) => {
-                        warn!(
-                            instance_id = %instance_id,
-                            "Instance not found in database after termination"
-                        );
-                    }
-                    Err(e) => {
-                        error!(
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to check instance status after termination"
-                        );
                     }
                 }
 

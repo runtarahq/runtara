@@ -13,7 +13,9 @@ use super::super::CodegenError;
 use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::FilterStep;
 
 /// Emit code for a Filter step.
@@ -74,9 +76,19 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Filter");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Filter", ctx, Some(&filter_input_var))
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         let #source_var = #build_source;
         let #filter_input_var = #array_value_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Convert input to array, tolerating null/non-array
         let #filter_array_var: Vec<serde_json::Value> = match #filter_input_var.as_array() {
@@ -266,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_filter_with_debug_mode() {
+    fn test_emit_filter_with_track_events() {
         let mut ctx = EmitContext::new(true); // debug mode enabled
         let step = create_filter_step("filter-debug", "data.items", "status", "active");
 
@@ -285,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_filter_without_debug_mode() {
+    fn test_emit_filter_without_track_events() {
         let mut ctx = EmitContext::new(false); // debug mode disabled
         let step = create_filter_step("filter-no-debug", "data.items", "status", "active");
 

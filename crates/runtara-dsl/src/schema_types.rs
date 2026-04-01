@@ -35,7 +35,7 @@ pub struct Scenario {
 
     /// Enable step-level debug instrumentation
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub debug_mode: Option<bool>,
+    pub track_events: Option<bool>,
 }
 
 /// Memory allocation tier for scenario execution
@@ -293,6 +293,10 @@ pub struct FinishStep {
     /// Maps scenario data to output values
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Compensation configuration for saga pattern support.
@@ -361,6 +365,10 @@ pub struct AgentStep {
     /// Defines what step to execute to rollback this step's effects on failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensation: Option<CompensationConfig>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Evaluates conditions and branches execution
@@ -377,6 +385,10 @@ pub struct ConditionalStep {
 
     /// The condition expression to evaluate
     pub condition: ConditionExpression,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Iterates over an array, executing subgraph for each item
@@ -409,6 +421,10 @@ pub struct SplitStep {
     /// Keys are field names, values define the field type and constraints.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_schema: HashMap<String, SchemaField>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Multi-way branch based on value matching
@@ -427,6 +443,10 @@ pub struct SwitchStep {
     /// Switch configuration: value to switch on, cases, and default
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<SwitchConfig>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Executes a nested child scenario
@@ -462,6 +482,10 @@ pub struct StartScenarioStep {
     /// Step timeout in milliseconds. If exceeded, step fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Child scenario version specification
@@ -499,6 +523,10 @@ pub struct WhileStep {
     /// While loop configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<WhileConfig>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Configuration for a While step.
@@ -550,6 +578,10 @@ pub struct LogStep {
     /// Keys are field names, values specify how to obtain the data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputMapping>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Log level for Log steps
@@ -623,6 +655,10 @@ pub struct ErrorStep {
     /// Keys are field names, values specify how to obtain the data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InputMapping>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Error category for structured errors.
@@ -699,6 +735,10 @@ pub struct FilterStep {
 
     /// Filter configuration: array to filter and condition
     pub config: FilterConfig,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Configuration for a Filter step
@@ -747,6 +787,10 @@ pub struct GroupByStep {
 
     /// GroupBy configuration: array to group and key path
     pub config: GroupByConfig,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Configuration for a GroupBy step
@@ -811,6 +855,10 @@ pub struct DelayStep {
     /// Duration to delay in milliseconds.
     /// Can be an immediate value or a reference to data/variables.
     pub duration_ms: MappingValue,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Wait for an external signal before continuing execution.
@@ -899,6 +947,10 @@ pub struct WaitForSignalStep {
     /// appropriate input widget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<HashMap<String, SchemaField>>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// LLM-driven agent that selects and calls tools in a loop.
@@ -945,6 +997,10 @@ pub struct AiAgentStep {
     /// AI Agent configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<AiAgentConfig>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// Configuration for the AI Agent step.

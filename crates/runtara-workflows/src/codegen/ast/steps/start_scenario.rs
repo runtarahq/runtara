@@ -15,8 +15,8 @@ use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
 use super::{
-    emit_child_scenario_span_start, emit_step_debug_end, emit_step_debug_start,
-    emit_step_span_start,
+    emit_breakpoint_check, emit_child_scenario_span_start, emit_step_debug_end,
+    emit_step_debug_start, emit_step_span_start,
 };
 use runtara_dsl::{ExecutionGraph, StartScenarioStep};
 
@@ -212,6 +212,19 @@ fn emit_with_embedded_child(
     let span_def = emit_step_span_start(step_id, step_name, "StartScenario");
     let child_span_def = emit_child_scenario_span_start(step_id, child_scenario_id);
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(
+            step_id,
+            step_name,
+            "StartScenario",
+            ctx,
+            Some(&child_inputs_var),
+        )
+    } else {
+        quote! {}
+    };
+
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("start_scenario::{}", step_id);
 
@@ -246,6 +259,9 @@ fn emit_with_embedded_child(
 
         let #source_var = #build_source;
         let #child_inputs_var = #inputs_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_def
@@ -590,7 +606,7 @@ mod tests {
         step_id: &str,
         child_scenario_id: &str,
         child_graph: ExecutionGraph,
-        debug_mode: bool,
+        track_events: bool,
     ) -> EmitContext {
         let version = 1;
         let mut child_scenarios = HashMap::new();
@@ -603,7 +619,7 @@ mod tests {
         );
 
         EmitContext::with_child_scenarios(
-            debug_mode,
+            track_events,
             child_scenarios,
             step_to_child_ref,
             None,
@@ -892,7 +908,7 @@ mod tests {
     // =============================================================================
 
     #[test]
-    fn test_emit_debug_mode_generates_events() {
+    fn test_emit_track_events_generates_events() {
         let step = create_named_step("start-child", "Test Step", "child-scenario-id");
 
         let mut child_scenarios = HashMap::new();

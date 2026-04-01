@@ -710,6 +710,7 @@ mod tests {
                 cases: vec![],
                 default: None,
             }),
+            breakpoint: None,
         };
 
         let json = serde_json::to_value(&step).unwrap();
@@ -753,6 +754,7 @@ mod tests {
             }),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let json = serde_json::to_value(&step).unwrap();
@@ -853,7 +855,7 @@ mod tests {
     fn test_parse_scenario_with_metadata() {
         let json = serde_json::json!({
             "memoryTier": "L",
-            "debugMode": true,
+            "trackEvents": true,
             "executionGraph": {
                 "name": "Complete Scenario",
                 "description": "With metadata",
@@ -872,7 +874,7 @@ mod tests {
             Some("Complete Scenario")
         );
         assert_eq!(scenario.memory_tier, Some(MemoryTier::L));
-        assert_eq!(scenario.debug_mode, Some(true));
+        assert_eq!(scenario.track_events, Some(true));
     }
 
     #[test]
@@ -1564,6 +1566,7 @@ mod tests {
             level: LogLevel::Debug,
             message: "Processing item".to_string(),
             context: None,
+            breakpoint: None,
         };
 
         let json = serde_json::to_value(&step).unwrap();
@@ -1603,6 +1606,7 @@ mod tests {
                 max_iterations: Some(10),
                 timeout: Some(5000),
             }),
+            breakpoint: None,
         };
 
         let json = serde_json::to_value(&step).unwrap();
@@ -1650,6 +1654,7 @@ mod tests {
                 message: "Order exceeds credit limit".to_string(),
                 severity: Some(ErrorSeverity::Warning),
                 context: None,
+                breakpoint: None,
             }),
         );
 
@@ -1698,6 +1703,7 @@ mod tests {
                 message: "Rate limited".to_string(),
                 severity: None,
                 context: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -1706,6 +1712,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -1751,6 +1758,7 @@ mod tests {
                 message: "Item validation failed".to_string(),
                 severity: Some(ErrorSeverity::Error),
                 context: None,
+                breakpoint: None,
             }),
         );
 
@@ -1778,6 +1786,7 @@ mod tests {
                 config: None,
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
+                breakpoint: None,
             }),
         );
 
@@ -1819,6 +1828,7 @@ mod tests {
                 message: "Top level error".to_string(),
                 severity: None,
                 context: None,
+                breakpoint: None,
             }),
         );
 
@@ -1833,6 +1843,7 @@ mod tests {
                 message: "Can recover".to_string(),
                 severity: None,
                 context: None,
+                breakpoint: None,
             }),
         );
 
@@ -1842,6 +1853,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 

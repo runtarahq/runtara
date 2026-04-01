@@ -5092,7 +5092,7 @@
     },
     "description": "Complete scenario definition",
     "properties": {
-      "debugMode": {
+      "trackEvents": {
         "description": "Enable step-level debug instrumentation",
         "type": [
           "boolean",

@@ -12,7 +12,9 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::{ErrorCategory, ErrorSeverity, ErrorStep};
 
 /// Emit code for an Error step.
@@ -88,9 +90,19 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Error");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Error", ctx, Some(&context_var))
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         let #source_var = #build_source;
         let #context_var = #context_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_def
@@ -539,8 +551,8 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_error_debug_events_in_debug_mode() {
-        let mut ctx = EmitContext::new(true); // debug_mode = true
+    fn test_emit_error_debug_events_in_track_events() {
+        let mut ctx = EmitContext::new(true); // track_events = true
         let step = create_error_step(
             "error-debug",
             ErrorCategory::Permanent,
@@ -564,8 +576,8 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_error_no_debug_events_when_not_debug_mode() {
-        let mut ctx = EmitContext::new(false); // debug_mode = false
+    fn test_emit_error_no_debug_events_when_not_track_events() {
+        let mut ctx = EmitContext::new(false); // track_events = false
         let step = create_error_step(
             "error-no-debug",
             ErrorCategory::Permanent,

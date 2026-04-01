@@ -248,7 +248,7 @@ fn test_compile_minimal_scenario() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -300,7 +300,7 @@ fn test_compile_transform_scenario() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_transform_graph(),
-        debug_mode: true, // Enable debug mode for visibility
+        track_events: true, // Enable debug mode for visibility
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -345,7 +345,7 @@ fn test_create_oci_bundle() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -407,7 +407,7 @@ fn test_bundle_network_modes() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -469,7 +469,7 @@ async fn test_full_container_execution() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: true,
+        track_events: true,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -591,7 +591,7 @@ async fn test_transform_workflow_e2e() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_transform_graph(),
-        debug_mode: true,
+        track_events: true,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -684,7 +684,7 @@ async fn test_container_timeout() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -758,7 +758,7 @@ async fn test_container_metrics_collection() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };

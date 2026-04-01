@@ -18,7 +18,7 @@ pub struct EmitContext {
     counter: usize,
 
     /// Whether debug mode is enabled (generates extra logging)
-    pub debug_mode: bool,
+    pub track_events: bool,
 
     /// Steps context variable name (for storing step results)
     pub steps_context_var: Ident,
@@ -51,11 +51,11 @@ pub struct EmitContext {
 
 impl EmitContext {
     /// Create a new emission context.
-    pub fn new(debug_mode: bool) -> Self {
+    pub fn new(track_events: bool) -> Self {
         Self {
             step_results: HashMap::new(),
             counter: 0,
-            debug_mode,
+            track_events,
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios: HashMap::new(),
@@ -69,13 +69,13 @@ impl EmitContext {
     /// Create a new emission context with child scenarios and connection configuration.
     ///
     /// # Arguments
-    /// * `debug_mode` - Enable debug logging in generated code
+    /// * `track_events` - Enable debug logging in generated code
     /// * `child_scenarios` - Map of scenario reference key -> ExecutionGraph
     /// * `step_to_child_ref` - Map of step_id -> (scenario_id, version_resolved)
     /// * `connection_service_url` - Optional URL for fetching connections at runtime
     /// * `tenant_id` - Optional tenant ID for connection service requests
     pub fn with_child_scenarios(
-        debug_mode: bool,
+        track_events: bool,
         child_scenarios: HashMap<String, ExecutionGraph>,
         step_to_child_ref: HashMap<String, (String, i32)>,
         connection_service_url: Option<String>,
@@ -84,7 +84,7 @@ impl EmitContext {
         Self {
             step_results: HashMap::new(),
             counter: 0,
-            debug_mode,
+            track_events,
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
             child_scenarios,
@@ -186,9 +186,9 @@ mod tests {
     // =============================================================================
 
     #[test]
-    fn test_new_debug_mode_true() {
+    fn test_new_track_events_true() {
         let ctx = EmitContext::new(true);
-        assert!(ctx.debug_mode);
+        assert!(ctx.track_events);
         assert_eq!(ctx.steps_context_var.to_string(), "steps_context");
         assert_eq!(ctx.inputs_var.to_string(), "inputs");
         assert!(ctx.connection_service_url.is_none());
@@ -196,16 +196,16 @@ mod tests {
     }
 
     #[test]
-    fn test_new_debug_mode_false() {
+    fn test_new_track_events_false() {
         let ctx = EmitContext::new(false);
-        assert!(!ctx.debug_mode);
+        assert!(!ctx.track_events);
     }
 
     #[test]
     fn test_with_child_scenarios_empty() {
         let ctx =
             EmitContext::with_child_scenarios(true, HashMap::new(), HashMap::new(), None, None);
-        assert!(ctx.debug_mode);
+        assert!(ctx.track_events);
         assert!(ctx.connection_service_url.is_none());
         assert!(ctx.tenant_id.is_none());
     }
@@ -219,7 +219,7 @@ mod tests {
             Some("http://connection-service:8080".to_string()),
             Some("tenant-123".to_string()),
         );
-        assert!(!ctx.debug_mode);
+        assert!(!ctx.track_events);
         assert_eq!(
             ctx.connection_service_url,
             Some("http://connection-service:8080".to_string())
@@ -557,7 +557,7 @@ mod tests {
         let _s = ctx.declare_step("y");
 
         // State should be preserved
-        assert!(ctx.debug_mode);
+        assert!(ctx.track_events);
         assert_eq!(
             ctx.connection_service_url,
             Some("http://test:8080".to_string())

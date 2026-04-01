@@ -10,7 +10,9 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::FinishStep;
 
 /// Emit code for a Finish step.
@@ -83,6 +85,13 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Finish");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Finish", ctx, Some(&outputs_var))
+    } else {
+        quote! {}
+    };
+
     // The Finish step immediately returns from the workflow function.
     // This allows multiple Finish steps in different branches to work correctly.
     Ok(quote! {
@@ -98,6 +107,9 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
             #debug_start
 
             let #outputs_var = #outputs;
+
+            // Breakpoint (after input resolution, before execution)
+            #breakpoint_check
 
             // Extract just the "outputs" field if it exists, otherwise use the whole value
             let #outputs_var = #outputs_var.get("outputs").cloned().unwrap_or(#outputs_var);
@@ -268,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_finish_debug_mode_enabled() {
+    fn test_emit_finish_track_events_enabled() {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let step = create_finish_step("finish-debug");
 
@@ -287,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_finish_debug_mode_disabled() {
+    fn test_emit_finish_track_events_disabled() {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let step = create_finish_step("finish-no-debug");
 

@@ -294,7 +294,7 @@ impl TrueE2eContext {
             scenario_id: scenario_id.to_string(),
             version: 1,
             execution_graph: graph,
-            debug_mode: true,
+            track_events: true,
             child_scenarios: vec![],
             connection_service_url: None,
         };
@@ -805,7 +805,7 @@ async fn test_true_e2e_invalid_server_address() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: true,
+        track_events: true,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -906,7 +906,7 @@ async fn test_true_e2e_concurrent_containers() {
         scenario_id: base_scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };

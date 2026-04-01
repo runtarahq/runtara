@@ -31,7 +31,7 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_span_start};
+use super::{emit_breakpoint_check, emit_step_debug_end, emit_step_span_start};
 use runtara_dsl::{AiAgentStep, ExecutionGraph, Step};
 
 /// Get the stdlib crate name, matching the logic in program.rs.
@@ -286,7 +286,7 @@ pub fn emit(
     // Debug events — AI Agent emits debug_start AFTER prompts are resolved so we can
     // include the resolved system_prompt and user_prompt in the event payload.
     // We serialize the input_mapping (prompt MappingValues) at codegen time.
-    let ai_input_mapping_json = if ctx.debug_mode {
+    let ai_input_mapping_json = if ctx.track_events {
         let mut map = serde_json::Map::new();
         if let Some(cfg) = step.config.as_ref() {
             map.insert(
@@ -303,7 +303,7 @@ pub fn emit(
         None
     };
 
-    let debug_start = if ctx.debug_mode {
+    let debug_start = if ctx.track_events {
         let name_expr = step_name
             .map(|n| quote! { Some(#n) })
             .unwrap_or(quote! { None::<&str> });
@@ -372,6 +372,13 @@ pub fn emit(
 
     // Tracing span
     let span_def = emit_step_span_start(step_id, step_name, "AiAgent");
+
+    // Breakpoint check — complex multiple resolved vars, pass None
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "AiAgent", ctx, None)
+    } else {
+        quote! {}
+    };
 
     let max_iter_lit = max_iterations;
     let temp_lit = temperature;
@@ -971,6 +978,9 @@ pub fn emit(
         #(#child_fn_tokens)*
 
         let #source_var = #build_source;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span
         #span_def

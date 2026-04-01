@@ -305,7 +305,7 @@ let input = CompilationInput {
     scenario_id: "order-processing".to_string(),
     version: 1,
     execution_graph: scenario.into(),
-    debug_mode: false,
+    track_events: false,
     child_scenarios: vec![],
     connection_service_url: Some("https://my-product.com/api/connections".to_string()),
 };

@@ -15,7 +15,8 @@ use super::super::mapping;
 use super::super::{CodegenError, json_to_tokens};
 use super::branching;
 use super::{
-    emit_step_debug_end, emit_step_debug_start, emit_step_span_start, find_next_step_for_label,
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+    find_next_step_for_label,
 };
 use runtara_dsl::{
     ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator, ExecutionGraph,
@@ -126,6 +127,13 @@ fn emit_value_switch(
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Switch");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Switch", ctx, Some(&inputs_var))
+    } else {
+        quote! {}
+    };
+
     // Compile-time case expansion: convert each case to a condition expression
     // and emit inline match blocks
     let case_blocks = if let Some(ref config) = step.config {
@@ -164,6 +172,9 @@ fn emit_value_switch(
     Ok(quote! {
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_def
@@ -285,6 +296,13 @@ fn emit_routing_switch(
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Switch");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Switch", ctx, Some(&inputs_var))
+    } else {
+        quote! {}
+    };
+
     // Compile-time case expansion with route tracking
     let case_blocks = if let Some(ref config) = step.config {
         config
@@ -404,6 +422,9 @@ fn emit_routing_switch(
     Ok(quote! {
         let #source_var = #build_source;
         let #inputs_var = #inputs_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define and enter tracing span for this step (sync pattern for control flow)
         #span_def
@@ -890,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_switch_debug_mode_enabled() {
+    fn test_emit_switch_track_events_enabled() {
         let mut ctx = EmitContext::new(true);
         let step = create_switch_step("switch-debug", "value", vec![]);
 
@@ -908,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_switch_debug_mode_disabled() {
+    fn test_emit_switch_track_events_disabled() {
         let mut ctx = EmitContext::new(false);
         let step = create_switch_step("switch-no-debug", "value", vec![]);
 
@@ -1448,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_routing_switch_debug_mode() {
+    fn test_routing_switch_track_events() {
         let mut ctx = EmitContext::new(true);
         let graph = make_routing_graph();
         let step = graph.steps.get("sw").unwrap();

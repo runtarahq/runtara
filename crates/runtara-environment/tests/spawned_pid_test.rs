@@ -164,7 +164,7 @@ async fn test_launch_detached_captures_spawned_pid() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -279,7 +279,7 @@ async fn test_launch_detached_with_pasta_captures_pid() {
         scenario_id: scenario_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };

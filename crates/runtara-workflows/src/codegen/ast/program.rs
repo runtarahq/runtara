@@ -772,6 +772,9 @@ fn emit_step_execution(
     // Debug logging via RuntimeContext (if debug mode enabled)
     let debug_log = emit_step_debug_start(ctx, sid, sname, stype);
 
+    // Breakpoint checks are emitted inside each step's emit() function (after input
+    // mapping resolution) so the breakpoint_hit event includes resolved inputs.
+
     // Check if this step has onError edges
     let on_error_edges = steps::find_on_error_edges(sid, &graph.execution_plan);
 
@@ -1068,7 +1071,7 @@ pub fn emit_graph_as_function(
     parent_ctx: &EmitContext,
 ) -> Result<TokenStream, CodegenError> {
     // Create a fresh context for this graph, inheriting configuration from parent
-    let mut ctx = EmitContext::new(parent_ctx.debug_mode);
+    let mut ctx = EmitContext::new(parent_ctx.track_events);
     ctx.connection_service_url = parent_ctx.connection_service_url.clone();
     ctx.tenant_id = parent_ctx.tenant_id.clone();
     ctx.child_scenarios = parent_ctx.child_scenarios.clone();
@@ -2245,9 +2248,9 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_program_with_debug_mode() {
+    fn test_emit_program_with_track_events() {
         let graph = create_minimal_finish_graph("finish");
-        let mut ctx = EmitContext::new(true); // debug_mode = true
+        let mut ctx = EmitContext::new(true); // track_events = true
         let tokens = emit_program(&graph, &mut ctx).unwrap();
         let code = tokens.to_string();
 

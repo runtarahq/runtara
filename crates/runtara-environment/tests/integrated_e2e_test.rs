@@ -282,7 +282,7 @@ impl IntegratedTestContext {
             scenario_id: scenario_id.to_string(),
             version: 1,
             execution_graph: graph,
-            debug_mode: true,
+            track_events: true,
             child_scenarios: vec![],
             connection_service_url: None,
         };
@@ -843,7 +843,7 @@ async fn test_integrated_concurrent_workflows() {
         scenario_id: base_scenario_id,
         version: 1,
         execution_graph: create_minimal_workflow(),
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };

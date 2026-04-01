@@ -14,7 +14,9 @@ use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::steps;
 use super::branching;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::{ConditionalStep, ExecutionGraph};
 
 /// Emit code for a Conditional step.
@@ -106,6 +108,13 @@ pub fn emit(
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Conditional");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Conditional", ctx, Some(&source_var))
+    } else {
+        quote! {}
+    };
+
     // Note: Conditional does NOT use async block wrapping because:
     // 1. Condition evaluation is synchronous (no await points)
     // 2. Branch steps have their own async instrumentation
@@ -117,6 +126,9 @@ pub fn emit(
     Ok(quote! {
         let #source_var = #build_source;
         let #condition_inputs_var = serde_json::json!({"condition": "evaluating"});
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define and enter tracing span for this step (sync pattern for control flow)
         #span_def

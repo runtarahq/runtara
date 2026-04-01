@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scenario_id: "order-processing".to_string(),
         version: 1,
         execution_graph: scenario.into(),
-        debug_mode: false, // Set to true to emit step telemetry events
+        track_events: false, // Set to true to emit step telemetry events
         child_scenarios: vec![],
         connection_service_url: Some("https://my-product.com/api/connections".to_string()),
     };
@@ -134,7 +134,7 @@ let input = CompilationInput {
     scenario_id: "parent-workflow".to_string(),
     version: 1,
     execution_graph: parent_scenario.into(),
-    debug_mode: false,
+    track_events: false,
     // Include child scenario binaries
     child_scenarios: vec![
         ChildScenario {
@@ -163,7 +163,7 @@ runtara-compile --workflow workflow.json --tenant tenant-123 --scenario my-workf
 
 ### Debug Mode
 
-When compiling with `debug_mode: true` (or `--debug` CLI flag), the compiled workflow emits telemetry events for each step execution. These events are stored as custom events in runtara-core and can be used for:
+When compiling with `track_events: true` (or `--debug` CLI flag), the compiled workflow emits telemetry events for each step execution. These events are stored as custom events in runtara-core and can be used for:
 
 - **Step-level tracing**: See exactly which steps executed and in what order
 - **Performance analysis**: Measure step execution duration

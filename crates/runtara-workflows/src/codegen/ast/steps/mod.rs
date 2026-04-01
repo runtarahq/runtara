@@ -127,6 +127,114 @@ pub fn step_name(step: &Step) -> Option<&str> {
     }
 }
 
+/// Check if a step has a breakpoint set.
+pub fn step_has_breakpoint(step: &Step) -> bool {
+    match step {
+        Step::Finish(s) => s.breakpoint.unwrap_or(false),
+        Step::Agent(s) => s.breakpoint.unwrap_or(false),
+        Step::Conditional(s) => s.breakpoint.unwrap_or(false),
+        Step::Switch(s) => s.breakpoint.unwrap_or(false),
+        Step::Split(s) => s.breakpoint.unwrap_or(false),
+        Step::StartScenario(s) => s.breakpoint.unwrap_or(false),
+        Step::While(s) => s.breakpoint.unwrap_or(false),
+        Step::Log(s) => s.breakpoint.unwrap_or(false),
+        Step::Error(s) => s.breakpoint.unwrap_or(false),
+        Step::Filter(s) => s.breakpoint.unwrap_or(false),
+        Step::GroupBy(s) => s.breakpoint.unwrap_or(false),
+        Step::Delay(s) => s.breakpoint.unwrap_or(false),
+        Step::WaitForSignal(s) => s.breakpoint.unwrap_or(false),
+        Step::AiAgent(s) => s.breakpoint.unwrap_or(false),
+    }
+}
+
+/// Emit breakpoint check code for a step.
+///
+/// When the scenario is running in debug mode (DEBUG_MODE env var) and this step
+/// has a breakpoint, the generated code will:
+/// 1. Call checkpoint() once — if found, the breakpoint was already hit (resume path, skip)
+/// 2. If not found, checkpoint() saves the marker and we emit a "breakpoint_hit" event
+/// 3. Return an error containing "paused" to trigger the suspend flow in main()
+///
+/// Uses a single checkpoint() call instead of get_checkpoint() + checkpoint() to avoid
+/// the HTTP backend's get_checkpoint side-effect (it saves empty data via the checkpoint
+/// endpoint, which prevents the real save from succeeding).
+///
+/// `step_inputs_var` is an optional identifier for a variable holding the resolved step
+/// inputs (e.g., the result of input mapping). When provided, the breakpoint event
+/// includes the resolved inputs so debuggers can inspect them.
+pub fn emit_breakpoint_check(
+    step_id: &str,
+    step_name: Option<&str>,
+    step_type: &str,
+    ctx: &EmitContext,
+    step_inputs_var: Option<&proc_macro2::Ident>,
+) -> TokenStream {
+    let inputs_var = &ctx.inputs_var;
+    let steps_context_var = &ctx.steps_context_var;
+
+    let name_expr = step_name
+        .map(|n| quote! { Some(#n) })
+        .unwrap_or(quote! { None::<&str> });
+
+    let inputs_expr = step_inputs_var
+        .map(|v| quote! { Some(#v.clone()) })
+        .unwrap_or(quote! { None::<serde_json::Value> });
+
+    quote! {
+        // Breakpoint check for step #step_id
+        {
+            if std::env::var("DEBUG_MODE").unwrap_or_default() == "true" {
+                let __bp_key = {
+                    let __loop_indices = (*#inputs_var.variables)
+                        .as_object()
+                        .and_then(|vars| vars.get("_loop_indices"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_u64())
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>()
+                            .join("_"))
+                        .unwrap_or_default();
+                    if __loop_indices.is_empty() {
+                        format!("breakpoint::{}", #step_id)
+                    } else {
+                        format!("breakpoint::{}::{}", #step_id, __loop_indices)
+                    }
+                };
+
+                let __sdk_guard = sdk().lock().unwrap();
+
+                // Single checkpoint() call: saves if new (returns found=false),
+                // returns existing if already saved (returns found=true).
+                let __bp_already_hit = match __sdk_guard.checkpoint(
+                    &__bp_key,
+                    &serde_json::to_vec(&serde_json::json!("breakpoint_hit")).unwrap_or_default(),
+                ) {
+                    Ok(result) => result.found,
+                    Err(_) => true, // On error, skip breakpoint to avoid infinite loop
+                };
+
+                if !__bp_already_hit {
+                    // First time hitting this breakpoint — emit event and suspend
+                    let __bp_payload = serde_json::json!({
+                        "step_id": #step_id,
+                        "step_name": #name_expr,
+                        "step_type": #step_type,
+                        "inputs": #inputs_expr,
+                        "steps_context": serde_json::Value::Object(#steps_context_var.clone()),
+                    });
+                    let __bp_payload_bytes = serde_json::to_vec(&__bp_payload).unwrap_or_default();
+                    let _ = __sdk_guard.custom_event("breakpoint_hit", __bp_payload_bytes);
+
+                    // Drop SDK lock before returning — main() will handle pause/suspend
+                    drop(__sdk_guard);
+                    return Err(format!("Breakpoint paused at step '{}'", #step_id));
+                }
+            }
+        }
+    }
+}
+
 // ==========================================
 // Scope tracking for hierarchy support
 // ==========================================
@@ -184,7 +292,7 @@ pub fn emit_generate_scope_id(
 /// The generated code builds a scope_enter event payload and sends it via `sdk.custom_event()`.
 ///
 /// # Arguments
-/// * `ctx` - Emit context (checks debug_mode)
+/// * `ctx` - Emit context (checks track_events)
 /// * `step_id` - Unique step identifier
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string ("Split", "While", "StartScenario")
@@ -200,7 +308,7 @@ pub fn emit_scope_enter_event(
     scenario_inputs_var: &proc_macro2::Ident,
     iteration_index_var: Option<&str>,
 ) -> TokenStream {
-    if !ctx.debug_mode {
+    if !ctx.track_events {
         return quote! {};
     }
 
@@ -244,10 +352,10 @@ pub fn emit_scope_enter_event(
 /// Emit scope_exit event for exiting a hierarchical step scope.
 ///
 /// # Arguments
-/// * `ctx` - Emit context (checks debug_mode)
+/// * `ctx` - Emit context (checks track_events)
 /// * `scope_id_var` - Variable name holding the scope_id
 pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStream {
-    if !ctx.debug_mode {
+    if !ctx.track_events {
         return quote! {};
     }
 
@@ -272,7 +380,7 @@ pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStre
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
 /// # Arguments
-/// * `ctx` - Emit context (checks debug_mode)
+/// * `ctx` - Emit context (checks track_events)
 /// * `step_id` - Unique step identifier
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
@@ -291,7 +399,7 @@ pub fn emit_step_debug_start(
     scenario_inputs_var: Option<&proc_macro2::Ident>,
     override_scope_id: Option<&str>,
 ) -> TokenStream {
-    if !ctx.debug_mode {
+    if !ctx.track_events {
         return quote! {};
     }
 
@@ -373,7 +481,7 @@ pub fn emit_step_debug_start(
 /// The generated code builds the payload inline and calls `sdk.custom_event()`.
 ///
 /// # Arguments
-/// * `ctx` - Emit context (checks debug_mode)
+/// * `ctx` - Emit context (checks track_events)
 /// * `step_id` - Unique step identifier
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
@@ -389,7 +497,7 @@ pub fn emit_step_debug_end(
     scenario_inputs_var: Option<&proc_macro2::Ident>,
     override_scope_id: Option<&str>,
 ) -> TokenStream {
-    if !ctx.debug_mode {
+    if !ctx.track_events {
         return quote! {};
     }
 
@@ -751,15 +859,15 @@ mod tests {
     use super::*;
 
     fn make_debug_ctx() -> EmitContext {
-        EmitContext::new(true) // debug_mode = true
+        EmitContext::new(true) // track_events = true
     }
 
     fn make_non_debug_ctx() -> EmitContext {
-        EmitContext::new(false) // debug_mode = false
+        EmitContext::new(false) // track_events = false
     }
 
     #[test]
-    fn test_emit_step_debug_start_disabled_when_not_debug_mode() {
+    fn test_emit_step_debug_start_disabled_when_not_track_events() {
         let ctx = make_non_debug_ctx();
         let tokens = emit_step_debug_start(
             &ctx,
@@ -773,12 +881,12 @@ mod tests {
         );
         assert!(
             tokens.is_empty(),
-            "Should emit nothing when debug_mode is false"
+            "Should emit nothing when track_events is false"
         );
     }
 
     #[test]
-    fn test_emit_step_debug_start_emits_code_in_debug_mode() {
+    fn test_emit_step_debug_start_emits_code_in_track_events() {
         let ctx = make_debug_ctx();
         let tokens = emit_step_debug_start(
             &ctx,
@@ -891,18 +999,18 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_step_debug_end_disabled_when_not_debug_mode() {
+    fn test_emit_step_debug_end_disabled_when_not_track_events() {
         let ctx = make_non_debug_ctx();
         let tokens =
             emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
         assert!(
             tokens.is_empty(),
-            "Should emit nothing when debug_mode is false"
+            "Should emit nothing when track_events is false"
         );
     }
 
     #[test]
-    fn test_emit_step_debug_end_emits_code_in_debug_mode() {
+    fn test_emit_step_debug_end_emits_code_in_track_events() {
         let ctx = make_debug_ctx();
         let tokens =
             emit_step_debug_end(&ctx, "step-1", Some("Test Step"), "Agent", None, None, None);
@@ -1656,7 +1764,7 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_events_not_emitted_when_debug_mode_disabled() {
+    fn test_debug_events_not_emitted_when_track_events_disabled() {
         // Debug mode OFF
         let ctx = make_non_debug_ctx();
         let scenario_var =
@@ -1677,11 +1785,11 @@ mod tests {
 
         assert!(
             start_tokens.is_empty(),
-            "Debug start should not emit when debug_mode is false"
+            "Debug start should not emit when track_events is false"
         );
         assert!(
             end_tokens.is_empty(),
-            "Debug end should not emit when debug_mode is false"
+            "Debug end should not emit when track_events is false"
         );
     }
 

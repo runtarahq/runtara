@@ -14,7 +14,9 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::{MappingValue, SplitStep};
 
 /// Emit code for a Split step.
@@ -139,6 +141,13 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "Split");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Split", ctx, Some(&split_inputs_var))
+    } else {
+        quote! {}
+    };
+
     // Static base for cache key - will be combined with prefix/scenario_id at runtime
     let cache_key_base = format!("split::{}", step_id);
 
@@ -149,6 +158,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     Ok(quote! {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Build cache key dynamically, including prefix and loop indices
         let __split_cache_key = {
@@ -868,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_split_debug_mode_enabled() {
+    fn test_emit_split_track_events_enabled() {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let split_step = create_split_step("split-debug", "data.items");
 

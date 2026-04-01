@@ -73,7 +73,7 @@ struct Args {
     scenario_id: String,
     version: u32,
     output_path: Option<PathBuf>,
-    debug_mode: bool,
+    track_events: bool,
     emit_source: Option<PathBuf>,
     analyze_only: bool,
     validate_only: bool,
@@ -88,7 +88,7 @@ fn parse_args() -> Result<Args, String> {
     let mut scenario_id: Option<String> = None;
     let mut version: u32 = 1;
     let mut output_path: Option<PathBuf> = None;
-    let mut debug_mode = false;
+    let mut track_events = false;
     let mut emit_source: Option<PathBuf> = None;
     let mut analyze_only = false;
     let mut validate_only = false;
@@ -139,7 +139,7 @@ fn parse_args() -> Result<Args, String> {
                 output_path = Some(PathBuf::from(&args[i]));
             }
             "--debug" => {
-                debug_mode = true;
+                track_events = true;
             }
             "--emit-source" => {
                 i += 1;
@@ -174,7 +174,7 @@ fn parse_args() -> Result<Args, String> {
         scenario_id,
         version,
         output_path,
-        debug_mode,
+        track_events,
         emit_source,
         analyze_only,
         validate_only,
@@ -481,7 +481,7 @@ fn main() -> ExitCode {
         scenario_id: args.scenario_id.clone(),
         version: args.version,
         execution_graph: execution_graph.clone(),
-        debug_mode: args.debug_mode,
+        track_events: args.track_events,
         child_scenarios: vec![],
         connection_service_url: None,
     };

@@ -14,7 +14,9 @@ use super::super::condition_emitters::emit_condition_expression;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::WhileStep;
 
 /// Emit code for a While step.
@@ -86,9 +88,19 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "While");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "While", ctx, Some(&loop_inputs_var))
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         let #source_var = #build_source;
         let #loop_inputs_var = serde_json::json!({"maxIterations": #max_iterations});
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_def
@@ -529,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_while_debug_mode_enabled() {
+    fn test_emit_while_track_events_enabled() {
         let mut ctx = EmitContext::new(true); // debug mode ON
         let while_step = create_while_step("while-debug", Some(5), 3);
 
@@ -548,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_while_debug_mode_disabled() {
+    fn test_emit_while_track_events_disabled() {
         let mut ctx = EmitContext::new(false); // debug mode OFF
         let while_step = create_while_step("while-no-debug", Some(5), 3);
 
@@ -556,7 +568,7 @@ mod tests {
         let code = tokens.to_string();
 
         // Debug events should not be present (or minimal)
-        // The debug functions return empty tokens when debug_mode is false
+        // The debug functions return empty tokens when track_events is false
         // So we just verify the core loop logic is present
         assert!(code.contains("loop {"), "Should have loop structure");
     }

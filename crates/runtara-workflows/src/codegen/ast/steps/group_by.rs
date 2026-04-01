@@ -11,7 +11,9 @@ use quote::quote;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::{emit_step_debug_end, emit_step_debug_start, emit_step_span_start};
+use super::{
+    emit_breakpoint_check, emit_step_debug_end, emit_step_debug_start, emit_step_span_start,
+};
 use runtara_dsl::GroupByStep;
 
 /// Emit code for a GroupBy step.
@@ -71,6 +73,13 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
     // Generate tracing span for OpenTelemetry
     let span_def = emit_step_span_start(step_id, step_name, "GroupBy");
 
+    // Breakpoint check after input resolution — includes resolved inputs in the event
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "GroupBy", ctx, Some(&group_input_var))
+    } else {
+        quote! {}
+    };
+
     // Generate expected keys initialization code
     let expected_keys_init = if let Some(ref keys) = step.config.expected_keys {
         let key_insertions = keys.iter().map(|key| {
@@ -87,6 +96,9 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
     Ok(quote! {
         let #source_var = #build_source;
         let #group_input_var = #array_value_code;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Convert input to array, tolerating null/non-array
         let #group_array_var: Vec<serde_json::Value> = match #group_input_var.as_array() {
@@ -256,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_group_by_with_debug_mode() {
+    fn test_emit_group_by_with_track_events() {
         let mut ctx = EmitContext::new(true);
         let step = create_group_by_step("group-debug", "data.items", "status");
 
@@ -274,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_group_by_without_debug_mode() {
+    fn test_emit_group_by_without_track_events() {
         let mut ctx = EmitContext::new(false);
         let step = create_group_by_step("group-no-debug", "data.items", "status");
 

@@ -301,7 +301,7 @@ pub struct CompilationInput {
     /// The workflow's execution graph definition.
     pub execution_graph: ExecutionGraph,
     /// Whether to enable debug mode (additional logging).
-    pub debug_mode: bool,
+    pub track_events: bool,
     /// Pre-loaded child scenarios (empty if none).
     pub child_scenarios: Vec<ChildScenarioInput>,
     /// URL for fetching connections at runtime.
@@ -374,7 +374,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         scenario_id,
         version,
         execution_graph,
-        debug_mode,
+        track_events,
         child_scenarios,
         connection_service_url,
     } = input;
@@ -468,7 +468,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     let rust_code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ast::compile_with_children(
             &execution_graph,
-            debug_mode,
+            track_events,
             child_graphs,
             step_to_child_ref,
             connection_service_url,
@@ -586,7 +586,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     // Skip strip and crt-static for WASM targets
     if !is_wasm {
         // Strip symbols to reduce binary size (skip in debug mode for stack traces)
-        if !debug_mode {
+        if !track_events {
             cmd.arg("-C").arg("strip=symbols");
         }
 
@@ -816,7 +816,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 /// * `scenario_id` - Scenario identifier
 /// * `version` - Version number
 /// * `execution_graph` - The execution graph
-/// * `debug_mode` - Whether to include debug instrumentation
+/// * `track_events` - Whether to include debug instrumentation
 ///
 /// # Returns
 /// Path to the build directory containing generated main.rs
@@ -825,14 +825,14 @@ pub fn translate_scenario(
     scenario_id: &str,
     version: u32,
     execution_graph: &ExecutionGraph,
-    debug_mode: bool,
+    track_events: bool,
 ) -> io::Result<PathBuf> {
     // Create build directory
     let build_dir = get_rustc_compile_dir(tenant_id, scenario_id, version);
     fs::create_dir_all(&build_dir)?;
 
     // Generate the Rust program using AST-based code generation
-    let rust_code = ast::compile(execution_graph, debug_mode).map_err(|codegen_err| {
+    let rust_code = ast::compile(execution_graph, track_events).map_err(|codegen_err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Code generation failed: {}", codegen_err),

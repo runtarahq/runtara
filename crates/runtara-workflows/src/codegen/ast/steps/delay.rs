@@ -17,7 +17,7 @@ use runtara_dsl::DelayStep;
 use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
-use super::emit_step_span_start;
+use super::{emit_breakpoint_check, emit_step_span_start};
 
 /// Emit code for a Delay step.
 ///
@@ -45,9 +45,19 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Emit step span
     let span_start = emit_step_span_start(step_id, step_name, "Delay");
 
+    // Breakpoint check — no single inputs variable available, pass None
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "Delay", ctx, None)
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         // Build source for mapping
         let #source_var = #build_source;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_start

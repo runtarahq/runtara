@@ -1052,7 +1052,7 @@ fn test_compile_simple_passthrough() {
         scenario_id: "passthrough".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1089,7 +1089,7 @@ fn test_compile_transform_workflow() {
         scenario_id: "transform".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1126,7 +1126,7 @@ fn test_compile_conditional_workflow() {
         scenario_id: "conditional".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1162,7 +1162,7 @@ fn test_compile_conditional_length_comparison() {
         scenario_id: "length-comparison".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1198,7 +1198,7 @@ fn test_compile_split_workflow() {
         scenario_id: "split".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1250,7 +1250,7 @@ fn test_compile_start_scenario_workflow() {
         scenario_id: "start_scenario".to_string(),
         version: 1,
         execution_graph: parent_graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![child_scenario],
         connection_service_url: None,
     };
@@ -1270,7 +1270,7 @@ fn test_compile_start_scenario_workflow() {
 
 #[test]
 #[ignore = "requires pre-built native library"]
-fn test_compile_with_debug_mode() {
+fn test_compile_with_track_events() {
     if !native_library_available() {
         eprintln!("Skipping: native library not available");
         return;
@@ -1287,7 +1287,7 @@ fn test_compile_with_debug_mode() {
         scenario_id: "passthrough_debug".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: true, // Enable debug mode
+        track_events: true, // Enable debug mode
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1359,7 +1359,7 @@ fn test_side_effects_detection() {
         scenario_id: "http_workflow".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1397,7 +1397,7 @@ fn test_compile_while_simple() {
         scenario_id: "while_simple".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1433,7 +1433,7 @@ fn test_compile_while_nested_condition() {
         scenario_id: "while_nested".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1465,7 +1465,7 @@ fn test_compile_while_with_loop_index() {
         scenario_id: "while_loop_index".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1501,7 +1501,7 @@ fn test_compile_log_all_levels() {
         scenario_id: "log_all_levels".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1538,7 +1538,7 @@ fn test_compile_log_with_context() {
         scenario_id: "log_with_context".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1570,7 +1570,7 @@ fn test_compile_log_in_subgraph() {
         scenario_id: "log_in_subgraph".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1793,7 +1793,7 @@ fn test_compile_error_all_categories() {
         scenario_id: "error_all_categories".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1830,7 +1830,7 @@ fn test_compile_error_with_context() {
         scenario_id: "error_with_context".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1862,7 +1862,7 @@ fn test_compile_error_transient() {
         scenario_id: "error_transient".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -1894,7 +1894,7 @@ fn test_compile_error_in_loop() {
         scenario_id: "error_in_loop".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -2011,7 +2011,7 @@ fn test_compile_http_structured_errors() {
         scenario_id: "http_structured_errors".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -2047,7 +2047,7 @@ fn test_compile_error_retry_exhausted() {
         scenario_id: "error_retry_exhausted".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -2093,7 +2093,7 @@ fn test_run_in_oci_container() {
         scenario_id: "passthrough".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -2167,7 +2167,7 @@ fn test_run_split_workflow_in_oci_container() {
         scenario_id: "split".to_string(),
         version: 1,
         execution_graph: graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![],
         connection_service_url: None,
     };
@@ -2259,7 +2259,7 @@ fn test_run_start_scenario_workflow_in_oci_container() {
         scenario_id: "start_scenario".to_string(),
         version: 1,
         execution_graph: parent_graph,
-        debug_mode: false,
+        track_events: false,
         child_scenarios: vec![child_scenario],
         connection_service_url: None,
     };

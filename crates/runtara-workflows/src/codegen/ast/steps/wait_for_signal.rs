@@ -23,7 +23,7 @@ use super::super::CodegenError;
 use super::super::context::EmitContext;
 use super::super::mapping;
 use super::super::program;
-use super::{emit_step_debug_end, emit_step_span_start};
+use super::{emit_breakpoint_check, emit_step_debug_end, emit_step_span_start};
 
 /// Emit code for a WaitForSignal step.
 ///
@@ -116,7 +116,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
     // Generate debug events if enabled.
     // WaitForSignal emits debug_start AFTER signal_id and timeout are resolved
     // so we can include them in the event payload.
-    let debug_start = if ctx.debug_mode {
+    let debug_start = if ctx.track_events {
         let name_expr = step_name
             .map(|n| quote! { Some(#n) })
             .unwrap_or(quote! { None::<&str> });
@@ -177,9 +177,19 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
     // Emit step span
     let span_start = emit_step_span_start(step_id, step_name, "WaitForSignal");
 
+    // Breakpoint check — complex decomposed inputs, pass None
+    let breakpoint_check = if step.breakpoint.unwrap_or(false) {
+        emit_breakpoint_check(step_id, step_name, "WaitForSignal", ctx, None)
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         // Build source for mapping
         let #source_var = #build_source;
+
+        // Breakpoint (after input resolution, before execution)
+        #breakpoint_check
 
         // Define tracing span for this step
         #span_start
@@ -455,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_wait_debug_mode() {
+    fn test_emit_wait_track_events() {
         let step = create_wait_for_signal_step("wait-debug");
         let mut ctx = EmitContext::new(true); // debug mode ON
         let result = emit(&step, &mut ctx);
