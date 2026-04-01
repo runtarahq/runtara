@@ -813,6 +813,15 @@ pub async fn handle_resume_instance(
         env: stored_env, // Restore env from initial launch
     };
 
+    // Remove the old container registry entry BEFORE launching the new process.
+    // This ensures any still-running old monitor will see its handle_id is gone
+    // and skip crash detection, preventing a race where the old monitor marks the
+    // instance as "failed" between launch and new container registration.
+    {
+        let container_registry = ContainerRegistry::new(state.pool.clone());
+        let _ = container_registry.cleanup(&request.instance_id).await;
+    }
+
     // Launch
     match state.runner.launch_detached(&options).await {
         Ok(handle) => {
@@ -1058,7 +1067,12 @@ pub fn spawn_container_monitor(
                         // this monitor is stale (instance was resumed with a new process)
                         current.container_id != handle.handle_id
                     }
-                    _ => false,
+                    Ok(None) => {
+                        // Registry entry was cleaned up (resume clears it before launching
+                        // new process) — this monitor is stale
+                        true
+                    }
+                    Err(_) => false,
                 };
 
                 if is_stale_monitor {
