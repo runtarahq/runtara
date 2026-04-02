@@ -436,6 +436,14 @@ pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
                     "variables": &*#inputs.variables
                 }
             }));
+            // Expose loop context (injected by While step) as top-level "loop" for
+            // subgraph steps to reference loop.index / loop.outputs
+            if let Some(loop_ctx) = (*#inputs.variables)
+                .as_object()
+                .and_then(|v| v.get("_loop"))
+            {
+                source_map.insert("loop".to_string(), loop_ctx.clone());
+            }
             serde_json::Value::Object(source_map)
         }
     }

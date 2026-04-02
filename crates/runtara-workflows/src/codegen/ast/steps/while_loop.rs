@@ -175,6 +175,14 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             __loop_vars.insert("_previousOutputs".to_string(), __loop_outputs.clone());
                         }
 
+                        // Inject loop context so subgraph steps can reference loop.index / loop.outputs
+                        {
+                            let mut loop_ctx = serde_json::Map::new();
+                            loop_ctx.insert("index".to_string(), serde_json::json!(__loop_index));
+                            loop_ctx.insert("outputs".to_string(), __loop_outputs.clone());
+                            __loop_vars.insert("_loop".to_string(), serde_json::Value::Object(loop_ctx));
+                        }
+
                         // Generate scope ID for this iteration
                         let __iteration_scope_id = {
                             let parent_scope = __loop_vars.get("_scope_id")
@@ -445,6 +453,22 @@ mod tests {
         assert!(
             code.contains("_previousOutputs"),
             "Should pass _previousOutputs to subgraph"
+        );
+    }
+
+    #[test]
+    fn test_emit_while_loop_context_in_subgraph_vars() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-loop-ctx", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // Verify _loop context is injected into subgraph variables
+        // so that emit_build_source can expose it as top-level "loop"
+        assert!(
+            code.contains("\"_loop\""),
+            "Should inject _loop context into subgraph variables for loop.outputs access"
         );
     }
 
