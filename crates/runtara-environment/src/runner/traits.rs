@@ -105,6 +105,11 @@ pub struct RunnerHandle {
     /// Captured immediately from `child.id()` at spawn time.
     /// More reliable than querying `crun state` which may have timing issues.
     pub spawned_pid: Option<u32>,
+    /// Child process handle for waiting on exit (WASM runner).
+    /// When present, the monitor uses child.wait() instead of PID polling
+    /// to detect process exit. This ensures the exit code is available and
+    /// the process has fully completed before crash detection runs.
+    pub child: Option<std::sync::Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>>,
 }
 
 /// Resource metrics collected from the instance execution.

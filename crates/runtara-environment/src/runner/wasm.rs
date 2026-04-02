@@ -497,12 +497,15 @@ impl WasmRunner {
             "Launched WASM process via wasmtime (detached)"
         );
 
+        let child_handle = std::sync::Arc::new(tokio::sync::Mutex::new(Some(child)));
+
         Ok(RunnerHandle {
             handle_id: format!("wasm_{}", instance_id),
             instance_id: instance_id.to_string(),
             tenant_id: tenant_id.to_string(),
             started_at: chrono::Utc::now(),
             spawned_pid,
+            child: Some(child_handle),
         })
     }
 }

@@ -431,6 +431,7 @@ impl NativeRunner {
             tenant_id: tenant_id.to_string(),
             started_at: chrono::Utc::now(),
             spawned_pid,
+            child: None,
         })
     }
 }

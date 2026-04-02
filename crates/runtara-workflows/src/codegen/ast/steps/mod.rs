@@ -202,16 +202,15 @@ pub fn emit_breakpoint_check(
                     }
                 };
 
-                let __sdk_guard = sdk().lock().unwrap();
-
                 // Single checkpoint() call: saves if new (returns found=false),
                 // returns existing if already saved (returns found=true).
-                let __bp_already_hit = match __sdk_guard.checkpoint(
-                    &__bp_key,
-                    &serde_json::to_vec(&serde_json::json!("breakpoint_hit")).unwrap_or_default(),
-                ) {
-                    Ok(result) => result.found,
-                    Err(_) => true, // On error, skip breakpoint to avoid infinite loop
+                let __bp_already_hit = {
+                    let __bp_data = serde_json::to_vec(&serde_json::json!("breakpoint_hit")).unwrap_or_default();
+                    let __sdk_guard = sdk().lock().unwrap();
+                    match __sdk_guard.checkpoint(&__bp_key, &__bp_data) {
+                        Ok(result) => result.found,
+                        Err(_) => true, // On error, skip to avoid infinite loop
+                    }
                 };
 
                 if !__bp_already_hit {
@@ -224,10 +223,10 @@ pub fn emit_breakpoint_check(
                         "steps_context": serde_json::Value::Object(#steps_context_var.clone()),
                     });
                     let __bp_payload_bytes = serde_json::to_vec(&__bp_payload).unwrap_or_default();
-                    let _ = __sdk_guard.custom_event("breakpoint_hit", __bp_payload_bytes);
-
-                    // Drop SDK lock before returning — main() will handle pause/suspend
-                    drop(__sdk_guard);
+                    {
+                        let __sdk_guard = sdk().lock().unwrap();
+                        let _ = __sdk_guard.custom_event("breakpoint_hit", __bp_payload_bytes);
+                    }
                     return Err(format!("Breakpoint paused at step '{}'", #step_id));
                 }
             }

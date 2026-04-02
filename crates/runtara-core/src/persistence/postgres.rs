@@ -254,15 +254,11 @@ pub async fn complete_instance_if_running(
     stderr: Option<&str>,
     checkpoint_id: Option<&str>,
 ) -> Result<bool, CoreError> {
-    // Allow SDK events (completed/suspended/cancelled) to overwrite a crash-detected
-    // "failed" status. The process monitor may mark an instance as "failed" before
-    // the SDK's HTTP call is processed (race condition). SDK events are authoritative
-    // since they come from the actual process, so they should win over monitor guesses.
     let result = sqlx::query(
         r#"
         UPDATE instances
         SET status = $2::instance_status,
-            output = COALESCE($3, output),
+            output = $3,
             error = $4,
             stderr = COALESCE($5, stderr),
             checkpoint_id = COALESCE($6, checkpoint_id),
@@ -270,7 +266,7 @@ pub async fn complete_instance_if_running(
                 WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
                 ELSE finished_at
             END
-        WHERE instance_id = $1 AND status IN ('running', 'failed')
+        WHERE instance_id = $1 AND status = 'running'
         "#,
     )
     .bind(instance_id)

@@ -1147,6 +1147,7 @@ impl Runner for OciRunner {
             tenant_id: options.tenant_id.clone(),
             started_at: now,
             spawned_pid,
+            child: None,
         })
     }
 

@@ -666,6 +666,7 @@ pub async fn handle_stop_instance(
         tenant_id: container.tenant_id,
         started_at: container.started_at,
         spawned_pid: container.pid.map(|p| p as u32),
+        child: None,
     };
 
     if let Err(e) = state.runner.stop(&handle).await {
@@ -993,9 +994,26 @@ pub fn spawn_container_monitor(
                 return;
             }
 
-            // Check if process is still running
-            // Use PID-based checking if available (faster and more reliable)
-            let is_alive = if let Some(p) = pid {
+            // Check if process is still running.
+            // Prefer child.wait() over PID polling — it blocks until the process
+            // fully exits (including all I/O cleanup), ensuring SDK HTTP calls
+            // have been processed before we check status.
+            let is_alive = if let Some(ref child_arc) = handle.child {
+                let mut child_guard = child_arc.lock().await;
+                if let Some(ref mut child) = *child_guard {
+                    match child.try_wait() {
+                        Ok(Some(_exit_status)) => {
+                            // Process exited — take ownership to drop it
+                            *child_guard = None;
+                            false
+                        }
+                        Ok(None) => true, // Still running
+                        Err(_) => false,  // Error checking — treat as exited
+                    }
+                } else {
+                    false // Already consumed
+                }
+            } else if let Some(p) = pid {
                 is_process_alive(p)
             } else {
                 runner.is_running(&handle).await
