@@ -417,26 +417,38 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     let mut query_parameters = input.query_parameters.clone();
     let mut url = input.url.clone();
 
-    // If connection data is provided, extract config and merge
+    // If connection data is provided, extract config and merge.
+    // In WASM, inventory-based extractors are unavailable — skip local extraction
+    // and let the HTTP proxy handle credential injection via X-Runtara-Connection-Id.
     if let Some(ref raw) = input._connection {
-        let config = extract_connection_config(raw)?;
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let config = extract_connection_config(raw)?;
 
-        // Prepend url_prefix if URL is relative (doesn't start with http)
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            url = format!("{}{}", config.url_prefix, url);
+            // Prepend url_prefix if URL is relative (doesn't start with http)
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                url = format!("{}{}", config.url_prefix, url);
+            }
+
+            // Merge headers (input headers override connection headers)
+            for (k, v) in config.headers {
+                headers.entry(k).or_insert(v);
+            }
+
+            // Merge query parameters (input params override connection params)
+            for (k, v) in config.query_parameters {
+                query_parameters.entry(k).or_insert(v);
+            }
+
+            // TODO: Apply rate limiting using config.rate_limit_config
         }
 
-        // Merge headers (input headers override connection headers)
-        for (k, v) in config.headers {
-            headers.entry(k).or_insert(v);
+        // Ensure connection_id is forwarded so the proxy can inject credentials
+        if !raw.connection_id.is_empty() {
+            headers
+                .entry("X-Runtara-Connection-Id".to_string())
+                .or_insert_with(|| raw.connection_id.clone());
         }
-
-        // Merge query parameters (input params override connection params)
-        for (k, v) in config.query_parameters {
-            query_parameters.entry(k).or_insert(v);
-        }
-
-        // TODO: Apply rate limiting using config.rate_limit_config
     }
 
     // Build URL with query parameters
