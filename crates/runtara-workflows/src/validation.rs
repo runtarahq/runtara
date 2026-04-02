@@ -2141,7 +2141,13 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
     > = HashMap::new();
 
     for edge in &graph.execution_plan {
-        let key = (edge.from_step.clone(), edge.label.clone());
+        // Normalize "next" label to None — "next" is a reserved label meaning
+        // "continue to next step" and is semantically equivalent to no label.
+        let normalized_label = match edge.label.as_deref() {
+            Some("next") => None,
+            other => other.map(|s| s.to_string()),
+        };
+        let key = (edge.from_step.clone(), normalized_label);
         edges_by_from_label.entry(key).or_default().push(edge);
     }
 
@@ -6035,6 +6041,42 @@ mod tests {
         assert!(
             !result.has_errors(),
             "Should pass: multiple unlabeled edges can run in parallel. Errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_condition_next_label_parallel_edges_pass() {
+        // Multiple "next"-labeled edges without conditions should pass (parallel execution).
+        // "next" is a reserved label meaning "continue to next step" and is semantically
+        // equivalent to no label — it should not prevent parallel fork patterns.
+        let mut steps = HashMap::new();
+        steps.insert("start".to_string(), create_log_step("start", None));
+        steps.insert("branch1".to_string(), create_finish_step("branch1", None));
+        steps.insert("branch2".to_string(), create_finish_step("branch2", None));
+
+        let mut graph = create_basic_graph(steps, "start");
+        graph.execution_plan = vec![
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "branch1".to_string(),
+                label: Some("next".to_string()),
+                condition: None,
+                priority: None,
+            },
+            runtara_dsl::ExecutionPlanEdge {
+                from_step: "start".to_string(),
+                to_step: "branch2".to_string(),
+                label: Some("next".to_string()),
+                condition: None,
+                priority: None,
+            },
+        ];
+
+        let result = validate_workflow(&graph);
+        assert!(
+            !result.has_errors(),
+            "Should pass: multiple 'next'-labeled edges can run in parallel. Errors: {:?}",
             result.errors
         );
     }
