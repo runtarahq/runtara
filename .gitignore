@@ -79,3 +79,7 @@ specs/
 .claude/
 CLAUDE.md
 agents.md
+
+# QEMU VM test artifacts
+.qemu-cache/
+.qemu-work/
