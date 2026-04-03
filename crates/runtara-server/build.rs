@@ -62,7 +62,6 @@ fn main() {
 
 /// Generate DSL and Agent specs from runtara-dsl
 fn generate_specs(out_dir: &Path) {
-    use runtara_dsl::spec::{agent_openapi, dsl_schema};
     use runtara_agents as _;
     use runtara_agents::integrations::ai_tools as _;
     use runtara_agents::integrations::bedrock as _;
@@ -71,6 +70,7 @@ fn generate_specs(out_dir: &Path) {
     use runtara_agents::integrations::openai as _;
     use runtara_agents::integrations::shopify as _;
     use runtara_agents::integrations::stripe as _;
+    use runtara_dsl::spec::{agent_openapi, dsl_schema};
 
     println!("cargo:warning=");
     println!("cargo:warning=╔════════════════════════════════════════════════════════════════╗");
@@ -127,8 +127,11 @@ fn generate_specs(out_dir: &Path) {
     let agent_changelog = agent_openapi::get_agent_changelog();
     let agent_changelog_json = serde_json::to_string_pretty(&agent_changelog)
         .expect("Failed to serialize Agent changelog");
-    fs::write(specs_dir.join("agent_changelog.json"), &agent_changelog_json)
-        .expect("Failed to write Agent changelog");
+    fs::write(
+        specs_dir.join("agent_changelog.json"),
+        &agent_changelog_json,
+    )
+    .expect("Failed to write Agent changelog");
     println!(
         "cargo:warning=      ✓ Agent changelog: {} bytes",
         agent_changelog_json.len()
