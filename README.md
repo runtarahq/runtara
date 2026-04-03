@@ -49,38 +49,44 @@ Important top-level directories:
 
 ## Runtime Model
 
-Today, the practical entrypoint is `runtara-environment`.
+The practical entrypoint is `runtara-server`. It embeds `runtara-environment` and `runtara-core` in a single process and adds scenario management, auth, connections, channels, MCP, and background workers.
 
-- `runtara-environment` exposes the management HTTP API on port `8002` by default
-- `runtara-environment` can run `runtara-core` in-process; the default binary does this when `RUNTARA_CORE_ADDR` is a valid socket address
+- `runtara-server` exposes the application HTTP API on port `7001` by default
+- `runtara-environment` runs embedded, handling image registry, instance lifecycle, and runners
+- `runtara-core` runs embedded, handling checkpoints, signals, events, and durable sleep
 - Workflow instances communicate with `runtara-core` over HTTP for registration, checkpoints, signals, heartbeats, and completion
-- Persistence lives in `runtara-core`; image registration and instance lifecycle live in `runtara-environment`
 
 At a high level:
 
 ```text
-Management client / CLI / product backend
+UI / API clients / MCP agents
                 |
                 v
-      runtara-environment (HTTP API, default :8002)
+      runtara-server (HTTP + MCP API, default :7001)
+                |
+                +--> scenario management, auth, connections, channels
+                +--> background workers (triggers, compilation, cron)
+                |
+                v
+      runtara-environment (embedded, default :8002)
                 |
                 +--> image registry
                 +--> instance lifecycle
-                +--> runner backend (OCI by default)
+                +--> runner backend (Wasm by default)
                 |
                 v
-         runtara-core (instance HTTP API, default :8001)
+         runtara-core (embedded, default :8001)
                 |
                 v
-        PostgreSQL or SQLite for core
-        PostgreSQL for environment
+        PostgreSQL (server, environment, core)
+        + separate PostgreSQL for object model
 ```
 
 Runner implementations currently present in the repo:
 
-- `OCI`: default production-oriented runner
+- `Wasm`: default production runner — executes WASM modules via `wasmtime` with WASI support
+- `OCI`: container-based runner using `crun` with cgroup isolation and metrics
 - `Native`: direct process execution, useful for development
-- `Wasm`: WebAssembly runner code exists in the workspace
 - `Mock`: test runner
 
 ## Workspace Crates
@@ -158,9 +164,9 @@ Runner backends:
 
 | Runner | Use case |
 |--------|----------|
-| **OCI** | Production — runs instances in `crun` containers with cgroup isolation and metrics |
+| **Wasm** | Default — runs WASM modules via `wasmtime` with WASI sandboxing |
+| **OCI** | Container-based — runs instances in `crun` containers with cgroup isolation and metrics |
 | **Native** | Development — direct child process execution, no container runtime needed |
-| **Wasm** | Sandboxed — runs WASM modules via `wasmtime` with WASI support |
 | **Mock** | Testing — simulates execution without running real processes |
 
 **Use this layer when** you need to run compiled workflows as isolated units but want to manage scenarios, auth, and application logic in your own code. Embed `runtara-environment` as a library (see `docs/embedding-runtara.md`) and interact with it through `runtara-management-sdk`.
