@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO scenario_dependencies (\n                parent_tenant_id,\n                parent_scenario_id,\n                parent_version,\n                child_scenario_id,\n                child_version_requested,\n                child_version_resolved,\n                step_id\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            ON CONFLICT (parent_tenant_id, parent_scenario_id, parent_version, step_id)\n            DO UPDATE SET\n                child_scenario_id = $4,\n                child_version_requested = $5,\n                child_version_resolved = $6,\n                created_at = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2eced3b393106e644c938434baece35efe93d22990746b1540e7cab474147375"
+}

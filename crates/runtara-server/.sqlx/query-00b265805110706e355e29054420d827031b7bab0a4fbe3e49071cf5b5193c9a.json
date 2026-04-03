@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT version, definition, file_size\n            FROM scenario_definitions\n            WHERE tenant_id = $1 AND scenario_id = $2 AND deleted_at IS NULL\n            ORDER BY version ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "definition",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "file_size",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "00b265805110706e355e29054420d827031b7bab0a4fbe3e49071cf5b5193c9a"
+}

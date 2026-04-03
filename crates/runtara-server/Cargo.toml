@@ -1,0 +1,123 @@
+[package]
+name = "runtara-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Complete HTTP API server for runtara — scenarios, connections, channels, workers"
+keywords = ["durable", "workflow", "server", "runtime"]
+categories = ["web-programming"]
+
+[lib]
+name = "runtara_server"
+path = "src/lib.rs"
+
+[dependencies]
+# Runtara crates
+runtara-workflows = { path = "../runtara-workflows" }
+runtara-management-sdk = { path = "../runtara-management-sdk" }
+runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
+runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations"] }
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
+runtara-core = { path = "../runtara-core", features = ["server"] }
+runtara-environment = { path = "../runtara-environment" }
+runtara-object-store = { path = "../../../runtara-object-store" }
+runtara-text-parser = { path = "../runtara-text-parser" }
+runtara-connections = { path = "../runtara-connections" }
+
+# Database
+sqlx = { version = "0.8.6", features = [
+    "runtime-tokio",
+    "tls-native-tls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "macros",
+    "migrate",
+    "rust_decimal",
+] }
+rust_decimal = "1.35"
+
+# HTTP/API
+axum = { version = "0.8", features = ["multipart"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+http-body-util = "0.1"
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+async-stream = "0.3"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+regex = "1.11"
+num_cpus = "1.16"
+sysinfo = "0.32"
+dashmap = "6.1"
+jsonschema = "0.26"
+croner = "2"
+
+# Redis/Valkey
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# JWT authentication
+jsonwebtoken = "9"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1"
+
+# Misc utilities
+base64 = { workspace = true }
+csv = "1.3"
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = "0.4"
+rand = "0.8"
+url = "2"
+urlencoding = "2"
+
+# MCP (Model Context Protocol) server
+rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
+reqwest = { version = "0.12", features = ["json"] }
+
+# OpenTelemetry integration
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.32"
+opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.31", features = [
+    "rt-tokio",
+    "trace",
+    "metrics",
+    "logs",
+] }
+opentelemetry-otlp = { version = "0.31", features = [
+    "grpc-tonic",
+    "trace",
+    "metrics",
+    "logs",
+] }
+opentelemetry-semantic-conventions = { version = "0.31", features = [
+    "semconv_experimental",
+] }
+opentelemetry-appender-tracing = "0.31"
+
+# Environment
+dotenvy = "0.15"
+
+[build-dependencies]
+runtara-dsl = { path = "../runtara-dsl" }
+runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations"] }
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
+serde_json = "1.0"

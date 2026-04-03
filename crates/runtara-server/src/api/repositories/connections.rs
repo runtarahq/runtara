@@ -3,7 +3,8 @@
 //! Handles all database operations for connection management
 //! SECURITY: Provides methods to explicitly exclude connection_parameters from queries
 
-use crate::types::*;
+use crate::api::dto::connections::*;
+use crate::api::dto::rate_limits::RateLimitConfigDto;
 use sqlx::PgPool;
 
 /// Convert JSONB value from DB to RateLimitConfigDto
@@ -33,23 +34,23 @@ impl ConnectionRepository {
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok());
 
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO connection_data_entity
             (id, tenant_id, title, connection_subtype, connection_parameters, integration_id, valid_until, status, rate_limit_config, is_default_file_storage)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
+            connection_id,
+            tenant_id,
+            request.title,
+            request.connection_subtype,
+            request.connection_parameters,
+            request.integration_id,
+            request.valid_until.as_ref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+            status.as_str(),
+            rate_limit_json.as_ref(),
+            request.is_default_file_storage.unwrap_or(false)
         )
-        .bind(connection_id)
-        .bind(tenant_id)
-        .bind(&request.title)
-        .bind(&request.connection_subtype)
-        .bind(&request.connection_parameters)
-        .bind(&request.integration_id)
-        .bind(request.valid_until.as_ref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&chrono::Utc))))
-        .bind(status.as_str())
-        .bind(rate_limit_json.as_ref())
-        .bind(request.is_default_file_storage.unwrap_or(false))
         .execute(&self.pool)
         .await?;
 
@@ -373,11 +374,11 @@ impl ConnectionRepository {
 
     /// Delete a connection
     pub async fn delete(&self, id: &str, tenant_id: &str) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "DELETE FROM connection_data_entity WHERE id = $1 AND tenant_id = $2",
+            id,
+            tenant_id
         )
-        .bind(id)
-        .bind(tenant_id)
         .execute(&self.pool)
         .await?;
 

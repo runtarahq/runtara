@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE scenarios\n            SET current_version = $1,\n                updated_at = NOW()\n            WHERE tenant_id = $2 AND scenario_id = $3 AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d123d8a5813faa7f463b688cfeef746fb9e3f34154e763d351298e904e122581"
+}

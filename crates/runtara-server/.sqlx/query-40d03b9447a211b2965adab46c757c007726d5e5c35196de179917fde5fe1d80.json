@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 as \"exists!\"\n            FROM scenario_definitions\n            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3 AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "40d03b9447a211b2965adab46c757c007726d5e5c35196de179917fde5fe1d80"
+}

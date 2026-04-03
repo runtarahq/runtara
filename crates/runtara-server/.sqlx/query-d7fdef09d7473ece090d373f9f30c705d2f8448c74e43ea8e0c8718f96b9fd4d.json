@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO scenario_compilations\n                (tenant_id, scenario_id, version, compiled_at, translated_path, compilation_status, registered_image_id)\n            VALUES ($1, $2, $3, NOW(), '', 'success', $4)\n            ON CONFLICT (tenant_id, scenario_id, version)\n            DO UPDATE SET\n                registered_image_id = $4,\n                compilation_status = 'success',\n                error_message = NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d7fdef09d7473ece090d373f9f30c705d2f8448c74e43ea8e0c8718f96b9fd4d"
+}
