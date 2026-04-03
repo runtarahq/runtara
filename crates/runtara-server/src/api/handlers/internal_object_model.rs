@@ -4,7 +4,7 @@
 //! for object model CRUD operations. They have NO authentication middleware —
 //! the tenant_id is passed via the X-Org-Id header without JWT validation.
 //!
-//! Mounted at `/api/internal/object-model/*` on the main smo-runtime server.
+//! Mounted at `/api/internal/object-model/*` on the main runtara server.
 
 use axum::{
     extract::{Path, State},

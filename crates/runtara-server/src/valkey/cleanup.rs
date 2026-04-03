@@ -12,7 +12,7 @@ const CLEANUP_INTERVAL_HOURS: u64 = 6;
 /// Run periodic cleanup of old messages from Redis streams
 ///
 /// This task runs every 6 hours and trims messages older than 48 hours
-/// from all `smo:events:*` streams.
+/// from all `runtara:events:*` streams.
 pub async fn start_cleanup_task(redis_client: redis::Client) {
     let cleanup_interval = Duration::from_secs(CLEANUP_INTERVAL_HOURS * 60 * 60);
 
@@ -64,7 +64,7 @@ async fn cleanup_old_messages(redis_client: &redis::Client) -> Result<CleanupSta
         cutoff_timestamp_ms, cutoff_stream_id
     );
 
-    // Scan for all event streams matching pattern smo:events:*
+    // Scan for all event streams matching pattern runtara:events:*
     let stream_keys = scan_event_streams(&mut conn).await?;
 
     println!("Found {} event streams to process", stream_keys.len());
@@ -105,11 +105,11 @@ fn calculate_cutoff_timestamp() -> i64 {
     cutoff.timestamp_millis()
 }
 
-/// Scan Redis for all event stream keys matching the pattern smo:events:*
+/// Scan Redis for all event stream keys matching the pattern runtara:events:*
 async fn scan_event_streams(
     conn: &mut redis::aio::MultiplexedConnection,
 ) -> Result<Vec<String>, String> {
-    let pattern = "smo:events:*";
+    let pattern = "runtara:events:*";
 
     // Use SCAN to iterate through keys matching the pattern
     let mut cursor = 0;

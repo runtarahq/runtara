@@ -15,9 +15,9 @@ pub struct ValkeyConfig {
     pub stream_name: String,
     /// Consumer group for raw event capture (legacy)
     pub consumer_group: String,
-    /// Stream prefix for trigger events (default: "smo:triggers")
+    /// Stream prefix for trigger events (default: "runtara:triggers")
     pub trigger_stream_prefix: String,
-    /// Consumer group for trigger workers (default: "smo-trigger-workers")
+    /// Consumer group for trigger workers (default: "runtara-trigger-workers")
     pub trigger_consumer_group: String,
 }
 
@@ -36,16 +36,16 @@ impl ValkeyConfig {
         let password = std::env::var("VALKEY_PASSWORD").ok();
 
         let stream_name =
-            std::env::var("VALKEY_STREAM_NAME").unwrap_or_else(|_| "smo-events".to_string());
+            std::env::var("VALKEY_STREAM_NAME").unwrap_or_else(|_| "runtara-events".to_string());
 
         let consumer_group = std::env::var("VALKEY_CONSUMER_GROUP")
-            .unwrap_or_else(|_| "smo-runtime-workers".to_string());
+            .unwrap_or_else(|_| "runtara-workers".to_string());
 
         let trigger_stream_prefix = std::env::var("VALKEY_TRIGGER_STREAM_PREFIX")
-            .unwrap_or_else(|_| "smo:triggers".to_string());
+            .unwrap_or_else(|_| "runtara:triggers".to_string());
 
         let trigger_consumer_group = std::env::var("VALKEY_TRIGGER_CONSUMER_GROUP")
-            .unwrap_or_else(|_| "smo-trigger-workers".to_string());
+            .unwrap_or_else(|_| "runtara-trigger-workers".to_string());
 
         Some(ValkeyConfig {
             host,

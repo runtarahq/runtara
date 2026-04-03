@@ -13,7 +13,7 @@ use utoipa::ToSchema;
     "inputs": {"url": "https://api.example.com/data", "method": "GET"},
     "connectionId": "conn_shopify_main",
     "instanceId": "inst-abc-123",
-    "tenantId": "org_p0IkAFnrVqVOvQw9"
+    "tenantId": "org_example_tenant"
 }))]
 pub struct ExecuteAgentRequest {
     /// Agent-specific input data (structure depends on the agent/capability).

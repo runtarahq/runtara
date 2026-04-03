@@ -54,8 +54,8 @@ impl CompilationRequest {
 /// Compilation queue backed by Redis/Valkey
 ///
 /// Uses two Redis keys:
-/// - `smo:compilation:queue` - LIST for ordered processing
-/// - `smo:compilation:pending` - SET for deduplication and tracking
+/// - `runtara:compilation:queue` - LIST for ordered processing
+/// - `runtara:compilation:pending` - SET for deduplication and tracking
 pub struct CompilationQueue {
     /// Redis client (reused across operations to avoid parsing URL repeatedly)
     client: redis::Client,
@@ -63,9 +63,9 @@ pub struct CompilationQueue {
 
 impl CompilationQueue {
     /// Queue key for the LIST (FIFO order)
-    const QUEUE_KEY: &'static str = "smo:compilation:queue";
+    const QUEUE_KEY: &'static str = "runtara:compilation:queue";
     /// Set key for tracking pending compilations (deduplication)
-    const PENDING_KEY: &'static str = "smo:compilation:pending";
+    const PENDING_KEY: &'static str = "runtara:compilation:pending";
 
     /// Create a new compilation queue
     ///

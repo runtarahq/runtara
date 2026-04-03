@@ -1,4 +1,4 @@
-//! MCP (Model Context Protocol) server for SyncMyOrders Runtime.
+//! MCP (Model Context Protocol) server for Runtara Runtime.
 //!
 //! Exposes scenario management, execution monitoring, object model,
 //! and agent discovery capabilities via Streamable HTTP transport.

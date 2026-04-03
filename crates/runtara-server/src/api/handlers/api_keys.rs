@@ -79,7 +79,7 @@ pub async fn create_api_key(
 
     let random_bytes: [u8; 24] = rand::random();
     let random_hex = hex::encode(random_bytes);
-    let plaintext_key = format!("smo_{}", random_hex);
+    let plaintext_key = format!("rt_{}", random_hex);
     let key_prefix = &plaintext_key[..12];
     let key_hash = sha256_hex(&plaintext_key);
 

@@ -53,15 +53,15 @@ fn main() {
 
     // Allow CI to override the version reported by the binary without modifying Cargo.toml
     // (modifying Cargo.toml invalidates cargo fingerprints and forces a full rebuild)
-    if let Ok(version) = std::env::var("SMO_BUILD_VERSION") {
-        println!("cargo:rustc-env=SMO_BUILD_VERSION={}", version);
+    if let Ok(version) = std::env::var("BUILD_VERSION") {
+        println!("cargo:rustc-env=BUILD_VERSION={}", version);
     } else {
         println!(
-            "cargo:rustc-env=SMO_BUILD_VERSION={}",
+            "cargo:rustc-env=BUILD_VERSION={}",
             std::env::var("CARGO_PKG_VERSION").unwrap()
         );
     }
-    println!("cargo:rerun-if-env-changed=SMO_BUILD_VERSION");
+    println!("cargo:rerun-if-env-changed=BUILD_VERSION");
 }
 
 /// Generate DSL and Agent specs from runtara-dsl
@@ -172,7 +172,7 @@ fn precompile_native_libraries(stable_cache_dir: &Path, workspace_root: &Path) {
     println!("cargo:warning=");
     println!("cargo:warning=╔════════════════════════════════════════════════════════════════╗");
     println!(
-        "cargo:warning=║  🔧 COMPILING SMO-STDLIB ({})            ║",
+        "cargo:warning=║  🔧 COMPILING STDLIB ({})                ║",
         target
     );
     println!("cargo:warning=╚════════════════════════════════════════════════════════════════╝");

@@ -1,7 +1,7 @@
 //! Trigger Stream Publisher
 //!
 //! Publishes trigger events to Redis/Valkey streams for async scenario execution.
-//! Stream naming: smo:triggers:{tenant_id}
+//! Stream naming: runtara:triggers:{tenant_id}
 
 use redis::AsyncCommands;
 
@@ -40,7 +40,7 @@ impl TriggerStreamPublisher {
             .map_err(|e| TriggerStreamError::ConnectionError(e.to_string()))?;
 
         // Construct Redis stream key
-        let stream_key = format!("smo:triggers:{}", tenant_id);
+        let stream_key = format!("runtara:triggers:{}", tenant_id);
 
         // Add to Redis stream using XADD with auto-generated ID
         // Store event_type for filtering and full event data as JSON
@@ -73,7 +73,7 @@ impl TriggerStreamPublisher {
 
     /// Get the stream key for a tenant
     pub fn stream_key(tenant_id: &str) -> String {
-        format!("smo:triggers:{}", tenant_id)
+        format!("runtara:triggers:{}", tenant_id)
     }
 }
 
@@ -116,7 +116,7 @@ mod tests {
     fn test_stream_key() {
         assert_eq!(
             TriggerStreamPublisher::stream_key("tenant-123"),
-            "smo:triggers:tenant-123"
+            "runtara:triggers:tenant-123"
         );
     }
 

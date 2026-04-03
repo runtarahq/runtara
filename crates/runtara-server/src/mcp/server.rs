@@ -16,7 +16,7 @@ use crate::runtime_client::RuntimeClient;
 
 use super::tools;
 
-/// MCP server state — holds references to smo-runtime internals.
+/// MCP server state — holds references to runtara-server internals.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct SmoMcpServer {
@@ -519,14 +519,14 @@ impl ServerHandler for SmoMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_06_18)
             .with_server_info(
-                Implementation::new("smo-runtime", env!("SMO_BUILD_VERSION"))
-                    .with_title("SyncMyOrders Runtime")
+                Implementation::new("runtara-server", env!("BUILD_VERSION"))
+                    .with_title("Runtara Runtime")
                     .with_description(
                         "Scenario management, execution, object model, and agent discovery",
                     ),
             )
             .with_instructions(
-                "SyncMyOrders Runtime MCP server.\n\n\
+                "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
                 **Scenarios**: list_scenarios, get_scenario, create_scenario, update_scenario, compile_scenario, deploy_scenario, set_current_version, diff_scenario_versions, validate_graph, validate_mappings\n\
                 **Execution**: execute_scenario, execute_scenario_sync, execute_scenario_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\

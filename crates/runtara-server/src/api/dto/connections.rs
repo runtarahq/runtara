@@ -424,7 +424,7 @@ impl ConnectionAuthType {
     }
 
     /// Parse from a string, accepting legacy SCREAMING_SNAKE_CASE variants
-    /// from smo-management and other common forms.
+    /// from common forms.
     #[allow(dead_code)]
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().replace('-', "_").as_str() {

@@ -7,7 +7,7 @@ use crate::api::dto::object_model::{ColumnDefinition, IndexDefinition};
 use runtara_object_store::sql::validate_identifier;
 use std::collections::HashSet;
 
-/// SMO-specific auto-managed column names that users cannot define
+/// Auto-managed column names that users cannot define
 const AUTO_MANAGED_COLUMNS: &[&str] = &["id", "created_at", "updated_at", "deleted", "tenant_id"];
 
 /// Schema validation errors

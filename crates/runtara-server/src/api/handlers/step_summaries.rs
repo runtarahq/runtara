@@ -205,7 +205,7 @@ pub async fn get_step_summaries(
         .await
     {
         Ok(result) => {
-            // Fetch instance info to check if instance is in terminal state (SMO-228 fix)
+            // Fetch instance info to check if instance is in terminal state
             let instance_terminal_state = match client.get_instance_info(&instance_id).await {
                 Ok(info) => {
                     use runtara_management_sdk::InstanceStatus;
@@ -230,7 +230,7 @@ pub async fn get_step_summaries(
                 tracing::debug!(
                     instance_id = %instance_id,
                     instance_status = terminal_state,
-                    "Instance is terminal, non-terminal steps will inherit this state (SMO-228)"
+                    "Instance is terminal, non-terminal steps will inherit this state"
                 );
             }
 
@@ -239,7 +239,7 @@ pub async fn get_step_summaries(
                 .steps
                 .into_iter()
                 .map(|step| {
-                    // SMO-228 fix: If instance is terminal but step is not, step inherits instance state
+                    // If instance is terminal but step is not, step inherits instance state
                     let status = match step.status {
                         StepStatus::Running => {
                             // Step is non-terminal, inherit instance state if instance is terminal

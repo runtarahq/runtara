@@ -1,9 +1,9 @@
 //! Embedded Runtara Core and Environment servers.
 //!
 //! This module provides functionality to start runtara-core and runtara-environment
-//! embedded within smo-runtime, eliminating the need for external services.
+//! embedded within the host application, eliminating the need for external services.
 //!
-//! Runtara uses its own dedicated PostgreSQL database, separate from smo-runtime's
+//! Runtara uses its own dedicated PostgreSQL database, separate from the host application's
 //! database. The connection is configured via `RUNTARA_DATABASE_URL`.
 //!
 //! ## Database Migrations

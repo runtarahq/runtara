@@ -53,86 +53,86 @@ impl Metrics {
     fn new(meter: Meter) -> Self {
         // Worker metrics
         let worker_executions_total = meter
-            .u64_counter("smo.worker.executions.total")
+            .u64_counter("runtara.worker.executions.total")
             .with_description("Total number of scenario executions")
             .build();
 
         let worker_executions_active = meter
-            .i64_up_down_counter("smo.worker.executions.active")
+            .i64_up_down_counter("runtara.worker.executions.active")
             .with_description("Currently active scenario executions")
             .build();
 
         let worker_execution_duration = meter
-            .f64_histogram("smo.worker.execution.duration")
+            .f64_histogram("runtara.worker.execution.duration")
             .with_description("Scenario execution duration in seconds")
             .with_unit("s")
             .build();
 
         // Compilation metrics
         let compilations_total = meter
-            .u64_counter("smo.compilation.total")
+            .u64_counter("runtara.compilation.total")
             .with_description("Total number of scenario compilations")
             .build();
 
         let compilations_active = meter
-            .i64_up_down_counter("smo.compilation.active")
+            .i64_up_down_counter("runtara.compilation.active")
             .with_description("Currently active compilations")
             .build();
 
         let compilation_duration = meter
-            .f64_histogram("smo.compilation.duration")
+            .f64_histogram("runtara.compilation.duration")
             .with_description("Compilation duration in seconds")
             .with_unit("s")
             .build();
 
         let compilation_queue_size = meter
-            .i64_up_down_counter("smo.compilation.queue.size")
+            .i64_up_down_counter("runtara.compilation.queue.size")
             .with_description("Number of pending compilations in queue")
             .build();
 
         // Trigger worker metrics
         let trigger_events_total = meter
-            .u64_counter("smo.trigger.events.total")
+            .u64_counter("runtara.trigger.events.total")
             .with_description("Total trigger events processed")
             .build();
 
         let trigger_events_failed = meter
-            .u64_counter("smo.trigger.events.failed")
+            .u64_counter("runtara.trigger.events.failed")
             .with_description("Failed trigger events")
             .build();
 
         let trigger_processing_duration = meter
-            .f64_histogram("smo.trigger.processing.duration")
+            .f64_histogram("runtara.trigger.processing.duration")
             .with_description("Trigger event processing duration in seconds")
             .with_unit("s")
             .build();
 
         // HTTP request metrics
         let http_requests_total = meter
-            .u64_counter("smo.http.requests.total")
+            .u64_counter("runtara.http.requests.total")
             .with_description("Total HTTP requests")
             .build();
 
         let http_request_duration = meter
-            .f64_histogram("smo.http.request.duration")
+            .f64_histogram("runtara.http.request.duration")
             .with_description("HTTP request duration in seconds")
             .with_unit("s")
             .build();
 
         // Database metrics
         let db_queries_total = meter
-            .u64_counter("smo.db.queries.total")
+            .u64_counter("runtara.db.queries.total")
             .with_description("Total database queries")
             .build();
 
         let db_query_duration = meter
-            .f64_histogram("smo.db.query.duration")
+            .f64_histogram("runtara.db.query.duration")
             .with_description("Database query duration in seconds")
             .with_unit("s")
             .build();
 
         let db_pool_connections_active = meter
-            .i64_up_down_counter("smo.db.pool.connections.active")
+            .i64_up_down_counter("runtara.db.pool.connections.active")
             .with_description("Active database pool connections")
             .build();
 
@@ -171,7 +171,7 @@ pub fn metrics() -> Option<&'static Metrics> {
 ///
 /// Uses environment variables:
 /// - OTEL_EXPORTER_OTLP_ENDPOINT (default: http://localhost:4317)
-/// - OTEL_SERVICE_NAME (default: smo-runtime)
+/// - OTEL_SERVICE_NAME (default: runtara-server)
 /// - DD_ENV, DD_SERVICE, DD_VERSION
 pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     // Check if disabled
@@ -196,10 +196,10 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     // Get service name from environment
     let service_name = std::env::var("OTEL_SERVICE_NAME")
         .or_else(|_| std::env::var("DD_SERVICE"))
-        .unwrap_or_else(|_| "smo-v2-runtime".to_string());
+        .unwrap_or_else(|_| "runtara-server".to_string());
 
     let service_version =
-        std::env::var("DD_VERSION").unwrap_or_else(|_| env!("SMO_BUILD_VERSION").to_string());
+        std::env::var("DD_VERSION").unwrap_or_else(|_| env!("BUILD_VERSION").to_string());
 
     let environment = std::env::var("DD_ENV").unwrap_or_else(|_| "development".to_string());
 
@@ -227,7 +227,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     global::set_tracer_provider(trace_provider.clone());
 
     // Get tracer
-    let tracer = trace_provider.tracer("smo-runtime");
+    let tracer = trace_provider.tracer("runtara-server");
 
     // Create OTLP metrics exporter
     let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
@@ -248,7 +248,7 @@ pub fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     global::set_meter_provider(meter_provider);
 
     // Create and initialize global metrics instruments
-    let meter = global::meter("smo-runtime");
+    let meter = global::meter("runtara-server");
     let _ = METRICS.set(Metrics::new(meter));
 
     // Create OTLP log exporter

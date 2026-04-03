@@ -1193,7 +1193,7 @@ fn runtara_info_to_execution_with_metadata(
         instance,
         scenario_name,
         scenario_description,
-        worker_id: None, // Not tracked by Runtara at smo-runtime level
+        worker_id: None, // Not tracked by Runtara at server level
         heartbeat_at: info.heartbeat_at,
         retry_count: Some(info.retry_count as i32),
         max_retries: Some(info.max_retries as i32),

@@ -13,7 +13,7 @@ use crate::auth::{AuthContext, AuthMethod, AuthState};
 ///
 /// For every request:
 /// 1. Extracts `Authorization: Bearer <token>` header
-/// 2. If token starts with `smo_` → validates via management API key endpoint
+/// 2. If token starts with `rt_` (or legacy `smo_`) → validates via management API key endpoint
 /// 3. Otherwise → decodes JWT, verifies signature via JWKS, validates claims
 /// 4. Validates org_id against configured TENANT_ID (single-tenant)
 /// 5. Inserts `AuthContext` into request extensions
@@ -45,7 +45,7 @@ pub async fn authenticate(
     }
 
     // Route to API key or JWT validation
-    let auth_context = if token.starts_with("smo_") {
+    let auth_context = if token.starts_with("rt_") || token.starts_with("smo_") {
         validate_api_key(token, &auth_state).await
     } else {
         validate_jwt(token, &auth_state).await

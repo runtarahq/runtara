@@ -1,7 +1,7 @@
 //! Runtime Client
 //!
 //! Provides a client abstraction for executing workflows via the Runtara Management SDK.
-//! This module bridges smo-runtime with the runtara-environment execution server.
+//! This module bridges runtara-server with the runtara-environment execution server.
 
 use std::sync::Arc;
 
@@ -251,7 +251,7 @@ impl RuntimeClient {
 
             // Service name (standard OTEL var, derived from scenario_id)
             options =
-                options.with_env_var("OTEL_SERVICE_NAME", format!("smo-scenario-{}", scenario_id));
+                options.with_env_var("OTEL_SERVICE_NAME", format!("runtara-scenario-{}", scenario_id));
 
             // Resource attributes - map vendor-specific vars (DD_*) to standard OTEL format
             if let Some(attrs) = trace_context::build_resource_attributes() {
@@ -463,7 +463,7 @@ impl RuntimeClient {
 
         let options = runtara_management_sdk::StopInstanceOptions::new(instance_id)
             .with_grace_period(5)
-            .with_reason("Stopped by smo-runtime");
+            .with_reason("Stopped by runtara-server");
 
         sdk.stop_instance(options)
             .await
