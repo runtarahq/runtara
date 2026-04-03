@@ -21,6 +21,48 @@ use super::{bedrock, openai};
 
 use super::errors::permanent_error;
 
+/// Resolve the integration_id for a connection.
+/// In compiled scenario binaries, the connection stub has an empty integration_id.
+fn resolve_integration_id(connection: &RawConnection) -> Result<String, String> {
+    let integration_id = &connection.integration_id;
+    if !integration_id.is_empty() {
+        return Ok(integration_id.clone());
+    }
+
+    let base_url = std::env::var("CONNECTION_SERVICE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:7001/api/connections".to_string());
+    let tenant_id = std::env::var("RUNTARA_TENANT_ID").unwrap_or_default();
+    let url = format!("{}/{}/{}", base_url, tenant_id, connection.connection_id);
+
+    let client = runtara_http::HttpClient::new();
+    let resp = client.request("GET", &url).call().map_err(|e| {
+        permanent_error(
+            "AI_TOOLS_CONNECTION_FETCH_ERROR",
+            &format!("Failed to fetch connection: {}", e),
+            json!({"connection_id": connection.connection_id}),
+        )
+    })?;
+
+    let body: Value = resp.into_json().map_err(|e| {
+        permanent_error(
+            "AI_TOOLS_CONNECTION_PARSE_ERROR",
+            &format!("Failed to parse connection response: {}", e),
+            json!({}),
+        )
+    })?;
+
+    body["integration_id"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| {
+            permanent_error(
+                "AI_TOOLS_MISSING_INTEGRATION_ID",
+                "Connection has no integration_id",
+                json!({"connection_id": connection.connection_id}),
+            )
+        })
+}
+
 pub use super::types::LlmUsage;
 
 // ============================================================================
@@ -181,7 +223,8 @@ pub fn ai_text_completion(input: AiTextCompletionInput) -> Result<AiTextCompleti
         );
     }
 
-    match connection.integration_id.as_str() {
+    let integration_id = resolve_integration_id(connection)?;
+    match integration_id.as_str() {
         "openai_api_key" => {
             let openai_input = openai::TextCompletionInput {
                 _connection: input._connection.clone(),
@@ -245,7 +288,8 @@ fn ai_text_completion_structured(
     input: &AiTextCompletionInput,
     schema: &Value,
 ) -> Result<AiTextCompletionOutput, String> {
-    match connection.integration_id.as_str() {
+    let integration_id = resolve_integration_id(connection)?;
+    match integration_id.as_str() {
         "openai_api_key" => {
             let openai_input = openai::StructuredOutputInput {
                 _connection: conn,
@@ -415,7 +459,8 @@ pub fn ai_image_generation(
         )
     })?;
 
-    match connection.integration_id.as_str() {
+    let integration_id = resolve_integration_id(connection)?;
+    match integration_id.as_str() {
         "openai_api_key" => {
             let openai_input = openai::ImageGenerationInput {
                 _connection: input._connection.clone(),
@@ -571,7 +616,8 @@ pub fn ai_vision_to_text(input: AiVisionToTextInput) -> Result<AiVisionToTextOut
         )
     })?;
 
-    match connection.integration_id.as_str() {
+    let integration_id = resolve_integration_id(connection)?;
+    match integration_id.as_str() {
         "openai_api_key" => {
             let openai_input = openai::VisionToTextInput {
                 _connection: input._connection.clone(),
@@ -737,7 +783,8 @@ pub fn ai_vision_to_image(input: AiVisionToImageInput) -> Result<AiVisionToImage
         )
     })?;
 
-    match connection.integration_id.as_str() {
+    let integration_id = resolve_integration_id(connection)?;
+    match integration_id.as_str() {
         "openai_api_key" => {
             let openai_input = openai::VisionToImageInput {
                 _connection: input._connection.clone(),
