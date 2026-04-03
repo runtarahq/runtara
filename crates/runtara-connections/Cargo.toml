@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Connection management for runtara — CRUD, OAuth2, rate limiting"
+publish = false
 keywords = ["durable", "workflow", "connections", "oauth"]
 categories = ["web-programming"]
 

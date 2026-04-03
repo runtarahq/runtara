@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Text parsing utilities for runtara DSL schema fields"
+publish = false
 keywords = ["durable", "workflow", "text", "parsing"]
 categories = ["development-tools"]
 
