@@ -1954,6 +1954,7 @@ mod tests {
                 memory: None,
                 output_schema: None,
             }),
+            breakpoint: None,
         }
     }
 
@@ -1969,6 +1970,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: Some("Done".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -2012,6 +2014,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 compensation: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2020,6 +2023,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: Some("Done".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -2220,6 +2224,7 @@ mod tests {
                     memory: None,
                     output_schema: None,
                 }),
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2228,6 +2233,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -2270,6 +2276,7 @@ mod tests {
                 memory: None,
                 output_schema: None,
             }),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx, &graph).unwrap();
@@ -2292,6 +2299,7 @@ mod tests {
                 id: "child_finish".to_string(),
                 name: Some("Child Done".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         let child_graph = ExecutionGraph {
@@ -2325,6 +2333,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2333,6 +2342,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: Some("Done".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 

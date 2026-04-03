@@ -515,6 +515,7 @@ mod tests {
                 id: entry_point.to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -557,6 +558,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         }
     }
 
@@ -584,6 +586,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -621,6 +624,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -675,6 +679,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -712,6 +717,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -812,6 +818,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -921,6 +928,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -973,6 +981,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1010,6 +1019,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1056,6 +1066,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1093,6 +1104,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1134,6 +1146,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1171,6 +1184,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1212,6 +1226,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1253,6 +1268,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1302,6 +1318,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1345,6 +1362,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1413,6 +1431,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1469,6 +1488,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1506,6 +1526,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();

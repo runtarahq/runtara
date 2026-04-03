@@ -178,6 +178,7 @@ fn test_runner_handle_creation() {
         tenant_id: "tenant-789".to_string(),
         started_at: chrono::Utc::now(),
         spawned_pid: Some(12345),
+        child: None,
     };
 
     assert_eq!(handle.handle_id, "handle-123");
@@ -194,6 +195,7 @@ fn test_runner_handle_clone() {
         tenant_id: "t1".to_string(),
         started_at: chrono::Utc::now(),
         spawned_pid: None,
+        child: None,
     };
 
     let cloned = handle.clone();
@@ -210,6 +212,7 @@ fn test_runner_handle_debug() {
         tenant_id: "t1".to_string(),
         started_at: chrono::Utc::now(),
         spawned_pid: None,
+        child: None,
     };
 
     let debug_str = format!("{:?}", handle);

@@ -274,6 +274,7 @@ mod tests {
                 id: entry_point.to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -317,6 +318,7 @@ mod tests {
                 timeout: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
+            breakpoint: None,
         }
     }
 
@@ -353,6 +355,7 @@ mod tests {
             })),
             config: None,
             subgraph: Box::new(create_minimal_graph("finish")),
+            breakpoint: None,
         };
 
         let tokens = emit(&while_step, &mut ctx).unwrap();
@@ -611,6 +614,7 @@ mod tests {
                 timeout: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
+            breakpoint: None,
         };
 
         let tokens = emit(&while_step, &mut ctx).unwrap();
@@ -670,6 +674,7 @@ mod tests {
                 timeout: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
+            breakpoint: None,
         };
 
         let tokens = emit(&while_step, &mut ctx).unwrap();

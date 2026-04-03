@@ -131,6 +131,7 @@ fn create_minimal_finish_graph() -> ExecutionGraph {
             id: "finish".to_string(),
             name: Some("Return output".to_string()),
             input_mapping: Some(input_mapping),
+            breakpoint: None,
         }),
     );
 
@@ -181,6 +182,7 @@ fn create_transform_graph() -> ExecutionGraph {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         }),
     );
 
@@ -201,6 +203,7 @@ fn create_transform_graph() -> ExecutionGraph {
             id: "finish".to_string(),
             name: Some("Return result".to_string()),
             input_mapping: Some(finish_mapping),
+            breakpoint: None,
         }),
     );
 

@@ -1119,6 +1119,7 @@ mod tests {
                 id: entry_point.to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -1153,6 +1154,7 @@ mod tests {
                 timeout: None,
                 connection_id: None,
                 compensation: None,
+                breakpoint: None,
             }),
         );
 
@@ -1208,6 +1210,7 @@ mod tests {
                 timeout: None,
                 connection_id: None,
                 compensation: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -1223,6 +1226,7 @@ mod tests {
                 timeout: None,
                 connection_id: None,
                 compensation: None,
+                breakpoint: None,
             }),
         );
 
@@ -1274,6 +1278,7 @@ mod tests {
                 subgraph: Box::new(subgraph),
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
+                breakpoint: None,
             }),
         );
 
@@ -1326,6 +1331,7 @@ mod tests {
                 condition,
                 config: None,
                 subgraph: Box::new(subgraph),
+                breakpoint: None,
             }),
         );
 
@@ -1369,6 +1375,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                breakpoint: None,
             }),
         );
 
@@ -1602,6 +1609,7 @@ mod tests {
                 id: "cond1".to_string(),
                 name: None,
                 condition,
+                breakpoint: None,
             }),
         );
 
@@ -1687,6 +1695,7 @@ mod tests {
                         id: "finish".to_string(),
                         name: None,
                         input_mapping: None,
+                        breakpoint: None,
                     }),
                 );
                 s
@@ -1741,6 +1750,7 @@ mod tests {
                 id: "cond1".to_string(),
                 name: None,
                 condition,
+                breakpoint: None,
             }),
         );
 
@@ -1782,6 +1792,7 @@ mod tests {
                 id: "inner-cond".to_string(),
                 name: None,
                 condition,
+                breakpoint: None,
             }),
         );
 
@@ -1822,6 +1833,7 @@ mod tests {
                 subgraph: Box::new(subgraph),
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
+                breakpoint: None,
             }),
         );
 
@@ -2076,6 +2088,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                breakpoint: None,
             }),
         );
 
@@ -2138,6 +2151,7 @@ mod tests {
                 max_retries: None,
                 retry_delay: None,
                 timeout: None,
+                breakpoint: None,
             }),
         );
 
@@ -2262,6 +2276,7 @@ mod tests {
                 message: "Error occurred".to_string(),
                 level: LogLevel::Info,
                 context: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2270,6 +2285,7 @@ mod tests {
                 id: "error-finish".to_string(),
                 name: Some("Error Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -2325,6 +2341,7 @@ mod tests {
                 message: "error".to_string(),
                 level: LogLevel::Info,
                 context: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2333,6 +2350,7 @@ mod tests {
                 id: "error-cond".to_string(),
                 name: None,
                 condition,
+                breakpoint: None,
             }),
         );
 
@@ -2376,6 +2394,7 @@ mod tests {
                 message: "msg".to_string(),
                 level: LogLevel::Info,
                 context: None,
+                breakpoint: None,
             }),
         );
 
@@ -2420,6 +2439,7 @@ mod tests {
                 message: "msg".to_string(),
                 level: LogLevel::Info,
                 context: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2428,6 +2448,7 @@ mod tests {
                 id: "step2".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2436,6 +2457,7 @@ mod tests {
                 id: "error-step".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -2521,6 +2543,7 @@ mod tests {
                 id: "error-finish".to_string(),
                 name: Some("Error Handler".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         modified_graph.execution_plan.push(ExecutionPlanEdge {
@@ -2560,6 +2583,7 @@ mod tests {
                 message: "Error!".to_string(),
                 level: LogLevel::Error,
                 context: None,
+                breakpoint: None,
             }),
         );
         steps.insert(
@@ -2568,6 +2592,7 @@ mod tests {
                 id: "error-finish".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 

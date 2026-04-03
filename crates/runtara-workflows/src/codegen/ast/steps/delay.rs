@@ -112,6 +112,7 @@ mod tests {
             id: id.to_string(),
             name: Some("Test Delay".to_string()),
             duration_ms: duration,
+            breakpoint: None,
         }
     }
 

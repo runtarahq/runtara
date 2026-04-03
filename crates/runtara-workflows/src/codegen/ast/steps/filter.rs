@@ -177,6 +177,7 @@ mod tests {
                     ],
                 }),
             },
+            breakpoint: None,
         }
     }
 
@@ -373,6 +374,7 @@ mod tests {
                     ],
                 }),
             },
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -414,6 +416,7 @@ mod tests {
                     ],
                 }),
             },
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();

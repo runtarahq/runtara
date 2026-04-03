@@ -121,6 +121,7 @@ fn create_minimal_finish_graph() -> ExecutionGraph {
             id: "finish".to_string(),
             name: Some("Return output".to_string()),
             input_mapping: Some(input_mapping),
+            breakpoint: None,
         }),
     );
 

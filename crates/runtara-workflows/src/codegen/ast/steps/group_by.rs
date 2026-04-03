@@ -196,6 +196,7 @@ mod tests {
                 key: key_path.to_string(),
                 expected_keys: None,
             },
+            breakpoint: None,
         }
     }
 
@@ -320,6 +321,7 @@ mod tests {
                 key: "status".to_string(),
                 expected_keys: None,
             },
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -364,6 +366,7 @@ mod tests {
                     "failed".to_string(),
                 ]),
             },
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();

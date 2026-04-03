@@ -259,6 +259,7 @@ mod tests {
             message: "test".to_string(),
             level: LogLevel::Info,
             context: None,
+            breakpoint: None,
         })
     }
 
@@ -267,6 +268,7 @@ mod tests {
             id: id.to_string(),
             name: Some(format!("Finish {}", id)),
             input_mapping: None,
+            breakpoint: None,
         })
     }
 
@@ -277,6 +279,7 @@ mod tests {
             condition: ConditionExpression::Value(MappingValue::Immediate(ImmediateValue {
                 value: serde_json::json!(true),
             })),
+            breakpoint: None,
         })
     }
 
@@ -301,6 +304,7 @@ mod tests {
                 cases,
                 default: None,
             }),
+            breakpoint: None,
         })
     }
 
@@ -320,6 +324,7 @@ mod tests {
                 }],
                 default: None,
             }),
+            breakpoint: None,
         })
     }
 

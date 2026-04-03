@@ -146,6 +146,7 @@ mod tests {
             id: step_id.to_string(),
             name: Some("Test Finish".to_string()),
             input_mapping: None,
+            breakpoint: None,
         }
     }
 
@@ -216,6 +217,7 @@ mod tests {
             id: "finish-mapped".to_string(),
             name: Some("Mapped Finish".to_string()),
             input_mapping: Some(mapping),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -236,6 +238,7 @@ mod tests {
             id: "finish-empty".to_string(),
             name: Some("Empty Mapping".to_string()),
             input_mapping: Some(HashMap::new()),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -317,6 +320,7 @@ mod tests {
             id: "finish-unnamed".to_string(),
             name: None, // No name
             input_mapping: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -344,6 +348,7 @@ mod tests {
             id: "finish-immediate".to_string(),
             name: Some("Immediate Finish".to_string()),
             input_mapping: Some(mapping),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();

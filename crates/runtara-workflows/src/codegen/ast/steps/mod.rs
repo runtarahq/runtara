@@ -1186,6 +1186,7 @@ mod tests {
                 id: entry_point.to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
 
@@ -1231,6 +1232,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = split::emit(&split_step, &mut ctx).unwrap();
@@ -1284,6 +1286,7 @@ mod tests {
                 timeout: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
+            breakpoint: None,
         };
 
         let tokens = while_loop::emit(&while_step, &mut ctx).unwrap();
@@ -1321,6 +1324,7 @@ mod tests {
             timeout: None,
             connection_id: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx).unwrap();
@@ -1383,6 +1387,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            breakpoint: None,
         };
 
         let tokens = start_scenario::emit(&start_scenario_step, &mut ctx).unwrap();
@@ -1555,6 +1560,7 @@ mod tests {
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
+            breakpoint: None,
         };
 
         let tokens = split::emit(&split_step, &mut ctx).unwrap();
@@ -1593,6 +1599,7 @@ mod tests {
             timeout: None,
             connection_id: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx).unwrap();
@@ -1642,6 +1649,7 @@ mod tests {
                 timeout: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
+            breakpoint: None,
         };
 
         let tokens = while_loop::emit(&while_step, &mut ctx).unwrap();
@@ -1684,6 +1692,7 @@ mod tests {
             id: "conditional-debug-test".to_string(),
             name: Some("Debug Conditional".to_string()),
             condition,
+            breakpoint: None,
         };
 
         let graph = create_minimal_graph("finish");
@@ -1712,6 +1721,7 @@ mod tests {
             id: "finish-debug-test".to_string(),
             name: Some("Debug Finish".to_string()),
             input_mapping: None,
+            breakpoint: None,
         };
 
         let tokens = finish::emit(&finish_step, &mut ctx).unwrap();
@@ -1745,6 +1755,7 @@ mod tests {
                 cases: vec![],
                 default: None,
             }),
+            breakpoint: None,
         };
 
         let graph = create_minimal_graph("finish");

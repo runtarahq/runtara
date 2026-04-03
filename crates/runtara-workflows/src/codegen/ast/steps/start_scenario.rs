@@ -559,6 +559,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            breakpoint: None,
         }
     }
 
@@ -572,6 +573,7 @@ mod tests {
             max_retries: None,
             retry_delay: None,
             timeout: None,
+            breakpoint: None,
         }
     }
 
@@ -583,6 +585,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         ExecutionGraph {
@@ -1683,6 +1686,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         ExecutionGraph {

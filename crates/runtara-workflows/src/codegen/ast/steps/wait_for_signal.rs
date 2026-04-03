@@ -380,6 +380,7 @@ mod tests {
             timeout_ms: None,
             poll_interval_ms: None,
             response_schema: None,
+            breakpoint: None,
         }
     }
 
@@ -393,6 +394,7 @@ mod tests {
             })),
             poll_interval_ms: None,
             response_schema: None,
+            breakpoint: None,
         }
     }
 
@@ -444,6 +446,7 @@ mod tests {
             timeout_ms: None,
             poll_interval_ms: Some(500),
             response_schema: None,
+            breakpoint: None,
         };
         let mut ctx = EmitContext::new(false);
         let result = emit(&step, &mut ctx);

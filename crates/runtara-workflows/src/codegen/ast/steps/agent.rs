@@ -485,6 +485,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         }
     }
 
@@ -560,6 +561,7 @@ mod tests {
             retry_delay: Some(2000),
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -598,6 +600,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -625,6 +628,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -651,6 +655,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -788,6 +793,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -859,6 +865,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -1015,6 +1022,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             compensation: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();

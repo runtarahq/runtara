@@ -420,6 +420,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: Some("Finish".to_string()),
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         ExecutionGraph {

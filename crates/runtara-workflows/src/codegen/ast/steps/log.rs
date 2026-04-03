@@ -123,6 +123,7 @@ mod tests {
             level,
             message: message.to_string(),
             context: None,
+            breakpoint: None,
         }
     }
 
@@ -238,6 +239,7 @@ mod tests {
             level: LogLevel::Info,
             message: "User action".to_string(),
             context: Some(context),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -259,6 +261,7 @@ mod tests {
             level: LogLevel::Info,
             message: "message".to_string(),
             context: Some(HashMap::new()),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -311,6 +314,7 @@ mod tests {
             level: LogLevel::Info,
             message: "unnamed log".to_string(),
             context: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();

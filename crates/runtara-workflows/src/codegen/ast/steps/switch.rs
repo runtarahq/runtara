@@ -636,6 +636,7 @@ mod tests {
                 id: "finish".to_string(),
                 name: None,
                 input_mapping: None,
+                breakpoint: None,
             }),
         );
         ExecutionGraph {
@@ -667,6 +668,7 @@ mod tests {
                 cases,
                 default: Some(serde_json::json!({"result": "default"})),
             }),
+            breakpoint: None,
         }
     }
 
@@ -952,6 +954,7 @@ mod tests {
                 cases: vec![],
                 default: None,
             }),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx, &empty_graph()).unwrap();
@@ -970,6 +973,7 @@ mod tests {
             id: "switch-no-config".to_string(),
             name: Some("Empty Switch".to_string()),
             config: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx, &empty_graph()).unwrap();
@@ -998,6 +1002,7 @@ mod tests {
                 )],
                 default: None,
             }),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx, &empty_graph()).unwrap();
@@ -1176,6 +1181,7 @@ mod tests {
             message: "test".to_string(),
             level: LogLevel::Info,
             context: None,
+            breakpoint: None,
         })
     }
 
@@ -1184,6 +1190,7 @@ mod tests {
             id: id.to_string(),
             name: Some(format!("Finish {}", id)),
             input_mapping: None,
+            breakpoint: None,
         })
     }
 
@@ -1223,6 +1230,7 @@ mod tests {
                     ],
                     default: Some(serde_json::json!({"s": "unknown"})),
                 }),
+                breakpoint: None,
             }),
         );
         steps.insert("s1".to_string(), make_log_step("s1"));
@@ -1420,6 +1428,7 @@ mod tests {
                     }],
                     default: Some(serde_json::json!({"v": 0})),
                 }),
+                breakpoint: None,
             }),
         );
         steps.insert("s1".to_string(), make_log_step("s1"));
@@ -1523,6 +1532,7 @@ mod tests {
                     }],
                     default: Some(serde_json::json!({"hit": false})),
                 }),
+                breakpoint: None,
             }),
         );
         steps.insert("s1".to_string(), make_log_step("s1"));
@@ -1591,6 +1601,7 @@ mod tests {
                     }],
                     default: Some(serde_json::json!({})),
                 }),
+                breakpoint: None,
             }),
         );
         steps.insert("fallback".to_string(), make_log_step("fallback"));

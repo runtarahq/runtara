@@ -202,6 +202,7 @@ mod tests {
             message: message.to_string(),
             severity: None,
             context: None,
+            breakpoint: None,
         }
     }
 
@@ -287,6 +288,7 @@ mod tests {
             message: "Credit limit exceeded".to_string(),
             severity: Some(ErrorSeverity::Warning), // Warning = expected business outcome
             context: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -313,6 +315,7 @@ mod tests {
             message: "Info level error".to_string(),
             severity: Some(ErrorSeverity::Info),
             context: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -332,6 +335,7 @@ mod tests {
             message: "Warning level error".to_string(),
             severity: Some(ErrorSeverity::Warning),
             context: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -354,6 +358,7 @@ mod tests {
             message: "Critical error".to_string(),
             severity: Some(ErrorSeverity::Critical),
             context: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -424,6 +429,7 @@ mod tests {
             message: "Order failed".to_string(),
             severity: None,
             context: Some(context),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -447,6 +453,7 @@ mod tests {
             message: "message".to_string(),
             severity: None,
             context: Some(HashMap::new()),
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -513,6 +520,7 @@ mod tests {
             message: "unnamed error".to_string(),
             severity: None,
             context: None,
+            breakpoint: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
