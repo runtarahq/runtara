@@ -420,7 +420,7 @@ impl ConnectionRepository {
         query.push_str(" ORDER BY created_at DESC");
 
         // Execute query with dynamic parameter binding
-        let rows = if !integration_ids.is_empty() && status.is_some() {
+        let rows = if let (false, Some(status_val)) = (integration_ids.is_empty(), &status) {
             // Has integration_ids AND status filter
             sqlx::query_as::<
                 _,
@@ -440,7 +440,7 @@ impl ConnectionRepository {
             >(&query)
             .bind(tenant_id)
             .bind(integration_ids)
-            .bind(status.unwrap())
+            .bind(status_val)
             .fetch_all(&self.pool)
             .await?
         } else if !integration_ids.is_empty() {
