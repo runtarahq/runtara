@@ -18,6 +18,8 @@ members = [
     "crates/runtara-test-harness",
     # Text parsing
     "crates/runtara-text-parser",
+    # Connection management
+    "crates/runtara-connections",
 ]
 default-members = ["crates/runtara-core"]
 
