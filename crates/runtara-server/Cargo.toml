@@ -21,7 +21,7 @@ runtara-agents = { path = "../runtara-agents", default-features = false, feature
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
 runtara-core = { path = "../runtara-core", features = ["server"] }
 runtara-environment = { path = "../runtara-environment" }
-runtara-object-store = { path = "../../runtara-object-store" }
+runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections" }
 

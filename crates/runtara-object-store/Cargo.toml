@@ -1,0 +1,24 @@
+[package]
+name = "runtara-object-store"
+version = "0.1.0"
+edition = "2024"
+description = "Schema-driven dynamic PostgreSQL object store"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/runtarahq/runtara-object-store"
+readme = "README.md"
+keywords = ["postgresql", "schema", "dynamic", "object-store", "database"]
+categories = ["database"]
+
+[dependencies]
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "rust_decimal", "tls-rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt"] }
+thiserror = "2.0"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+rust_decimal = { version = "1", features = ["db-postgres"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

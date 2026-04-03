@@ -22,6 +22,8 @@ members = [
     "crates/runtara-connections",
     # HTTP API server
     "crates/runtara-server",
+    # Object model storage
+    "crates/runtara-object-store",
 ]
 default-members = ["crates/runtara-core"]
 
