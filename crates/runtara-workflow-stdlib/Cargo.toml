@@ -76,3 +76,7 @@ opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "trace", "logs"]
 opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "trace", "logs"], optional = true }
 tracing-opentelemetry = { version = "0.29", optional = true }
 opentelemetry-appender-tracing = { version = "0.28", optional = true }
+
+[dev-dependencies]
+runtara-dsl = { path = "../runtara-dsl" }
+inventory = "0.3"
