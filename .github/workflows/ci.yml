@@ -11,6 +11,26 @@ env:
   SQLX_OFFLINE: "true"
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: ". -> target"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   build:
     runs-on: ubuntu-latest
 
@@ -27,12 +47,6 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --all-targets
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Save build cache
         uses: actions/cache/save@v4
