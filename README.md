@@ -17,14 +17,18 @@ Runtara is a Rust workspace for building and running durable workflows. It inclu
 │   ├── runtara-agent-macro/
 │   ├── runtara-agents/
 │   ├── runtara-ai/
+│   ├── runtara-connections/
 │   ├── runtara-core/
 │   ├── runtara-dsl/
 │   ├── runtara-environment/
 │   ├── runtara-http/
 │   ├── runtara-management-sdk/
+│   ├── runtara-object-store/
 │   ├── runtara-sdk/
 │   ├── runtara-sdk-macros/
+│   ├── runtara-server/
 │   ├── runtara-test-harness/
+│   ├── runtara-text-parser/
 │   ├── runtara-workflow-stdlib/
 │   └── runtara-workflows/
 ├── docs/
@@ -85,6 +89,7 @@ Runner implementations currently present in the repo:
 |------|---------|
 | `runtara-core` | Core runtime: checkpoints, signals, events, durable sleep, instance HTTP API |
 | `runtara-environment` | Management plane: image registry, instance lifecycle, runners, wake scheduling |
+| `runtara-server` | Complete HTTP API server: scenarios, connections, channels, workers, MCP integration |
 | `runtara-management-sdk` | SDK and CLI-facing client for `runtara-environment` |
 | `runtara-sdk` | Instance-side SDK used by compiled workflows |
 | `runtara-sdk-macros` | Proc macros for `runtara-sdk` |
@@ -93,9 +98,123 @@ Runner implementations currently present in the repo:
 | `runtara-workflow-stdlib` | Runtime/stdlib linked into compiled workflows |
 | `runtara-agents` | Built-in agent implementations |
 | `runtara-agent-macro` | Proc macros for defining custom agents/capabilities |
+| `runtara-connections` | Connection management: CRUD, OAuth2, rate limiting |
+| `runtara-object-store` | Schema-driven dynamic PostgreSQL object store |
 | `runtara-http` | Shared HTTP client abstraction used across the workspace |
 | `runtara-ai` | AI/LLM-related integration helpers for workflows |
+| `runtara-text-parser` | Text parsing utilities for DSL schema fields |
 | `runtara-test-harness` | Internal binary for isolated agent capability execution |
+
+## Component Architecture
+
+Runtara is organized into three independent layers. Each layer builds on the one below it, but can also be used on its own.
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│  runtara-server                                                  │
+│  Full application server: scenarios, connections, auth, MCP,     │
+│  channels, workers, file storage, object model                   │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  runtara-environment                                       │  │
+│  │  Management plane: image registry, instance lifecycle,     │  │
+│  │  runners (OCI/Native/Wasm), wake scheduling                │  │
+│  │  ┌──────────────────────────────────────────────────────┐  │  │
+│  │  │  runtara-core + runtara-sdk                          │  │  │
+│  │  │  Durable execution: checkpoints, signals, events,    │  │  │
+│  │  │  durable sleep, compensation (saga rollback)          │  │  │
+│  │  └──────────────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Layer 1: Durable Execution Framework (`runtara-core` + `runtara-sdk`)
+
+The foundation layer. Provides checkpoint-based durability for long-running processes.
+
+**`runtara-core`** is the persistence engine. It exposes an HTTP API (default port 8001) that workflow instances call to save checkpoints, record events, report completion, and poll for signals. All state is stored in PostgreSQL or SQLite. If an instance crashes, it can resume from its last checkpoint with full context intact.
+
+**`runtara-sdk`** is the client library linked into compiled workflows. It wraps the core protocol behind a Rust API — `checkpoint()`, `sleep()`, `completed()`, `poll_signal()`, etc. The `#[durable]` proc macro adds transparent checkpoint-and-resume to any function. The SDK has two backends: HTTP (for containerized/remote instances) and embedded (for in-process use with no network overhead).
+
+**Use this layer alone when** you want durable execution without container orchestration. Embed `runtara-core` into your Rust application, use the SDK to checkpoint your own long-running tasks, and manage process lifecycle yourself.
+
+```rust
+// Embed core for direct persistence access
+let persistence = Arc::new(PostgresPersistence::new(pool));
+let runtime = CoreRuntime::builder()
+    .persistence(persistence)
+    .bind_addr("127.0.0.1:8001".parse()?)
+    .build()?
+    .start()
+    .await?;
+```
+
+### Layer 2: Management Plane (`runtara-environment`)
+
+Adds container orchestration and instance lifecycle management on top of Layer 1.
+
+`runtara-environment` is a management plane that registers workflow images (compiled binaries), launches instances in isolated runners, monitors heartbeats, handles durable sleep wake-up, and proxies signals. It exposes an HTTP API (default port 8002) for image and instance operations, and can optionally embed `runtara-core` in the same process.
+
+Runner backends:
+
+| Runner | Use case |
+|--------|----------|
+| **OCI** | Production — runs instances in `crun` containers with cgroup isolation and metrics |
+| **Native** | Development — direct child process execution, no container runtime needed |
+| **Wasm** | Sandboxed — runs WASM modules via `wasmtime` with WASI support |
+| **Mock** | Testing — simulates execution without running real processes |
+
+**Use this layer when** you need to run compiled workflows as isolated units but want to manage scenarios, auth, and application logic in your own code. Embed `runtara-environment` as a library (see `docs/embedding-runtara.md`) and interact with it through `runtara-management-sdk`.
+
+```rust
+// Embed environment with OCI runner and embedded core
+let runtime = EnvironmentRuntime::builder()
+    .pool(pool)
+    .runner(Arc::new(OciRunner::from_env()))
+    .core_persistence(persistence)
+    .core_addr("127.0.0.1:8001")
+    .bind_addr("0.0.0.0:8002".parse()?)
+    .data_dir("/var/lib/runtara")
+    .build()?
+    .start()
+    .await?;
+```
+
+### Layer 3: Application Server (`runtara-server`)
+
+A complete, batteries-included server that embeds both Layer 1 and Layer 2 and adds everything needed to run Runtara as a product.
+
+`runtara-server` is a library crate (no binary — you host it in your own `main`). It provides:
+
+- **Scenario management** — CRUD, compilation, execution, scheduling, and replay of workflows
+- **Authentication** — JWT (with JWKS) and API key auth with tenant isolation
+- **Connections** — third-party credential storage with OAuth2 flows and rate limiting
+- **Object model** — user-defined schemas and instance CRUD backed by a separate PostgreSQL database
+- **File storage** — S3-compatible bucket and file management for workflows
+- **Channels** — webhook integrations (Slack, Teams, Telegram, Mailgun) for conversational triggers
+- **MCP server** — Model Context Protocol interface so AI agents can manage scenarios, executions, and connections through tools
+- **Background workers** — trigger execution, compilation queues, cron scheduling, cleanup
+- **Observability** — OpenTelemetry with Datadog, HTTP metrics middleware, system analytics
+
+**Use this layer when** you want the full Runtara platform. It is the highest-level entry point and handles everything from auth to execution to monitoring.
+
+```rust
+// Start the full platform
+let pool = PgPoolOptions::new()
+    .connect(&std::env::var("DATABASE_URL")?)
+    .await?;
+runtara_server::start(pool).await?;
+```
+
+### Choosing a Layer
+
+| You want to... | Use |
+|-----------------|-----|
+| Add durable checkpointing to your own long-running tasks | Layer 1 (`runtara-core` + `runtara-sdk`) |
+| Run compiled workflows in containers with lifecycle management | Layer 2 (`runtara-environment`) |
+| Deploy the full Runtara platform with auth, scenarios, MCP, and channels | Layer 3 (`runtara-server`) |
+| Embed workflow execution inside an existing Rust service | Layer 2 as a library (see `docs/embedding-runtara.md`) |
+
+Each higher layer embeds the layers below it. You never need to run them as separate processes unless you want to scale them independently.
 
 ## Quick Start
 
