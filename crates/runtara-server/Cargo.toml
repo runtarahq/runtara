@@ -12,6 +12,10 @@ categories = ["web-programming"]
 name = "runtara_server"
 path = "src/lib.rs"
 
+[[bin]]
+name = "runtara-server"
+path = "src/main.rs"
+
 [dependencies]
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }

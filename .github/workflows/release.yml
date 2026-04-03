@@ -31,18 +31,23 @@ jobs:
               uses: actions-rust-lang/setup-rust-toolchain@v1
 
             - name: Build release binaries
-              run: cargo build --release -p runtara-core -p runtara-environment
+              run: cargo build --release -p runtara-server -p runtara-core -p runtara-environment
 
             - name: Strip binaries
               run: |
+                  strip target/release/runtara-server
                   strip target/release/runtara-core
                   strip target/release/runtara-environment
 
             - name: Create tarballs
+              env:
+                  VERSION: ${{ steps.get_version.outputs.version }}
               run: |
                   cd target/release
-                  tar czf runtara-core-${{ steps.get_version.outputs.version }}-x86_64-linux.tar.gz runtara-core
-                  tar czf runtara-environment-${{ steps.get_version.outputs.version }}-x86_64-linux.tar.gz runtara-environment
+                  tar czf "runtara-server-${VERSION}-x86_64-linux.tar.gz" runtara-server
+                  sha256sum "runtara-server-${VERSION}-x86_64-linux.tar.gz" > "runtara-server-${VERSION}-x86_64-linux.tar.gz.sha256"
+                  tar czf "runtara-core-${VERSION}-x86_64-linux.tar.gz" runtara-core
+                  tar czf "runtara-environment-${VERSION}-x86_64-linux.tar.gz" runtara-environment
 
             - name: Build DEB packages
               env:
@@ -54,10 +59,9 @@ jobs:
             - name: Create GitHub Release and upload assets
               env:
                   GH_TOKEN: ${{ github.token }}
+                  VERSION: ${{ steps.get_version.outputs.version }}
+                  TAG: ${{ github.ref_name }}
               run: |
-                  VERSION="${{ steps.get_version.outputs.version }}"
-                  TAG="${{ github.ref_name }}"
-
                   # Determine if prerelease
                   PRERELEASE_FLAG=""
                   if [[ "$TAG" == *-* ]]; then
@@ -68,10 +72,12 @@ jobs:
                   gh release create "$TAG" \
                       --title "Release $VERSION" \
                       $PRERELEASE_FLAG \
-                      target/release/runtara-core-${VERSION}-x86_64-linux.tar.gz \
-                      target/release/runtara-environment-${VERSION}-x86_64-linux.tar.gz \
-                      target/runtara-core_${VERSION}_amd64.deb \
-                      target/runtara-environment_${VERSION}_amd64.deb
+                      "target/release/runtara-server-${VERSION}-x86_64-linux.tar.gz" \
+                      "target/release/runtara-server-${VERSION}-x86_64-linux.tar.gz.sha256" \
+                      "target/release/runtara-core-${VERSION}-x86_64-linux.tar.gz" \
+                      "target/release/runtara-environment-${VERSION}-x86_64-linux.tar.gz" \
+                      "target/runtara-core_${VERSION}_amd64.deb" \
+                      "target/runtara-environment_${VERSION}_amd64.deb"
 
     # Publish crates in dependency order as separate jobs for retry capability
     # Layer 1: No internal dependencies
