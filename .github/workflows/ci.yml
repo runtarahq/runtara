@@ -146,6 +146,30 @@ jobs:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-core -- --test-threads=1
 
+  test-server:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.sha }}
+
+      - name: Run runtara-server tests
+        run: cargo test -p runtara-server
+
   test-environment:
     runs-on: ubuntu-latest
     needs: build
