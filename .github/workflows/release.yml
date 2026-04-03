@@ -117,6 +117,24 @@ jobs:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
               run: cargo publish -p runtara-agent-macro --allow-dirty
 
+    publish-http:
+        name: Publish runtara-http
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+            - name: Get version from tag
+              id: get_version
+              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            - name: Setup Rust toolchain
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+            - name: Update versions from tag
+              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - name: Publish
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+              run: cargo publish -p runtara-http --allow-dirty
+
     publish-sdk-macros:
         name: Publish runtara-sdk-macros
         runs-on: ubuntu-latest
@@ -157,10 +175,31 @@ jobs:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
               run: cargo publish -p runtara-core --allow-dirty
 
+    publish-ai:
+        name: Publish runtara-ai
+        runs-on: ubuntu-latest
+        needs: [publish-http]
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+            - name: Get version from tag
+              id: get_version
+              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            - name: Setup Rust toolchain
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+            - name: Update versions from tag
+              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - name: Wait for crates.io index
+              run: sleep 30
+            - name: Publish
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+              run: cargo publish -p runtara-ai --allow-dirty
+
     publish-agents:
         name: Publish runtara-agents
         runs-on: ubuntu-latest
-        needs: [publish-dsl, publish-agent-macro]
+        needs: [publish-dsl, publish-agent-macro, publish-http]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
@@ -181,7 +220,7 @@ jobs:
     publish-sdk:
         name: Publish runtara-sdk
         runs-on: ubuntu-latest
-        needs: [publish-sdk-macros, publish-core]
+        needs: [publish-sdk-macros, publish-core, publish-http]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
@@ -202,7 +241,7 @@ jobs:
     publish-workflows:
         name: Publish runtara-workflows
         runs-on: ubuntu-latest
-        needs: [publish-dsl]
+        needs: [publish-dsl, publish-ai]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
@@ -224,7 +263,7 @@ jobs:
     publish-workflow-stdlib:
         name: Publish runtara-workflow-stdlib
         runs-on: ubuntu-latest
-        needs: [publish-agents, publish-sdk]
+        needs: [publish-agents, publish-sdk, publish-ai]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
