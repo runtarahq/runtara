@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::types::*;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
+use crate::types::*;
 
 /// Create a new connection
 pub async fn create_connection_handler(

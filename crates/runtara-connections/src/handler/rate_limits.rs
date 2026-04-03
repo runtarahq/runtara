@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::types::*;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::rate_limits::{RateLimitService, ServiceError};
+use crate::types::*;
 
 /// List rate limit status for all tenant connections
 ///

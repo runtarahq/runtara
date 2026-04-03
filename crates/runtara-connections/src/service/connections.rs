@@ -3,9 +3,9 @@
 //! Business logic for connection management
 //! Handles validation and error mapping
 
-use crate::types::*;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::rate_limits::RateLimitService;
+use crate::types::*;
 use crate::util::rate_limit_defaults::get_default_rate_limit_config;
 use std::sync::Arc;
 use uuid::Uuid;

@@ -250,8 +250,10 @@ impl RuntimeClient {
             }
 
             // Service name (standard OTEL var, derived from scenario_id)
-            options =
-                options.with_env_var("OTEL_SERVICE_NAME", format!("runtara-scenario-{}", scenario_id));
+            options = options.with_env_var(
+                "OTEL_SERVICE_NAME",
+                format!("runtara-scenario-{}", scenario_id),
+            );
 
             // Resource attributes - map vendor-specific vars (DD_*) to standard OTEL format
             if let Some(attrs) = trace_context::build_resource_attributes() {

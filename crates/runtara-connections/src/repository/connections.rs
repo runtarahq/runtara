@@ -373,13 +373,12 @@ impl ConnectionRepository {
 
     /// Delete a connection
     pub async fn delete(&self, id: &str, tenant_id: &str) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
-            "DELETE FROM connection_data_entity WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM connection_data_entity WHERE id = $1 AND tenant_id = $2")
+                .bind(id)
+                .bind(tenant_id)
+                .execute(&self.pool)
+                .await?;
 
         Ok(result.rows_affected())
     }

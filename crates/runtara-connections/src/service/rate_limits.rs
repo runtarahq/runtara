@@ -3,8 +3,8 @@
 //! Business logic for rate limit status endpoints
 //! Combines PostgreSQL configuration with Redis runtime state
 
-use crate::types::*;
 use crate::repository::connections::ConnectionRepository;
+use crate::types::*;
 use redis::Commands;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -43,7 +43,10 @@ impl RateLimitService {
     }
 
     /// Create service with a specific Redis URL
-    pub fn with_redis_url(connection_repository: Arc<ConnectionRepository>, redis_url: Option<String>) -> Self {
+    pub fn with_redis_url(
+        connection_repository: Arc<ConnectionRepository>,
+        redis_url: Option<String>,
+    ) -> Self {
         Self {
             connection_repository,
             redis_url,
@@ -61,7 +64,11 @@ impl RateLimitService {
     }
 
     /// Create service with both Redis URL and database pool
-    pub fn with_redis_url_and_db_pool(connection_repository: Arc<ConnectionRepository>, redis_url: Option<String>, db_pool: PgPool) -> Self {
+    pub fn with_redis_url_and_db_pool(
+        connection_repository: Arc<ConnectionRepository>,
+        redis_url: Option<String>,
+        db_pool: PgPool,
+    ) -> Self {
         Self {
             connection_repository,
             redis_url,
