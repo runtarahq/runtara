@@ -459,8 +459,8 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    // Configure Runtara to use SMO-specific stdlib for workflow compilation
-    // This enables product-specific agents in compiled workflows
+    // Configure Runtara stdlib for workflow compilation
+    // This enables agents in compiled workflows
     // SAFETY: This is called early in main() before any threads are spawned,
     // so there are no data races. The environment variable is only read later
     // during workflow compilation.
@@ -576,7 +576,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "runtime",
         tenant_id = %tenant_id,
         version = %version,
-        service = "smo-runtime"
+        service = "runtara-server"
     );
     let _guard = root_span.enter();
 
@@ -916,7 +916,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // CORS is handled by the gateway (smo-gateway) — the backend does NOT add
+    // CORS is handled by the API gateway — the backend does NOT add
     // CORS headers to avoid duplicate/conflicting Access-Control-Allow-Origin values.
     // For local development without the gateway, set ENABLE_CORS=true.
     let cors = if std::env::var("ENABLE_CORS").is_ok() {
