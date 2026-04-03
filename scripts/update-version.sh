@@ -36,7 +36,15 @@ cd "$ROOT_DIR"
 
 # Update workspace version in root Cargo.toml
 echo "Updating workspace version in Cargo.toml..."
-sed -i "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
+sed_inplace() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
+sed_inplace "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" Cargo.toml
 
 # Update path dependency version constraints in all crate Cargo.toml files
 # These are lines like: runtara-protocol = { path = "../runtara-protocol", version = "0.1" }
@@ -48,7 +56,7 @@ for toml in $CRATE_TOMLS; do
     # Match pattern: runtara-xxx = { path = "...", version = "X.Y" }
     if grep -q 'runtara-.*path.*version' "$toml"; then
         echo "  Updating $toml"
-        sed -i "s/\(runtara-[a-z-]*\s*=\s*{[^}]*version\s*=\s*\)\"[0-9.]*\"/\1\"$MAJOR_MINOR\"/" "$toml"
+        sed_inplace "s/\(runtara-[a-z-]*\s*=\s*{[^}]*version\s*=\s*\)\"[0-9.]*\"/\1\"$MAJOR_MINOR\"/" "$toml"
     fi
 done
 

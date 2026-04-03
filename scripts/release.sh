@@ -29,8 +29,13 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
     exit 1
 fi
 
-# --- Read current version ---
-CURRENT_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+# --- Read current version from latest git tag ---
+LATEST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+if [ -z "$LATEST_TAG" ]; then
+    echo "Error: No version tags found (expected v*.*.* format)."
+    exit 1
+fi
+CURRENT_VERSION="${LATEST_TAG#v}"
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
 echo "Current version: $CURRENT_VERSION"
