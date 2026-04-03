@@ -682,12 +682,11 @@ impl ManagementSdk {
             return Err(Self::parse_error_response(resp).await);
         };
 
-        if !json.success {
-            if let Some(ref error) = json.error {
-                if error.contains("not found") {
-                    return Err(SdkError::ImageNotFound(error.clone()));
-                }
-            }
+        if !json.success
+            && let Some(ref error) = json.error
+            && error.contains("not found")
+        {
+            return Err(SdkError::ImageNotFound(error.clone()));
         }
 
         Ok(StartInstanceResult {

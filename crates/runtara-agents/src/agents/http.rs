@@ -1006,7 +1006,7 @@ mod tests {
 
         let response = result.unwrap();
         assert_eq!(response.status_code, 200);
-        assert!(response.headers.get("allow").is_some());
+        assert!(response.headers.contains_key("allow"));
     }
 
     #[tokio::test]

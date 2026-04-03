@@ -738,6 +738,7 @@ mod tests {
     // -- Number tests --
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn number_valid() {
         let field = SchemaField {
             field_type: SchemaFieldType::Number,
@@ -745,7 +746,7 @@ mod tests {
         };
         let result = parse_text("3.14", &field);
         let v = assert_ok(&result);
-        assert!((v.as_f64().unwrap() - 3.14).abs() < f64::EPSILON);
+        assert!((v.as_f64().unwrap() - 3.14_f64).abs() < f64::EPSILON);
     }
 
     #[test]

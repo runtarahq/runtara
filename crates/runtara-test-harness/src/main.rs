@@ -150,10 +150,10 @@ mod tests {
 
         // Simulate connection injection
         let mut input = request.input.clone();
-        if let Some(conn) = &request.connection {
-            if let serde_json::Value::Object(ref mut map) = input {
-                map.insert("_connection".to_string(), conn.clone());
-            }
+        if let Some(conn) = &request.connection
+            && let serde_json::Value::Object(ref mut map) = input
+        {
+            map.insert("_connection".to_string(), conn.clone());
         }
 
         // Verify _connection was injected
@@ -173,10 +173,10 @@ mod tests {
 
         // Simulate connection injection
         let mut input = request.input.clone();
-        if let Some(conn) = &request.connection {
-            if let serde_json::Value::Object(ref mut map) = input {
-                map.insert("_connection".to_string(), conn.clone());
-            }
+        if let Some(conn) = &request.connection
+            && let serde_json::Value::Object(ref mut map) = input
+        {
+            map.insert("_connection".to_string(), conn.clone());
         }
 
         // Verify _connection was NOT injected
@@ -199,7 +199,7 @@ mod tests {
         let value = result.unwrap();
         // random-double returns a number between 0 and 1
         let num = value.as_f64().unwrap();
-        assert!(num >= 0.0 && num <= 1.0);
+        assert!((0.0..=1.0).contains(&num));
     }
 
     #[test]

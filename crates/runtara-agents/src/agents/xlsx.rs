@@ -742,6 +742,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_cell_to_value_types() {
         assert_eq!(cell_to_value(&Data::Empty), Value::Null);
         assert_eq!(cell_to_value(&Data::String("hello".into())), json!("hello"));

@@ -2695,6 +2695,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_extract_numbers_all_options() {
         let input = ExtractNumbersInput {
             text: Some("Values: -12.5, 3.14, -7".to_string()),

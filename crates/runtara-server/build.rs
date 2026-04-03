@@ -302,12 +302,11 @@ fn is_any_file_newer(dir: &Path, threshold: std::time::SystemTime) -> bool {
                 if is_any_file_newer(&path, threshold) {
                     return true;
                 }
-            } else if let Ok(meta) = fs::metadata(&path) {
-                if let Ok(modified) = meta.modified() {
-                    if modified > threshold {
-                        return true;
-                    }
-                }
+            } else if let Ok(meta) = fs::metadata(&path)
+                && let Ok(modified) = meta.modified()
+                && modified > threshold
+            {
+                return true;
             }
         }
     }
@@ -329,13 +328,13 @@ fn acquire_file_lock(lock_path: &Path) -> impl Drop {
 
     // Simple spin-lock with file existence
     for _ in 0..60 {
-        if !lock_path.exists() {
-            if let Ok(mut f) = fs::File::create(lock_path) {
-                let _ = f.write_all(format!("{}", std::process::id()).as_bytes());
-                return FileLock {
-                    path: lock_path.to_path_buf(),
-                };
-            }
+        if !lock_path.exists()
+            && let Ok(mut f) = fs::File::create(lock_path)
+        {
+            let _ = f.write_all(format!("{}", std::process::id()).as_bytes());
+            return FileLock {
+                path: lock_path.to_path_buf(),
+            };
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }

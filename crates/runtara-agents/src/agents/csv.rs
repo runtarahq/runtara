@@ -908,6 +908,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_infer_type() {
         assert_eq!(infer_type("true"), "Boolean");
         assert_eq!(infer_type("false"), "Boolean");
