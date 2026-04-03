@@ -10,10 +10,13 @@ pub mod metrics;
 pub mod middleware;
 pub mod observability;
 pub mod runtime_client;
+pub mod server;
 pub mod step_events;
 pub mod types;
 pub mod valkey;
 pub mod workers;
+
+pub use server::start;
 
 // Link runtara_agents crate to ensure inventory collects agent metadata at runtime
 // This is required for the runtime metadata API to work
