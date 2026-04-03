@@ -1,498 +1,362 @@
 # Runtara
 
-> **Beta Software**: This project is under active development and not yet production-ready. APIs may change without notice. Use with caution.
+> Beta software. APIs, crate boundaries, and runtime behavior are still evolving.
 
-A durable execution platform written in Rust for building business process automation products. Runtara provides the foundational infrastructure for crash-resilient workflows, enabling product teams to focus on business logic while the platform handles durability, orchestration, and execution.
+Runtara is a Rust workspace for building and running durable workflows. It includes:
 
-## Platform Overview
+- A workflow compiler for the Runtara JSON DSL
+- A runtime persistence layer for checkpoints, signals, events, and durable sleep
+- A management plane for registering workflow images and starting instances
+- SDKs, macros, agents, and stdlib crates used by compiled workflows
 
-Runtara is designed as a **platform** that products build on top of. It separates concerns between:
+## Current Repo Layout
 
-- **Platform (Runtara)**: Handles execution infrastructure, durability, and orchestration
-- **Product**: Defines business workflows, UI, and domain-specific logic
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           YOUR PRODUCT                                  │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────────────────┐ │
-│  │   Your UI   │  │  Your API    │  │     Workflow Definitions        │ │
-│  │  (Web/App)  │  │  (Backend)   │  │  (JSON scenarios using DSL)     │ │
-│  └──────┬──────┘  └──────┬───────┘  └────────────────┬────────────────┘ │
-└─────────┼────────────────┼───────────────────────────┼──────────────────┘
-          │                │                           │
-          ▼                ▼                           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                        RUNTARA PLATFORM                                 │
-│                                                                         │
-│  ┌──────────────────────┐       ┌───────────────────────────────────┐   │
-│  │  Management SDK      │       │         runtara-core              │   │
-│  │  - Start instances   │──────▶│  - Instance lifecycle management  │   │
-│  │  - Query status      │       │  - Checkpoint persistence (PG)    │   │
-│  │  - Send signals      │       │  - Wake scheduling & signals      │   │
-│  └──────────────────────┘       └──────────────┬────────────────────┘   │
-│                                                │ HTTP                   │
-│  ┌──────────────────────┐       ┌──────────────▼────────────────────┐   │
-│  │  runtara-environment │       │       Workflow Instance           │   │
-│  │  - OCI container exec│       │  - Compiled native binary         │   │
-│  │  - Image registry    │──────▶│  - runtara-sdk (durability)       │   │
-│  │  - Wake scheduling   │       │  - runtara-agents (integrations)  │   │
-│  └──────────────────────┘       └───────────────────────────────────┘   │
-│                                                                         │
-│  ┌──────────────────────┐                                               │
-│  │  runtara-workflows   │                                               │
-│  │  (Workflow Compiler) │  Built-in agents: HTTP, SFTP, CSV,           │
-│  │  - JSON DSL parsing  │                   XML, Transform...          │
-│  │  - Code generation   │                                               │
-│  │  - Native compilation│                                               │
-│  └──────────────────────┘                                               │
-└─────────────────────────────────────────────────────────────────────────┘
+```text
+.
+├── crates/
+│   ├── runtara-agent-macro/
+│   ├── runtara-agents/
+│   ├── runtara-ai/
+│   ├── runtara-core/
+│   ├── runtara-dsl/
+│   ├── runtara-environment/
+│   ├── runtara-http/
+│   ├── runtara-management-sdk/
+│   ├── runtara-sdk/
+│   ├── runtara-sdk-macros/
+│   ├── runtara-test-harness/
+│   ├── runtara-workflow-stdlib/
+│   └── runtara-workflows/
+├── docs/
+├── e2e/
+├── packaging/
+├── scripts/
+├── Cargo.toml
+└── start.sh
 ```
 
-Note: The Management SDK connects to `runtara-environment` (port 8002). Environment owns image registration and instance lifecycle. It proxies signals to `runtara-core` (port 8003) and passes the core address to instances so they can checkpoint and receive signals over HTTP.
+Important top-level directories:
 
-## Integration Points
+- `crates/`: all workspace members
+- `docs/`: architecture notes, transition plans, embedding guide, DSL spec
+- `e2e/`: shell-based end-to-end tests and sample workflows
+- `packaging/`: packaging assets for core/environment
+- `start.sh`: local development launcher for `runtara-environment` with embedded `runtara-core`
 
-### 1. Management API (Product → Platform)
+## Runtime Model
 
-Products interact with Runtara through the **Management SDK**:
+Today, the practical entrypoint is `runtara-environment`.
 
-```rust
-use runtara_management_sdk::{ManagementSdk, StartInstanceOptions};
+- `runtara-environment` exposes the management HTTP API on port `8002` by default
+- `runtara-environment` can run `runtara-core` in-process; the default binary does this when `RUNTARA_CORE_ADDR` is a valid socket address
+- Workflow instances communicate with `runtara-core` over HTTP for registration, checkpoints, signals, heartbeats, and completion
+- Persistence lives in `runtara-core`; image registration and instance lifecycle live in `runtara-environment`
 
-// Start a workflow instance
-let sdk = ManagementSdk::new("runtara-environment-host:8002")?;
-sdk.connect().await?;
+At a high level:
 
-let options = StartInstanceOptions::new("order-processing-v1", "tenant-123")
-    .with_input(serde_json::json!({
-        "order_id": "ORD-456",
-        "customer_email": "user@example.com"
-    }));
-let result = sdk.start_instance(options).await?;
-
-// Query instance status
-let status = sdk.get_instance_status(&result.instance_id).await?;
-
-// Send control signals
-sdk.pause_instance(&result.instance_id).await?;
-sdk.resume_instance(&result.instance_id).await?;
-sdk.cancel_instance(&result.instance_id).await?;
+```text
+Management client / CLI / product backend
+                |
+                v
+      runtara-environment (HTTP API, default :8002)
+                |
+                +--> image registry
+                +--> instance lifecycle
+                +--> runner backend (OCI by default)
+                |
+                v
+         runtara-core (instance HTTP API, default :8001)
+                |
+                v
+        PostgreSQL or SQLite for core
+        PostgreSQL for environment
 ```
 
-### 2. Workflow DSL (Product → Platform)
+Runner implementations currently present in the repo:
 
-Products define workflows using a JSON-based DSL that compiles to native binaries:
+- `OCI`: default production-oriented runner
+- `Native`: direct process execution, useful for development
+- `Wasm`: WebAssembly runner code exists in the workspace
+- `Mock`: test runner
 
-```json
-{
-  "name": "Order Processing",
-  "description": "Process incoming orders with validation and fulfillment",
-  "steps": {
-    "validate": {
-      "stepType": "Agent",
-      "id": "validate",
-      "agentId": "http",
-      "capabilityId": "request",
-      "inputMapping": {
-        "url": { "valueType": "immediate", "value": "https://api.example.com/validate" },
-        "body": { "valueType": "reference", "value": "data.order" }
-      }
-    },
-    "notify": {
-      "stepType": "Agent",
-      "id": "notify",
-      "agentId": "http",
-      "capabilityId": "request",
-      "inputMapping": {
-        "url": { "valueType": "immediate", "value": "https://api.example.com/notify" }
-      }
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": {
-        "result": { "valueType": "reference", "value": "steps.notify.outputs" }
-      }
-    }
-  },
-  "entryPoint": "validate",
-  "executionPlan": [
-    { "fromStep": "validate", "toStep": "notify" },
-    { "fromStep": "notify", "toStep": "finish" }
-  ]
-}
-```
+## Workspace Crates
 
-### 3. Custom Agents (Product → Platform)
-
-Products can extend the platform with custom agents for domain-specific integrations:
-
-```rust
-use runtara_agent_macro::agent;
-
-#[agent(id = "my-erp", category = "integration")]
-pub mod my_erp {
-    #[capability(id = "create-order", description = "Create order in ERP system")]
-    pub async fn create_order(input: CreateOrderInput) -> Result<CreateOrderOutput, AgentError> {
-        // Your ERP integration logic
-    }
-}
-```
-
-## Responsibilities
-
-### Platform Responsibilities (Runtara)
-
-| Responsibility | Description |
-|----------------|-------------|
-| **Durability** | Persist workflow state to PostgreSQL; survive crashes and restarts |
-| **Orchestration** | Execute workflow steps according to the execution plan |
-| **Scheduling** | Wake sleeping instances at the right time |
-| **Signal Delivery** | Deliver pause/resume/cancel signals to running instances |
-| **Isolation** | Run workflow instances in isolated OCI containers |
-| **Multi-tenancy** | Isolate data and execution between tenants |
-| **Built-in Agents** | Provide common integrations (HTTP, SFTP, CSV, XML, etc.) |
-| **Compilation** | Compile DSL scenarios to optimized native binaries |
-| **Image Registration** | Accept compiled binaries, create OCI bundles, store in registry |
-
-### Product Responsibilities
-
-| Responsibility | Description |
-|----------------|-------------|
-| **Workflow Storage** | Store and version workflow definitions (JSON scenarios) |
-| **Connection Management** | Store credentials/connections; expose via HTTP for runtime fetching |
-| **Workflow Compilation** | Call `compile_scenario()` to compile workflows, then register via Management SDK |
-| **User Interface** | Build UI for users to trigger and monitor workflows |
-| **Authentication** | Authenticate users and map to tenant IDs |
-| **Business Logic** | Implement domain-specific validation and rules |
-| **Custom Agents** | Build integrations specific to your domain |
-| **Input/Output Handling** | Transform data between your API and workflow inputs |
-| **Error Handling** | Define how workflow failures surface to users |
-| **Monitoring** | Build dashboards and alerts on top of instance status |
-
-## Data Flow
-
-```
-1. User Action (Product UI)
-   │
-   ▼
-2. Product API validates request, determines tenant
-   │
-   ▼
-3. Product loads workflow definition from its database
-   │  - Retrieves JSON scenario
-   │
-   ▼
-4. Product compiles workflow (if not cached)
-   │  - Calls runtara_workflows::compile_scenario()
-   │  - Returns binary path and metadata
-   │
-   ▼
-4b. Product registers image with Management SDK
-   │  - Reads compiled binary
-   │  - Calls management_sdk.register_image()
-   │  - Returns image_id
- │
- ▼
-5. Product calls Management SDK to start instance
-   │  - Provides: image_id, tenant_id, input data
-   │
- ▼
-6. runtara-environment creates instance record and prepares OCI bundle
-   │
- ▼
-7. runtara-environment launches OCI container with workflow binary
-   │
- ▼
-8. Workflow executes, calling agents and checkpointing via runtara-core
-   │  - Each checkpoint persists state to PostgreSQL through core
-   │  - Agents use provided connections for external calls
-   │
- ▼
-9. runtara-environment monitors container, collects output/error, updates status
-   │
- ▼
-10. Product queries status via Management SDK
-   │
- ▼
-11. Product UI displays result to user
-```
-
-## Features
-
-- **Checkpointing**: Automatically save workflow state to PostgreSQL for crash recovery
-- **Durable Sleep**: Long sleeps cause instance to exit; runtara-environment wakes it later
-- **Signal Handling**: External control (cancel, pause, resume) polled by instances
-- **HTTP Transport**: Communication between instances and the execution engine
-- **OCI Runner**: Run workflows as OCI containers with resource isolation
-- **DSL Compiler**: JSON workflow definitions compile to native Rust binaries
-- **Built-in Agents**: Pre-built integrations for HTTP, SFTP, CSV, XML, and more
-- **Child Workflows**: Workflows can invoke other workflows via StartScenario steps
+| Crate | Purpose |
+|------|---------|
+| `runtara-core` | Core runtime: checkpoints, signals, events, durable sleep, instance HTTP API |
+| `runtara-environment` | Management plane: image registry, instance lifecycle, runners, wake scheduling |
+| `runtara-management-sdk` | SDK and CLI-facing client for `runtara-environment` |
+| `runtara-sdk` | Instance-side SDK used by compiled workflows |
+| `runtara-sdk-macros` | Proc macros for `runtara-sdk` |
+| `runtara-dsl` | Workflow and agent metadata types, schema support |
+| `runtara-workflows` | Workflow compiler and validation pipeline |
+| `runtara-workflow-stdlib` | Runtime/stdlib linked into compiled workflows |
+| `runtara-agents` | Built-in agent implementations |
+| `runtara-agent-macro` | Proc macros for defining custom agents/capabilities |
+| `runtara-http` | Shared HTTP client abstraction used across the workspace |
+| `runtara-ai` | AI/LLM-related integration helpers for workflows |
+| `runtara-test-harness` | Internal binary for isolated agent capability execution |
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust 1.75+
-- PostgreSQL 14+
+- Rust toolchain
+- `rustc`
+- PostgreSQL for `runtara-environment`
+- `crun` and Linux container support for the OCI runner path
 
-### Running runtara-core
+For native compilation targets on Linux, you may also need the relevant Rust target and linker tools. The compiler already surfaces `rustup target add ...` guidance when a target is missing.
+
+### Start The Full Runtime
+
+Run the management plane with embedded core:
 
 ```bash
-# Set required environment variables
-export RUNTARA_DATABASE_URL=postgres://user:pass@localhost/runtara
+export RUNTARA_DATABASE_URL=postgres://localhost/runtara
+cargo run -p runtara-environment
+```
 
-# Run the server
+Default bind addresses:
+
+- Environment API: `0.0.0.0:8002`
+- Core instance API: `0.0.0.0:8001`
+
+For local development, you can also use:
+
+```bash
+./start.sh
+```
+
+`start.sh` is a convenience wrapper around `runtara-environment`. Its script-level variable names still use older `QUIC` naming, but the authoritative runtime configuration is the HTTP-based environment documented below.
+
+### Run Core Only
+
+If you want the core runtime without environment management:
+
+```bash
+export RUNTARA_DATABASE_URL=postgres://localhost/runtara
 cargo run -p runtara-core
 ```
 
-### Defining a Workflow
+### Compile A Workflow
 
-Workflows are defined as JSON scenarios using the DSL, then compiled to native binaries by `runtara-workflows`:
+CLI:
 
-```json
-{
-  "name": "Data Processing",
-  "steps": {
-    "fetch": {
-      "stepType": "Agent",
-      "id": "fetch",
-      "agentId": "http",
-      "capabilityId": "request",
-      "inputMapping": {
-        "url": { "valueType": "reference", "value": "data.endpoint" }
-      }
-    },
-    "transform": {
-      "stepType": "Agent",
-      "id": "transform",
-      "agentId": "transform",
-      "capabilityId": "map-fields",
-      "inputMapping": {
-        "source": { "valueType": "reference", "value": "steps.fetch.outputs" }
-      }
-    },
-    "finish": {
-      "stepType": "Finish",
-      "id": "finish",
-      "inputMapping": {
-        "result": { "valueType": "reference", "value": "steps.transform.outputs" }
-      }
-    }
-  },
-  "entryPoint": "fetch",
-  "executionPlan": [
-    { "fromStep": "fetch", "toStep": "transform" },
-    { "fromStep": "transform", "toStep": "finish" }
-  ]
-}
+```bash
+cargo run -p runtara-workflows --bin runtara-compile -- \
+  --workflow e2e/workflows/simple_passthrough.json \
+  --tenant demo \
+  --scenario simple-passthrough
 ```
 
-### Compiling Workflows
-
-Use `compile_scenario()` to compile a scenario to a native binary:
+Library:
 
 ```rust
 use runtara_workflows::{compile_scenario, CompilationInput, Scenario};
-use std::fs;
 
-// 1. Load scenario JSON from product's database
-let scenario: Scenario = serde_json::from_str(&scenario_json)?;
+let scenario: Scenario = serde_json::from_str(&std::fs::read_to_string("workflow.json")?)?;
 
-// 2. Compile to native binary
-let input = CompilationInput {
-    tenant_id: "tenant-123".to_string(),
-    scenario_id: "order-processing".to_string(),
+let result = compile_scenario(CompilationInput {
+    tenant_id: "demo".to_string(),
+    scenario_id: "simple-passthrough".to_string(),
     version: 1,
     execution_graph: scenario.into(),
     track_events: false,
     child_scenarios: vec![],
-    connection_service_url: Some("https://my-product.com/api/connections".to_string()),
-};
+    connection_service_url: None,
+})?;
 
-let result = compile_scenario(input)?;
-// result.binary_path contains the compiled binary
-// result.binary_checksum contains SHA-256 for caching
+println!("Compiled artifact: {}", result.binary_path.display());
+println!("Checksum: {}", result.binary_checksum);
 ```
 
-### Registering Images
+The compiler currently resolves its target from `RUNTARA_COMPILE_TARGET` and defaults to `wasm32-wasip2`. The output path can therefore be either a native executable or a `.wasm` artifact depending on target selection.
 
-After compilation, use the Management SDK to register the image with runtara-environment:
+### Register And Start An Instance
+
+Using the management SDK:
 
 ```rust
-use runtara_management_sdk::{ManagementSdk, SdkConfig, RegisterImageOptions};
-use std::fs;
+use runtara_management_sdk::{ManagementSdk, RegisterImageOptions, StartInstanceOptions};
 
-// 1. Read the compiled binary
-let binary_bytes = fs::read(&result.binary_path)?;
-
-// 2. Connect to runtara-environment
-let sdk = ManagementSdk::new(SdkConfig::localhost())?;
+let sdk = ManagementSdk::localhost()?;
 sdk.connect().await?;
 
-// 3. Register the image
-let options = RegisterImageOptions::new("tenant-123", "order-processing", binary_bytes)
-    .with_description("Order processing workflow");
+let binary = std::fs::read("./scenario")?;
+let image = sdk
+    .register_image(RegisterImageOptions::new("tenant-1", "demo-workflow", binary))
+    .await?;
 
-let registration = sdk.register_image(options).await?;
-let image_id = registration.image_id;
+let instance = sdk
+    .start_instance(
+        StartInstanceOptions::new(&image.image_id, "tenant-1")
+            .with_input(serde_json::json!({ "hello": "world" })),
+    )
+    .await?;
 
-// 4. Now start instances using the image_id
-sdk.start_instance(StartInstanceOptions::new(&image_id, "tenant-123")).await?;
+println!("Instance started: {}", instance.instance_id);
 ```
 
-The compiled binary:
- - Uses `runtara-sdk` internally for durability primitives
- - Links against `runtara-workflow-stdlib` for built-in agents
- - Fetches connections at runtime from product's connection service
- - Runs in OCI containers managed by `runtara-environment`
+Using the CLI:
+
+```bash
+cargo run -p runtara-management-sdk --bin runtara-ctl -- health
+cargo run -p runtara-management-sdk --bin runtara-ctl -- list-images
+```
+
+## Workflow DSL
+
+Runtara workflows are described as JSON execution graphs. A minimal workflow:
+
+```json
+{
+  "name": "Simple Passthrough",
+  "description": "A simple workflow that passes input directly to output",
+  "steps": {
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "data.input"
+        }
+      }
+    }
+  },
+  "entryPoint": "finish",
+  "executionPlan": [],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}
+```
+
+An agent step uses `agentId` and `capabilityId`:
+
+```json
+{
+  "stepType": "Agent",
+  "id": "delay",
+  "agentId": "utils",
+  "capabilityId": "delay-in-ms",
+  "inputMapping": {
+    "delay_value": {
+      "valueType": "reference",
+      "value": "data.input.delay_ms"
+    }
+  }
+}
+```
+
+Useful references:
+
+- `docs/dsl_spec.json`
+- `crates/runtara-dsl/README.md`
+- `crates/runtara-workflows/README.md`
 
 ## Configuration
 
-### runtara-core
+The tables below reflect the current code paths in the workspace, not older transport naming from helper scripts.
+
+### `runtara-core`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
+| `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP API port |
+| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Max concurrent instances |
+
+### `runtara-environment`
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `RUNTARA_HTTP_PORT` | No | 8001 | Instance HTTP server port |
-| `RUNTARA_ADMIN_PORT` | No | 8003 | Management HTTP server port (Environment connects) |
-| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | 32 | Maximum concurrent instances |
+| `RUNTARA_ENV_HTTP_PORT` | No | `8002` | Environment HTTP API port |
+| `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address passed to instances for core communication |
+| `DATA_DIR` | No | `.data` | Data directory for images, bundles, and run state |
+| `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Forwarded to runners where applicable |
+| `RUNTARA_DB_POOL_SIZE` | No | `100` | Environment DB pool size |
+| `RUNTARA_DB_REQUEST_TIMEOUT_MS` | No | `30000` | Environment DB request timeout |
 
-### runtara-environment
+### Instance-Side SDK Environment
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_ENVIRONMENT_DATABASE_URL` | Yes* | - | PostgreSQL connection string (falls back to `RUNTARA_DATABASE_URL`) |
-| `RUNTARA_ENV_HTTP_PORT` | No | 8002 | Environment HTTP server port |
-| `RUNTARA_CORE_ADDR` | No | `127.0.0.1:8001` | Address of runtara-core |
-| `DATA_DIR` | No | `.data` | Data directory for images, bundles, and instance I/O |
-| `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification (passed to instances) |
-
-### OCI Runner (runtara-environment)
+These are the variables compiled workflows consume at runtime.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BUNDLES_DIR` | No | `${DATA_DIR}/bundles` | Directory for OCI bundles |
-| `EXECUTION_TIMEOUT_SECS` | No | 300 | Default execution timeout in seconds |
-| `USE_SYSTEMD_CGROUP` | No | `false` | Use systemd for cgroup management |
-
-### runtara-sdk
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_INSTANCE_ID` | Yes | - | Unique instance identifier |
+| `RUNTARA_INSTANCE_ID` | Yes | - | Instance identifier |
 | `RUNTARA_TENANT_ID` | Yes | - | Tenant identifier |
-| `RUNTARA_SERVER_ADDR` | No | `127.0.0.1:8001` | Server address |
-| `RUNTARA_SERVER_NAME` | No | `localhost` | Server name for TLS verification |
-| `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Skip TLS verification |
-| `RUNTARA_CONNECT_TIMEOUT_MS` | No | 10000 | Connection timeout in milliseconds |
-| `RUNTARA_REQUEST_TIMEOUT_MS` | No | 30000 | Request timeout in milliseconds |
-| `RUNTARA_SIGNAL_POLL_INTERVAL_MS` | No | 1000 | Signal poll interval in milliseconds |
+| `RUNTARA_HTTP_URL` | No | `http://127.0.0.1:8003` fallback in SDK | Base URL for the core HTTP API |
+| `RUNTARA_SERVER_ADDR` | No | compatibility fallback | Legacy host:port input still accepted by the SDK |
+| `RUNTARA_CORE_HTTP_PORT` | No | derived | Override used when deriving HTTP URL from `RUNTARA_SERVER_ADDR` |
+| `RUNTARA_REQUEST_TIMEOUT_MS` | No | `30000` | HTTP request timeout |
+| `RUNTARA_SIGNAL_POLL_INTERVAL_MS` | No | `1000` | Signal polling interval |
+| `RUNTARA_HEARTBEAT_INTERVAL_MS` | No | `30000` | Heartbeat interval |
+| `RUNTARA_CHECKPOINT_ID` | No | - | Resume/checkpoint bootstrap |
 
-### runtara-workflows (compilation)
+Note: environment runners already inject `RUNTARA_HTTP_URL` directly for instances. `RUNTARA_SERVER_ADDR` is kept mainly for backward compatibility.
+
+### Workflow Compilation
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `RUNTARA_NATIVE_LIBRARY_DIR` | No | (auto-detected) | Directory containing pre-compiled stdlib and deps |
-| `RUNTARA_STDLIB_NAME` | No | `runtara_workflow_stdlib` | Stdlib crate name for custom product stdlibs |
-| `DATA_DIR` | No | `.data` | Data directory for compiled artifacts |
+| `RUNTARA_COMPILE_TARGET` | No | `wasm32-wasip2` | Compilation target triple |
+| `RUNTARA_NATIVE_LIBRARY_DIR` | No | auto-detected | Precompiled stdlib/dependency cache |
+| `RUNTARA_WASM_LIBRARY_DIR` | No | auto-detected | Precompiled WASM stdlib/dependency cache |
+| `RUNTARA_STDLIB_NAME` | No | `runtara_workflow_stdlib` | Alternate stdlib crate name |
+| `RUNTARA_OPT_LEVEL` | No | target-dependent | rustc optimization level |
+| `RUNTARA_CODEGEN_UNITS` | No | `1` | rustc codegen units |
+| `RUNTARA_LTO` | No | `fat` for WASM | LTO mode for WASM builds |
+| `DATA_DIR` | No | `.data` | Build artifact root |
 
-#### Custom Workflow Stdlib
+## Development And Testing
 
-Products can provide their own workflow stdlib that extends `runtara-workflow-stdlib` with product-specific agents:
-
-1. Create a crate that re-exports `runtara-workflow-stdlib`:
-   ```rust
-   // my-product-stdlib/src/lib.rs
-   pub use runtara_workflow_stdlib::*;
-
-   // Add product-specific agents
-   pub mod my_custom_agents;
-   ```
-
-2. Compile to `.rlib` and place in your native library directory
-
-3. Set environment variables:
-   ```bash
-   export RUNTARA_NATIVE_LIBRARY_DIR=/path/to/native_cache
-   export RUNTARA_STDLIB_NAME=my_product_stdlib
-   ```
-
-## Database Migrations
-
-Runtara uses an inheritance model for database migrations:
-
-### Migration Hierarchy
-
-```
-runtara-core (base)
-    └── runtara-environment (extends core)
-```
-
-- **runtara-core**: Owns the base schema for instances, checkpoints, events, signals, and wake queue
-- **runtara-environment**: Extends core with image registry, container tracking, and lifecycle tables
-
-### Running Migrations
-
-**Core-only deployment** (durability without managed containers):
-```rust
-use runtara_core::migrations;
-
-let pool = PgPool::connect(&database_url).await?;
-migrations::run_postgres(&pool).await?;
-```
-
-**Full deployment** (includes environment):
-```rust
-use runtara_environment::migrations;
-
-let pool = PgPool::connect(&database_url).await?;
-migrations::run(&pool).await?;  // Runs core + environment migrations
-```
-
-Environment's `migrations::run()` automatically includes all core migrations, merging them into a single unified migrator. You only need one call - no need to run core migrations separately.
-
-### Testing
-
-Use `TEST_RUNTARA_DATABASE_URL` for database tests:
-```bash
-TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-core
-TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-environment
-```
-
-## Crates
-
-| Crate | Description |
-|-------|-------------|
-| `runtara-core` | Execution engine - manages instances, checkpoints, signals, wake scheduling |
-| `runtara-environment` | Execution environment - OCI container runner, image registry, instance lifecycle |
-| `runtara-protocol` | Wire protocol layer (Protobuf message definitions via prost) |
-| `runtara-sdk` | High-level client for instances to communicate with runtara-core |
-| `runtara-sdk-macros` | Proc macros (`#[durable]`) for transparent durability |
-| `runtara-management-sdk` | Management client for external tools |
-| `runtara-workflows` | Workflow compiler - compiles JSON scenarios to native binaries |
-| `runtara-dsl` | DSL type definitions and JSON schema generation |
-| `runtara-agents` | Built-in agent implementations (HTTP, SFTP, CSV, XML, etc.) |
-| `runtara-agent-macro` | Proc macros (`#[agent]`, `#[capability]`) for defining custom agents |
-| `runtara-workflow-stdlib` | Standard library linked into compiled workflows |
-
-## Building
+Build everything:
 
 ```bash
-# Build all crates
 cargo build
-
-# Run tests
-cargo test
-
-# Run tests with database
-TEST_RUNTARA_DATABASE_URL=postgres://... cargo test -p runtara-core
 ```
+
+Run the full workspace tests:
+
+```bash
+cargo test
+```
+
+Target a specific crate:
+
+```bash
+cargo test -p runtara-core
+cargo test -p runtara-environment
+cargo test -p runtara-workflows
+```
+
+Run the shell-based end-to-end checks:
+
+```bash
+./e2e/run_all.sh
+```
+
+Examples in `e2e/workflows/`:
+
+- `simple_passthrough.json`
+- `delay_workflow.json`
+
+## Additional Docs
+
+- `docs/embedding-runtara.md`: embedding `runtara-environment` into another Rust service
+- `docs/structured-errors.md`: error model notes
+- `docs/cross-platform.md`: cross-platform and WASM architecture direction
+- `docs/wasm-transition-plan.md`: staged migration notes
+
+The documents in `docs/cross-platform.md` and `docs/wasm-transition-plan.md` include design and transition material. Treat the code and config in the workspace as the source of truth for current behavior.
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+Licensed under `AGPL-3.0-or-later`.
 
-For commercial licensing options, contact: hello@syncmyorders.com
+For commercial licensing options, contact `hello@syncmyorders.com`.
 
 Copyright (C) 2025 SyncMyOrders Sp. z o.o.
