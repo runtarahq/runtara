@@ -176,37 +176,23 @@ fn collect_used_capabilities_recursive(
 /// For runtara-agents: the module is under `agents::` (re-exported from the prelude).
 /// For smo-stdlib agents: the module is under `smo_agents::`.
 ///
-/// Returns `None` for unknown agents — the codegen will generate a fallback error arm.
-fn agent_module_path(agent_id: &str) -> Option<&'static str> {
+/// Resolve agent module ID to its Rust module path within the stdlib crate.
+///
+/// Convention:
+/// - Core agents (http, csv, text, etc.) live at `agents::{module}`
+/// - Everything else is an integration agent at `agents::integrations::{module}`
+///
+/// This is fully convention-based — adding a new integration agent requires
+/// zero changes here. The `#[capability]` macro handles registration.
+fn agent_module_path(agent_id: &str) -> String {
     match agent_id {
-        // runtara-agents (re-exported via stdlib prelude as `agents::`)
-        "utils" => Some("agents::utils"),
-        "transform" => Some("agents::transform"),
-        "http" => Some("agents::http"),
-        "csv" => Some("agents::csv"),
-        "text" => Some("agents::text"),
-        "xml" => Some("agents::xml"),
-        "datetime" => Some("agents::datetime"),
-        "file" => Some("agents::file"),
-        "crypto" => Some("agents::crypto"),
-        // Native-only runtara-agents (use stub in WASM)
-        "sftp" => Some("agents::sftp"),
-        "xlsx" => Some("agents::xlsx"),
-        "compression" => Some("agents::compression"),
-        // smo-stdlib agents
-        "openai" => Some("smo_agents::openai"),
-        "shopify" => Some("smo_agents::shopify"),
-        "slack" => Some("smo_agents::slack"),
-        "stripe" => Some("smo_agents::stripe"),
-        "hubspot" => Some("smo_agents::hubspot"),
-        "mailgun" => Some("smo_agents::mailgun"),
-        "bedrock" => Some("smo_agents::bedrock"),
-        "ai_tools" => Some("smo_agents::ai_tools"),
-        "hdm_commerce" => Some("smo_agents::hdm_commerce"),
-        "object_model" => Some("smo_agents::object_model"),
-        "s3_storage" => Some("smo_agents::s3_storage"),
-        "smo-test" | "smo_test" => Some("smo_agents::test_agent"),
-        _ => None,
+        // Core runtara-agents
+        "utils" | "transform" | "http" | "csv" | "text" | "xml" | "datetime" | "file"
+        | "crypto" | "sftp" | "xlsx" | "compression" => {
+            format!("agents::{}", agent_id)
+        }
+        // All other agents are integration agents
+        _ => format!("agents::integrations::{}", agent_id),
     }
 }
 
@@ -257,8 +243,8 @@ fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStr
     // Build match arms for each used capability
     let match_arms: Vec<TokenStream> = used_caps
         .iter()
-        .filter_map(|(agent_id, capability_id)| {
-            let module_path = agent_module_path(agent_id)?;
+        .map(|(agent_id, capability_id)| {
+            let module_path = agent_module_path(agent_id);
             let exec_name = executor_static_name(capability_id);
             let exec_ident = Ident::new(&exec_name, Span::call_site());
 
@@ -273,7 +259,7 @@ fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStr
 
             if is_native_only_agent(agent_id) {
                 // Native-only: use cfg to switch between direct call and HTTP stub
-                Some(quote! {
+                quote! {
                     (#agent_id_str, #cap_id_str) => {
                         #[cfg(feature = "native")]
                         {
@@ -284,14 +270,14 @@ fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStr
                             dispatch::native_agent_stub(#agent_id_str, #cap_id_str, input)
                         }
                     }
-                })
+                }
             } else {
                 // Normal capability: direct executor call
-                Some(quote! {
+                quote! {
                     (#agent_id_str, #cap_id_str) => {
                         (#stdlib_ident::#(#path_segments)::*::#exec_ident.execute)(input)
                     }
-                })
+                }
             }
         })
         .collect();

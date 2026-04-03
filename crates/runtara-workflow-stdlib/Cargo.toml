@@ -46,7 +46,7 @@ telemetry = [
 
 [dependencies]
 # Core dependencies
-runtara-agents = { path = "../runtara-agents", version = "1.0", default-features = false }
+runtara-agents = { path = "../runtara-agents", version = "1.0", default-features = false, features = ["integrations"] }
 runtara-ai = { path = "../runtara-ai", version = "1.0" }
 runtara-sdk = { path = "../runtara-sdk", version = "1.0", default-features = false, features = ["http"] }
 

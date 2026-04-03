@@ -39,6 +39,11 @@ pub mod xlsx;
 #[path = "agents/xml.rs"]
 pub mod xml;
 
+// Platform integration agents
+#[cfg(feature = "integrations")]
+#[path = "agents/integrations/mod.rs"]
+pub mod integrations;
+
 // Shared types
 pub mod types;
 
