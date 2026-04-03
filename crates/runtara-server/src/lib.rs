@@ -5,6 +5,7 @@ pub mod compiler;
 pub mod config;
 pub mod dsl;
 pub mod embedded_runtara;
+pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod observability;
