@@ -1,0 +1,15 @@
+[package]
+name = "runtara-text-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Text parsing utilities for runtara DSL schema fields"
+keywords = ["durable", "workflow", "text", "parsing"]
+categories = ["development-tools"]
+
+[dependencies]
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"
+runtara-dsl = { path = "../runtara-dsl" }

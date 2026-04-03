@@ -16,6 +16,8 @@ members = [
     "crates/runtara-agent-macro",
     # Agent testing
     "crates/runtara-test-harness",
+    # Text parsing
+    "crates/runtara-text-parser",
 ]
 default-members = ["crates/runtara-core"]
 
