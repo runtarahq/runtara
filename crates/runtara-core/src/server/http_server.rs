@@ -9,6 +9,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::{
     Router,
     extract::{Path, State},
@@ -895,6 +896,7 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
         .route("/api/v1/instances/{instance_id}/input", get(input_handler))
         // Health check
         .route("/health", get(health_handler))
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state)
 }
 

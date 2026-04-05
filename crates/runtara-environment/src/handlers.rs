@@ -726,25 +726,48 @@ pub async fn handle_resume_instance(
         }
     };
 
-    // Check status
-    if instance.status != "suspended" {
+    // Check status — allow resume from suspended, failed, or cancelled
+    if !matches!(
+        instance.status.as_str(),
+        "suspended" | "failed" | "cancelled"
+    ) {
         return Ok(ResumeInstanceResponse {
             success: false,
             error: Some(format!(
-                "Cannot resume instance in '{}' state (must be suspended)",
+                "Cannot resume instance in '{}' state (must be suspended, failed, or cancelled)",
                 instance.status
             )),
         });
     }
 
-    // Get checkpoint ID
+    // Get checkpoint ID from instance record, or look up the latest checkpoint
     let checkpoint_id = match instance.checkpoint_id {
         Some(id) => id,
         None => {
-            return Ok(ResumeInstanceResponse {
-                success: false,
-                error: Some("Instance has no checkpoint to resume from".to_string()),
-            });
+            // Failed instances may not have checkpoint_id on the record if the crash
+            // happened before the SDK could update it. Fall back to the latest
+            // checkpoint stored in the checkpoints table.
+            match runtara_core::persistence::postgres::load_latest_checkpoint(
+                &state.pool,
+                &request.instance_id,
+            )
+            .await
+            {
+                Ok(Some(record)) => {
+                    info!(
+                        instance_id = %request.instance_id,
+                        checkpoint_id = %record.checkpoint_id,
+                        "Found latest checkpoint for failed instance"
+                    );
+                    record.checkpoint_id
+                }
+                _ => {
+                    return Ok(ResumeInstanceResponse {
+                        success: false,
+                        error: Some("Instance has no checkpoint to resume from".to_string()),
+                    });
+                }
+            }
         }
     };
 
@@ -823,6 +846,25 @@ pub async fn handle_resume_instance(
         let _ = container_registry.cleanup(&request.instance_id).await;
     }
 
+    // Update status to "running" BEFORE launch so the WASM process can
+    // immediately perform checkpoint lookups (the Core checkpoint handler
+    // rejects requests from non-running instances).
+    if let Err(e) = state
+        .persistence
+        .update_instance_status(&request.instance_id, "running", Some(chrono::Utc::now()))
+        .await
+    {
+        warn!(error = %e, "Failed to update instance status to running before launch");
+    }
+    // Also update checkpoint_id on the instance record
+    if let Err(e) = state
+        .persistence
+        .update_instance_checkpoint(&request.instance_id, &checkpoint_id)
+        .await
+    {
+        warn!(error = %e, "Failed to update instance checkpoint before launch");
+    }
+
     // Launch
     match state.runner.launch_detached(&options).await {
         Ok(handle) => {
@@ -862,23 +904,6 @@ pub async fn handle_resume_instance(
             };
             if let Err(e) = container_registry.register(&container_info).await {
                 warn!(error = %e, "Failed to register container");
-            }
-
-            // Update status via Persistence trait
-            if let Err(e) = state
-                .persistence
-                .update_instance_status(&request.instance_id, "running", Some(chrono::Utc::now()))
-                .await
-            {
-                warn!(error = %e, "Failed to update instance status to running");
-            }
-            // Also update checkpoint_id
-            if let Err(e) = state
-                .persistence
-                .update_instance_checkpoint(&request.instance_id, &checkpoint_id)
-                .await
-            {
-                warn!(error = %e, "Failed to update instance checkpoint");
             }
 
             // Spawn background task to monitor container and process output when done

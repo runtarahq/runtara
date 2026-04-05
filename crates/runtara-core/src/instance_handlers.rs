@@ -577,7 +577,22 @@ pub async fn handle_checkpoint(
         });
     }
 
-    // 3. Checkpoint doesn't exist - save new checkpoint
+    // 3. Checkpoint doesn't exist
+    // Only save if state is non-empty. The SDK's get_checkpoint() calls this
+    // endpoint with empty state as a read-only probe. If we saved empty state,
+    // subsequent save attempts with real state would find the empty checkpoint
+    // and return it instead of overwriting — corrupting the checkpoint permanently.
+    if request.state.is_empty() {
+        return Ok(CheckpointResponse {
+            found: false,
+            state: vec![],
+            pending_signal: get_pending_signal(state.persistence.as_ref(), &request.instance_id)
+                .await,
+            custom_signal: None,
+            last_error: None,
+        });
+    }
+
     state
         .persistence
         .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)

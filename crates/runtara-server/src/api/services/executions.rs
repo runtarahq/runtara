@@ -853,14 +853,15 @@ impl ExecutionService {
             // Already running
             "running" => Ok(ResumeInstanceResult::AlreadyRunning),
 
-            // Suspended/paused - can be resumed
-            "suspended" => {
+            // Suspended, failed, or cancelled - can be resumed from checkpoint
+            "suspended" | "failed" | "cancelled" => {
                 client.resume_instance(instance_id).await.map_err(|e| {
                     ServiceError::DatabaseError(format!("Failed to send resume signal: {}", e))
                 })?;
 
                 info!(
                     instance_id = %instance_id,
+                    previous_status = %status_str,
                     "Sent resume signal to instance"
                 );
 
@@ -869,7 +870,7 @@ impl ExecutionService {
                 })
             }
 
-            // Not resumable (terminal states, queued, or running)
+            // Not resumable (completed, cancelled, queued)
             _ => Ok(ResumeInstanceResult::NotResumable { status: status_str }),
         }
     }

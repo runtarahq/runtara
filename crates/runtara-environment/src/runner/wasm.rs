@@ -216,7 +216,7 @@ impl WasmRunner {
             .arg("http-outgoing-body-buffer-chunks=4096");
         cmd.arg("--wasi")
             .arg("http-outgoing-body-chunk-size=1048576");
-        cmd.arg("--wasi").arg("max-resources=100000");
+        cmd.arg("--wasi").arg("max-resources=10000000");
 
         // Pass environment variables via --env flags
         for (key, value) in env {
@@ -464,7 +464,7 @@ impl WasmRunner {
             .arg("http-outgoing-body-buffer-chunks=4096");
         cmd.arg("--wasi")
             .arg("http-outgoing-body-chunk-size=1048576");
-        cmd.arg("--wasi").arg("max-resources=100000");
+        cmd.arg("--wasi").arg("max-resources=10000000");
 
         // Pass environment variables
         for (key, value) in env {

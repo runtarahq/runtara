@@ -412,9 +412,12 @@ pub fn extract_connection_config(
     )
 )]
 pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
-    // Start with input values
+    // Start with input values — mut needed for connection config merging (cfg-gated)
+    #[allow(unused_mut)]
     let mut headers = input.headers.clone();
+    #[allow(unused_mut)]
     let mut query_parameters = input.query_parameters.clone();
+    #[allow(unused_mut)]
     let mut url = input.url.clone();
 
     // If connection data is provided, extract config and merge.

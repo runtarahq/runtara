@@ -355,10 +355,24 @@ fn read_incoming_body(
     // Drop the stream before finishing the body
     drop(stream);
 
-    // Finish the incoming body — consumes it and returns FutureTrailers.
-    // Just drop it — polling for trailers can block indefinitely.
-    // The large max-resources limit prevents resource table exhaustion.
-    let _trailers = wasi::http::types::IncomingBody::finish(incoming_body);
+    // Finish the incoming body and poll trailers to completion.
+    //
+    // IncomingBody::finish() returns a FutureTrailers resource that holds a
+    // reference to the underlying TCP connection.  If we just drop it without
+    // polling, wasmtime's hyper backend never gets the signal that the
+    // request/response cycle is done, so the socket file descriptor leaks
+    // inside the async runtime.  After ~3,250 requests the wasmtime process
+    // exhausts macOS's FD limit (~10,240) and all subsequent connections fail
+    // with EADDRNOTAVAIL ("address not available").
+    //
+    // For HTTP/1.1 responses (no trailers), this resolves immediately once the
+    // body has been fully consumed above.
+    let trailers_future = wasi::http::types::IncomingBody::finish(incoming_body);
+    let trailers_pollable = trailers_future.subscribe();
+    poll(&[&trailers_pollable]);
+    // Consume the result to finalize — we don't use the actual trailers.
+    let _ = trailers_future.get();
+    drop(trailers_pollable);
 
     Ok(body)
 }

@@ -1,5 +1,6 @@
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     middleware::{from_fn, from_fn_with_state},
     response::Json,
     routing::{delete, get, post, put},
@@ -1538,14 +1539,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/internal/proxy",
             post(api::handlers::internal_proxy::proxy_handler),
         )
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_proxy_state);
 
     // Internal Agent Service routes (called by WASM scenarios for native-only capabilities)
     // NO authentication — only accessible from localhost.
-    let internal_agent_routes = Router::new().route(
-        "/api/internal/agents/{module}/{capability_id}",
-        post(api::handlers::internal_agents::execute_agent_capability),
-    );
+    // Body limit raised to 64 MB: WASM scenarios POST base64-encoded archives
+    // (e.g. 4.5 MB ZIP → ~6 MB JSON) which exceed Axum's default 2 MB limit.
+    let internal_agent_routes = Router::new()
+        .route(
+            "/api/internal/agents/{module}/{capability_id}",
+            post(api::handlers::internal_agents::execute_agent_capability),
+        )
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
