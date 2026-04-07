@@ -96,7 +96,11 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     };
 
     Ok(quote! {
-        let #source_var = #build_source;
+        // Source is mutable so per-iteration loop context can be injected in
+        // place. Previously the iteration loop cloned the entire source
+        // every iteration to attach the "loop" key, which is O(N²) in the
+        // size of upstream step outputs. See SYN-364.
+        let mut #source_var = #build_source;
         let #loop_inputs_var = serde_json::json!({"maxIterations": #max_iterations});
 
         // Breakpoint (after input resolution, before execution)
@@ -133,15 +137,17 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                         otel.kind = "INTERNAL"
                     );
 
-                    // Build source with loop context for condition evaluation
-                    let mut __loop_source = #source_var.clone();
-                    if let serde_json::Value::Object(ref mut map) = __loop_source {
+                    // Inject loop context into source IN PLACE (no clone).
+                    // The "loop" key is replaced each iteration with the
+                    // current {index, outputs}. See SYN-364 — the previous
+                    // emitter cloned the entire source per iteration which
+                    // was O(N²) in the size of upstream step outputs.
+                    if let serde_json::Value::Object(ref mut map) = #source_var {
                         let mut loop_ctx = serde_json::Map::new();
                         loop_ctx.insert("index".to_string(), serde_json::json!(__loop_index));
                         loop_ctx.insert("outputs".to_string(), __loop_outputs.clone());
                         map.insert("loop".to_string(), serde_json::Value::Object(loop_ctx));
                     }
-                    let #source_var = __loop_source;
 
                     // Evaluate condition
                     let __condition_result: bool = #condition_eval;
@@ -624,6 +630,68 @@ mod tests {
         assert!(
             code.contains("\"Unnamed\""),
             "Should use 'Unnamed' for unnamed steps"
+        );
+    }
+
+    /// Regression test for SYN-364: the While iteration body must NOT clone
+    /// the source per iteration. The previous emitter wrote
+    /// `let mut __loop_source = source_<N>.clone();` inside the loop body
+    /// in order to attach the per-iteration "loop" key for condition
+    /// evaluation. That clones the entire source — including all upstream
+    /// step outputs — every iteration, which is O(N²) in source size.
+    ///
+    /// The fix declares the source as `mut` once and mutates the "loop"
+    /// key in place each iteration. This test guards both invariants:
+    /// (1) the `__loop_source` clone temporary is gone, and (2) the source
+    /// binding itself is mutable.
+    #[test]
+    fn test_emit_while_does_not_clone_source_per_iteration() {
+        let mut ctx = EmitContext::new(false);
+        let while_step = create_while_step("while-perf", Some(5), 3);
+
+        let tokens = emit(&while_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // The old emitter declared `let mut __loop_source = source_N.clone()`
+        // inside the loop. After the fix, that temporary is gone entirely.
+        assert!(
+            !code.contains("__loop_source"),
+            "While must not use the __loop_source clone temporary. \
+             Source mutation should happen in place via the existing \
+             source binding. See SYN-364."
+        );
+
+        // The source binding must be mutable so we can replace the "loop"
+        // key in place each iteration.
+        assert!(
+            code.contains("let mut source_"),
+            "While must declare its source binding as `mut` so the \
+             iteration loop can mutate the \"loop\" key in place. \
+             Generated code:\n{}",
+            code
+        );
+
+        // Loop context still gets injected — verifies the in-place mutation
+        // path is wired up. The emitter uses an `if let Object(ref mut map)`
+        // destructure on the source to grab a mutable reference to the
+        // underlying map without a clone.
+        assert!(
+            code.contains("ref mut map"),
+            "While must still take a mutable reference to the source map \
+             to inject the per-iteration loop context. Generated code:\n{}",
+            code
+        );
+        assert!(
+            code.contains("\"loop\""),
+            "While must still inject the \"loop\" key each iteration"
+        );
+        assert!(
+            code.contains("\"index\""),
+            "While must still inject loop.index"
+        );
+        assert!(
+            code.contains("\"outputs\""),
+            "While must still inject loop.outputs"
         );
     }
 

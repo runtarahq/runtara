@@ -103,11 +103,19 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         __step_span.in_scope(|| {
             #debug_start
 
+            // Move (not clone) the source into a mutable binding for the loop.
+            // Per-iteration we replace only the "item" key on this same value
+            // instead of cloning the whole source. The source contains the
+            // very array we're iterating over (under steps.*.outputs), so a
+            // per-iteration clone makes the step O(N²) in time and peak
+            // memory and silently kills the wasm guest for inputs of ~tens
+            // of thousands of rows. See SYN-364.
+            let mut #item_source_var = #source_var;
+
             // Filter the array
             let mut #filter_results_var: Vec<serde_json::Value> = Vec::new();
             for #item_var in #filter_array_var {
-                // Build source with "item" key pointing to current element
-                let mut #item_source_var = #source_var.clone();
+                // Replace the "item" key in place; no full source clone.
                 if let Some(obj) = #item_source_var.as_object_mut() {
                     obj.insert("item".to_string(), #item_var.clone());
                 }
@@ -384,6 +392,61 @@ mod tests {
         assert!(
             code.contains("&&"),
             "Should have AND operator for complex condition"
+        );
+    }
+
+    /// Regression test for SYN-364: the Filter loop body must NOT clone
+    /// the source per iteration. The previous emitter wrote
+    /// `let mut item_source_<N> = source_<M>.clone();` inside the for loop,
+    /// which was O(N²) in time and peak memory because the source contains
+    /// the very array being filtered (under steps.*.outputs). For inputs of
+    /// ~tens of thousands of rows that silently killed the wasm guest.
+    ///
+    /// The fix moves the source into a mutable binding ABOVE the for loop
+    /// and replaces only the "item" key per iteration. This test guards the
+    /// structural invariant.
+    #[test]
+    fn test_emit_filter_does_not_clone_source_per_iteration() {
+        let mut ctx = EmitContext::new(false);
+        let step = create_filter_step("perf", "data.items", "x", "y");
+
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // The mutable item_source binding must be hoisted OUT of the for loop.
+        let move_idx = code
+            .find("let mut item_source_")
+            .expect("filter should declare a mutable item_source_<N> binding");
+        let for_idx = code
+            .find("for ")
+            .expect("filter step should emit a `for` loop");
+        assert!(
+            move_idx < for_idx,
+            "item_source_<N> must be declared BEFORE the for loop, not inside it. \
+             Per-iteration source clone is the SYN-364 quadratic-blow-up bug. \
+             Generated code:\n{}",
+            code
+        );
+
+        // The hoisted declaration must MOVE the source, not CLONE it.
+        // Inspect the tokens between the move declaration and the for keyword.
+        let between = &code[move_idx..for_idx];
+        assert!(
+            !between.contains(". clone"),
+            "Filter must move (not clone) the source into item_source_<N>. \
+             Found a `.clone` between the binding and the loop:\n{}",
+            between
+        );
+
+        // Sanity: the in-place mutation pattern must still be present so the
+        // condition evaluator sees the current item.
+        assert!(
+            code.contains("as_object_mut"),
+            "Filter must still mutate the source object to inject the current item"
+        );
+        assert!(
+            code.contains("\"item\""),
+            "Filter must still set the \"item\" key per iteration"
         );
     }
 
