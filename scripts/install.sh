@@ -263,7 +263,11 @@ resolve_bundle() {
     # Verify checksum
     info "Verifying checksum"
     if curl -fSL -o "${tmp_dl}/${tarball}.sha256" "${base_url}/${tarball}.sha256" 2>/dev/null; then
-        (cd "$tmp_dl" && shasum -a 256 -c "${tarball}.sha256") \
+        local sha_cmd="sha256sum"
+        if ! command -v sha256sum > /dev/null 2>&1; then
+            sha_cmd="shasum -a 256"
+        fi
+        (cd "$tmp_dl" && $sha_cmd -c "${tarball}.sha256") \
             || die $EXIT_CHECKSUM "Checksum verification failed."
     else
         warn "No checksum file found, skipping verification"

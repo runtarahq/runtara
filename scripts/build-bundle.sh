@@ -297,7 +297,11 @@ create_tarball() {
     (cd "$OUTPUT_DIR" && tar czf "${basename}.tar.gz" "${basename}/")
 
     # Checksum
-    (cd "$OUTPUT_DIR" && shasum -a 256 "${basename}.tar.gz" > "${basename}.tar.gz.sha256")
+    local sha_cmd="sha256sum"
+    if ! command -v sha256sum > /dev/null 2>&1; then
+        sha_cmd="shasum -a 256"
+    fi
+    (cd "$OUTPUT_DIR" && $sha_cmd "${basename}.tar.gz" > "${basename}.tar.gz.sha256")
 
     local size
     size=$(du -sh "$tarball" | cut -f1)
