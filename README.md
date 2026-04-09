@@ -469,14 +469,6 @@ Examples in `e2e/workflows/`:
 - `simple_passthrough.json`
 - `delay_workflow.json`
 
-## Additional Docs
-
-- `docs/embedding-runtara.md`: embedding `runtara-environment` into another Rust service
-- `docs/structured-errors.md`: error model notes
-- `docs/cross-platform.md`: cross-platform and WASM architecture direction
-- `docs/wasm-transition-plan.md`: staged migration notes
-
-The documents in `docs/cross-platform.md` and `docs/wasm-transition-plan.md` include design and transition material. Treat the code and config in the workspace as the source of truth for current behavior.
 
 ## License
 
