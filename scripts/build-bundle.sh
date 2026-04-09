@@ -117,6 +117,10 @@ build_stdlib() {
     fi
 
     step "Building workflow stdlib (wasm32-wasip2 rlibs)"
+    # Clean stale artifacts to prevent duplicate rlibs (different RUSTFLAGS produce
+    # different hashes; cargo doesn't remove the old ones)
+    rm -rf target/wasm32-wasip2/release/deps/*.rlib target/wasm32-wasip2/release/*.rlib 2>/dev/null || true
+
     # embed-bitcode=yes is required so that scenario compilation can use LTO
     # for cross-crate dead code elimination (see compile.rs)
     RUSTFLAGS="-C embed-bitcode=yes" \
