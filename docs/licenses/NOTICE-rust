@@ -1,0 +1,22 @@
+The Rust Programming Language
+
+Copyright (c) The Rust Project Developers
+
+This product includes software developed by The Rust Project Developers
+(https://www.rust-lang.org/).
+
+Rust is dual-licensed under the Apache License, Version 2.0, and the MIT
+License. See LICENSE-rust-APACHE-2.0 and LICENSE-rust-MIT for the full
+text of those licenses.
+
+Source code for the unmodified upstream Rust distribution bundled with
+this release is available at:
+
+    https://github.com/rust-lang/rust
+
+The Runtara bundle ships unmodified upstream Rust binaries obtained from
+https://static.rust-lang.org/dist/. Runtara does not patch, fork, or
+otherwise modify the Rust compiler or standard library.
+
+"Rust" and the Rust logo are trademarks of the Rust Foundation. This
+product is not affiliated with or endorsed by the Rust Foundation.

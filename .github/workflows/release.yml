@@ -1,4 +1,4 @@
-name: Release
+name: Release Bundle
 
 on:
     push:
@@ -15,9 +15,16 @@ env:
     SQLX_OFFLINE: true
 
 jobs:
-    release:
-        name: Build and Release
-        runs-on: ubuntu-latest
+    bundle:
+        name: Build Bundle (${{ matrix.os }}-${{ matrix.arch }})
+        runs-on: ${{ matrix.runner }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04, os: linux, arch: x86_64 }
+                    - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm, os: linux, arch: aarch64 }
+                    - { target: aarch64-apple-darwin, runner: macos-14, os: darwin, arch: aarch64 }
 
         steps:
             - name: Get version from tag
@@ -29,296 +36,237 @@ jobs:
 
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
+              # rust-toolchain.toml in the repo root pins the version and wasm32-wasip2 target
 
-            - name: Build release binaries
-              run: cargo build --release -p runtara-server -p runtara-core -p runtara-environment
+            - name: Build bundle
+              run: ./scripts/build-bundle.sh --output-dir target/bundle
 
-            - name: Strip binaries
+            - name: Upload bundle artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: bundle-${{ matrix.os }}-${{ matrix.arch }}
+                  path: |
+                      target/bundle/runtara-*.tar.gz
+                      target/bundle/runtara-*.tar.gz.sha256
+
+    release:
+        name: Create Release
+        runs-on: ubuntu-latest
+        needs: bundle
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Get version from tag
+              id: get_version
+              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+            - name: Download all bundle artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+                  merge-multiple: true
+
+            - name: List artifacts
+              run: ls -lh artifacts/
+
+            - name: Generate SHA256SUMS
+              working-directory: artifacts
               run: |
-                  strip target/release/runtara-server
-                  strip target/release/runtara-core
-                  strip target/release/runtara-environment
+                  sha256sum runtara-*.tar.gz > SHA256SUMS
+                  cat SHA256SUMS
 
-            - name: Create tarballs
-              env:
-                  VERSION: ${{ steps.get_version.outputs.version }}
-              run: |
-                  cd target/release
-                  tar czf "runtara-server-${VERSION}-x86_64-linux.tar.gz" runtara-server
-                  sha256sum "runtara-server-${VERSION}-x86_64-linux.tar.gz" > "runtara-server-${VERSION}-x86_64-linux.tar.gz.sha256"
-                  tar czf "runtara-core-${VERSION}-x86_64-linux.tar.gz" runtara-core
-                  tar czf "runtara-environment-${VERSION}-x86_64-linux.tar.gz" runtara-environment
-
-            - name: Build DEB packages
-              env:
-                  VERSION: ${{ steps.get_version.outputs.version }}
-              run: |
-                  ./scripts/build-deb.sh runtara-core
-                  ./scripts/build-deb.sh runtara-environment
-
-            - name: Create GitHub Release and upload assets
+            - name: Create GitHub Release
               env:
                   GH_TOKEN: ${{ github.token }}
                   VERSION: ${{ steps.get_version.outputs.version }}
                   TAG: ${{ github.ref_name }}
               run: |
-                  # Determine if prerelease
                   PRERELEASE_FLAG=""
                   if [[ "$TAG" == *-* ]]; then
                       PRERELEASE_FLAG="--prerelease"
                   fi
 
-                  # Create release with assets
                   gh release create "$TAG" \
                       --title "Release $VERSION" \
                       $PRERELEASE_FLAG \
-                      "target/release/runtara-server-${VERSION}-x86_64-linux.tar.gz" \
-                      "target/release/runtara-server-${VERSION}-x86_64-linux.tar.gz.sha256" \
-                      "target/release/runtara-core-${VERSION}-x86_64-linux.tar.gz" \
-                      "target/release/runtara-environment-${VERSION}-x86_64-linux.tar.gz" \
-                      "target/runtara-core_${VERSION}_amd64.deb" \
-                      "target/runtara-environment_${VERSION}_amd64.deb"
+                      artifacts/runtara-*.tar.gz \
+                      artifacts/runtara-*.tar.gz.sha256 \
+                      artifacts/SHA256SUMS \
+                      scripts/install.sh
 
-    # Publish crates in dependency order as separate jobs for retry capability
-    # Layer 1: No internal dependencies
+    # ── Crates.io publishing (unchanged from existing release.yml) ──
+    # These jobs publish the library crates to crates.io for Rust library consumers.
+    # They are independent of the bundle and run in parallel.
+
     publish-dsl:
         name: Publish runtara-dsl
         runs-on: ubuntu-latest
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: cargo publish -p runtara-dsl --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-dsl --allow-dirty
 
     publish-agent-macro:
         name: Publish runtara-agent-macro
         runs-on: ubuntu-latest
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: cargo publish -p runtara-agent-macro --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-agent-macro --allow-dirty
 
     publish-http:
         name: Publish runtara-http
         runs-on: ubuntu-latest
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: cargo publish -p runtara-http --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-http --allow-dirty
 
     publish-sdk-macros:
         name: Publish runtara-sdk-macros
         runs-on: ubuntu-latest
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: cargo publish -p runtara-sdk-macros --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-sdk-macros --allow-dirty
 
-    # Layer 2: Depend on layer 1
     publish-core:
         name: Publish runtara-core
         runs-on: ubuntu-latest
         needs: [publish-dsl]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-core --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-core --allow-dirty
 
     publish-ai:
         name: Publish runtara-ai
         runs-on: ubuntu-latest
         needs: [publish-http]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-ai --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-ai --allow-dirty
 
     publish-agents:
         name: Publish runtara-agents
         runs-on: ubuntu-latest
         needs: [publish-dsl, publish-agent-macro, publish-http]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-agents --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-agents --allow-dirty
 
     publish-sdk:
         name: Publish runtara-sdk
         runs-on: ubuntu-latest
         needs: [publish-sdk-macros, publish-core, publish-http]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-sdk --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-sdk --allow-dirty
 
     publish-workflows:
         name: Publish runtara-workflows
         runs-on: ubuntu-latest
         needs: [publish-dsl, publish-ai, publish-agents]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-workflows --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-workflows --allow-dirty
 
-    # Layer 3: Depend on layer 2
     publish-workflow-stdlib:
         name: Publish runtara-workflow-stdlib
         runs-on: ubuntu-latest
         needs: [publish-agents, publish-sdk, publish-ai]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-workflow-stdlib --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-workflow-stdlib --allow-dirty
 
     publish-management-sdk:
         name: Publish runtara-management-sdk
         runs-on: ubuntu-latest
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-management-sdk --allow-dirty
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              run: cargo publish -p runtara-management-sdk --allow-dirty
 
     publish-environment:
         name: Publish runtara-environment
         runs-on: ubuntu-latest
         needs: [publish-core, publish-dsl]
         steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-            - name: Get version from tag
-              id: get_version
+            - uses: actions/checkout@v4
+            - id: get_version
               run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            - name: Setup Rust toolchain
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-            - name: Update versions from tag
-              run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
-            - name: Wait for crates.io index
-              run: sleep 30
-            - name: Publish
+            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - run: ./scripts/update-version.sh ${{ steps.get_version.outputs.version }}
+            - run: sleep 30
+            - run: cargo publish -p runtara-environment --allow-dirty --no-verify
               env:
                   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-              # --no-verify: dev-deps create a cycle with runtara-core
-              run: cargo publish -p runtara-environment --allow-dirty --no-verify
