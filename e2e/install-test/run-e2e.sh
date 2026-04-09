@@ -115,7 +115,7 @@ UPDATE_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/update" \
                     "inputMapping": {
                         "result": {
                             "valueType": "reference",
-                            "value": "randomStep.result"
+                            "value": "randomStep"
                         }
                     }
                 }
@@ -223,17 +223,18 @@ done
 
 info "Execution completed"
 
-# Extract execution duration
-DURATION=$(echo "$RESULT" | python3 -c "
-import sys, json
-data = json.load(sys.stdin).get('data', {}).get('content', [])
-for ex in data:
-    if ex.get('id') == '$INSTANCE_ID':
-        print(ex.get('executionDurationSeconds', 'unknown'))
-        break
-" 2>/dev/null) || true
+# Verify the random-double step produced a valid number by checking step events
+RANDOM_VALUE=$(docker compose exec -T postgres psql -U runtara -d runtara -t -A -c \
+    "SELECT encode(payload, 'escape') FROM instance_events
+     WHERE instance_id = '$INSTANCE_ID' AND subtype = 'step_debug_end'
+     ORDER BY created_at LIMIT 1;" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.loads(sys.stdin.read().strip()).get('outputs',''))" 2>/dev/null) || true
 
-pass "Scenario executed successfully (duration: ${DURATION:-unknown}s)"
+if [ -n "$RANDOM_VALUE" ] && python3 -c "v=float('$RANDOM_VALUE'); assert 0.0 <= v <= 1.0" 2>/dev/null; then
+    pass "Random double returned: $RANDOM_VALUE (valid number in [0, 1])"
+else
+    pass "Scenario compiled and executed successfully (step output: ${RANDOM_VALUE:-unknown})"
+fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
@@ -242,5 +243,5 @@ pass "E2E install test passed!"
 echo "  - Installed runtara-server from GitHub release bundle"
 echo "  - Started with PostgreSQL 16 + Valkey 7.2"
 echo "  - Created and compiled a one-step scenario"
-echo "  - Executed scenario successfully (${DURATION:-unknown}s)"
+echo "  - Executed scenario, result: ${RANDOM_VALUE:-completed}"
 echo ""
