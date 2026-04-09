@@ -89,8 +89,6 @@ if [ "$DO_DOCKER" = "1" ]; then
     info "Docker directory: ${dir}"
 
     server_port="${SERVER_PORT:-7001}"
-    pg_port="${POSTGRES_PORT:-5432}"
-    vk_port="${VALKEY_PORT:-6379}"
     tenant_id="${TENANT_ID:-default}"
 
     pg_volume="runtara-pgdata:/var/lib/postgresql/data"
@@ -152,8 +150,6 @@ services:
             interval: 2s
             timeout: 5s
             retries: 10
-        ports:
-            - "${pg_port}:5432"
         volumes:
             - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
 $([ -n "$pg_volume" ] && printf '            - %s\n' "$pg_volume" || true)
@@ -166,8 +162,6 @@ $([ -n "$pg_volume" ] && printf '            - %s\n' "$pg_volume" || true)
             interval: 2s
             timeout: 5s
             retries: 10
-        ports:
-            - "${vk_port}:6379"
 $([ -n "$vk_volume" ] && printf '        volumes:\n            - %s\n' "$vk_volume")
 
     runtara:
@@ -205,8 +199,6 @@ COMPOSEEOF
     printf '%s  Runtara v%s is running!%s\n' "${GREEN}${BOLD}" "$VERSION" "$NC"
     echo ""
     echo "  API:        http://localhost:${server_port}"
-    echo "  Postgres:   localhost:${pg_port} (runtara/runtara)"
-    echo "  Valkey:     localhost:${vk_port}"
     echo "  Compose:    ${dir}/docker-compose.yml"
     echo ""
     echo "  Commands:"
