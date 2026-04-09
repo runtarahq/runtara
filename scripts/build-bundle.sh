@@ -117,7 +117,10 @@ build_stdlib() {
     fi
 
     step "Building workflow stdlib (wasm32-wasip2 rlibs)"
-    cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 --no-default-features
+    # embed-bitcode=yes is required so that scenario compilation can use LTO
+    # for cross-crate dead code elimination (see compile.rs)
+    RUSTFLAGS="-C embed-bitcode=yes" \
+        cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 --no-default-features
 
     step "Building workflow stdlib (host proc-macros)"
     cargo build -p runtara-workflow-stdlib --release
