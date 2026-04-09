@@ -41,6 +41,8 @@ while [[ $# -gt 0 ]]; do
         --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
         --output-dir=*)    OUTPUT_DIR="${1#*=}"; shift ;;
         --wasmtime-version) WASMTIME_VERSION="$2"; shift 2 ;;
+        --version)         RUNTARA_VERSION_OVERRIDE="$2"; shift 2 ;;
+        --version=*)       RUNTARA_VERSION_OVERRIDE="${1#*=}"; shift ;;
         *)                 echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -81,8 +83,8 @@ detect_platform() {
 # ─── Resolve versions ───────────────────────────────────────────────────────
 
 resolve_versions() {
-    # Runtara version from workspace Cargo.toml
-    RUNTARA_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+    # Runtara version: override or from workspace Cargo.toml
+    RUNTARA_VERSION="${RUNTARA_VERSION_OVERRIDE:-$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')}"
 
     # Rust version from the active toolchain (pinned by rust-toolchain.toml)
     RUSTC_VERSION="$(rustc --version | cut -d' ' -f2)"

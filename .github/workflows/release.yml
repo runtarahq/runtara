@@ -45,7 +45,7 @@ jobs:
               uses: actions-rust-lang/setup-rust-toolchain@v1
 
             - name: Build bundle
-              run: ./scripts/build-bundle.sh --output-dir target/bundle
+              run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ steps.get_version.outputs.version }}"
 
             - name: Upload bundle artifact
               uses: actions/upload-artifact@v4
