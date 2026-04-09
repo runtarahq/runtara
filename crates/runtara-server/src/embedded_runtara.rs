@@ -174,14 +174,22 @@ impl EmbeddedRuntara {
     }
 }
 
+/// Server-specific migrations (scenarios, api_keys, triggers, connections).
+static SERVER_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 /// Run Runtara database migrations.
 ///
-/// This runs both core and environment migrations as a unified set.
+/// This runs core + environment migrations first, then server-specific
+/// migrations (scenarios, api_keys, etc.) as a unified set.
 /// Safe to run multiple times (idempotent).
 pub async fn run_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Running Runtara migrations...");
     runtara_environment::migrations::run(pool).await?;
-    info!("✓ Runtara migrations completed");
+    info!("✓ Runtara core/environment migrations completed");
+
+    info!("Running server migrations...");
+    SERVER_MIGRATOR.run(pool).await?;
+    info!("✓ Server migrations completed");
     Ok(())
 }
 

@@ -1,0 +1,57 @@
+services:
+    postgres:
+        image: postgres:16
+        environment:
+            POSTGRES_USER: runtara
+            POSTGRES_PASSWORD: runtara
+            POSTGRES_DB: runtara
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U runtara"]
+            interval: 2s
+            timeout: 5s
+            retries: 10
+        volumes:
+            - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+
+    valkey:
+        image: valkey/valkey:7.2
+        healthcheck:
+            test: ["CMD", "valkey-cli", "ping"]
+            interval: 2s
+            timeout: 5s
+            retries: 10
+
+    jwks:
+        image: nginx:alpine
+        volumes:
+            - ./jwks.json:/usr/share/nginx/html/.well-known/jwks.json:ro
+        healthcheck:
+            test: ["CMD", "wget", "-qO-", "http://localhost/.well-known/jwks.json"]
+            interval: 2s
+            timeout: 5s
+            retries: 5
+
+    runtara:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        depends_on:
+            postgres:
+                condition: service_healthy
+            valkey:
+                condition: service_healthy
+            jwks:
+                condition: service_healthy
+        environment:
+            RUNTARA_NONINTERACTIVE: "1"
+            RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
+            OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
+            DATA_DIR: /tmp/runtara-data
+            VALKEY_HOST: valkey
+            VALKEY_PORT: "6379"
+            TENANT_ID: test-tenant
+            SERVER_PORT: "7001"
+            OAUTH2_JWKS_URI: http://jwks/.well-known/jwks.json
+            OAUTH2_ISSUER: https://test.example.com
+        ports:
+            - "7001:7001"
