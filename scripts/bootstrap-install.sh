@@ -26,16 +26,18 @@ info() { printf "${GREEN}[+]${NC} %s\n" "$*"; }
 warn() { printf "${YELLOW}[!]${NC} %s\n" "$*"; }
 err()  { printf "${RED}[x]${NC} %s\n" "$*" >&2; }
 
-# ─── Extract --version from args (if present) ──────────────────────────────
+# ─── Extract --version and --docker from args (if present) ────────────────
 
 VERSION=""
+USE_DOCKER=0
 PASSTHROUGH_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version)   VERSION="$2"; PASSTHROUGH_ARGS+=("$1" "$2"); shift 2 ;;
-        --version=*) VERSION="${1#*=}"; PASSTHROUGH_ARGS+=("$1"); shift ;;
-        *)           PASSTHROUGH_ARGS+=("$1"); shift ;;
+        --version)        VERSION="$2"; PASSTHROUGH_ARGS+=("$1" "$2"); shift 2 ;;
+        --version=*)      VERSION="${1#*=}"; PASSTHROUGH_ARGS+=("$1"); shift ;;
+        --docker|--docker-persist) USE_DOCKER=1; PASSTHROUGH_ARGS+=("$1"); shift ;;
+        *)                PASSTHROUGH_ARGS+=("$1"); shift ;;
     esac
 done
 
@@ -57,13 +59,20 @@ info "Runtara v${VERSION}"
 
 # ─── Download and execute the real installer ────────────────────────────────
 
-INSTALL_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/install.sh"
-
-info "Fetching installer from release v${VERSION}..."
+if [ "$USE_DOCKER" = "1" ]; then
+    # Docker mode: fetch install.sh from main branch (not tied to a release bundle)
+    INSTALL_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh"
+    info "Fetching installer from main branch (docker mode)..."
+else
+    INSTALL_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/install.sh"
+    info "Fetching installer from release v${VERSION}..."
+fi
 
 INSTALLER="$(curl -fsSL "$INSTALL_URL")" || {
     err "Failed to download install.sh from ${INSTALL_URL}"
-    err "Check that release v${VERSION} exists: https://github.com/${GITHUB_REPO}/releases/tag/v${VERSION}"
+    if [ "$USE_DOCKER" = "0" ]; then
+        err "Check that release v${VERSION} exists: https://github.com/${GITHUB_REPO}/releases/tag/v${VERSION}"
+    fi
     exit 1
 }
 
