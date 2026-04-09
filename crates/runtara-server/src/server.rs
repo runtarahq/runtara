@@ -470,9 +470,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             std::env::set_var("RUNTARA_STDLIB_NAME", "runtara_workflow_stdlib");
         }
 
-        // Ensure in-process S3Client (used by Files endpoints) routes through the proxy
+        // Ensure in-process S3Client (used by Files endpoints) routes through the internal proxy
         if std::env::var("RUNTARA_HTTP_PROXY_URL").is_err() {
-            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
+            let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
             std::env::set_var(
                 "RUNTARA_HTTP_PROXY_URL",
                 format!("http://127.0.0.1:{}/api/internal/proxy", port),
@@ -527,7 +527,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         // Object model internal API URL — scenarios use this for CRUD operations
         if std::env::var("RUNTARA_OBJECT_MODEL_URL").is_err() {
-            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
+            let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
             std::env::set_var(
                 "RUNTARA_OBJECT_MODEL_URL",
                 format!("http://127.0.0.1:{}/api/internal/object-model", port),
@@ -539,7 +539,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Agent service URL — WASM scenarios use this to call native-only capabilities
         if std::env::var("RUNTARA_AGENT_SERVICE_URL").is_err() {
-            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
+            let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
             std::env::set_var(
                 "RUNTARA_AGENT_SERVICE_URL",
                 format!("http://127.0.0.1:{}/api/internal/agents", port),
@@ -1655,19 +1655,17 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(pool.clone());
 
-    // Combine routes and add global middleware
-    let app = Router::new()
+    // =========================================================================
+    // Public API server — accessible externally / via API gateway
+    // =========================================================================
+    let public_app = Router::new()
         .merge(tenant_routes)
         .merge(object_model_routes)
         .merge(file_storage_routes)
-        .merge(public_routes)
+        .merge(public_routes.clone())
         .merge(event_routes)
         .merge(oauth_callback_routes)
         .merge(channel_routes)
-        .merge(internal_routes)
-        .merge(internal_object_model_routes)
-        .merge(internal_proxy_routes)
-        .merge(internal_agent_routes)
         .nest("/mcp", mcp_router)
         .route(
             "/api/runtime/openapi/docs.json",
@@ -1677,22 +1675,47 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));
 
-    // Get port from environment variable or use default
+    // =========================================================================
+    // Internal API server — localhost only, called by scenario binaries / WASM
+    // =========================================================================
+    let internal_app = Router::new()
+        .merge(internal_routes)
+        .merge(internal_object_model_routes)
+        .merge(internal_proxy_routes)
+        .merge(internal_agent_routes)
+        .merge(public_routes)
+        .layer(TraceLayer::new_for_http())
+        .layer(from_fn(middleware::http_metrics::http_metrics_middleware));
+
+    // Get port/host from environment variables or use defaults
     let port = std::env::var("SERVER_PORT")
         .unwrap_or_else(|_| "7001".to_string())
         .parse::<u16>()
         .unwrap_or(7001);
-
     let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let addr = format!("{}:{}", host, port);
+    let public_addr = format!("{}:{}", host, port);
 
-    // Start the server
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let internal_port = std::env::var("INTERNAL_PORT")
+        .unwrap_or_else(|_| "7002".to_string())
+        .parse::<u16>()
+        .unwrap_or(7002);
+    let internal_host = std::env::var("INTERNAL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let internal_addr = format!("{}:{}", internal_host, internal_port);
 
+    // Start public API server
+    let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
     tracing::info!(
         port = port,
-        address = %addr,
-        "Server started successfully"
+        address = %public_addr,
+        "Public API server started"
+    );
+
+    // Start internal API server (localhost only)
+    let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
+    tracing::info!(
+        port = internal_port,
+        address = %internal_addr,
+        "Internal API server started"
     );
 
     // Spawn heartbeat task for log pipeline monitoring
@@ -1704,7 +1727,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    axum::serve(listener, app).await?;
+    // Run both servers concurrently
+    let public_server = axum::serve(public_listener, public_app);
+    let internal_server = axum::serve(internal_listener, internal_app);
+
+    tokio::select! {
+        result = public_server => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "Public API server error");
+            }
+        }
+        result = internal_server => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "Internal API server error");
+            }
+        }
+    }
 
     // Gracefully shutdown embedded Runtara server
     if let Some(runtara) = embedded_runtara {
