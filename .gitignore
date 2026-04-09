@@ -83,3 +83,6 @@ agents.md
 # QEMU VM test artifacts
 .qemu-cache/
 .qemu-work/
+# Local bundle builds
+runtara-*-*.tar.gz
+runtara-*-*.tar.gz.sha256

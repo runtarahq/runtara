@@ -83,33 +83,15 @@ impl EmbeddedRuntara {
             .await?;
         info!("✓ runtara-core started on {}", core_http_addr);
 
-        // Create runner for scenario execution
-        // Linux: OCI runner (crun + pasta) for container isolation
-        // Select runner based on compile target
-        let compile_target = std::env::var("RUNTARA_COMPILE_TARGET").unwrap_or_default();
-        let runner: Arc<dyn runtara_environment::runner::Runner> =
-            if compile_target.contains("wasm") {
-                info!("Using WasmRunner for WASM compilation target");
-                Arc::new(runtara_environment::runner::wasm::WasmRunner::new(
-                    runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
-                    persistence.clone(),
-                ))
-            } else {
-                #[cfg(target_os = "linux")]
-                {
-                    Arc::new(runtara_environment::runner::oci::OciRunner::new(
-                        runtara_environment::runner::oci::OciRunnerConfig::from_env(),
-                        persistence.clone(),
-                    ))
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    Arc::new(runtara_environment::runner::NativeRunner::new(
-                        runtara_environment::runner::NativeRunnerConfig::from_env(),
-                        persistence.clone(),
-                    ))
-                }
-            };
+        // Create WASM runner for scenario execution.
+        // Scenarios are compiled to wasm32-wasip2 and executed via wasmtime.
+        let runner: Arc<dyn runtara_environment::runner::Runner> = Arc::new(
+            runtara_environment::runner::wasm::WasmRunner::new(
+                runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
+                persistence.clone(),
+            ),
+        );
+        info!("Using WasmRunner for scenario execution");
 
         // Start Environment (management protocol)
         // Note: core_client_addr is what scenario processes use to connect to runtara-core.
