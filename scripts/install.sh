@@ -41,6 +41,7 @@ BUNDLE_DIR=""
 SKIP_SERVICE=0
 DO_UNINSTALL=0
 DO_PURGE=0
+DO_RUN=0
 
 # ─── Colour helpers ──────────────────────────────────────────────────────────
 
@@ -73,6 +74,7 @@ while [ $# -gt 0 ]; do
         --bundle-dir)    BUNDLE_DIR="$2"; shift 2 ;;
         --bundle-dir=*)  BUNDLE_DIR="${1#*=}"; shift ;;
         --skip-service)  SKIP_SERVICE=1; shift ;;
+        --run)           DO_RUN=1; SKIP_SERVICE=1; shift ;;
         --uninstall)     DO_UNINSTALL=1; shift ;;
         --purge)         DO_PURGE=1; shift ;;
         --version)       RUNTARA_VERSION="$2"; shift 2 ;;
@@ -637,6 +639,11 @@ main() {
     install_service
     start_service
     print_summary
+
+    if [ "$DO_RUN" = "1" ]; then
+        step "Running runtara-server in foreground"
+        exec "$RUNTARA_DIR/bin/runtara-server"
+    fi
 }
 
 main "$@"
