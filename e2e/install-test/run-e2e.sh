@@ -115,7 +115,7 @@ UPDATE_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/update" \
                     "inputMapping": {
                         "result": {
                             "valueType": "reference",
-                            "value": "randomStep"
+                            "value": "steps['randomStep'].outputs"
                         }
                     }
                 }
