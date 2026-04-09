@@ -654,6 +654,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to connect to object model database");
 
+    // Run server migrations (scenarios, api_keys, etc.) against the main pool
+    run_server_migrations(&pool).await;
+
     // Create ObjectStoreManager from the pool (single-database mode for now)
     let object_store_manager = Arc::new(
         ObjectStoreManager::from_pool(object_model_pool)
@@ -1715,4 +1718,50 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     observability::shutdown_telemetry();
 
     Ok(())
+}
+
+/// Run server-specific database migrations (scenarios, api_keys, triggers, connections).
+///
+/// These run against the main server pool (OBJECT_MODEL_DATABASE_URL) which holds
+/// all server-managed tables. Uses ignore_missing since this pool may share the
+/// _sqlx_migrations table with other migrators.
+async fn run_server_migrations(pool: &PgPool) {
+    #[derive(Debug)]
+    struct Migrations(Vec<sqlx::migrate::Migration>);
+
+    impl<'s> sqlx::migrate::MigrationSource<'s> for Migrations {
+        fn resolve(
+            self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<sqlx::migrate::Migration>,
+                            Box<dyn std::error::Error + Send + Sync>,
+                        >,
+                    > + Send
+                    + 's,
+            >,
+        > {
+            Box::pin(async move { Ok(self.0) })
+        }
+    }
+
+    println!("Running server migrations...");
+    let source = sqlx::migrate!("./migrations");
+    let migrations: Vec<sqlx::migrate::Migration> = source.iter().cloned().collect();
+    match sqlx::migrate::Migrator::new(Migrations(migrations)).await {
+        Ok(mut migrator) => {
+            migrator.set_ignore_missing(true);
+            if let Err(e) = migrator.run(pool).await {
+                eprintln!("⚠ Server migrations failed: {e}");
+                eprintln!("  Some features may not work until migrations are applied.");
+            } else {
+                println!("✓ Server migrations completed");
+            }
+        }
+        Err(e) => {
+            eprintln!("⚠ Failed to initialize server migrator: {e}");
+        }
+    }
 }

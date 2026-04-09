@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS scenarios (
     deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    path TEXT,
+    path TEXT NOT NULL DEFAULT '/',
     PRIMARY KEY (tenant_id, scenario_id)
 );
 
@@ -32,8 +32,8 @@ CREATE TABLE IF NOT EXISTS scenario_definitions (
     version INTEGER NOT NULL,
     definition JSONB NOT NULL,
     file_size INTEGER,
-    memory_tier TEXT,
-    track_events BOOLEAN,
+    memory_tier TEXT NOT NULL DEFAULT 'standard',
+    track_events BOOLEAN NOT NULL DEFAULT FALSE,
     deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS scenario_compilations (
     wasm_size INTEGER,
     wasm_checksum TEXT,
     registered_image_id TEXT,
+    error_message TEXT,
     PRIMARY KEY (tenant_id, scenario_id, version)
 );
 

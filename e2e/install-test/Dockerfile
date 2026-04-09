@@ -4,9 +4,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Download and run the install script from the latest GitHub release
-RUN curl -fsSL https://github.com/runtarahq/runtara/releases/latest/download/install.sh | \
-    bash -s -- --user --skip-service
+# Copy the install script and pre-built bundle for local testing
+# For CI/production: remove COPY lines and use curl from GitHub releases instead
+COPY install.sh /tmp/install.sh
+RUN chmod +x /tmp/install.sh
+COPY runtara-*-linux.tar.gz /tmp/
+
+RUN /tmp/install.sh --user --skip-service --bundle "$(ls /tmp/runtara-*-linux.tar.gz | head -1)"
 
 ENV PATH="/root/.runtara/toolchain/bin:/root/.runtara/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/root/.runtara/toolchain/lib"

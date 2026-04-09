@@ -87,16 +87,20 @@ resolve_versions() {
     # Rust version from the active toolchain (pinned by rust-toolchain.toml)
     RUSTC_VERSION="$(rustc --version | cut -d' ' -f2)"
 
+    # Respect CARGO_TARGET_DIR if set
+    TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+
     info "Runtara version: ${RUNTARA_VERSION}"
     info "Rustc version:   ${RUSTC_VERSION}"
     info "Wasmtime version: ${WASMTIME_VERSION}"
+    info "Target dir:      ${TARGET_DIR}"
 }
 
 # ─── Build runtara-server ────────────────────────────────────────────────────
 
 build_server() {
     if [ "$SKIP_BUILD" = "1" ]; then
-        if [ ! -f "target/release/runtara-server" ]; then
+        if [ ! -f "${TARGET_DIR}/release/runtara-server" ]; then
             echo "Error: --skip-build but target/release/runtara-server not found" >&2
             exit 1
         fi
@@ -119,7 +123,7 @@ build_stdlib() {
     step "Building workflow stdlib (wasm32-wasip2 rlibs)"
     # Clean stale artifacts to prevent duplicate rlibs (different RUSTFLAGS produce
     # different hashes; cargo doesn't remove the old ones)
-    rm -rf target/wasm32-wasip2/release/deps/*.rlib target/wasm32-wasip2/release/*.rlib 2>/dev/null || true
+    rm -rf "${TARGET_DIR}"/wasm32-wasip2/release/deps/*.rlib "${TARGET_DIR}"/wasm32-wasip2/release/*.rlib 2>/dev/null || true
 
     # embed-bitcode=yes is required so that scenario compilation can use LTO
     # for cross-crate dead code elimination (see compile.rs)
@@ -174,12 +178,8 @@ assemble_bundle() {
 
     # ── runtara-server binary ──
     info "Copying runtara-server binary"
-    cp "target/release/runtara-server" "$bundle/bin/"
-    if [ "$OS" = "darwin" ]; then
-        strip "$bundle/bin/runtara-server" 2>/dev/null || true
-    else
-        strip "$bundle/bin/runtara-server"
-    fi
+    cp "${TARGET_DIR}/release/runtara-server" "$bundle/bin/"
+    strip "$bundle/bin/runtara-server" 2>/dev/null || warn "strip failed (non-critical)"
 
     # ── Wasmtime binary ──
     info "Extracting wasmtime binary"
@@ -240,7 +240,7 @@ assemble_bundle() {
     info "Copying pre-built workflow stdlib"
 
     # WASM rlibs
-    local wasm_release="target/wasm32-wasip2/release"
+    local wasm_release="${TARGET_DIR}/wasm32-wasip2/release"
     local wasm_deps="${wasm_release}/deps"
     cp "${wasm_release}/libruntara_workflow_stdlib.rlib" "$bundle/stdlib/"
     for rlib in "$wasm_deps"/*.rlib; do
@@ -251,8 +251,12 @@ assemble_bundle() {
         cp "$rlib" "$bundle/stdlib/deps/"
     done
 
+    # Native static archives (.a files) needed by the WASM linker (e.g., wit_bindgen_cabi_realloc).
+    # These live in the build/ directory, not deps/.
+    find "${wasm_release}/build" -name "*.a" -exec cp {} "$bundle/stdlib/deps/" \; 2>/dev/null || true
+
     # Host proc-macro shared libraries
-    local host_deps="target/release/deps"
+    local host_deps="${TARGET_DIR}/release/deps"
     case "$OS" in
         darwin) local dylib_ext="dylib" ;;
         linux)  local dylib_ext="so" ;;

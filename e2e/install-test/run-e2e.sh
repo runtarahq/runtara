@@ -58,7 +58,7 @@ info "Server is healthy"
 info "Creating API key in database..."
 API_KEY_HASH=$(echo -n "$API_KEY" | sha256sum | cut -d' ' -f1)
 
-docker compose exec -T postgres psql -U runtara -d runtara -c "
+docker compose exec -T postgres psql -U runtara -d runtara_objects -c "
 INSERT INTO public.api_keys (id, org_id, name, key_prefix, key_hash, created_by, created_at, is_revoked)
 VALUES (
     gen_random_uuid(),
@@ -136,9 +136,39 @@ UPDATE_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/update" \
 
 info "Scenario updated"
 
+# ─── Wait for compilation ────────────────────────────────────────────────────
+
+info "Waiting for scenario compilation (async)..."
+# Compilation is asynchronous via the compilation worker.
+# Poll the compile endpoint until compilation succeeds.
+for i in $(seq 1 60); do
+    # Try to trigger compilation explicitly
+    curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/compile" \
+        -X POST \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "Content-Type: application/json" > /dev/null 2>&1 || true
+
+    # Try executing — if it returns 200, compilation is done
+    EXEC_TEST=$(curl -s -o /dev/null -w "%{http_code}" "$API/api/runtime/scenarios/${SCENARIO_ID}/execute" \
+        -X POST \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{"inputs": {"data": {}}, "debug": false}' 2>/dev/null) || true
+
+    if [ "$EXEC_TEST" = "200" ]; then
+        info "Scenario compiled and execution started"
+        break
+    fi
+
+    if [ "$i" -eq 60 ]; then
+        fail "Scenario compilation/execution did not succeed within 60s (last HTTP status: ${EXEC_TEST:-unknown})"
+    fi
+    sleep 1
+done
+
 # ─── Execute scenario ───────────────────────────────────────────────────────
 
-info "Executing scenario..."
+info "Fetching execution result..."
 EXEC_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/execute" \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
