@@ -30,7 +30,7 @@ cd "$ROOT_DIR"
 
 SKIP_BUILD=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
-WASMTIME_VERSION="29.0.1"
+WASMTIME_VERSION="43.0.0"
 DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
 
 # ─── Parse arguments ─────────────────────────────────────────────────────────
