@@ -253,14 +253,17 @@ resolve_bundle() {
         info "Upgrading from v${installed} to v${RUNTARA_VERSION}"
     fi
 
+    local tag
+    if [ "$RUNTARA_VERSION" = "dev" ]; then tag="dev"; else tag="v${RUNTARA_VERSION}"; fi
+
     local tarball="runtara-${RUNTARA_VERSION}-${ARCH}-${OS}.tar.gz"
-    local base_url="https://github.com/${GITHUB_REPO}/releases/download/v${RUNTARA_VERSION}"
+    local base_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
 
     step "Downloading ${tarball}"
     local tmp_dl
     tmp_dl="$(mktemp -d)"
     curl -fSL -o "${tmp_dl}/${tarball}" "${base_url}/${tarball}" \
-        || die $EXIT_DOWNLOAD "Failed to download ${tarball}. Check https://github.com/${GITHUB_REPO}/releases/tag/v${RUNTARA_VERSION}"
+        || die $EXIT_DOWNLOAD "Failed to download ${tarball}. Check https://github.com/${GITHUB_REPO}/releases/tag/${tag}"
 
     # Verify checksum
     info "Verifying checksum"

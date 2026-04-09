@@ -51,6 +51,11 @@ done
 
 # ─── Resolve version ───────────────────────────────────────────────────────
 
+# Map version to git tag: "dev" -> "dev", anything else -> "v1.2.3"
+version_to_tag() {
+    if [ "$1" = "dev" ]; then echo "dev"; else echo "v$1"; fi
+}
+
 if [ -z "$VERSION" ]; then
     info "Resolving latest Runtara version..."
     VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
@@ -63,7 +68,8 @@ if [ -z "$VERSION" ]; then
     PASSTHROUGH_ARGS+=("--version" "$VERSION")
 fi
 
-info "Runtara v${VERSION}"
+TAG="$(version_to_tag "$VERSION")"
+info "Runtara v${VERSION} (tag: ${TAG})"
 
 # ─── Docker simple mode ───────────────────────────────────────────────────
 
@@ -115,7 +121,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/install.sh | \\
+RUN curl -fsSL https://github.com/${GITHUB_REPO}/releases/download/${TAG}/install.sh | \\
     bash -s -- --user --skip-service --version ${VERSION}
 
 ENV PATH="/root/.runtara/toolchain/bin:/root/.runtara/bin:\${PATH}"
@@ -216,13 +222,13 @@ fi
 
 # ─── Download and execute the real installer ────────────────────────────────
 
-INSTALL_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/install.sh"
+INSTALL_URL="https://github.com/${GITHUB_REPO}/releases/download/${TAG}/install.sh"
 
-info "Fetching installer from release v${VERSION}..."
+info "Fetching installer from release ${TAG}..."
 
 INSTALLER="$(curl -fsSL "$INSTALL_URL")" || {
     err "Failed to download install.sh from ${INSTALL_URL}"
-    err "Check that release v${VERSION} exists: https://github.com/${GITHUB_REPO}/releases/tag/v${VERSION}"
+    err "Check that release ${TAG} exists: https://github.com/${GITHUB_REPO}/releases/tag/${TAG}"
     exit 1
 }
 
