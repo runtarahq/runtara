@@ -57,12 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Ensure OBJECT_MODEL_DATABASE_URL is set for the server internals.
     // If only DATABASE_URL was provided (legacy), forward it.
-    if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            // SAFETY: called before any threads are spawned
-            unsafe {
-                std::env::set_var("OBJECT_MODEL_DATABASE_URL", &url);
-            }
+    if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err()
+        && let Ok(url) = std::env::var("DATABASE_URL")
+    {
+        // SAFETY: called before any threads are spawned
+        unsafe {
+            std::env::set_var("OBJECT_MODEL_DATABASE_URL", &url);
         }
     }
 
