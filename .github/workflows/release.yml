@@ -5,6 +5,8 @@ on:
         tags:
             - "v[0-9]+.[0-9]+.[0-9]+"
             - "v[0-9]+.[0-9]+.[0-9]+-*"
+        branches:
+            - main
 
 permissions:
     contents: write
@@ -27,12 +29,17 @@ jobs:
                     - { target: aarch64-apple-darwin, runner: macos-14, os: darwin, arch: aarch64 }
 
         steps:
-            - name: Get version from tag
-              id: get_version
-              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
             - name: Checkout code
               uses: actions/checkout@v4
+
+            - name: Determine version
+              id: get_version
+              run: |
+                  if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+                      echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+                  else
+                      echo "version=dev" >> $GITHUB_OUTPUT
+                  fi
 
             - name: Setup Rust toolchain
               uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -57,9 +64,18 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@v4
 
-            - name: Get version from tag
+            - name: Determine version and tag
               id: get_version
-              run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+              run: |
+                  if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+                      echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+                      echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+                      echo "is_dev=false" >> $GITHUB_OUTPUT
+                  else
+                      echo "version=dev" >> $GITHUB_OUTPUT
+                      echo "tag=dev" >> $GITHUB_OUTPUT
+                      echo "is_dev=true" >> $GITHUB_OUTPUT
+                  fi
 
             - name: Download all bundle artifacts
               uses: actions/download-artifact@v4
@@ -76,20 +92,43 @@ jobs:
                   sha256sum runtara-*.tar.gz > SHA256SUMS
                   cat SHA256SUMS
 
+            - name: Delete existing dev release
+              if: steps.get_version.outputs.is_dev == 'true'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh release delete dev --yes --cleanup-tag 2>/dev/null || true
+
             - name: Create GitHub Release
               env:
                   GH_TOKEN: ${{ github.token }}
                   VERSION: ${{ steps.get_version.outputs.version }}
-                  TAG: ${{ github.ref_name }}
+                  TAG: ${{ steps.get_version.outputs.tag }}
+                  IS_DEV: ${{ steps.get_version.outputs.is_dev }}
+                  COMMIT_SHA: ${{ github.sha }}
               run: |
-                  PRERELEASE_FLAG=""
-                  if [[ "$TAG" == *-* ]]; then
-                      PRERELEASE_FLAG="--prerelease"
+                  FLAGS=""
+                  if [[ "$IS_DEV" == "true" ]]; then
+                      FLAGS="--prerelease --target $COMMIT_SHA"
+                      TITLE="Development Snapshot (${VERSION})"
+                      NOTES="Automated development build from main at ${COMMIT_SHA}.
+
+                  > **This is a rolling release** — it is replaced on every push to main.
+                  > For stable releases, use a tagged version.
+
+                  Install: \`curl -fsSL https://install.runtara.com | sh -s -- --version ${VERSION}\`"
+                  else
+                      TITLE="Release ${VERSION}"
+                      NOTES=""
+                      if [[ "$TAG" == *-* ]]; then
+                          FLAGS="--prerelease"
+                      fi
                   fi
 
                   gh release create "$TAG" \
-                      --title "Release $VERSION" \
-                      $PRERELEASE_FLAG \
+                      --title "$TITLE" \
+                      $FLAGS \
+                      ${NOTES:+--notes "$NOTES"} \
                       artifacts/runtara-*.tar.gz \
                       artifacts/runtara-*.tar.gz.sha256 \
                       artifacts/SHA256SUMS \
