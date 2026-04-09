@@ -85,12 +85,11 @@ impl EmbeddedRuntara {
 
         // Create WASM runner for scenario execution.
         // Scenarios are compiled to wasm32-wasip2 and executed via wasmtime.
-        let runner: Arc<dyn runtara_environment::runner::Runner> = Arc::new(
-            runtara_environment::runner::wasm::WasmRunner::new(
+        let runner: Arc<dyn runtara_environment::runner::Runner> =
+            Arc::new(runtara_environment::runner::wasm::WasmRunner::new(
                 runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
                 persistence.clone(),
-            ),
-        );
+            ));
         info!("Using WasmRunner for scenario execution");
 
         // Start Environment (management protocol)
