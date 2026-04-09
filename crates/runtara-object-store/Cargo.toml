@@ -1,6 +1,6 @@
 [package]
 name = "runtara-object-store"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Schema-driven dynamic PostgreSQL object store"
 license = "AGPL-3.0-or-later"
