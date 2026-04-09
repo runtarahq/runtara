@@ -2,7 +2,7 @@
 
 Status: **Draft**
 Owner: Platform
-Supersedes: `.deb` packaging under [packaging/](../packaging) and [scripts/build-deb.sh](../scripts/build-deb.sh)
+Supersedes: previous `.deb` packaging (removed)
 
 ## Goals
 
@@ -25,15 +25,14 @@ A single, script-based installation and update path for Runtara that:
 ## Current state (what we're replacing)
 
 - [scripts/install.sh](../scripts/install.sh) — Linux-only. Installs rustup, WASI SDK, clones runtara source, compiles `runtara-workflow-stdlib` from scratch on the host (multi-minute build), then installs a systemd unit. Runtara's `rustc` dependency is exposed to the user as "here, let us install rustup into `/usr/local/rustup`" — a surprising intrusion for someone who just wanted a workflow engine.
-- [scripts/build-deb.sh](../scripts/build-deb.sh) + [packaging/runtara-core/](../packaging/runtara-core) + [packaging/runtara-environment/](../packaging/runtara-environment) — produce `.deb` packages. Separate code path duplicating `install.sh`'s responsibilities.
-- [.github/workflows/release.yml](../.github/workflows/release.yml) — builds one `x86_64-linux` tarball + two `.deb`s per release. No aarch64, no macOS.
+- [.github/workflows/release.yml](../.github/workflows/release.yml) — previously built one `x86_64-linux` tarball + `.deb` packages. Now replaced with the bundle matrix build.
 
 ### Problems
 
 1. The installer exposes Runtara's internal dependency on `rustc` to the user. Rustup is added to the host, `/etc/profile.d/rust.sh` is written, `$CARGO_HOME` and `$RUSTUP_HOME` are created. If the user already had a Rust toolchain, it's now competing with ours.
 2. Fresh install is multi-minute because the stdlib is compiled from source on every host.
 3. No aarch64 Linux or macOS support.
-4. `.deb` packaging duplicates the install logic and has to be maintained in parallel.
+4. ~~`.deb` packaging duplicated the install logic~~ (now removed).
 5. No update mechanism — users manually re-run the installer with no guarantee of atomicity.
 6. The Linux binary is dynamically linked against the GitHub runner's glibc (currently 2.39 on `ubuntu-latest`). Hosts with older glibc see `GLIBC_2.39 not found` at startup.
 
@@ -106,7 +105,7 @@ Tarball size estimate: 300–500 MB per target. Comparable to a rustup install, 
 
 **Linux libc strategy:** build against glibc on `ubuntu-22.04` (glibc 2.35). Covers Ubuntu 22.04+, Debian 12+, Amazon Linux 2023, RHEL 9+. Amazon Linux 2 and older are explicitly not supported. We deliberately avoid musl — the scenario-native-compile path that previously motivated it has been replaced by `wasm32-wasip2`, and the host binary has no cross-distro requirements beyond "modern Linux". Cleanup of the dead musl code in [crates/runtara-workflows/src/compile.rs](../crates/runtara-workflows/src/compile.rs), [.cargo/config.toml](../.cargo/config.toml), and [Cargo.toml:47-48](../Cargo.toml#L47-L48) is tracked as a follow-up.
 
-**No `.deb` packages.** The `.deb` path and `packaging/` directory are removed.
+**No `.deb` packages.** The `.deb` path and `packaging/` directory have been removed.
 
 ## How the bundle is built in CI
 
@@ -450,7 +449,7 @@ curl -fsSL https://github.com/runtarahq/runtara/releases/download/v1.5.0/install
 2. **Phase 2 — full matrix.** Extend to aarch64-linux and aarch64-darwin.
 3. **Phase 3 — installer rewrite.** Rewrite [scripts/install.sh](../scripts/install.sh) around the bundle: detect platform, download bundle, verify, atomic swap, install service. Add `--user`, `--uninstall`, `--version`, `--purge` flags.
 4. **Phase 4 — self-update subcommand.** Add `runtara-server self-update` in Rust. Uses the same atomic-swap flow as the installer.
-5. **Phase 5 — delete `.deb` packaging.** Delete [packaging/](../packaging), [scripts/build-deb.sh](../scripts/build-deb.sh), the old source-compiling `install.sh`, and the `.deb` steps in [release.yml](../.github/workflows/release.yml). No deprecation period — the old paths are replaced, not phased out.
+5. **Phase 5 — ~~delete `.deb` packaging~~.** Done. `packaging/`, `scripts/build-deb.sh`, and the old `install.sh` have been removed.
 6. **Phase 6 — docs.** Rewrite the installation section of user docs around the one-liner. (No domain or worker setup — we serve `install.sh` from GitHub release assets directly.)
 7. **Follow-up — dead code cleanup.** Remove the vestigial scenario-native-compile code in [compile.rs](../crates/runtara-workflows/src/compile.rs) (musl target, `get_host_target`, `+crt-static`), and the `musl`-related bits of [.cargo/config.toml](../.cargo/config.toml) and [Cargo.toml:47-48](../Cargo.toml#L47-L48) now that scenarios compile to WASM exclusively.
 
