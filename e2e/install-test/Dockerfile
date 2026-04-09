@@ -16,7 +16,7 @@ RUN if [ "$INSTALL_SOURCE" = "local" ] && [ -f /tmp/install.sh ]; then \
         chmod +x /tmp/install.sh && \
         /tmp/install.sh --user --skip-service --bundle "$(ls /tmp/runtara-*-linux.tar.gz 2>/dev/null | head -1)"; \
     else \
-        curl -fsSL https://github.com/runtarahq/runtara/releases/latest/download/install.sh | \
+        curl -fsSL https://install.runtara.com | \
         bash -s -- --user --skip-service; \
     fi
 
