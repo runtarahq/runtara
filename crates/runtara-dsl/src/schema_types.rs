@@ -119,8 +119,31 @@ pub struct ExecutionGraph {
     pub rate_limit_budget_ms: u64,
 }
 
-fn default_rate_limit_budget_ms() -> u64 { 60_000 }
-fn is_default_rate_limit_budget(v: &u64) -> bool { *v == 60_000 }
+fn default_rate_limit_budget_ms() -> u64 {
+    60_000
+}
+fn is_default_rate_limit_budget(v: &u64) -> bool {
+    *v == 60_000
+}
+
+impl Default for ExecutionGraph {
+    fn default() -> Self {
+        Self {
+            name: None,
+            description: None,
+            steps: HashMap::new(),
+            entry_point: String::new(),
+            execution_plan: Vec::new(),
+            variables: HashMap::new(),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            notes: None,
+            nodes: None,
+            edges: None,
+            rate_limit_budget_ms: default_rate_limit_budget_ms(),
+        }
+    }
+}
 
 /// An edge in the execution plan defining control flow between steps.
 ///

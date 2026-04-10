@@ -355,6 +355,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 

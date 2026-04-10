@@ -1137,6 +1137,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -1172,6 +1173,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -1244,6 +1246,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let ctx = EmitContext::new(false);
@@ -1296,6 +1299,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let ctx = EmitContext::new(false);
@@ -1349,6 +1353,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let ctx = EmitContext::new(false);
@@ -1393,6 +1398,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Create context with child scenario registered
@@ -1627,6 +1633,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let ctx = EmitContext::new(false);
@@ -1709,6 +1716,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let tokens = emit_scenario_variables(&graph);
@@ -1768,6 +1776,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         assert!(graph_uses_conditions(&graph));
@@ -1810,6 +1819,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut steps = HashMap::new();
@@ -1851,6 +1861,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         assert!(
@@ -2106,6 +2117,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Create parent context with child_scenarios populated
@@ -2169,6 +2181,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Create parent context WITHOUT child_scenarios
@@ -2311,6 +2324,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let branch_steps = collect_error_branch_steps("error-handler", &graph);
@@ -2376,6 +2390,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let branch_steps = collect_error_branch_steps("error-handler", &graph);
@@ -2421,6 +2436,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let branch_steps = collect_error_branch_steps("step1", &graph);
@@ -2494,6 +2510,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Following from step1, should go to step2 (normal flow), not error-step
@@ -2618,6 +2635,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut ctx = EmitContext::new(false);

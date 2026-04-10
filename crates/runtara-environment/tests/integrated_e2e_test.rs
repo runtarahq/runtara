@@ -364,6 +364,7 @@ fn create_minimal_workflow() -> ExecutionGraph {
         notes: None,
         nodes: None,
         edges: None,
+        ..Default::default()
     }
 }
 
@@ -470,6 +471,7 @@ fn create_checkpoint_workflow() -> ExecutionGraph {
         notes: None,
         nodes: None,
         edges: None,
+        ..Default::default()
     }
 }
 

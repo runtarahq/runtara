@@ -735,6 +735,7 @@ mod tests {
                 notes: None,
                 nodes: None,
                 edges: None,
+                ..Default::default()
             }),
             config: Some(SplitConfig {
                 value: MappingValue::Reference(ReferenceValue {
@@ -1601,6 +1602,7 @@ mod tests {
                 notes: None,
                 nodes: None,
                 edges: None,
+                ..Default::default()
             }),
             config: Some(WhileConfig {
                 max_iterations: Some(10),
@@ -1635,6 +1637,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let errors = graph.get_terminal_errors();
@@ -1676,6 +1679,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let errors = graph.get_terminal_errors();
@@ -1737,6 +1741,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let errors = graph.get_terminal_errors();
@@ -1774,6 +1779,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut steps = HashMap::new();
@@ -1802,6 +1808,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let errors = graph.get_terminal_errors();
@@ -1875,6 +1882,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let errors = graph.get_terminal_errors();

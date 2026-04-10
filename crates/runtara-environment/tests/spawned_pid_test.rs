@@ -137,6 +137,7 @@ fn create_minimal_finish_graph() -> ExecutionGraph {
         notes: None,
         nodes: None,
         edges: None,
+        ..Default::default()
     }
 }
 

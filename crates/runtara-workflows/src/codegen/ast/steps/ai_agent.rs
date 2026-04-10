@@ -1992,6 +1992,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -2054,6 +2055,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -2255,6 +2257,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut ctx = EmitContext::new(false);
@@ -2314,6 +2317,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Build parent graph with AI Agent + StartScenario tool target
@@ -2373,6 +2377,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut ctx = EmitContext::new(false);

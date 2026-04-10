@@ -147,6 +147,7 @@ fn create_minimal_finish_graph() -> ExecutionGraph {
         notes: None,
         nodes: None,
         edges: None,
+        ..Default::default()
     }
 }
 
@@ -225,6 +226,7 @@ fn create_transform_graph() -> ExecutionGraph {
         notes: None,
         nodes: None,
         edges: None,
+        ..Default::default()
     }
 }
 

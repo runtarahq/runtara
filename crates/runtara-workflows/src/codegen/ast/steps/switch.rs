@@ -651,6 +651,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -1259,6 +1260,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -1453,6 +1455,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut ctx = EmitContext::new(false);
@@ -1558,6 +1561,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut ctx = EmitContext::new(false);
@@ -1623,6 +1627,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let mut ctx = EmitContext::new(false);

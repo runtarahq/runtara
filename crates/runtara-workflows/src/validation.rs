@@ -2956,6 +2956,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -3759,6 +3760,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         }
     }
 
@@ -3851,6 +3853,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Create a simple condition that always evaluates
@@ -4059,6 +4062,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         steps.insert(
@@ -4678,6 +4682,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Create split step containing the subgraph
@@ -5064,6 +5069,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // config.variables injects parentUserId into the subgraph
@@ -5164,6 +5170,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // config.variables has a different variable (not undeclaredVar)
@@ -5276,6 +5283,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // config.variables provides configVar
@@ -5379,6 +5387,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         let config = SplitConfig {
@@ -5478,6 +5487,7 @@ mod tests {
             notes: None,
             nodes: None,
             edges: None,
+            ..Default::default()
         };
 
         // Define config.variables that inject variables into the subgraph
