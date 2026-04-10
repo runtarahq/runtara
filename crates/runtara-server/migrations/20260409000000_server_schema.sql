@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS scenario_compilations (
     wasm_checksum TEXT,
     registered_image_id TEXT,
     error_message TEXT,
+    runtara_version TEXT,
     PRIMARY KEY (tenant_id, scenario_id, version)
 );
 

@@ -912,8 +912,8 @@ impl ScenarioRepository {
         sqlx::query!(
             r#"
             INSERT INTO scenario_compilations
-                (tenant_id, scenario_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6)
+                (tenant_id, scenario_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7)
             ON CONFLICT (tenant_id, scenario_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -921,14 +921,16 @@ impl ScenarioRepository {
                 compilation_status = 'success',
                 error_message = NULL,
                 wasm_size = $5,
-                wasm_checksum = $6
+                wasm_checksum = $6,
+                runtara_version = $7
             "#,
             tenant_id,
             scenario_id,
             version,
             build_dir.to_string_lossy().to_string(),
             binary_size,
-            binary_checksum
+            binary_checksum,
+            env!("BUILD_VERSION")
         )
         .execute(&self.pool)
         .await?;
@@ -951,18 +953,20 @@ impl ScenarioRepository {
         sqlx::query!(
             r#"
             INSERT INTO scenario_compilations
-                (tenant_id, scenario_id, version, compiled_at, translated_path, compilation_status, registered_image_id)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4)
+                (tenant_id, scenario_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5)
             ON CONFLICT (tenant_id, scenario_id, version)
             DO UPDATE SET
                 registered_image_id = $4,
                 compilation_status = 'success',
-                error_message = NULL
+                error_message = NULL,
+                runtara_version = $5
             "#,
             tenant_id,
             scenario_id,
             version,
-            image_id
+            image_id,
+            env!("BUILD_VERSION")
         )
         .execute(&self.pool)
         .await?;

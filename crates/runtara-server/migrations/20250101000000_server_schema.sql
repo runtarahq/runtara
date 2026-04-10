@@ -214,6 +214,7 @@ CREATE TABLE IF NOT EXISTS scenario_compilations (
     wasm_size INTEGER,
     wasm_checksum VARCHAR(64),
     registered_image_id VARCHAR(255),
+    runtara_version VARCHAR(255),
     PRIMARY KEY (tenant_id, scenario_id, version),
     FOREIGN KEY (tenant_id, scenario_id, version)
         REFERENCES scenario_definitions(tenant_id, scenario_id, version)

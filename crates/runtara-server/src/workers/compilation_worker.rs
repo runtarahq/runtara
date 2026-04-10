@@ -282,18 +282,20 @@ async fn record_compilation_failure(
     sqlx::query!(
         r#"
         INSERT INTO scenario_compilations
-            (tenant_id, scenario_id, version, compilation_status, translated_path, compiled_at, error_message)
-        VALUES ($1, $2, $3, 'failed', '', NOW(), $4)
+            (tenant_id, scenario_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version)
+        VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5)
         ON CONFLICT (tenant_id, scenario_id, version)
         DO UPDATE SET
             compilation_status = 'failed',
             compiled_at = NOW(),
-            error_message = $4
+            error_message = $4,
+            runtara_version = $5
         "#,
         tenant_id,
         scenario_id,
         version,
-        error_message
+        error_message,
+        env!("BUILD_VERSION")
     )
     .execute(pool)
     .await?;
