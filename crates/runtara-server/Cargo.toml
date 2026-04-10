@@ -74,7 +74,7 @@ croner = "2"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # JWT authentication
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 
 # Error handling
 thiserror = "1.0"
