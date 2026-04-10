@@ -5131,13 +5131,24 @@ pub fn commerce_get_products(
         })
         .collect();
 
-    let next_cursor = response_json
+    let page_info = response_json
         .get("data")
         .and_then(|d| d.get("products"))
-        .and_then(|p| p.get("pageInfo"))
-        .and_then(|pi| pi.get("endCursor"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string());
+        .and_then(|p| p.get("pageInfo"));
+
+    let has_next_page = page_info
+        .and_then(|pi| pi.get("hasNextPage"))
+        .and_then(|hnp| hnp.as_bool())
+        .unwrap_or(false);
+
+    let next_cursor = if has_next_page {
+        page_info
+            .and_then(|pi| pi.get("endCursor"))
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
 
     Ok(CommerceGetProductsOutput {
         products,

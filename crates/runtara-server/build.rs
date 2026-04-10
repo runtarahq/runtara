@@ -226,6 +226,22 @@ fn precompile_native_libraries(stable_cache_dir: &Path, workspace_root: &Path) {
         println!("cargo:warning=      ✓ Copied {} artifacts to cache", count);
     }
 
+    // Copy native .a libraries from WASM build scripts (e.g. wit-bindgen-rt's cabi_realloc)
+    // These live in build/*/out/ and are needed by the linker at scenario compilation time.
+    let wasm_build_dir = stdlib_build_dir.join(target).join("release").join("build");
+    if wasm_build_dir.exists() {
+        let deps_cache = final_cache_dir.join("deps");
+        fs::create_dir_all(&deps_cache).ok();
+        let mut a_count = 0;
+        copy_build_script_outputs(&wasm_build_dir, &deps_cache, "a", &mut a_count);
+        if a_count > 0 {
+            println!(
+                "cargo:warning=      ✓ Copied {} native .a libraries from build scripts",
+                a_count
+            );
+        }
+    }
+
     // Copy host proc-macro .so files (needed for scenario compilation)
     let host_release_deps = stdlib_build_dir.join("release").join("deps");
     if host_release_deps.exists() {
@@ -243,6 +259,28 @@ fn precompile_native_libraries(stable_cache_dir: &Path, workspace_root: &Path) {
     }
 
     println!("cargo:warning=");
+}
+
+/// Copy files with a given extension from build script output directories (build/*/out/).
+fn copy_build_script_outputs(build_dir: &Path, dest: &Path, ext: &str, count: &mut usize) {
+    if let Ok(entries) = fs::read_dir(build_dir) {
+        for entry in entries.flatten() {
+            let out_dir = entry.path().join("out");
+            if out_dir.is_dir() {
+                if let Ok(files) = fs::read_dir(&out_dir) {
+                    for file in files.flatten() {
+                        let path = file.path();
+                        if path.extension().is_some_and(|e| e == ext) {
+                            let dest_file = dest.join(path.file_name().unwrap());
+                            if fs::copy(&path, &dest_file).is_ok() {
+                                *count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn copy_files_recursive(dir: &Path, dest: &Path, ext: &str, count: &mut usize) {
