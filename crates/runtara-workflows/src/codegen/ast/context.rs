@@ -47,6 +47,10 @@ pub struct EmitContext {
 
     /// Tenant ID for connection service requests
     pub tenant_id: Option<String>,
+
+    /// Maximum cumulative durable-sleep time for rate-limited retries (ms).
+    /// Propagated from `ExecutionGraph.rate_limit_budget_ms`.
+    pub rate_limit_budget_ms: u64,
 }
 
 impl EmitContext {
@@ -63,6 +67,7 @@ impl EmitContext {
             emitted_child_functions: HashMap::new(),
             connection_service_url: None,
             tenant_id: None,
+            rate_limit_budget_ms: 60_000,
         }
     }
 
@@ -92,6 +97,7 @@ impl EmitContext {
             emitted_child_functions: HashMap::new(),
             connection_service_url,
             tenant_id,
+            rate_limit_budget_ms: 60_000,
         }
     }
 

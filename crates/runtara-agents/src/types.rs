@@ -300,10 +300,56 @@ pub fn classify_http_status(status: u16) -> ErrorCategory {
     }
 }
 
+/// Parse the `Retry-After` response header into milliseconds.
+///
+/// Checks `retry-after-ms` first (precise, set by our proxy), then falls back
+/// to the standard `Retry-After` header in seconds.
+/// Returns `None` if both are absent or unparseable.
+#[allow(clippy::collapsible_if)]
+pub fn parse_retry_after_header(headers: &HashMap<String, String>) -> Option<u64> {
+    // Prefer precise millisecond header from our proxy
+    if let Some(ms_str) = headers
+        .get("retry-after-ms")
+        .or_else(|| headers.get("Retry-After-Ms"))
+    {
+        if let Ok(ms) = ms_str.trim().parse::<u64>() {
+            return Some(ms);
+        }
+    }
+
+    // Fall back to standard Retry-After header (seconds)
+    let value = headers
+        .get("retry-after")
+        .or_else(|| headers.get("Retry-After"))?;
+    // Try integer seconds (covers >99% of real-world APIs)
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(seconds.saturating_mul(1000));
+    }
+    // Try float seconds (some APIs like Stripe use e.g. "1.5")
+    if let Ok(seconds) = value.trim().parse::<f64>() {
+        if seconds > 0.0 && seconds.is_finite() {
+            return Some((seconds * 1000.0) as u64);
+        }
+    }
+    None
+}
+
 /// Create an AgentError from an HTTP response status.
 ///
 /// Extracts retry-after header if present for rate limiting.
 pub fn http_error(status: u16, body: impl Into<String>) -> AgentError {
+    http_error_with_headers(status, body, None)
+}
+
+/// Create an AgentError from an HTTP response status, with optional response headers.
+///
+/// When headers are provided and the status is 429, extracts the `Retry-After` header
+/// to populate `retry_after_ms` so the `#[durable]` retry loop can honor server-specified delays.
+pub fn http_error_with_headers(
+    status: u16,
+    body: impl Into<String>,
+    headers: Option<&HashMap<String, String>>,
+) -> AgentError {
     let category = classify_http_status(status);
     let body_text = body.into();
 
@@ -327,6 +373,13 @@ pub fn http_error(status: u16, body: impl Into<String>) -> AgentError {
         format!("HTTP {} error: {}", status, body_text)
     };
 
+    // Extract Retry-After for rate-limited responses
+    let retry_after_ms = if status == 429 {
+        headers.and_then(parse_retry_after_header)
+    } else {
+        None
+    };
+
     AgentError {
         code: code.to_string(),
         message,
@@ -336,10 +389,13 @@ pub fn http_error(status: u16, body: impl Into<String>) -> AgentError {
         } else {
             ErrorSeverity::Error
         },
-        retry_after_ms: None,
+        retry_after_ms,
         attributes: {
             let mut attrs = HashMap::new();
             attrs.insert("status_code".to_string(), status.to_string());
+            if let Some(ms) = retry_after_ms {
+                attrs.insert("retry_after_ms".to_string(), ms.to_string());
+            }
             attrs
         },
     }

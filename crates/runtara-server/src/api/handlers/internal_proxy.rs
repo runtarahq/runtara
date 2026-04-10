@@ -32,6 +32,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct ProxyState {
     pub pool: PgPool,
     pub client: reqwest::Client,
+    pub redis_url: Option<String>,
 }
 
 // ============================================================================
@@ -86,7 +87,14 @@ pub async fn proxy_handler(
     Json(request): Json<ProxyRequest>,
 ) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    execute_proxy_request(&tenant_id, &state.pool, &state.client, request).await
+    execute_proxy_request(
+        &tenant_id,
+        &state.pool,
+        &state.client,
+        request,
+        state.redis_url.as_deref(),
+    )
+    .await
 }
 
 /// Core proxy logic shared between internal and authenticated debug endpoints
@@ -95,6 +103,7 @@ pub async fn execute_proxy_request(
     pool: &PgPool,
     client: &reqwest::Client,
     request: ProxyRequest,
+    redis_url: Option<&str>,
 ) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
     // Mutable copies we'll enrich with connection data
     let mut final_headers = request.headers.clone();
@@ -180,6 +189,61 @@ pub async fn execute_proxy_request(
         }
 
         aws_signing = resolved.aws_signing;
+
+        // ── Pre-flight rate limit check ────────────────────────────────────
+        // If adaptive rate limiting is enabled and we have Redis, check the
+        // token bucket before dispatching upstream. When tokens are exhausted,
+        // return a synthetic 429 with Retry-After so the agent's #[durable]
+        // retry loop can use durable_sleep() (suspendable/resumable) to wait.
+        if crate::config::adaptive_rate_limiting_enabled()
+            && let Some(redis_url) = redis_url
+            && let Err(retry_after_ms) =
+                check_rate_limit(pool, redis_url, connection_id, &conn.rate_limit_config).await
+        {
+            // Record rate_limited event for analytics
+            let rate_limit_service = RateLimitService::with_db_pool(
+                Arc::new(ConnectionRepository::new(pool.clone())),
+                pool.clone(),
+            );
+            let _ = rate_limit_service
+                .record_credential_request(
+                    connection_id,
+                    tenant_id,
+                    &RateLimitEventType::RateLimited,
+                    Some(json!({
+                        "source": "preflight",
+                        "retry_after_ms": retry_after_ms
+                    })),
+                )
+                .await;
+
+            tracing::info!(
+                target: "proxy",
+                connection_id = connection_id,
+                retry_after_ms = retry_after_ms,
+                "Pre-flight rate limit: returning 429 for durable retry"
+            );
+
+            // Return synthetic 429 with precise Retry-After in milliseconds.
+            // We use a custom header `retry-after-ms` for sub-second precision,
+            // plus the standard `retry-after` in seconds as fallback.
+            let retry_after_secs = (retry_after_ms / 1000).max(1);
+            let mut headers = HashMap::new();
+            headers.insert("retry-after".to_string(), retry_after_secs.to_string());
+            headers.insert("retry-after-ms".to_string(), retry_after_ms.to_string());
+            return Ok((
+                StatusCode::OK,
+                Json(ProxyResponse {
+                    status: 429,
+                    headers,
+                    body: Some(json!({
+                        "error": "Rate limited (pre-flight)",
+                        "retry_after_ms": retry_after_ms
+                    })),
+                    body_raw: None,
+                }),
+            ));
+        }
     }
 
     // ── SSRF protection: block private/internal IP ranges ─────────────────
@@ -296,6 +360,39 @@ pub async fn execute_proxy_request(
         )
     })?;
 
+    // Track upstream 429 responses for analytics
+    if status == 429
+        && let Some(ref connection_id) = request.connection_id
+    {
+        let retry_after = resp_headers
+            .get("retry-after")
+            .or_else(|| resp_headers.get("Retry-After"))
+            .and_then(|v| v.parse::<u64>().ok());
+
+        let rate_limit_service = RateLimitService::with_db_pool(
+            Arc::new(ConnectionRepository::new(pool.clone())),
+            pool.clone(),
+        );
+        let _ = rate_limit_service
+            .record_credential_request(
+                connection_id,
+                tenant_id,
+                &RateLimitEventType::RateLimited,
+                Some(json!({
+                    "source": "upstream_429",
+                    "retry_after_secs": retry_after
+                })),
+            )
+            .await;
+
+        tracing::warn!(
+            target: "proxy",
+            connection_id = connection_id.as_str(),
+            retry_after_secs = ?retry_after,
+            "Upstream returned 429 — rate limited"
+        );
+    }
+
     // Try to parse as JSON; always provide base64 raw body too
     let json_body = serde_json::from_slice::<Value>(&resp_body_bytes).ok();
     let raw_body = BASE64.encode(&resp_body_bytes);
@@ -309,6 +406,134 @@ pub async fn execute_proxy_request(
             body_raw: Some(raw_body),
         }),
     ))
+}
+
+// ============================================================================
+// Token bucket rate limit check
+// ============================================================================
+
+/// Lua script for atomic token bucket check-and-decrement.
+///
+/// KEYS[1] = rate_limit:{connection_id}
+/// ARGV[1] = requests_per_second (refill rate)
+/// ARGV[2] = burst_size (max tokens)
+/// ARGV[3] = now_ms (current timestamp in milliseconds)
+///
+/// Returns:
+///   1 if the request is allowed (token consumed)
+///   Negative value = -retry_after_ms if rate limited
+const TOKEN_BUCKET_LUA: &str = r#"
+local key = KEYS[1]
+local rps = tonumber(ARGV[1])
+local burst = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+
+local tokens = tonumber(redis.call('hget', key, 'tokens') or burst)
+local last_refill = tonumber(redis.call('hget', key, 'last_refill') or now_ms)
+
+-- Refill tokens based on elapsed time
+local elapsed_ms = now_ms - last_refill
+if elapsed_ms > 0 then
+    local refill = (elapsed_ms / 1000.0) * rps
+    tokens = math.min(burst, tokens + refill)
+end
+
+if tokens >= 1 then
+    tokens = tokens - 1
+    redis.call('hset', key, 'tokens', tostring(tokens))
+    redis.call('hset', key, 'last_refill', tostring(now_ms))
+    return 1
+else
+    redis.call('hset', key, 'tokens', tostring(tokens))
+    redis.call('hset', key, 'last_refill', tostring(now_ms))
+    -- Compute wait time until one token is available
+    local wait_ms = math.ceil((1 - tokens) / rps * 1000)
+    return -wait_ms
+end
+"#;
+
+/// Check the token bucket for a connection and consume a token if available.
+///
+/// Returns `Ok(())` if the request is allowed (or if rate limiting is not
+/// configured for this connection). Returns `Err(retry_after_ms)` if the
+/// caller should wait before retrying.
+async fn check_rate_limit(
+    _pool: &PgPool,
+    redis_url: &str,
+    connection_id: &str,
+    rate_limit_config_json: &Option<serde_json::Value>,
+) -> Result<(), u64> {
+    // Parse rate limit config — if absent or invalid, allow the request
+    let config: crate::api::dto::rate_limits::RateLimitConfigDto = match rate_limit_config_json {
+        Some(v) => match serde_json::from_value(v.clone()) {
+            Ok(c) => c,
+            Err(_) => return Ok(()),
+        },
+        None => return Ok(()),
+    };
+
+    // Skip if requests_per_second is 0 (unconfigured)
+    if config.requests_per_second == 0 {
+        return Ok(());
+    }
+
+    // Connect to Redis
+    let client = match redis::Client::open(redis_url) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                connection_id = connection_id,
+                error = %e,
+                "Redis connect failed for rate limit check — allowing request"
+            );
+            return Ok(());
+        }
+    };
+
+    let mut conn = match client.get_multiplexed_async_connection().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                connection_id = connection_id,
+                error = %e,
+                "Redis connection failed for rate limit check — allowing request"
+            );
+            return Ok(());
+        }
+    };
+
+    let key = format!("rate_limit:{}", connection_id);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    // Execute atomic Lua script
+    let result: Result<i64, redis::RedisError> = redis::Script::new(TOKEN_BUCKET_LUA)
+        .key(&key)
+        .arg(config.requests_per_second)
+        .arg(config.burst_size)
+        .arg(now_ms)
+        .invoke_async(&mut conn)
+        .await;
+
+    match result {
+        Ok(v) if v > 0 => Ok(()),
+        Ok(v) => {
+            // Negative value = -retry_after_ms
+            let retry_after_ms = (-v) as u64;
+            Err(retry_after_ms)
+        }
+        Err(e) => {
+            // Redis error — fail open, allow the request
+            tracing::warn!(
+                connection_id = connection_id,
+                error = %e,
+                "Token bucket Lua script failed — allowing request"
+            );
+            Ok(())
+        }
+    }
 }
 
 // ============================================================================

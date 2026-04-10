@@ -97,13 +97,14 @@ pub fn compile_with_children(
     connection_service_url: Option<String>,
     tenant_id: Option<String>,
 ) -> Result<String, CodegenError> {
-    let ctx = EmitContext::with_child_scenarios(
+    let mut ctx = EmitContext::with_child_scenarios(
         track_events,
         child_scenarios,
         step_to_child_ref,
         connection_service_url,
         tenant_id,
     );
+    ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
     let tokens = program::emit_program(graph, &mut { ctx })?;
     Ok(tokens.to_string())
 }

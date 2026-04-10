@@ -42,13 +42,23 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     let agent_id = &step.agent_id;
     let capability_id = &step.capability_id;
 
-    // Get retry configuration with defaults
-    let max_retries = step.max_retries.unwrap_or(3);
-    let retry_delay = step.retry_delay.unwrap_or(1000);
-
     // All capabilities use #[durable] for crash recovery.
     // Rate limiting is only applied to external API calls.
     let needs_rate_limit = needs_rate_limiting(agent_id, capability_id);
+
+    // Rate-limited capabilities get more retries and a longer base delay,
+    // since 429 errors are expected to succeed after waiting.
+    let (max_retries, retry_delay) = if needs_rate_limit {
+        (
+            step.max_retries.unwrap_or(5),
+            step.retry_delay.unwrap_or(2000),
+        )
+    } else {
+        (
+            step.max_retries.unwrap_or(3),
+            step.retry_delay.unwrap_or(1000),
+        )
+    };
 
     // Do all mutable operations first
     let step_var = ctx.declare_step(step_id);
@@ -86,6 +96,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     };
 
     // Generate the durable capability execution
+    let rate_limit_budget = ctx.rate_limit_budget_ms;
     let execute_capability = if needs_rate_limit {
         emit_durable_rate_limited_call(
             step_id,
@@ -97,6 +108,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             ctx,
             max_retries,
             retry_delay,
+            rate_limit_budget,
         )
     } else {
         emit_durable_call(
@@ -109,6 +121,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             ctx,
             max_retries,
             retry_delay,
+            rate_limit_budget,
         )
     };
 
@@ -230,6 +243,7 @@ fn emit_durable_call(
     ctx: &EmitContext,
     max_retries: u32,
     retry_delay: u64,
+    rate_limit_budget: u64,
 ) -> TokenStream {
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
@@ -250,6 +264,7 @@ fn emit_durable_call(
 
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
+    let rate_limit_budget_lit = rate_limit_budget;
 
     quote! {
         // Build cache key dynamically, including prefix and loop indices
@@ -292,7 +307,7 @@ fn emit_durable_call(
         // Define the durable agent execution function with cancellation support.
         // The raw capability error is passed through (not wrapped) so that the
         // #[durable] macro can parse JSON error category for retry decisions.
-        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
         fn #durable_fn_name(
             cache_key: &str,
             inputs: serde_json::Value,
@@ -331,6 +346,7 @@ fn emit_durable_rate_limited_call(
     ctx: &EmitContext,
     max_retries: u32,
     retry_delay: u64,
+    rate_limit_budget: u64,
 ) -> TokenStream {
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
@@ -351,6 +367,7 @@ fn emit_durable_rate_limited_call(
 
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
+    let rate_limit_budget_lit = rate_limit_budget;
 
     quote! {
         // Build cache key dynamically, including prefix and loop indices
@@ -393,7 +410,7 @@ fn emit_durable_rate_limited_call(
         // Define the durable agent execution function (rate-limited) with cancellation support.
         // The raw capability error is passed through (not wrapped) so that the
         // #[durable] macro can parse JSON error category for retry decisions.
-        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
         fn #durable_fn_name(
             cache_key: &str,
             inputs: serde_json::Value,

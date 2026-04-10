@@ -22,6 +22,9 @@ struct DurableAttr {
     strategy: Option<String>,
     /// Base delay between retries in milliseconds (default: 1000)
     delay: Option<u64>,
+    /// Maximum cumulative durable-sleep time for rate-limited retries (ms).
+    /// When set, overrides the MAX_RETRY_DELAY_MS env var.
+    rate_limit_budget: Option<u64>,
 }
 
 impl Parse for DurableAttr {
@@ -52,11 +55,15 @@ impl Parse for DurableAttr {
                     let lit: LitInt = input.parse()?;
                     attr.delay = Some(lit.base10_parse()?);
                 }
+                "rate_limit_budget" => {
+                    let lit: LitInt = input.parse()?;
+                    attr.rate_limit_budget = Some(lit.base10_parse()?);
+                }
                 _ => {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
-                            "Unknown attribute '{}'. Valid attributes: max_retries, strategy, delay",
+                            "Unknown attribute '{}'. Valid attributes: max_retries, strategy, delay, rate_limit_budget",
                             ident
                         ),
                     ));
@@ -150,6 +157,7 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
     // Get retry configuration with defaults
     let max_retries = config.max_retries.unwrap_or(3);
     let base_delay_ms = config.delay.unwrap_or(1000);
+    let rate_limit_budget_ms = config.rate_limit_budget;
 
     // Generate appropriate code based on whether retries are enabled
     if max_retries == 0 {
@@ -175,6 +183,7 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
             idempotency_key_ident,
             max_retries,
             base_delay_ms,
+            rate_limit_budget_ms,
         )
     }
 }
@@ -316,6 +325,7 @@ fn generate_retry_wrapper(
     idempotency_key_ident: Ident,
     max_retries: u32,
     base_delay_ms: u64,
+    rate_limit_budget_ms: Option<u64>,
 ) -> syn::Result<TokenStream2> {
     let total_attempts = max_retries + 1;
 
@@ -331,6 +341,17 @@ fn generate_retry_wrapper(
             }
         })
         .collect();
+
+    // Generate rate limit budget: compile-time value from scenario, or env var fallback
+    let rate_limit_budget_init = match rate_limit_budget_ms {
+        Some(ms) => quote! { #ms },
+        None => quote! {
+            ::std::env::var("MAX_RETRY_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60_000u64)
+        },
+    };
 
     Ok(quote! {
         #(#attrs)*
@@ -381,20 +402,51 @@ fn generate_retry_wrapper(
             }
 
             // Step 2: Retry loop
+            //
+            // Two retry budgets:
+            // - Normal retries: capped at max_retries (for transient errors like 5xx)
+            // - Rate-limit retries: unlimited count, capped by cumulative wait time
+            //   (MAX_RETRY_DELAY_MS). Rate-limited errors with retryAfterMs use durable
+            //   sleep and do NOT consume the normal retry budget.
             let mut __last_error: Option<String> = None;
             let __total_attempts: u32 = #total_attempts;
+            let mut __attempt: u32 = 0;
+            let mut __rate_limit_wait_total_ms: u64 = 0;
 
-            for __attempt in 1..=__total_attempts {
+            loop {
+                __attempt += 1;
+
                 // Clone non-reference parameters for this iteration
                 #(#clone_statements)*
 
                 // Record retry attempt (for attempts > 1)
                 if __attempt > 1 {
-                    // Apply backoff delay before retry
-                    let __delay_multiplier = 2u64.pow(__attempt - 2);
-                    let __delay = ::std::time::Duration::from_millis(
-                        __base_delay_ms.saturating_mul(__delay_multiplier)
-                    );
+                    // Rate limit budget: scenario setting (compile-time) or env var fallback
+                    let __max_retry_delay_ms: u64 = #rate_limit_budget_init;
+
+                    // Try to extract retryAfterMs from the last error JSON.
+                    // When present (e.g. from a 429 with Retry-After header), use
+                    // server-specified delay instead of fixed exponential backoff.
+                    let __retry_after_override: Option<u64> = (|| -> Option<u64> {
+                        let parsed: ::serde_json::Value = ::serde_json::from_str(
+                            __last_error.as_deref()?
+                        ).ok()?;
+                        parsed.get("retryAfterMs")?.as_u64()
+                    })();
+
+                    let __delay = if let Some(__retry_after) = __retry_after_override {
+                        // Use server-specified delay, capped to prevent abuse
+                        let __capped = __retry_after.min(__max_retry_delay_ms);
+                        ::std::time::Duration::from_millis(__capped)
+                    } else {
+                        // Fall back to exponential backoff (use normal attempt count)
+                        let __backoff_attempt = __attempt.min(__total_attempts);
+                        let __delay_multiplier = 2u64.pow(__backoff_attempt.saturating_sub(2));
+                        ::std::time::Duration::from_millis(
+                            __base_delay_ms.saturating_mul(__delay_multiplier)
+                                .min(__max_retry_delay_ms)
+                        )
+                    };
 
                     ::tracing::info!(
                         function = #fn_name_str,
@@ -402,11 +454,31 @@ fn generate_retry_wrapper(
                         attempt = __attempt,
                         max_retries = __max_retries,
                         delay_ms = __delay.as_millis() as u64,
+                        retry_after_override = ?__retry_after_override,
+                        rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
                         last_error = ?__last_error,
                         "Retrying after backoff"
                     );
 
-                    ::std::thread::sleep(__delay);
+                    // Use durable sleep for rate-limited retries (suspendable/resumable).
+                    // For normal exponential backoff (short waits), use thread::sleep.
+                    if __retry_after_override.is_some() {
+                        let __sleep_key = format!("{}::retry_sleep::{}", __cache_key, __attempt);
+                        let __sdk = ::runtara_sdk::sdk();
+                        let __sdk_guard = __sdk.lock().unwrap();
+                        if let Err(e) = __sdk_guard.sleep(__delay, &__sleep_key, b"rate_limit_wait") {
+                            ::tracing::warn!(
+                                function = #fn_name_str,
+                                cache_key = %__cache_key,
+                                error = %e,
+                                "Durable sleep failed, falling back to thread::sleep"
+                            );
+                            drop(__sdk_guard);
+                            ::std::thread::sleep(__delay);
+                        }
+                    } else {
+                        ::std::thread::sleep(__delay);
+                    }
 
                     // Record retry attempt to runtara-core
                     {
@@ -497,28 +569,71 @@ fn generate_retry_wrapper(
                     Err(ref e) => {
                         let __err_str = format!("{}", e);
 
-                        // Check if error is classified as permanent (non-retryable).
-                        // Capability errors are JSON with a "category" field matching
-                        // the AgentError format. Permanent errors (validation, deserialization,
-                        // business rules) should not be retried.
-                        let __is_permanent = (|| -> Option<bool> {
-                            let parsed: ::serde_json::Value = ::serde_json::from_str(&__err_str).ok()?;
-                            let category = parsed.get("category")?.as_str()?;
-                            Some(category == "permanent")
-                        })().unwrap_or(false);
+                        // Parse error JSON to check category and rate-limit status.
+                        let (__is_permanent, __is_rate_limited, __err_retry_after) =
+                            (|| -> Option<(bool, bool, Option<u64>)> {
+                                let parsed: ::serde_json::Value = ::serde_json::from_str(&__err_str).ok()?;
+                                let category = parsed.get("category")?.as_str()?;
+                                let code = parsed.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                                let is_rate_limited = code.contains("RATE_LIMITED") || code == "HTTP_RATE_LIMITED";
+                                let retry_after = parsed.get("retryAfterMs").and_then(|v| v.as_u64());
+                                Some((category == "permanent", is_rate_limited, retry_after))
+                            })().unwrap_or((false, false, None));
 
-                        if __is_permanent {
+                        // When AUTO_RETRY_ON_429 is disabled, treat rate-limited errors as permanent
+                        let __auto_retry_429: bool = ::std::env::var("AUTO_RETRY_ON_429")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(true);
+
+                        if __is_permanent || (__is_rate_limited && !__auto_retry_429) {
                             ::tracing::warn!(
                                 function = #fn_name_str,
                                 cache_key = %__cache_key,
                                 attempt = __attempt,
                                 error = %e,
-                                "Permanent error detected, skipping retries"
+                                is_rate_limited = __is_rate_limited,
+                                auto_retry_429 = __auto_retry_429,
+                                "Non-retryable error detected, skipping retries"
                             );
                             return __result;
                         }
 
                         __last_error = Some(__err_str);
+
+                        // Rate-limited errors with retryAfterMs get unlimited retries
+                        // (capped by cumulative wait time, not by attempt count).
+                        // Normal transient errors use the fixed retry budget.
+                        let __max_retry_delay_ms: u64 = #rate_limit_budget_init;
+
+                        if __is_rate_limited {
+                            let __wait = __err_retry_after.unwrap_or(__base_delay_ms);
+                            __rate_limit_wait_total_ms += __wait;
+
+                            if __rate_limit_wait_total_ms <= __max_retry_delay_ms {
+                                ::tracing::info!(
+                                    function = #fn_name_str,
+                                    cache_key = %__cache_key,
+                                    attempt = __attempt,
+                                    rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
+                                    max_wait_ms = __max_retry_delay_ms,
+                                    error = %e,
+                                    "Rate limited, will durable-sleep and retry (not counting against retry budget)"
+                                );
+                                continue;
+                            } else {
+                                ::tracing::error!(
+                                    function = #fn_name_str,
+                                    cache_key = %__cache_key,
+                                    attempt = __attempt,
+                                    rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
+                                    max_wait_ms = __max_retry_delay_ms,
+                                    error = %e,
+                                    "Rate limit wait budget exhausted"
+                                );
+                                return __result;
+                            }
+                        }
 
                         if __attempt < __total_attempts {
                             ::tracing::warn!(
@@ -544,9 +659,6 @@ fn generate_retry_wrapper(
                     }
                 }
             }
-
-            // This should never be reached, but needed for type checker
-            unreachable!("Retry loop should always return")
         }
     })
 }
@@ -866,6 +978,7 @@ mod tests {
             max_retries: Some(0),
             strategy: None,
             delay: None,
+            ..Default::default()
         };
         let result = generate_durable_wrapper(fn_item, config);
         assert!(result.is_ok());
@@ -886,6 +999,7 @@ mod tests {
             max_retries: Some(3),
             strategy: None,
             delay: Some(1000),
+            ..Default::default()
         };
         let result = generate_durable_wrapper(fn_item, config);
         assert!(result.is_ok());
@@ -907,6 +1021,7 @@ mod tests {
             max_retries: Some(0),
             strategy: None,
             delay: None,
+            ..Default::default()
         };
         let result = generate_durable_wrapper(fn_item, config);
         assert!(result.is_ok());
@@ -954,6 +1069,7 @@ mod tests {
             max_retries: Some(3),
             strategy: None,
             delay: Some(1000),
+            ..Default::default()
         };
         let result = generate_durable_wrapper(fn_item, config);
         assert!(result.is_ok());
@@ -1048,6 +1164,7 @@ mod tests {
                 } else {
                     None
                 },
+                ..Default::default()
             };
             let result = generate_durable_wrapper(fn_item, config);
             assert!(result.is_ok(), "{} path should compile", path_name);
@@ -1113,6 +1230,7 @@ mod tests {
             max_retries: Some(3),
             strategy: None,
             delay: Some(1000),
+            ..Default::default()
         };
         let result = generate_durable_wrapper(fn_item, config);
         assert!(result.is_ok());

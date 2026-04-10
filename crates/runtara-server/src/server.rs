@@ -1531,6 +1531,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let internal_proxy_state = Arc::new(api::handlers::internal_proxy::ProxyState {
         pool: pool.clone(),
         client: reqwest::Client::new(),
+        redis_url: crate::valkey::build_redis_url(),
     });
     let internal_proxy_routes = Router::new()
         .route(

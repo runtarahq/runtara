@@ -11,7 +11,7 @@
 //! The actual HTTP execution happens on the host side via host functions,
 //! while this module handles request preparation and response parsing.
 
-use crate::types::{http_error, network_error};
+use crate::types::{http_error_with_headers, network_error};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
@@ -522,7 +522,8 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     // Handle non-2xx with fail_on_error
     if !success && input.fail_on_error {
         let body_text = String::from_utf8_lossy(&response.body).to_string();
-        let err = http_error(status_code, &body_text).with_attr("url", &input.url);
+        let err = http_error_with_headers(status_code, &body_text, Some(&response_headers))
+            .with_attr("url", &input.url);
         return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
     }
 

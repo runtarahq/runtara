@@ -2439,8 +2439,15 @@ pub async fn debug_proxy_handler(
     // Create a one-shot client for the proxy request.
     // POC simplification — production would share a client via AppState.
     let client = reqwest::Client::new();
-    crate::api::handlers::internal_proxy::execute_proxy_request(&tenant_id, &pool, &client, request)
-        .await
+    let redis_url = crate::valkey::build_redis_url();
+    crate::api::handlers::internal_proxy::execute_proxy_request(
+        &tenant_id,
+        &pool,
+        &client,
+        request,
+        redis_url.as_deref(),
+    )
+    .await
 }
 
 // ============================================================================

@@ -110,7 +110,17 @@ pub struct ExecutionGraph {
     /// Not used in compilation or execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edges: Option<serde_json::Value>,
+
+    /// Maximum cumulative time (in milliseconds) that rate-limited retries may
+    /// durable-sleep before giving up.  Applies to all steps in this scenario.
+    /// Default: 60 000 (1 minute).  Set higher for scenarios that make many
+    /// calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
+    #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
+    pub rate_limit_budget_ms: u64,
 }
+
+fn default_rate_limit_budget_ms() -> u64 { 60_000 }
+fn is_default_rate_limit_budget(v: &u64) -> bool { *v == 60_000 }
 
 /// An edge in the execution plan defining control flow between steps.
 ///
