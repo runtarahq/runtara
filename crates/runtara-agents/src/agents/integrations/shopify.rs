@@ -5066,9 +5066,19 @@ pub fn commerce_get_products(
         )
     })?;
 
+    let after_clause = match &input.cursor {
+        Some(cursor) => format!(r#", after: "{}""#, cursor),
+        None => String::new(),
+    };
+
+    let query_filter = match &input.status {
+        Some(status) => format!(r#", query: "status:{}""#, status.to_lowercase()),
+        None => String::new(),
+    };
+
     let query = format!(
         r#"query {{
-            products(first: {}) {{
+            products(first: {limit}{after}{filter}) {{
                 edges {{
                     node {{
                         id
@@ -5103,7 +5113,9 @@ pub fn commerce_get_products(
                 }}
             }}
         }}"#,
-        limit
+        limit = limit,
+        after = after_clause,
+        filter = query_filter,
     );
 
     // Use execute_graphql_query to make the request (handles URL building with https://)
