@@ -9,10 +9,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::Arc;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
-};
+use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
@@ -604,6 +601,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     auth::jwks::JwksCache::spawn_refresh_task(jwks_cache.clone(), 3600);
     println!("✓ JWKS cache initialized");
 
+    // OIDC discovery cache — proxies /.well-known/openid-configuration to issuer with 1h TTL
+    let oidc_cache = Arc::new(api::handlers::oidc_discovery::OidcDiscoveryCache::new(
+        api_jwt_config.issuer.clone(),
+    ));
+    println!("✓ OIDC discovery cache initialized");
+
     println!("✓ Database connected successfully");
 
     // Construct auth states — API and MCP have separate audience validation
@@ -920,17 +923,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // CORS is handled by the API gateway — the backend does NOT add
-    // CORS headers to avoid duplicate/conflicting Access-Control-Allow-Origin values.
-    // For local development without the gateway, set ENABLE_CORS=true.
-    let cors = if std::env::var("ENABLE_CORS").is_ok() {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    } else {
-        CorsLayer::new()
-    };
+    // CORS — configured via CORS_ALLOWED_ORIGINS env var.
+    // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
+    let cors = middleware::cors::build_cors_layer();
 
     // Create router for tenant-scoped endpoints (requires JWT authentication)
     let tenant_routes = Router::new()
@@ -1658,6 +1653,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // Public API server — accessible externally / via API gateway
     // =========================================================================
+    // OIDC discovery routes (public, no auth) — serves OAuth/OIDC metadata for MCP clients
+    let oidc_routes = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(api::handlers::oidc_discovery::oauth_protected_resource_handler),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(api::handlers::oidc_discovery::openid_configuration_handler),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(api::handlers::oidc_discovery::openid_configuration_handler),
+        )
+        .with_state(oidc_cache);
+
     let public_app = Router::new()
         .merge(tenant_routes)
         .merge(object_model_routes)
@@ -1666,11 +1677,23 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .merge(event_routes)
         .merge(oauth_callback_routes)
         .merge(channel_routes)
-        .nest("/mcp", mcp_router)
-        .route(
+        .merge(oidc_routes)
+        .nest("/mcp", mcp_router);
+
+    // Only expose OpenAPI docs when explicitly enabled (disabled in production)
+    let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
+        public_app.route(
             "/api/runtime/openapi/docs.json",
             get(|| async { Json(ApiDoc::openapi()) }),
         )
+    } else {
+        public_app
+    };
+
+    let public_app = public_app
+        .layer(from_fn(
+            middleware::security_headers::security_headers_middleware,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));

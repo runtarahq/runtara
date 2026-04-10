@@ -15,6 +15,7 @@ pub mod internal_agents;
 pub mod internal_object_model;
 pub mod internal_proxy;
 pub mod metrics;
+pub mod oidc_discovery;
 pub mod oauth;
 pub mod object_model;
 pub mod operators;
