@@ -49,7 +49,7 @@ pub struct TriggerWorkerConfig {
     /// Default: 5
     pub pending_batch_size: usize,
     /// Maximum number of retries before giving up on an event
-    /// Default: 30 (30 retries * 10s = 5 minutes)
+    /// Default: 5 (5 retries * 10s = ~50 seconds)
     pub max_retries: u64,
 }
 
@@ -70,7 +70,7 @@ impl Default for TriggerWorkerConfig {
             max_retries: std::env::var("TRIGGER_MAX_RETRIES")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(30), // 30 retries = 5 minutes at 10s interval
+                .unwrap_or(5), // 5 retries = ~50 seconds at 10s interval
         }
     }
 }
