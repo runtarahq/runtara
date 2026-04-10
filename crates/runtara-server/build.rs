@@ -266,15 +266,15 @@ fn copy_build_script_outputs(build_dir: &Path, dest: &Path, ext: &str, count: &m
     if let Ok(entries) = fs::read_dir(build_dir) {
         for entry in entries.flatten() {
             let out_dir = entry.path().join("out");
-            if out_dir.is_dir() {
-                if let Ok(files) = fs::read_dir(&out_dir) {
-                    for file in files.flatten() {
-                        let path = file.path();
-                        if path.extension().is_some_and(|e| e == ext) {
-                            let dest_file = dest.join(path.file_name().unwrap());
-                            if fs::copy(&path, &dest_file).is_ok() {
-                                *count += 1;
-                            }
+            if out_dir.is_dir()
+                && let Ok(files) = fs::read_dir(&out_dir)
+            {
+                for file in files.flatten() {
+                    let path = file.path();
+                    if path.extension().is_some_and(|e| e == ext) {
+                        let dest_file = dest.join(path.file_name().unwrap());
+                        if fs::copy(&path, &dest_file).is_ok() {
+                            *count += 1;
                         }
                     }
                 }
