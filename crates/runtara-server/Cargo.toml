@@ -21,7 +21,7 @@ path = "src/main.rs"
 runtara-workflows = { path = "../runtara-workflows" }
 runtara-management-sdk = { path = "../runtara-management-sdk" }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
-runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations"] }
+runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations", "native"] }
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
 runtara-core = { path = "../runtara-core", features = ["server"] }
 runtara-environment = { path = "../runtara-environment" }
@@ -122,6 +122,6 @@ dotenvy = "0.15"
 
 [build-dependencies]
 runtara-dsl = { path = "../runtara-dsl" }
-runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations"] }
+runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations", "native"] }
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
 serde_json = "1.0"
