@@ -41,19 +41,19 @@ impl OidcDiscoveryCache {
         // Fast path: read lock
         {
             let guard = self.cached.read().await;
-            if let Some((ref body, fetched_at)) = *guard {
-                if fetched_at.elapsed() < self.ttl {
-                    return Ok(body.clone());
-                }
+            if let Some((ref body, fetched_at)) = *guard
+                && fetched_at.elapsed() < self.ttl
+            {
+                return Ok(body.clone());
             }
         }
 
         // Slow path: write lock with double-check
         let mut guard = self.cached.write().await;
-        if let Some((ref body, fetched_at)) = *guard {
-            if fetched_at.elapsed() < self.ttl {
-                return Ok(body.clone());
-            }
+        if let Some((ref body, fetched_at)) = *guard
+            && fetched_at.elapsed() < self.ttl
+        {
+            return Ok(body.clone());
         }
 
         let res = self
