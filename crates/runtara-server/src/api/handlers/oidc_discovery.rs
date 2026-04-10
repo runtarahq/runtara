@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::State,
     http::{StatusCode, header},
     response::IntoResponse,
-    Json,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -64,10 +64,7 @@ impl OidcDiscoveryCache {
             .map_err(|e| format!("Failed to fetch OIDC discovery: {e}"))?;
 
         if !res.status().is_success() {
-            return Err(format!(
-                "OIDC discovery returned status {}",
-                res.status()
-            ));
+            return Err(format!("OIDC discovery returned status {}", res.status()));
         }
 
         let body = res
@@ -85,10 +82,8 @@ impl OidcDiscoveryCache {
 /// Returns OAuth 2.0 Protected Resource Metadata (RFC 9728) for MCP clients.
 /// Requires `MCP_RESOURCE_URI` and `OAUTH2_ISSUER` env vars to be set.
 pub async fn oauth_protected_resource_handler() -> impl IntoResponse {
-    let resource_uri = std::env::var("MCP_RESOURCE_URI")
-        .expect("MCP_RESOURCE_URI must be set");
-    let issuer_uri = std::env::var("OAUTH2_ISSUER")
-        .expect("OAUTH2_ISSUER must be set");
+    let resource_uri = std::env::var("MCP_RESOURCE_URI").expect("MCP_RESOURCE_URI must be set");
+    let issuer_uri = std::env::var("OAUTH2_ISSUER").expect("OAUTH2_ISSUER must be set");
 
     let body = json!({
         "resource": resource_uri,
@@ -115,10 +110,7 @@ pub async fn openid_configuration_handler(
             StatusCode::OK,
             [
                 (header::CACHE_CONTROL, "public, max-age=3600".to_string()),
-                (
-                    header::CONTENT_TYPE,
-                    "application/json".to_string(),
-                ),
+                (header::CONTENT_TYPE, "application/json".to_string()),
             ],
             body,
         )
