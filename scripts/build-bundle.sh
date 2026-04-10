@@ -207,9 +207,20 @@ assemble_bundle() {
     local sysroot
     sysroot="$(rustc --print sysroot)"
 
-    # bin: only rustc and cargo
+    # bin: rustc, cargo, and wasm-component-ld (required for wasm32-wasip2 linking)
     cp "$sysroot/bin/rustc" "$bundle/toolchain/bin/"
     cp "$sysroot/bin/cargo" "$bundle/toolchain/bin/"
+
+    # wasm-component-ld: installed via `cargo install wasm-component-ld`, lives in ~/.cargo/bin
+    local wasm_ld
+    wasm_ld="$(command -v wasm-component-ld 2>/dev/null || true)"
+    if [ -n "$wasm_ld" ]; then
+        cp "$wasm_ld" "$bundle/toolchain/bin/"
+        info "Included wasm-component-ld from ${wasm_ld}"
+    else
+        warn "wasm-component-ld not found — WASM scenario compilation will fail at runtime!"
+        warn "Install it with: cargo install wasm-component-ld"
+    fi
 
     # lib: rustc shared libraries (mandatory runtime deps of rustc)
     case "$OS" in
