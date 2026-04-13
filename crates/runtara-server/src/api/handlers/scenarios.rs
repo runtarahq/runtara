@@ -847,6 +847,15 @@ struct CompilationQueryResult {
     error_message: Option<String>,
 }
 
+/// Raw row from scenario_compilations (avoids sqlx::query! macro which requires offline cache update)
+#[derive(sqlx::FromRow)]
+struct CompilationRow {
+    compilation_status: String,
+    registered_image_id: Option<String>,
+    wasm_size: Option<i32>,
+    error_message: Option<String>,
+}
+
 /// Query the compilation result from the database after the compilation worker has processed it
 async fn query_compilation_result(
     pool: &PgPool,
@@ -854,16 +863,14 @@ async fn query_compilation_result(
     scenario_id: &str,
     version: i32,
 ) -> Result<CompilationQueryResult, sqlx::Error> {
-    let result = sqlx::query!(
-        r#"
-        SELECT compilation_status, registered_image_id, wasm_size, error_message
-        FROM scenario_compilations
-        WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
-        "#,
-        tenant_id,
-        scenario_id,
-        version
+    let result: Option<CompilationRow> = sqlx::query_as(
+        "SELECT compilation_status, registered_image_id, wasm_size, error_message \
+         FROM scenario_compilations \
+         WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3",
     )
+    .bind(tenant_id)
+    .bind(scenario_id)
+    .bind(version)
     .fetch_optional(pool)
     .await?;
 
