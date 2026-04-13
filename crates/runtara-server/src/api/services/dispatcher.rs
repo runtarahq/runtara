@@ -19,14 +19,14 @@ use crate::runtime_client::RuntimeClient;
 /// The dispatcher source code template
 ///
 /// This is a minimal binary that:
-/// 1. Loads input from INPUT_JSON environment variable
+/// 1. Loads input from runtara-core via SDK (same as compiled scenarios)
 /// 2. Optionally injects connection as _connection field (same as test harness)
 /// 3. Executes the requested agent capability via the registry
-/// 4. Returns the result via output.json
+/// 4. Reports the result via SDK protocol
 const DISPATCHER_SOURCE: &str = r#"//! Universal Agent Dispatcher
 //!
 //! A binary that accepts agent/capability/input dynamically and dispatches
-//! to the appropriate agent via the inventory registry.
+//! to the appropriate agent via the static dispatch table.
 //!
 //! Uses the runtara SDK protocol to report completion/failure back to
 //! runtara-core (same as compiled scenarios).
@@ -37,7 +37,7 @@ const DISPATCHER_SOURCE: &str = r#"//! Universal Agent Dispatcher
 extern crate runtara_workflow_stdlib;
 
 use runtara_workflow_stdlib::prelude::*;
-use runtara_workflow_stdlib::registry;
+use runtara_workflow_stdlib::dispatch;
 use std::process::ExitCode;
 
 /// Input structure for the dispatcher
@@ -81,24 +81,31 @@ fn main() -> ExitCode {
     // Register SDK globally
     register_sdk(sdk_instance);
 
-    // Load input from /data/input.json (mounted by OCI runner)
-    let raw_input: serde_json::Value = match std::fs::read_to_string("/data/input.json") {
-        Ok(s) => match serde_json::from_str(&s) {
-            Ok(v) => v,
-            Err(e) => {
-                let msg = format!("Failed to parse /data/input.json: {}", e);
+    // Load input from runtara-core via SDK (same as compiled scenarios)
+    let raw_input: serde_json::Value = {
+        let sdk_guard = sdk().lock().unwrap();
+        match sdk_guard.load_input() {
+            Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = format!("Failed to parse input from Core: {}", e);
+                    eprintln!("ERROR: {}", msg);
+                    let _ = sdk_guard.failed(&msg);
+                    return ExitCode::FAILURE;
+                }
+            },
+            Ok(None) => {
+                let msg = "No input provided";
                 eprintln!("ERROR: {}", msg);
-                let sdk_guard = sdk().lock().unwrap();
+                let _ = sdk_guard.failed(msg);
+                return ExitCode::FAILURE;
+            },
+            Err(e) => {
+                let msg = format!("Failed to load input from Core: {}", e);
+                eprintln!("ERROR: {}", msg);
                 let _ = sdk_guard.failed(&msg);
                 return ExitCode::FAILURE;
             }
-        },
-        Err(e) => {
-            let msg = format!("Failed to read /data/input.json: {}", e);
-            eprintln!("ERROR: {}", msg);
-            let sdk_guard = sdk().lock().unwrap();
-            let _ = sdk_guard.failed(&msg);
-            return ExitCode::FAILURE;
         }
     };
 
@@ -126,8 +133,8 @@ fn main() -> ExitCode {
         }
     }
 
-    // Execute the agent capability via registry (sync)
-    let result = registry::execute_capability(
+    // Execute the agent capability via static dispatch table (WASM-compatible)
+    let result = dispatch::execute_capability(
         &input.agent_id,
         &input.capability_id,
         agent_input_value,
@@ -170,7 +177,9 @@ pub const DISPATCHER_SCENARIO_ID: &str = "__agent_dispatcher__";
 /// v19: Added fallback connection injection for object_model agent from OBJECT_STORE_DATABASE_URL
 /// v21: Switched from write_completed/output.json to SDK protocol (QUIC to runtara-core)
 /// v22: Compile to WASM (same mechanism as scenarios) instead of native host binary
-pub const DISPATCHER_VERSION: u32 = 22;
+/// v23: Load input from runtara-core via SDK instead of /data/input.json (WASM has no filesystem)
+/// v24: Use static dispatch table instead of inventory registry (inventory unavailable in WASM)
+pub const DISPATCHER_VERSION: u32 = 24;
 
 /// Service for managing the agent dispatcher binary
 pub struct DispatcherService {
@@ -382,6 +391,8 @@ impl DispatcherService {
         };
 
         // Add ALL dependency rlibs AND dylibs as extern crates
+        // Skip the stdlib itself (already added explicitly above) to avoid
+        // E0464 "multiple candidates" when deps_dir contains extra copies.
         if deps_dir.exists()
             && let Ok(entries) = fs::read_dir(deps_dir)
         {
@@ -398,6 +409,10 @@ impl DispatcherService {
                     && let Some(crate_name) = crate_name_part.split('-').next()
                 {
                     let extern_name = crate_name.replace('-', "_");
+                    // Skip stdlib — it's already added explicitly via scenario_lib_path
+                    if extern_name == stdlib_name {
+                        continue;
+                    }
                     cmd.arg("--extern")
                         .arg(format!("{}={}", extern_name, path.display()));
                 }

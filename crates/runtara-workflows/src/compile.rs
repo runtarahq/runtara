@@ -648,6 +648,8 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 
     // Add ALL dependency rlibs AND dylibs as extern crates (needed for transitive dependency resolution)
     // Proc-macro crates are compiled as dylibs, not rlibs
+    // Skip the stdlib itself (already added explicitly above) to avoid
+    // E0464 "multiple candidates" when deps_dir contains extra copies.
     if deps_dir.exists()
         && let Ok(entries) = fs::read_dir(deps_dir)
     {
@@ -666,6 +668,10 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
             {
                 // Convert hyphens to underscores for crate names
                 let extern_name = crate_name.replace('-', "_");
+                // Skip stdlib — it's already added explicitly via scenario_lib_path
+                if extern_name == stdlib_name {
+                    continue;
+                }
                 cmd.arg("--extern")
                     .arg(format!("{}={}", extern_name, path.display()));
             }
