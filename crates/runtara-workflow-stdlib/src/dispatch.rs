@@ -26,7 +26,7 @@ pub fn native_agent_stub(
     input: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let base_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7001/api/internal/agents".to_string());
+        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/internal/agents".to_string());
     let url = format!("{}/{}/{}", base_url, module, capability_id);
     let tid = std::env::var("RUNTARA_TENANT_ID").unwrap_or_default();
 

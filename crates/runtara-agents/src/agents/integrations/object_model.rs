@@ -26,7 +26,7 @@ use super::errors::permanent_error;
 /// Get the base URL for the internal object model API.
 fn base_url() -> String {
     std::env::var("RUNTARA_OBJECT_MODEL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7001/api/internal/object-model".to_string())
+        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/internal/object-model".to_string())
 }
 
 /// Get the tenant ID from environment.

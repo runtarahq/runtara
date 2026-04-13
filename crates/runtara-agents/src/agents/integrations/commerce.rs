@@ -25,7 +25,7 @@ fn resolve_integration_id(connection: &RawConnection) -> Result<String, String> 
 
     // Fetch from connection service
     let base_url = std::env::var("CONNECTION_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7001/api/connections".to_string());
+        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/connections".to_string());
     let tenant_id = std::env::var("RUNTARA_TENANT_ID").unwrap_or_default();
     let url = format!("{}/{}/{}", base_url, tenant_id, connection.connection_id);
 
