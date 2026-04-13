@@ -393,9 +393,14 @@ impl DispatcherService {
         // Add ALL dependency rlibs AND dylibs as extern crates
         // Skip the stdlib itself (already added explicitly above) to avoid
         // E0464 "multiple candidates" when deps_dir contains extra copies.
+        //
+        // Deduplicate by crate name: when multiple versions of the same crate exist,
+        // keep only the most recently modified one to avoid E0464.
         if deps_dir.exists()
             && let Ok(entries) = fs::read_dir(deps_dir)
         {
+            let mut extern_crates: HashMap<String, std::path::PathBuf> = HashMap::new();
+
             for entry in entries.flatten() {
                 let path = entry.path();
                 let ext = path.extension().and_then(|s| s.to_str());
@@ -413,9 +418,27 @@ impl DispatcherService {
                     if extern_name == stdlib_name {
                         continue;
                     }
-                    cmd.arg("--extern")
-                        .arg(format!("{}={}", extern_name, path.display()));
+
+                    // Keep the most recently modified file when duplicates exist
+                    let dominated = extern_crates.get(&extern_name).is_some_and(|existing| {
+                        let existing_mtime = fs::metadata(existing)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        let new_mtime = fs::metadata(&path)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        new_mtime > existing_mtime
+                    });
+
+                    if !extern_crates.contains_key(&extern_name) || dominated {
+                        extern_crates.insert(extern_name, path);
+                    }
                 }
+            }
+
+            for (extern_name, path) in &extern_crates {
+                cmd.arg("--extern")
+                    .arg(format!("{}={}", extern_name, path.display()));
             }
         }
 

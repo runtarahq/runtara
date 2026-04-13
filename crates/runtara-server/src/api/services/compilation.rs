@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use crate::api::repositories::scenarios::ScenarioRepository;
@@ -7,6 +8,25 @@ use crate::runtime_client::RuntimeClient;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{RegisterImageStreamOptions, RunnerType};
 use runtara_workflows::{ChildScenarioInput, CompilationInput, compile_scenario};
+
+/// Global semaphore limiting concurrent compilations across all code paths.
+/// Prevents OOM when multiple compilations are triggered simultaneously.
+/// Configured via MAX_CONCURRENT_COMPILATIONS env var (default: 1).
+static COMPILATION_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+
+fn compilation_semaphore() -> &'static Semaphore {
+    COMPILATION_SEMAPHORE.get_or_init(|| {
+        let max = std::env::var("MAX_CONCURRENT_COMPILATIONS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1);
+        info!(
+            max_concurrent_compilations = max,
+            "Compilation semaphore initialized"
+        );
+        Semaphore::new(max)
+    })
+}
 
 /// Service for scenario compilation operations
 pub struct CompilationService {
@@ -196,8 +216,19 @@ impl CompilationService {
         // IMPORTANT: compile_scenario is a synchronous blocking function that runs cargo build.
         // We MUST use spawn_blocking to prevent blocking the tokio runtime, which would
         // starve all other async tasks (API handlers, database queries, etc.) during compilation.
+        //
+        // The semaphore limits concurrent compilations to prevent OOM when multiple
+        // compilations are triggered simultaneously (e.g., via API or execution engine).
         let step_start = std::time::Instant::now();
-        debug!("compile: step 6 - compiling to native binary");
+        debug!("compile: step 6 - acquiring compilation semaphore");
+        let _permit = compilation_semaphore().acquire().await.map_err(|_| {
+            ServiceError::CompilationError("Compilation semaphore closed".to_string())
+        })?;
+        debug!(
+            wait_ms = step_start.elapsed().as_millis(),
+            "compile: step 6 - semaphore acquired, compiling to native binary"
+        );
+        let compile_start_time = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || compile_scenario(compilation_input))
             .await
             .map_err(|e| {
@@ -205,7 +236,7 @@ impl CompilationService {
             })?
             .map_err(|e| ServiceError::CompilationError(format!("Compilation failed: {}", e)))?;
         debug!(
-            duration_ms = step_start.elapsed().as_millis(),
+            duration_ms = compile_start_time.elapsed().as_millis(),
             binary_size = result.binary_size,
             "compile: step 6 completed - native binary compiled"
         );

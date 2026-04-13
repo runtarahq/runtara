@@ -637,9 +637,137 @@ pub async fn compile_scenario_handler(
         Ok(v) => v,
     };
 
-    // Create repository and services
+    // Route compilation through the queue if Valkey is available.
+    // This ensures all compilations are serialized through the compilation worker,
+    // preventing OOM from concurrent compiler processes.
+    if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
+        let redis_url = valkey_config.connection_url();
+
+        // Check if already compiled
+        let repository = ScenarioRepository::new(pool.clone());
+        match repository
+            .get_registered_image_id(&tenant_id, &scenario_id, version_num)
+            .await
+        {
+            Ok(Some(image_id)) => {
+                let response = json!({
+                    "success": true,
+                    "message": "Scenario already compiled",
+                    "scenarioId": scenario_id,
+                    "version": version,
+                    "imageId": image_id,
+                    "registered": true,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                });
+                return (StatusCode::OK, Json(response));
+            }
+            Ok(None) => {} // Not compiled yet, proceed to queue
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to check compilation status, proceeding to queue");
+            }
+        }
+
+        // Enqueue the compilation request
+        match crate::workers::compilation_worker::enqueue_compilation(
+            &redis_url,
+            &tenant_id,
+            &scenario_id,
+            version_num,
+        )
+        .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    tenant_id = %tenant_id,
+                    scenario_id = %scenario_id,
+                    version = version_num,
+                    "Compilation request queued via API"
+                );
+            }
+            Err(e) => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Failed to queue compilation",
+                    "message": format!("Failed to enqueue compilation: {}", e),
+                    "scenarioId": scenario_id,
+                    "version": version
+                });
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
+            }
+        }
+
+        // Wait for the compilation worker to process the request (up to 5 minutes)
+        let timeout = std::time::Duration::from_secs(300);
+        let completed = crate::workers::compilation_worker::wait_for_compilation(
+            &redis_url,
+            &tenant_id,
+            &scenario_id,
+            version_num,
+            timeout,
+        )
+        .await
+        .unwrap_or(false);
+
+        if !completed {
+            let error_response = json!({
+                "success": false,
+                "error": "Compilation timeout",
+                "message": format!(
+                    "Compilation for scenario '{}' version {} timed out after 5 minutes",
+                    scenario_id, version_num
+                ),
+                "scenarioId": scenario_id,
+                "version": version
+            });
+            return (StatusCode::GATEWAY_TIMEOUT, Json(error_response));
+        }
+
+        // Query DB for the compilation result
+        return match query_compilation_result(&pool, &tenant_id, &scenario_id, version_num).await {
+            Ok(result) => {
+                if result.success {
+                    let mut response = json!({
+                        "success": true,
+                        "message": "Scenario compiled successfully",
+                        "scenarioId": scenario_id,
+                        "version": version,
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    if let Some(image_id) = result.image_id {
+                        response["imageId"] = json!(image_id);
+                        response["registered"] = json!(true);
+                    }
+                    if let Some(size) = result.wasm_size {
+                        response["binarySize"] = json!(size);
+                    }
+                    (StatusCode::OK, Json(response))
+                } else {
+                    let error_response = json!({
+                        "success": false,
+                        "error": "Compilation failed",
+                        "message": result.error_message.unwrap_or_else(|| "Unknown compilation error".to_string()),
+                        "scenarioId": scenario_id,
+                        "version": version
+                    });
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                }
+            }
+            Err(e) => {
+                let error_response = json!({
+                    "success": false,
+                    "error": "Database error",
+                    "message": format!("Failed to query compilation result: {}", e),
+                    "scenarioId": scenario_id,
+                    "version": version
+                });
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+            }
+        };
+    }
+
+    // Fallback: Valkey not configured, compile directly (still protected by semaphore)
+    tracing::warn!("Valkey not configured, compiling directly (no queue)");
     let repository = Arc::new(ScenarioRepository::new(pool));
-    // With pasta --config-net, localhost URLs work in containers directly.
     let connection_service_url = std::env::var("CONNECTION_SERVICE_URL").ok();
     let compilation_service = crate::api::services::compilation::CompilationService::new(
         repository,
@@ -647,7 +775,6 @@ pub async fn compile_scenario_handler(
         runtime_client,
     );
 
-    // Delegate to service
     match compilation_service
         .compile_scenario(&tenant_id, &scenario_id, version_num)
         .await
@@ -663,7 +790,6 @@ pub async fn compile_scenario_handler(
                 "binaryChecksum": result.binary_checksum,
                 "timestamp": chrono::Utc::now().to_rfc3339()
             });
-            // Include imageId if registration was successful
             if let Some(image_id) = result.image_id {
                 response["imageId"] = json!(image_id);
                 response["registered"] = json!(true);
@@ -710,6 +836,50 @@ pub async fn compile_scenario_handler(
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
+    }
+}
+
+/// Result of querying compilation status from the database after queue processing
+struct CompilationQueryResult {
+    success: bool,
+    image_id: Option<String>,
+    wasm_size: Option<i32>,
+    error_message: Option<String>,
+}
+
+/// Query the compilation result from the database after the compilation worker has processed it
+async fn query_compilation_result(
+    pool: &PgPool,
+    tenant_id: &str,
+    scenario_id: &str,
+    version: i32,
+) -> Result<CompilationQueryResult, sqlx::Error> {
+    let result = sqlx::query!(
+        r#"
+        SELECT compilation_status, registered_image_id, wasm_size, error_message
+        FROM scenario_compilations
+        WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
+        "#,
+        tenant_id,
+        scenario_id,
+        version
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match result {
+        Some(record) => Ok(CompilationQueryResult {
+            success: record.compilation_status == "success" && record.registered_image_id.is_some(),
+            image_id: record.registered_image_id,
+            wasm_size: record.wasm_size,
+            error_message: record.error_message,
+        }),
+        None => Ok(CompilationQueryResult {
+            success: false,
+            image_id: None,
+            wasm_size: None,
+            error_message: Some("No compilation record found after queue processing".to_string()),
+        }),
     }
 }
 
