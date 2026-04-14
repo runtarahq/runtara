@@ -315,10 +315,7 @@ struct ChildScenarioRef {
 }
 
 /// Resolve a version string ("latest", "current", or numeric) against a scenario's metadata.
-fn resolve_child_version(
-    version_str: &str,
-    scenario_data: &serde_json::Value,
-) -> Option<i32> {
+fn resolve_child_version(version_str: &str, scenario_data: &serde_json::Value) -> Option<i32> {
     match version_str {
         "latest" => scenario_data
             .pointer("/data/latestVersion")
@@ -383,10 +380,7 @@ pub async fn deploy_scenario(
             // Validate child scenario exists
             let child_result = api_get(
                 server,
-                &format!(
-                    "/api/runtime/scenarios/{}",
-                    child_ref.child_scenario_id
-                ),
+                &format!("/api/runtime/scenarios/{}", child_ref.child_scenario_id),
             )
             .await
             .map_err(|_| {
@@ -398,17 +392,12 @@ pub async fn deploy_scenario(
             })?;
 
             // Resolve version
-            let resolved_version = resolve_child_version(
-                &child_ref.child_version,
-                &child_result,
-            )
-            .ok_or_else(|| {
+            let resolved_version = resolve_child_version(&child_ref.child_version, &child_result)
+                .ok_or_else(|| {
                 err(format!(
                     "Cannot resolve version '{}' for child scenario '{}'. \
                      The child scenario may not have a '{}' version set.",
-                    child_ref.child_version,
-                    child_ref.child_scenario_id,
-                    child_ref.child_version
+                    child_ref.child_version, child_ref.child_scenario_id, child_ref.child_version
                 ))
             })?;
 
@@ -609,15 +598,13 @@ pub async fn deploy_latest(
                 ))
             })?;
 
-            let resolved_version =
-                resolve_child_version(&child_ref.child_version, &child_result).ok_or_else(
-                    || {
-                        err(format!(
-                            "Cannot resolve version '{}' for child scenario '{}'",
-                            child_ref.child_version, child_ref.child_scenario_id
-                        ))
-                    },
-                )?;
+            let resolved_version = resolve_child_version(&child_ref.child_version, &child_result)
+                .ok_or_else(|| {
+                err(format!(
+                    "Cannot resolve version '{}' for child scenario '{}'",
+                    child_ref.child_version, child_ref.child_scenario_id
+                ))
+            })?;
 
             let child_compile = api_post(
                 server,

@@ -517,9 +517,13 @@ pub struct AddAgentStepParams {
         description = "Capability ID (e.g., 'http-request', 'get-product-variant-by-sku'). Use get_agent to discover."
     )]
     pub capability_id: String,
-    #[schemars(description = "Step ID to connect after (creates a normal edge from that step to this one)")]
+    #[schemars(
+        description = "Step ID to connect after (creates a normal edge from that step to this one)"
+    )]
     pub connect_after: Option<String>,
-    #[schemars(description = "Step ID to route errors to (creates an onError edge from this step)")]
+    #[schemars(
+        description = "Step ID to route errors to (creates an onError edge from this step)"
+    )]
     pub on_error_step: Option<String>,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."

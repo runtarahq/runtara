@@ -513,23 +513,22 @@ fn resolve_input_mappings(
                         Some("steps") if parts.len() >= 3 => {
                             let source_step_id = parts[1];
                             // parts[2] should be "outputs"
-                            let field_path =
-                                if parts.len() >= 4 { Some(parts[3]) } else { None };
+                            let field_path = if parts.len() >= 4 {
+                                Some(parts[3])
+                            } else {
+                                None
+                            };
 
-                            if let Some(source) =
-                                find_step_in_summaries(summaries, source_step_id)
+                            if let Some(source) = find_step_in_summaries(summaries, source_step_id)
                             {
                                 entry["sourceStep"] = json!(source_step_id);
-                                entry["sourceStatus"] = source
-                                    .get("status")
-                                    .cloned()
-                                    .unwrap_or(json!("unknown"));
+                                entry["sourceStatus"] =
+                                    source.get("status").cloned().unwrap_or(json!("unknown"));
 
                                 if let Some(outputs) = source.get("outputs") {
                                     if let Some(fp) = field_path {
                                         entry["resolvedValue"] =
-                                            resolve_json_path(outputs, fp)
-                                                .unwrap_or(json!(null));
+                                            resolve_json_path(outputs, fp).unwrap_or(json!(null));
                                     } else {
                                         entry["resolvedValue"] = outputs.clone();
                                     }
@@ -581,7 +580,8 @@ pub async fn inspect_step(
     validate_path_param("instance_id", &params.instance_id)?;
 
     // Fetch step summaries (full, not compact) and scenario definition in parallel
-    let summaries = fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
+    let summaries =
+        fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
 
     let target = find_step_in_summaries(&summaries, &params.step_id).ok_or_else(|| {
         rmcp::ErrorData::internal_error(
@@ -658,11 +658,14 @@ pub async fn trace_reference(
                 ));
             }
             let step_id = parts[1];
-            let field_path = if parts.len() >= 4 { Some(parts[3]) } else { None };
+            let field_path = if parts.len() >= 4 {
+                Some(parts[3])
+            } else {
+                None
+            };
 
             let summaries =
-                fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id)
-                    .await?;
+                fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
 
             let step = find_step_in_summaries(&summaries, step_id).ok_or_else(|| {
                 rmcp::ErrorData::internal_error(
