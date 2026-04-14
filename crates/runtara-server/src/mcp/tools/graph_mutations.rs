@@ -489,6 +489,30 @@ pub struct RemoveVariableParams {
     pub path: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddAgentStepParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(description = "Unique step ID within the graph")]
+    pub step_id: String,
+    #[schemars(description = "Human-readable step name")]
+    pub step_name: String,
+    #[schemars(description = "Agent ID (e.g., 'shopify', 'http'). Use list_agents to discover.")]
+    pub agent_id: String,
+    #[schemars(
+        description = "Capability ID (e.g., 'http-request', 'get-product-variant-by-sku'). Use get_agent to discover."
+    )]
+    pub capability_id: String,
+    #[schemars(description = "Step ID to connect after (creates a normal edge from that step to this one)")]
+    pub connect_after: Option<String>,
+    #[schemars(description = "Step ID to route errors to (creates an onError edge from this step)")]
+    pub on_error_step: Option<String>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
 // ===== Tool Implementations =====
 
 pub async fn add_step(
@@ -497,6 +521,19 @@ pub async fn add_step(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     if params.step.get("stepType").is_none() {
         return Err(err("Step definition must include 'stepType' field"));
+    }
+
+    // Typo linting: catch common field name mistakes
+    if params.step.get("inputMappings").is_some() {
+        return Err(err(
+            "Found 'inputMappings' (plural) — use 'inputMapping' (singular)",
+        ));
+    }
+    if params.step.get("agent").is_some() && params.step.get("agentId").is_none() {
+        return Err(err("Found 'agent' — use 'agentId' instead"));
+    }
+    if params.step.get("capability").is_some() && params.step.get("capabilityId").is_none() {
+        return Err(err("Found 'capability' — use 'capabilityId' instead"));
     }
 
     let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
@@ -641,6 +678,17 @@ pub async fn connect_steps(
     server: &SmoMcpServer,
     params: ConnectStepsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
+    // Typo linting: catch common label mistakes
+    if let Some(label) = &params.label {
+        let lower = label.to_lowercase();
+        if (lower == "on_error" || lower == "onerror") && label != "onError" {
+            return Err(err(format!(
+                "Label '{}' looks like a typo — use 'onError' (camelCase)",
+                label
+            )));
+        }
+    }
+
     let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
@@ -1044,11 +1092,14 @@ pub async fn list_references(
                 .get("type")
                 .and_then(|t| t.as_str())
                 .unwrap_or("unknown");
+            let ref_path = format!("data.{}", field);
             let mut entry = serde_json::json!({
-                "reference": format!("data.{}", field),
+                "reference": &ref_path,
                 "source": "input",
                 "field": field,
                 "type": field_type,
+                "mapping": { "valueType": "reference", "value": &ref_path },
+                "setMappingArgs": { "from_input": field },
             });
             if supports_nested_access(field_type) {
                 entry["nested"] = serde_json::json!(true);
@@ -1067,11 +1118,14 @@ pub async fn list_references(
                 .get("type")
                 .and_then(|t| t.as_str())
                 .unwrap_or("unknown");
+            let ref_path = format!("variables.{}", name);
             let mut entry = serde_json::json!({
-                "reference": format!("variables.{}", name),
+                "reference": &ref_path,
                 "source": "variable",
                 "field": name,
                 "type": var_type,
+                "mapping": { "valueType": "reference", "value": &ref_path },
+                "setMappingArgs": { "from_variable": name },
             });
             if supports_nested_access(var_type) {
                 entry["nested"] = serde_json::json!(true);
@@ -1123,14 +1177,17 @@ pub async fn list_references(
                                     .get("type")
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("unknown");
+                                let ref_path = format!("steps.{}.outputs.{}", step_id, field_name);
                                 let mut entry = serde_json::json!({
-                                    "reference": format!("steps.{}.outputs.{}", step_id, field_name),
+                                    "reference": &ref_path,
                                     "source": "step",
                                     "stepId": step_id,
                                     "agentId": agent_id,
                                     "capabilityId": capability_id,
                                     "field": field_name,
                                     "type": field_type,
+                                    "mapping": { "valueType": "reference", "value": &ref_path },
+                                    "setMappingArgs": { "from_step": step_id, "from_output": field_name },
                                 });
                                 if supports_nested_access(field_type) {
                                     entry["nested"] = serde_json::json!(true);
@@ -1164,6 +1221,108 @@ pub async fn list_references(
         "scenarioId": params.scenario_id,
         "references": references,
         "count": references.len(),
+    }))
+}
+
+pub async fn add_agent_step(
+    server: &SmoMcpServer,
+    params: AddAgentStepParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("scenario_id", &params.scenario_id)?;
+
+    // Validate agent/capability exist and get capability info
+    let cap_result = api_get(
+        server,
+        &format!(
+            "/api/runtime/agents/{}/capabilities/{}",
+            params.agent_id, params.capability_id
+        ),
+    )
+    .await
+    .map_err(|_| {
+        err(format!(
+            "Capability '{}/{}' not found. Use list_agents and get_agent to discover valid IDs.",
+            params.agent_id, params.capability_id
+        ))
+    })?;
+
+    // Build step definition
+    let step = serde_json::json!({
+        "id": params.step_id,
+        "stepType": "Agent",
+        "name": params.step_name,
+        "agentId": params.agent_id,
+        "capabilityId": params.capability_id,
+    });
+
+    // Add the step
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let path = params.path.clone().unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    if target
+        .get("steps")
+        .and_then(|s| s.as_object())
+        .is_some_and(|s| s.contains_key(&params.step_id))
+    {
+        return Err(err(format!(
+            "Step '{}' already exists in graph",
+            params.step_id
+        )));
+    }
+
+    if target.get("steps").is_none() || !target["steps"].is_object() {
+        target["steps"] = serde_json::json!({});
+    }
+    target["steps"][&params.step_id] = step;
+
+    let steps_count = target["steps"].as_object().map(|s| s.len()).unwrap_or(0);
+    let set_entry = steps_count == 1;
+    if set_entry {
+        target["entryPoint"] = serde_json::Value::String(params.step_id.clone());
+    }
+
+    // Connect edges
+    if target.get("executionPlan").is_none() || !target["executionPlan"].is_array() {
+        target["executionPlan"] = serde_json::json!([]);
+    }
+    let plan = target["executionPlan"].as_array_mut().unwrap();
+
+    if let Some(ref after) = params.connect_after {
+        plan.push(serde_json::json!({
+            "fromStep": after,
+            "toStep": params.step_id,
+        }));
+    }
+    if let Some(ref error_step) = params.on_error_step {
+        plan.push(serde_json::json!({
+            "fromStep": params.step_id,
+            "toStep": error_step,
+            "label": "onError",
+        }));
+    }
+
+    let (version, new_version) =
+        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+
+    // Extract expected inputs from capability schema
+    let expected_inputs = cap_result
+        .get("input")
+        .and_then(|i| i.get("fields"))
+        .cloned()
+        .unwrap_or(serde_json::json!([]));
+
+    json_result(serde_json::json!({
+        "success": true,
+        "scenarioId": params.scenario_id,
+        "version": version,
+        "newVersion": new_version,
+        "stepId": params.step_id,
+        "setAsEntryPoint": set_entry,
+        "connectedAfter": params.connect_after,
+        "onErrorStep": params.on_error_step,
+        "expectedInputs": expected_inputs,
+        "hint": "Use set_mapping to map each expected input to a reference or value",
     }))
 }
 
