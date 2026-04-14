@@ -456,7 +456,7 @@ async fn fetch_full_step_summaries(
 fn resolve_json_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut current = value;
     for segment in path.split('.') {
-        if let Some(idx) = segment.parse::<usize>().ok() {
+        if let Ok(idx) = segment.parse::<usize>() {
             current = current.get(idx)?;
         } else {
             current = current.get(segment)?;

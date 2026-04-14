@@ -284,22 +284,22 @@ fn extract_child_refs_recursive(graph: &serde_json::Value, refs: &mut Vec<ChildS
         return;
     };
     for (step_id, step_def) in steps {
-        if step_def.get("stepType").and_then(|v| v.as_str()) == Some("StartScenario") {
-            if let Some(child_id) = step_def.get("childScenarioId").and_then(|v| v.as_str()) {
-                let version = step_def
-                    .get("childVersion")
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        _ => "latest".to_string(),
-                    })
-                    .unwrap_or_else(|| "latest".to_string());
-                refs.push(ChildScenarioRef {
-                    step_id: step_id.clone(),
-                    child_scenario_id: child_id.to_string(),
-                    child_version: version,
-                });
-            }
+        if step_def.get("stepType").and_then(|v| v.as_str()) == Some("StartScenario")
+            && let Some(child_id) = step_def.get("childScenarioId").and_then(|v| v.as_str())
+        {
+            let version = step_def
+                .get("childVersion")
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => "latest".to_string(),
+                })
+                .unwrap_or_else(|| "latest".to_string());
+            refs.push(ChildScenarioRef {
+                step_id: step_id.clone(),
+                child_scenario_id: child_id.to_string(),
+                child_version: version,
+            });
         }
         // Recurse into subgraphs (Split, While, etc.)
         if let Some(subgraph) = step_def.get("subgraph") {
