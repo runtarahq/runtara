@@ -534,7 +534,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var("RUNTARA_TENANT_ID").is_err() {
             std::env::set_var("RUNTARA_TENANT_ID", &tenant_id);
         }
-        // Agent service URL — WASM scenarios use this to call native-only capabilities
+        // Agent service URL — scenario binaries use this to call native-only capabilities
         if std::env::var("RUNTARA_AGENT_SERVICE_URL").is_err() {
             let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
             std::env::set_var(
@@ -966,33 +966,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/scenarios/{id}/versions/{version}/compile",
             post(api::handlers::scenarios::compile_scenario_handler),
-        )
-        .route(
-            "/api/runtime/scenarios/{id}/versions/{version}/wasm",
-            get(api::handlers::scenarios::download_wasm_handler),
-        )
-        .route(
-            "/api/runtime/scenarios/{id}/debug/proxy",
-            post(api::handlers::scenarios::debug_proxy_handler),
-        )
-        // Agent execution endpoint (for browser WASM execution)
-        // JWT-authenticated version of /api/internal/agents. Used by browser WASM
-        // scenarios to execute native-only agents (sftp, xlsx, compression).
-        .route(
-            "/api/runtime/agents/execute/{module}/{capability_id}",
-            post(api::handlers::internal_agents::execute_agent_capability_authenticated),
-        )
-        // Connection credentials endpoint (for browser WASM execution)
-        // Same as internal /api/connections/{tenant_id}/{connection_id} but JWT-authenticated.
-        // The WASM binary sets CONNECTION_SERVICE_URL to this path.
-        .route(
-            "/api/runtime/connections/{tenant_id}/{connection_id}",
-            get(api::handlers::connections::get_connection_for_runtime_handler),
-        )
-        // Reverse proxy to runtara-core instance API (for browser WASM execution)
-        .route(
-            "/api/runtime/core/{*path}",
-            axum::routing::any(api::handlers::scenarios::core_proxy_handler),
         )
         .route(
             "/api/runtime/scenarios/{id}/execute",

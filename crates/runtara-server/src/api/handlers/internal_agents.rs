@@ -1,13 +1,10 @@
 //! Agent Capability Execution Handlers
 //!
-//! Two endpoints for executing native-only agent capabilities (sftp, xlsx,
-//! compression) on behalf of WASM scenario binaries:
+//! Internal endpoint for executing native-only agent capabilities (sftp, xlsx,
+//! compression) on behalf of scenario binaries:
 //!
 //! 1. **Internal** (`/api/internal/agents/{module}/{capability_id}`) —
-//!    No authentication, localhost only. Used by server-side WASM execution.
-//!
-//! 2. **Authenticated** (`/api/runtime/agents/{module}/{capability_id}/run`) —
-//!    JWT-authenticated via gateway. Used by browser WASM execution.
+//!    No authentication, localhost only.
 //!
 //! Connection resolution: if the input contains a `connection_id` field,
 //! the handler fetches full credentials from the connection service and
@@ -29,16 +26,6 @@ pub async fn execute_agent_capability(
         .map(|s| s.to_string())
         .unwrap_or_else(|| std::env::var("TENANT_ID").unwrap_or_default());
 
-    run_agent(&tenant_id, &module, &capability_id, input).await
-}
-
-/// Authenticated endpoint — JWT-validated tenant via gateway.
-/// Used by browser WASM scenarios via `RUNTARA_AGENT_SERVICE_URL`.
-pub async fn execute_agent_capability_authenticated(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    Path((module, capability_id)): Path<(String, String)>,
-    Json(input): Json<Value>,
-) -> (StatusCode, Json<Value>) {
     run_agent(&tenant_id, &module, &capability_id, input).await
 }
 

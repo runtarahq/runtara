@@ -1002,33 +1002,6 @@ impl ScenarioRepository {
         Ok(result.and_then(|r| r.registered_image_id))
     }
 
-    /// Get the WASM binary path and checksum for a compiled scenario
-    ///
-    /// Returns (translated_path, wasm_checksum) for serving the compiled WASM binary.
-    /// The actual binary is at `{translated_path}/scenario.wasm`.
-    pub async fn get_wasm_path(
-        &self,
-        tenant_id: &str,
-        scenario_id: &str,
-        version: i32,
-    ) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
-        let result = sqlx::query!(
-            r#"
-            SELECT translated_path, wasm_checksum
-            FROM scenario_compilations
-            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
-                AND compilation_status = 'success'
-            "#,
-            tenant_id,
-            scenario_id,
-            version
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(result.map(|r| (r.translated_path, r.wasm_checksum)))
-    }
-
     /// Update scenario by creating a new version
     ///
     /// Creates a new version of the scenario.
