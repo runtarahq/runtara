@@ -253,12 +253,147 @@ pub async fn set_current_version(
     json_result(result)
 }
 
+/// Extract StartScenario step references from an execution graph JSON,
+/// including those nested inside subgraphs (Split, While, etc.).
+fn extract_child_refs(graph: &serde_json::Value) -> Vec<ChildScenarioRef> {
+    let mut refs = Vec::new();
+    extract_child_refs_recursive(graph, &mut refs);
+    refs
+}
+
+fn extract_child_refs_recursive(graph: &serde_json::Value, refs: &mut Vec<ChildScenarioRef>) {
+    let Some(steps) = graph.get("steps").and_then(|v| v.as_object()) else {
+        return;
+    };
+    for (step_id, step_def) in steps {
+        if step_def.get("stepType").and_then(|v| v.as_str()) == Some("StartScenario") {
+            if let Some(child_id) = step_def.get("childScenarioId").and_then(|v| v.as_str()) {
+                let version = step_def
+                    .get("childVersion")
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => "latest".to_string(),
+                    })
+                    .unwrap_or_else(|| "latest".to_string());
+                refs.push(ChildScenarioRef {
+                    step_id: step_id.clone(),
+                    child_scenario_id: child_id.to_string(),
+                    child_version: version,
+                });
+            }
+        }
+        // Recurse into subgraphs (Split, While, etc.)
+        if let Some(subgraph) = step_def.get("subgraph") {
+            extract_child_refs_recursive(subgraph, refs);
+        }
+    }
+}
+
+struct ChildScenarioRef {
+    step_id: String,
+    child_scenario_id: String,
+    child_version: String,
+}
+
+/// Resolve a version string ("latest", "current", or numeric) against a scenario's metadata.
+fn resolve_child_version(
+    version_str: &str,
+    scenario_data: &serde_json::Value,
+) -> Option<i32> {
+    match version_str {
+        "latest" => scenario_data
+            .pointer("/data/latestVersion")
+            .or_else(|| scenario_data.pointer("/data/latest_version"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        "current" => scenario_data
+            .pointer("/data/currentVersion")
+            .or_else(|| scenario_data.pointer("/data/current_version"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        _ => version_str.parse::<i32>().ok(),
+    }
+}
+
 pub async fn deploy_scenario(
     server: &SmoMcpServer,
     params: DeployScenarioParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("scenario_id", &params.scenario_id)?;
-    // Step 1: Update scenario
+
+    // Step 0: Detect and validate child scenario references (StartScenario steps)
+    let child_refs = extract_child_refs(&params.execution_graph);
+    let mut child_compilations = Vec::new();
+
+    if !child_refs.is_empty() {
+        // Deduplicate by child_scenario_id (multiple steps may reference the same child)
+        let mut seen_children = std::collections::HashSet::new();
+
+        for child_ref in &child_refs {
+            if !seen_children.insert(child_ref.child_scenario_id.clone()) {
+                continue; // Already handled this child
+            }
+
+            // Validate child scenario exists
+            let child_result = api_get(
+                server,
+                &format!(
+                    "/api/runtime/scenarios/{}",
+                    child_ref.child_scenario_id
+                ),
+            )
+            .await
+            .map_err(|_| {
+                err(format!(
+                    "Child scenario '{}' (referenced by StartScenario step '{}') not found. \
+                     Deploy the child scenario first, then retry deploying the parent.",
+                    child_ref.child_scenario_id, child_ref.step_id
+                ))
+            })?;
+
+            // Resolve version
+            let resolved_version = resolve_child_version(
+                &child_ref.child_version,
+                &child_result,
+            )
+            .ok_or_else(|| {
+                err(format!(
+                    "Cannot resolve version '{}' for child scenario '{}'. \
+                     The child scenario may not have a '{}' version set.",
+                    child_ref.child_version,
+                    child_ref.child_scenario_id,
+                    child_ref.child_version
+                ))
+            })?;
+
+            // Compile child scenario (skips if already compiled)
+            let child_compile = api_post(
+                server,
+                &format!(
+                    "/api/runtime/scenarios/{}/versions/{}/compile",
+                    child_ref.child_scenario_id, resolved_version
+                ),
+                None,
+            )
+            .await
+            .map_err(|e| {
+                err(format!(
+                    "Failed to compile child scenario '{}' version {}: {}. \
+                     Fix the child scenario first, then retry deploying the parent.",
+                    child_ref.child_scenario_id, resolved_version, e
+                ))
+            })?;
+
+            child_compilations.push(serde_json::json!({
+                "childScenarioId": child_ref.child_scenario_id,
+                "version": resolved_version,
+                "status": if child_compile.get("imageId").is_some() { "compiled" } else { "unknown" },
+            }));
+        }
+    }
+
+    // Step 1: Update parent scenario
     let update_body = serde_json::json!({
         "executionGraph": params.execution_graph,
     });
@@ -274,7 +409,7 @@ pub async fn deploy_scenario(
         .and_then(|v| v.as_str())
         .ok_or_else(|| err("Update succeeded but no version returned"))?;
 
-    // Step 2: Compile
+    // Step 2: Compile parent
     let compile_result = api_post(
         server,
         &format!(
@@ -296,7 +431,7 @@ pub async fn deploy_scenario(
     )
     .await?;
 
-    let response = serde_json::json!({
+    let mut response = serde_json::json!({
         "success": true,
         "message": format!("Scenario deployed successfully (version {})", version),
         "scenarioId": params.scenario_id,
@@ -307,6 +442,14 @@ pub async fn deploy_scenario(
         },
         "warnings": update_result.get("warnings"),
     });
+
+    if !child_compilations.is_empty() {
+        response["childScenarios"] = serde_json::json!({
+            "count": child_compilations.len(),
+            "compilations": child_compilations,
+        });
+    }
+
     json_result(response)
 }
 

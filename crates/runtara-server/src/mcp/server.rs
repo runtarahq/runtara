@@ -124,7 +124,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Deploy a scenario in one step: update graph → compile → set as current version. Returns version, binary size, and any warnings."
+        description = "Deploy a scenario in one step: update graph → compile → set as current version. Automatically detects StartScenario steps and compiles child scenarios first (cascading). Returns version, binary size, child compilation info, and any warnings."
     )]
     async fn deploy_scenario(
         &self,

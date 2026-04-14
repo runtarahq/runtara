@@ -67,12 +67,13 @@ pub async fn validate_mappings(
     params: ValidateMappingsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("scenario_id", &params.scenario_id)?;
-    let result = api_get(
+    let result = api_post(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/versions/{}/schemas",
+            "/api/runtime/scenarios/{}/validate-mappings?versionNumber={}",
             params.scenario_id, params.version
         ),
+        None,
     )
     .await?;
     json_result(result)

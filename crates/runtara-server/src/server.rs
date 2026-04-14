@@ -62,6 +62,7 @@ use runtime_client::RuntimeClient;
         api::handlers::scenarios::resume_instance_handler,
         api::handlers::scenarios::replay_instance_handler,
         api::handlers::scenarios::validate_graph_handler,
+        api::handlers::scenarios::validate_mappings_handler,
         api::handlers::scenarios::get_step_subinstances_handler,
         api::handlers::scenarios::list_step_types_handler,
         api::handlers::scenarios::get_version_schemas_handler,
@@ -1044,6 +1045,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/scenarios/graph/validate",
             post(api::handlers::scenarios::validate_graph_handler),
+        )
+        .route(
+            "/api/runtime/scenarios/{scenarioId}/validate-mappings",
+            post(api::handlers::scenarios::validate_mappings_handler),
         )
         .route(
             "/api/runtime/scenarios/instances/{instanceId}/steps/{stepId}/subinstances",
