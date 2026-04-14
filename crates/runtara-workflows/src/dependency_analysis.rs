@@ -404,4 +404,33 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing childScenarioId"));
     }
+
+    #[test]
+    fn test_extract_start_scenario_steps_no_steps() {
+        let execution_graph = serde_json::json!({
+            "steps": {
+                "step1": {
+                    "stepType": "Agent",
+                    "operatorId": "utils"
+                },
+                "step2": {
+                    "stepType": "Agent",
+                    "operatorId": "http"
+                }
+            }
+        });
+
+        let steps = extract_start_scenario_steps(&execution_graph).unwrap();
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_version_latest_zero() {
+        assert_eq!(resolve_version("latest", 0, Some(3)).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_resolve_version_numeric_zero() {
+        assert_eq!(resolve_version("0", 5, Some(3)).unwrap(), 0);
+    }
 }

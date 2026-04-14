@@ -98,6 +98,14 @@ pub struct DeployScenarioParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct PreflightCompileParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(description = "Version number (defaults to latest)")]
+    pub version: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiffScenarioVersionsParams {
     #[schemars(description = "Scenario ID")]
     pub scenario_id: String,
@@ -322,7 +330,34 @@ pub async fn deploy_scenario(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("scenario_id", &params.scenario_id)?;
 
-    // Step 0: Detect and validate child scenario references (StartScenario steps)
+    // Step 0a: Validate graph structure before doing anything
+    let graph_validation = api_post(
+        server,
+        "/api/runtime/scenarios/graph/validate",
+        Some(params.execution_graph.clone()),
+    )
+    .await
+    .ok();
+
+    let has_graph_errors = graph_validation
+        .as_ref()
+        .and_then(|v| v.get("errors"))
+        .and_then(|e| e.as_array())
+        .is_some_and(|a| !a.is_empty());
+
+    if has_graph_errors {
+        return json_result(serde_json::json!({
+            "success": false,
+            "message": "Execution graph has validation errors — fix before deploying",
+            "scenarioId": params.scenario_id,
+            "compiled": false,
+            "validationErrors": {
+                "graph": graph_validation,
+            },
+        }));
+    }
+
+    // Step 0b: Detect and validate child scenario references (StartScenario steps)
     let child_refs = extract_child_refs(&params.execution_graph);
     let mut child_compilations = Vec::new();
 
@@ -451,6 +486,157 @@ pub async fn deploy_scenario(
     }
 
     json_result(response)
+}
+
+pub async fn preflight_compile(
+    server: &SmoMcpServer,
+    params: PreflightCompileParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("scenario_id", &params.scenario_id)?;
+
+    // Fetch scenario
+    let qs = match params.version {
+        Some(v) => format!("?versionNumber={}", v),
+        None => String::new(),
+    };
+    let scenario = api_get(
+        server,
+        &format!("/api/runtime/scenarios/{}{}", params.scenario_id, qs),
+    )
+    .await?;
+
+    let version = scenario
+        .pointer("/data/version")
+        .or_else(|| scenario.pointer("/data/latestVersion"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32;
+
+    let graph = scenario
+        .pointer("/data/definition/executionGraph")
+        .or_else(|| scenario.pointer("/data/executionGraph"))
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let mut blockers = Vec::new();
+
+    // 1. Validate graph structure
+    let graph_validation = api_post(
+        server,
+        "/api/runtime/scenarios/graph/validate",
+        Some(graph.clone()),
+    )
+    .await
+    .ok();
+
+    let graph_errors = graph_validation
+        .as_ref()
+        .and_then(|v| v.get("errors"))
+        .and_then(|e| e.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if graph_errors > 0 {
+        blockers.push(format!("{} graph validation error(s)", graph_errors));
+    }
+
+    // 2. Validate mappings
+    let mapping_validation = api_post(
+        server,
+        &format!(
+            "/api/runtime/scenarios/{}/validate-mappings?versionNumber={}",
+            params.scenario_id, version
+        ),
+        None,
+    )
+    .await
+    .ok();
+
+    let mapping_errors = mapping_validation
+        .as_ref()
+        .and_then(|v| v.get("errorCount"))
+        .and_then(|c| c.as_u64())
+        .unwrap_or(0);
+    if mapping_errors > 0 {
+        blockers.push(format!("{} mapping validation error(s)", mapping_errors));
+    }
+
+    // 3. Check child scenario dependencies
+    let child_refs = extract_child_refs(&graph);
+    let mut child_reports = Vec::new();
+    let mut seen_children = std::collections::HashSet::new();
+
+    for child_ref in &child_refs {
+        if !seen_children.insert(child_ref.child_scenario_id.clone()) {
+            continue;
+        }
+
+        let child_result = api_get(
+            server,
+            &format!("/api/runtime/scenarios/{}", child_ref.child_scenario_id),
+        )
+        .await;
+
+        match child_result {
+            Ok(child_data) => {
+                let resolved = resolve_child_version(&child_ref.child_version, &child_data);
+                let mut report = serde_json::json!({
+                    "stepId": child_ref.step_id,
+                    "childScenarioId": child_ref.child_scenario_id,
+                    "requestedVersion": child_ref.child_version,
+                    "resolvedVersion": resolved,
+                });
+
+                if let Some(rv) = resolved {
+                    // Check if compiled
+                    let compile_check = api_get(
+                        server,
+                        &format!(
+                            "/api/runtime/scenarios/{}?versionNumber={}",
+                            child_ref.child_scenario_id, rv
+                        ),
+                    )
+                    .await
+                    .ok();
+
+                    let has_image = compile_check
+                        .as_ref()
+                        .and_then(|v| v.pointer("/data/compilationStatus"))
+                        .and_then(|s| s.as_str())
+                        .is_some_and(|s| s == "compiled");
+
+                    report["compiled"] = serde_json::json!(has_image);
+                } else {
+                    blockers.push(format!(
+                        "Cannot resolve version '{}' for child scenario '{}'",
+                        child_ref.child_version, child_ref.child_scenario_id
+                    ));
+                }
+
+                child_reports.push(report);
+            }
+            Err(_) => {
+                blockers.push(format!(
+                    "Child scenario '{}' (step '{}') not found",
+                    child_ref.child_scenario_id, child_ref.step_id
+                ));
+                child_reports.push(serde_json::json!({
+                    "stepId": child_ref.step_id,
+                    "childScenarioId": child_ref.child_scenario_id,
+                    "requestedVersion": child_ref.child_version,
+                    "error": "not found",
+                }));
+            }
+        }
+    }
+
+    json_result(serde_json::json!({
+        "scenarioId": params.scenario_id,
+        "version": version,
+        "ready": blockers.is_empty(),
+        "graphValidation": graph_validation,
+        "mappingValidation": mapping_validation,
+        "childScenarios": child_reports,
+        "blockers": blockers,
+    }))
 }
 
 pub async fn diff_scenario_versions(
@@ -584,4 +770,164 @@ fn diff_step(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_child_refs_flat() {
+        let graph = serde_json::json!({
+            "steps": {
+                "s1": {
+                    "stepType": "StartScenario",
+                    "childScenarioId": "child-a",
+                    "childVersion": "latest"
+                },
+                "s2": {
+                    "stepType": "StartScenario",
+                    "childScenarioId": "child-b",
+                    "childVersion": 10
+                }
+            }
+        });
+
+        let refs = extract_child_refs(&graph);
+        assert_eq!(refs.len(), 2);
+
+        let r1 = refs.iter().find(|r| r.step_id == "s1").unwrap();
+        assert_eq!(r1.child_scenario_id, "child-a");
+        assert_eq!(r1.child_version, "latest");
+
+        let r2 = refs.iter().find(|r| r.step_id == "s2").unwrap();
+        assert_eq!(r2.child_scenario_id, "child-b");
+        assert_eq!(r2.child_version, "10");
+    }
+
+    #[test]
+    fn test_extract_child_refs_nested_subgraph() {
+        let graph = serde_json::json!({
+            "steps": {
+                "split1": {
+                    "stepType": "Split",
+                    "subgraph": {
+                        "steps": {
+                            "inner": {
+                                "stepType": "StartScenario",
+                                "childScenarioId": "nested-child",
+                                "childVersion": "current"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let refs = extract_child_refs(&graph);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].step_id, "inner");
+        assert_eq!(refs[0].child_scenario_id, "nested-child");
+        assert_eq!(refs[0].child_version, "current");
+    }
+
+    #[test]
+    fn test_extract_child_refs_mixed_versions() {
+        let graph = serde_json::json!({
+            "steps": {
+                "s1": {
+                    "stepType": "StartScenario",
+                    "childScenarioId": "c1",
+                    "childVersion": "latest"
+                },
+                "s2": {
+                    "stepType": "StartScenario",
+                    "childScenarioId": "c2",
+                    "childVersion": "current"
+                },
+                "s3": {
+                    "stepType": "StartScenario",
+                    "childScenarioId": "c3",
+                    "childVersion": 42
+                }
+            }
+        });
+
+        let refs = extract_child_refs(&graph);
+        assert_eq!(refs.len(), 3);
+
+        let r1 = refs.iter().find(|r| r.step_id == "s1").unwrap();
+        assert_eq!(r1.child_version, "latest");
+
+        let r2 = refs.iter().find(|r| r.step_id == "s2").unwrap();
+        assert_eq!(r2.child_version, "current");
+
+        let r3 = refs.iter().find(|r| r.step_id == "s3").unwrap();
+        assert_eq!(r3.child_version, "42");
+    }
+
+    #[test]
+    fn test_extract_child_refs_empty() {
+        let graph = serde_json::json!({
+            "steps": {
+                "a1": {
+                    "stepType": "Agent",
+                    "operatorId": "utils"
+                },
+                "a2": {
+                    "stepType": "Agent",
+                    "operatorId": "http"
+                }
+            }
+        });
+
+        let refs = extract_child_refs(&graph);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_child_version_latest() {
+        let scenario_data = serde_json::json!({
+            "data": {
+                "latestVersion": 5
+            }
+        });
+        assert_eq!(resolve_child_version("latest", &scenario_data), Some(5));
+    }
+
+    #[test]
+    fn test_resolve_child_version_current() {
+        let scenario_data = serde_json::json!({
+            "data": {
+                "currentVersion": 3
+            }
+        });
+        assert_eq!(resolve_child_version("current", &scenario_data), Some(3));
+    }
+
+    #[test]
+    fn test_resolve_child_version_numeric() {
+        let scenario_data = serde_json::json!({
+            "data": {}
+        });
+        assert_eq!(resolve_child_version("7", &scenario_data), Some(7));
+    }
+
+    #[test]
+    fn test_resolve_child_version_invalid() {
+        let scenario_data = serde_json::json!({
+            "data": {}
+        });
+        assert_eq!(resolve_child_version("abc", &scenario_data), None);
+    }
+
+    #[test]
+    fn test_resolve_child_version_current_missing() {
+        let scenario_data = serde_json::json!({
+            "data": {
+                "latestVersion": 5
+            }
+        });
+        assert_eq!(resolve_child_version("current", &scenario_data), None);
+    }
 }

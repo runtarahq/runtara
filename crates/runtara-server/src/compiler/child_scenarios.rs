@@ -285,9 +285,131 @@ async fn load_or_get_cached_scenario(
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
 
-    // Note: Integration tests would require database setup
-    // Unit tests for individual functions are in dependency_analysis.rs
+    #[test]
+    fn test_extract_all_nested_split_start_scenario() {
+        let graph = serde_json::json!({
+            "steps": {
+                "split1": {
+                    "stepType": "Split",
+                    "subgraph": {
+                        "steps": {
+                            "nested_start": {
+                                "stepType": "StartScenario",
+                                "childScenarioId": "child-1",
+                                "childVersion": "latest"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let steps = extract_all_start_scenario_steps(&graph).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "nested_start");
+        assert_eq!(steps[0].child_scenario_id, "child-1");
+        assert_eq!(steps[0].child_version_requested, "latest");
+    }
+
+    #[test]
+    fn test_extract_all_deeply_nested() {
+        // Split -> While -> StartScenario (three levels)
+        let graph = serde_json::json!({
+            "steps": {
+                "split1": {
+                    "stepType": "Split",
+                    "subgraph": {
+                        "steps": {
+                            "while1": {
+                                "stepType": "While",
+                                "subgraph": {
+                                    "steps": {
+                                        "deep_start": {
+                                            "stepType": "StartScenario",
+                                            "childScenarioId": "deep-child",
+                                            "childVersion": 7
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let steps = extract_all_start_scenario_steps(&graph).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_id, "deep_start");
+        assert_eq!(steps[0].child_scenario_id, "deep-child");
+        assert_eq!(steps[0].child_version_requested, "7");
+    }
+
+    #[test]
+    fn test_extract_all_mixed_top_and_nested() {
+        let graph = serde_json::json!({
+            "steps": {
+                "top_start": {
+                    "stepType": "StartScenario",
+                    "childScenarioId": "top-child",
+                    "childVersion": "current"
+                },
+                "split1": {
+                    "stepType": "Split",
+                    "subgraph": {
+                        "steps": {
+                            "nested_start": {
+                                "stepType": "StartScenario",
+                                "childScenarioId": "nested-child",
+                                "childVersion": "latest"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let steps = extract_all_start_scenario_steps(&graph).unwrap();
+        assert_eq!(steps.len(), 2);
+
+        let top = steps.iter().find(|s| s.step_id == "top_start").unwrap();
+        assert_eq!(top.child_scenario_id, "top-child");
+        assert_eq!(top.child_version_requested, "current");
+
+        let nested = steps.iter().find(|s| s.step_id == "nested_start").unwrap();
+        assert_eq!(nested.child_scenario_id, "nested-child");
+        assert_eq!(nested.child_version_requested, "latest");
+    }
+
+    #[test]
+    fn test_extract_all_no_start_scenario() {
+        let graph = serde_json::json!({
+            "steps": {
+                "agent1": {
+                    "stepType": "Agent",
+                    "operatorId": "utils"
+                },
+                "cond1": {
+                    "stepType": "Conditional",
+                    "condition": "x > 0"
+                },
+                "split1": {
+                    "stepType": "Split",
+                    "subgraph": {
+                        "steps": {
+                            "agent2": {
+                                "stepType": "Agent",
+                                "operatorId": "http"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let steps = extract_all_start_scenario_steps(&graph).unwrap();
+        assert!(steps.is_empty());
+    }
 }
