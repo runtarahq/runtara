@@ -1,6 +1,7 @@
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::json;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{api_get, api_post, validate_path_param};
@@ -324,6 +325,38 @@ pub async fn resume_execution(
     json_result(result)
 }
 
+// ===== Debugging Tool Parameter Structs =====
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InspectStepParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(description = "Execution instance UUID")]
+    pub instance_id: String,
+    #[schemars(description = "Step ID to inspect")]
+    pub step_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TraceReferenceParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(description = "Execution instance UUID")]
+    pub instance_id: String,
+    #[schemars(
+        description = "Reference path to resolve (e.g., 'steps.getVariant.outputs.price', 'data.orderId', 'variables.counter')"
+    )]
+    pub reference: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WhyExecutionFailedParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(description = "Execution instance UUID")]
+    pub instance_id: String,
+}
+
 pub async fn execute_scenario_wait(
     server: &SmoMcpServer,
     params: ExecuteScenarioWaitParams,
@@ -399,4 +432,438 @@ pub async fn execute_scenario_wait(
             }
         }
     }
+}
+
+// ===== Debugging Tools =====
+
+/// Helper: fetch all step summaries with full inputs/outputs for an instance.
+async fn fetch_full_step_summaries(
+    server: &SmoMcpServer,
+    scenario_id: &str,
+    instance_id: &str,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    api_get(
+        server,
+        &format!(
+            "/api/runtime/scenarios/{}/instances/{}/steps?compact=false&limit=500",
+            scenario_id, instance_id
+        ),
+    )
+    .await
+}
+
+/// Helper: resolve a JSON path like "field.nested.0.name" against a Value.
+fn resolve_json_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut current = value;
+    for segment in path.split('.') {
+        if let Some(idx) = segment.parse::<usize>().ok() {
+            current = current.get(idx)?;
+        } else {
+            current = current.get(segment)?;
+        }
+    }
+    Some(current.clone())
+}
+
+/// Helper: find a step by ID in the step summaries response.
+fn find_step_in_summaries<'a>(
+    summaries: &'a serde_json::Value,
+    step_id: &str,
+) -> Option<&'a serde_json::Value> {
+    summaries
+        .pointer("/data/steps")
+        .and_then(|s| s.as_array())
+        .and_then(|steps| {
+            steps
+                .iter()
+                .find(|s| s.get("stepId").and_then(|v| v.as_str()) == Some(step_id))
+        })
+}
+
+/// Helper: resolve inputMapping references against step summaries.
+fn resolve_input_mappings(
+    input_mapping: &serde_json::Value,
+    summaries: &serde_json::Value,
+    execution: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(mapping_obj) = input_mapping.as_object() else {
+        return json!({});
+    };
+
+    let mut resolved = serde_json::Map::new();
+    for (input_name, mapping_value) in mapping_obj {
+        let value_type = mapping_value
+            .get("valueType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let value = mapping_value
+            .get("value")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        let mut entry = json!({
+            "mapping": mapping_value,
+        });
+
+        match value_type {
+            "reference" => {
+                if let Some(ref_path) = value.as_str() {
+                    let parts: Vec<&str> = ref_path.splitn(4, '.').collect();
+                    match parts.first().copied() {
+                        Some("steps") if parts.len() >= 3 => {
+                            let source_step_id = parts[1];
+                            // parts[2] should be "outputs"
+                            let field_path =
+                                if parts.len() >= 4 { Some(parts[3]) } else { None };
+
+                            if let Some(source) =
+                                find_step_in_summaries(summaries, source_step_id)
+                            {
+                                entry["sourceStep"] = json!(source_step_id);
+                                entry["sourceStatus"] = source
+                                    .get("status")
+                                    .cloned()
+                                    .unwrap_or(json!("unknown"));
+
+                                if let Some(outputs) = source.get("outputs") {
+                                    if let Some(fp) = field_path {
+                                        entry["resolvedValue"] =
+                                            resolve_json_path(outputs, fp)
+                                                .unwrap_or(json!(null));
+                                    } else {
+                                        entry["resolvedValue"] = outputs.clone();
+                                    }
+                                }
+                            } else {
+                                entry["sourceStep"] = json!(source_step_id);
+                                entry["sourceStatus"] = json!("not_found");
+                            }
+                        }
+                        Some("data") if parts.len() >= 2 => {
+                            let field = parts[1..].join(".");
+                            if let Some(inputs) = execution
+                                .pointer("/data/inputs/data")
+                                .or_else(|| execution.pointer("/data/inputs"))
+                            {
+                                entry["resolvedValue"] =
+                                    resolve_json_path(inputs, &field).unwrap_or(json!(null));
+                            }
+                            entry["source"] = json!("scenario_input");
+                        }
+                        Some("variables") if parts.len() >= 2 => {
+                            entry["source"] = json!("variable");
+                            entry["variableName"] = json!(parts[1]);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "immediate" => {
+                entry["resolvedValue"] = value;
+            }
+            "template" => {
+                entry["template"] = value;
+            }
+            _ => {}
+        }
+
+        resolved.insert(input_name.clone(), entry);
+    }
+
+    serde_json::Value::Object(resolved)
+}
+
+pub async fn inspect_step(
+    server: &SmoMcpServer,
+    params: InspectStepParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("instance_id", &params.instance_id)?;
+
+    // Fetch step summaries (full, not compact) and scenario definition in parallel
+    let summaries = fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
+
+    let target = find_step_in_summaries(&summaries, &params.step_id).ok_or_else(|| {
+        rmcp::ErrorData::internal_error(
+            format!(
+                "Step '{}' not found in execution {}",
+                params.step_id, params.instance_id
+            ),
+            None,
+        )
+    })?;
+
+    // Fetch scenario definition to get inputMapping
+    let scenario = api_get(
+        server,
+        &format!("/api/runtime/scenarios/{}", params.scenario_id),
+    )
+    .await?;
+
+    // Fetch execution for input data
+    let execution = api_get(
+        server,
+        &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+    )
+    .await?;
+
+    // Extract step definition from scenario graph
+    let input_mapping = scenario
+        .pointer("/data/definition/executionGraph/steps")
+        .or_else(|| scenario.pointer("/data/executionGraph/steps"))
+        .and_then(|steps| steps.get(&params.step_id))
+        .and_then(|step| step.get("inputMapping"))
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution);
+
+    let response = json!({
+        "step": {
+            "stepId": target.get("stepId"),
+            "stepName": target.get("stepName"),
+            "stepType": target.get("stepType"),
+            "status": target.get("status"),
+            "durationMs": target.get("durationMs"),
+            "error": target.get("error"),
+        },
+        "resolvedInputs": resolved_inputs,
+        "outputs": target.get("outputs"),
+    });
+
+    json_result(response)
+}
+
+pub async fn trace_reference(
+    server: &SmoMcpServer,
+    params: TraceReferenceParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("instance_id", &params.instance_id)?;
+
+    let parts: Vec<&str> = params.reference.splitn(4, '.').collect();
+    if parts.is_empty() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "Reference path must not be empty".to_string(),
+            None,
+        ));
+    }
+
+    match parts[0] {
+        "steps" => {
+            if parts.len() < 3 {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "Step reference must be 'steps.<stepId>.outputs[.<field>]'".to_string(),
+                    None,
+                ));
+            }
+            let step_id = parts[1];
+            let field_path = if parts.len() >= 4 { Some(parts[3]) } else { None };
+
+            let summaries =
+                fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id)
+                    .await?;
+
+            let step = find_step_in_summaries(&summaries, step_id).ok_or_else(|| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "Source step '{}' not found in execution {}",
+                        step_id, params.instance_id
+                    ),
+                    None,
+                )
+            })?;
+
+            let outputs = step.get("outputs").cloned().unwrap_or(json!(null));
+            let resolved = if let Some(fp) = field_path {
+                resolve_json_path(&outputs, fp).unwrap_or(json!(null))
+            } else {
+                outputs.clone()
+            };
+
+            json_result(json!({
+                "reference": params.reference,
+                "resolved": !resolved.is_null(),
+                "value": resolved,
+                "source": {
+                    "type": "step_output",
+                    "stepId": step_id,
+                    "stepStatus": step.get("status"),
+                    "fullOutputs": outputs,
+                }
+            }))
+        }
+        "data" => {
+            let field = parts[1..].join(".");
+            let execution = api_get(
+                server,
+                &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+            )
+            .await?;
+
+            let inputs = execution
+                .pointer("/data/inputs/data")
+                .or_else(|| execution.pointer("/data/inputs"))
+                .cloned()
+                .unwrap_or(json!(null));
+
+            let resolved = resolve_json_path(&inputs, &field).unwrap_or(json!(null));
+
+            json_result(json!({
+                "reference": params.reference,
+                "resolved": !resolved.is_null(),
+                "value": resolved,
+                "source": {
+                    "type": "scenario_input",
+                    "fullInputs": inputs,
+                }
+            }))
+        }
+        "variables" => {
+            let var_name = parts[1..].join(".");
+            let scenario = api_get(
+                server,
+                &format!("/api/runtime/scenarios/{}", params.scenario_id),
+            )
+            .await?;
+
+            let variables = scenario
+                .pointer("/data/definition/executionGraph/variables")
+                .or_else(|| scenario.pointer("/data/executionGraph/variables"))
+                .cloned()
+                .unwrap_or(json!({}));
+
+            let resolved = resolve_json_path(&variables, &var_name).unwrap_or(json!(null));
+
+            json_result(json!({
+                "reference": params.reference,
+                "resolved": !resolved.is_null(),
+                "value": resolved,
+                "source": {
+                    "type": "variable",
+                    "allVariables": variables,
+                }
+            }))
+        }
+        _ => Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "Unknown reference root '{}'. Must be 'steps', 'data', or 'variables'.",
+                parts[0]
+            ),
+            None,
+        )),
+    }
+}
+
+pub async fn why_execution_failed(
+    server: &SmoMcpServer,
+    params: WhyExecutionFailedParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("instance_id", &params.instance_id)?;
+
+    // Fetch execution status
+    let execution = api_get(
+        server,
+        &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+    )
+    .await?;
+
+    let status = execution
+        .pointer("/data/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    if status != "failed" {
+        return json_result(json!({
+            "execution": {
+                "instanceId": params.instance_id,
+                "status": status,
+            },
+            "message": format!("Execution is not failed (status: {})", status),
+        }));
+    }
+
+    // Fetch all step summaries (full)
+    let summaries =
+        fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
+
+    let steps = summaries
+        .pointer("/data/steps")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut completed = 0;
+    let mut failed_steps = Vec::new();
+    let mut running = 0;
+    for step in &steps {
+        match step.get("status").and_then(|v| v.as_str()) {
+            Some("completed") => completed += 1,
+            Some("failed") => {
+                failed_steps.push(step.clone());
+            }
+            Some("running") => running += 1,
+            _ => {}
+        }
+    }
+    let not_reached = steps.len() - completed - failed_steps.len() - running;
+
+    // Build failure diagnosis for the first (primary) failing step
+    let failing_step = if let Some(first_failed) = failed_steps.first() {
+        let step_id = first_failed
+            .get("stepId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Try to resolve inputs for the failing step
+        let scenario = api_get(
+            server,
+            &format!("/api/runtime/scenarios/{}", params.scenario_id),
+        )
+        .await
+        .ok();
+
+        let input_mapping = scenario
+            .as_ref()
+            .and_then(|s| s.pointer("/data/definition/executionGraph/steps"))
+            .or_else(|| {
+                scenario
+                    .as_ref()
+                    .and_then(|s| s.pointer("/data/executionGraph/steps"))
+            })
+            .and_then(|steps| steps.get(step_id))
+            .and_then(|step| step.get("inputMapping"))
+            .cloned()
+            .unwrap_or(json!({}));
+
+        let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution);
+
+        json!({
+            "stepId": first_failed.get("stepId"),
+            "stepName": first_failed.get("stepName"),
+            "stepType": first_failed.get("stepType"),
+            "error": first_failed.get("error"),
+            "durationMs": first_failed.get("durationMs"),
+            "resolvedInputs": resolved_inputs,
+        })
+    } else {
+        json!(null)
+    };
+
+    json_result(json!({
+        "execution": {
+            "instanceId": params.instance_id,
+            "status": "failed",
+            "error": execution.pointer("/data/error"),
+        },
+        "failingStep": failing_step,
+        "executionSummary": {
+            "totalSteps": steps.len(),
+            "completed": completed,
+            "failed": failed_steps.len(),
+            "running": running,
+            "notReached": not_reached,
+        },
+    }))
 }
