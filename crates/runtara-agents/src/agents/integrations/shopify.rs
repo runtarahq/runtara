@@ -1938,7 +1938,10 @@ pub struct GetProductBySkuInput {
 #[capability(
     module = "shopify",
     display_name = "Get Product by SKU",
-    description = "Get a Shopify product by its SKU"
+    description = "Get a Shopify product by its SKU. Returns SHOPIFY_NOT_FOUND error if no product matches.",
+    errors(
+        permanent("SHOPIFY_NOT_FOUND", "No product found matching the given SKU", ["sku"])
+    )
 )]
 pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<Value, String> {
     let connection = input._connection.as_ref().ok_or_else(|| {
@@ -1985,17 +1988,25 @@ pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<Value, String> 
                     })
                     .unwrap_or(false);
                 if has_exact_sku {
-                    return Ok(node.cloned().unwrap_or(Value::Null));
+                    return Ok(node.cloned().unwrap_or_default());
                 }
             }
         }
-        Ok(Value::Null)
+        Err(permanent_error(
+            "SHOPIFY_NOT_FOUND",
+            &format!("Product with SKU '{}' not found", input.sku),
+            json!({"sku": input.sku}),
+        ))
     } else {
         // Legacy behavior: return first result
         if let Some(first_product) = products.as_array().and_then(|arr| arr.first()) {
-            Ok(first_product.get("node").cloned().unwrap_or(Value::Null))
+            Ok(first_product.get("node").cloned().unwrap_or_default())
         } else {
-            Ok(Value::Null)
+            Err(permanent_error(
+                "SHOPIFY_NOT_FOUND",
+                &format!("Product with SKU '{}' not found", input.sku),
+                json!({"sku": input.sku}),
+            ))
         }
     }
 }
@@ -2476,7 +2487,10 @@ pub struct GetProductVariantBySkuInput {
 #[capability(
     module = "shopify",
     display_name = "Get Variant by SKU",
-    description = "Get a Shopify product variant by its SKU"
+    description = "Get a Shopify product variant by its SKU. Returns SHOPIFY_NOT_FOUND error if no variant matches.",
+    errors(
+        permanent("SHOPIFY_NOT_FOUND", "No variant found matching the given SKU", ["sku"])
+    )
 )]
 pub fn get_product_variant_by_sku(input: GetProductVariantBySkuInput) -> Result<Value, String> {
     let connection = input._connection.as_ref().ok_or_else(|| {
@@ -2517,17 +2531,25 @@ pub fn get_product_variant_by_sku(input: GetProductVariantBySkuInput) -> Result<
                     .and_then(|s| s.as_str())
                     .is_some_and(|s| s == input.sku.as_str());
                 if is_exact {
-                    return Ok(node.cloned().unwrap_or(Value::Null));
+                    return Ok(node.cloned().unwrap_or_default());
                 }
             }
         }
-        Ok(Value::Null)
+        Err(permanent_error(
+            "SHOPIFY_NOT_FOUND",
+            &format!("Product variant with SKU '{}' not found", input.sku),
+            json!({"sku": input.sku}),
+        ))
     } else {
         // Legacy behavior: return first result
         if let Some(first_variant) = variants.as_array().and_then(|arr| arr.first()) {
-            Ok(first_variant.get("node").cloned().unwrap_or(Value::Null))
+            Ok(first_variant.get("node").cloned().unwrap_or_default())
         } else {
-            Ok(Value::Null)
+            Err(permanent_error(
+                "SHOPIFY_NOT_FOUND",
+                &format!("Product variant with SKU '{}' not found", input.sku),
+                json!({"sku": input.sku}),
+            ))
         }
     }
 }
@@ -4398,7 +4420,10 @@ pub struct GetCustomerByEmailInput {
 #[capability(
     module = "shopify",
     display_name = "Get Customer by Email",
-    description = "Get a Shopify customer by email"
+    description = "Get a Shopify customer by email. Returns SHOPIFY_NOT_FOUND error if no customer matches.",
+    errors(
+        permanent("SHOPIFY_NOT_FOUND", "No customer found matching the given email", ["email"])
+    )
 )]
 pub fn get_customer_by_email(input: GetCustomerByEmailInput) -> Result<Value, String> {
     let connection = input._connection.as_ref().ok_or_else(|| {
@@ -4421,9 +4446,13 @@ pub fn get_customer_by_email(input: GetCustomerByEmailInput) -> Result<Value, St
     let customers = extract_graphql_data(response, &["data", "customers", "edges"])?;
 
     if let Some(first_customer) = customers.as_array().and_then(|arr| arr.first()) {
-        Ok(first_customer.get("node").cloned().unwrap_or(Value::Null))
+        Ok(first_customer.get("node").cloned().unwrap_or_default())
     } else {
-        Ok(Value::Null)
+        Err(permanent_error(
+            "SHOPIFY_NOT_FOUND",
+            &format!("Customer with email '{}' not found", input.email),
+            json!({"email": input.email}),
+        ))
     }
 }
 
@@ -4636,7 +4665,10 @@ pub struct GetLocationByNameInput {
 #[capability(
     module = "shopify",
     display_name = "Get Location by Name",
-    description = "Get a Shopify location by name"
+    description = "Get a Shopify location by name. Returns SHOPIFY_NOT_FOUND error if no location matches.",
+    errors(
+        permanent("SHOPIFY_NOT_FOUND", "No location found matching the given name", ["location_name"])
+    )
 )]
 pub fn get_location_by_name(input: GetLocationByNameInput) -> Result<Value, String> {
     let connection = input._connection.as_ref().ok_or_else(|| {
@@ -4661,7 +4693,11 @@ pub fn get_location_by_name(input: GetLocationByNameInput) -> Result<Value, Stri
         }
     }
 
-    Ok(Value::Null)
+    Err(permanent_error(
+        "SHOPIFY_NOT_FOUND",
+        &format!("Location '{}' not found", input.location_name),
+        json!({"location_name": input.location_name}),
+    ))
 }
 
 // ============================================================================
