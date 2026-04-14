@@ -490,6 +490,20 @@ pub struct RemoveVariableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetScenarioMetadataParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(description = "Scenario name")]
+    pub name: Option<String>,
+    #[schemars(description = "Scenario description")]
+    pub description: Option<String>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddAgentStepParams {
     #[schemars(description = "Scenario ID")]
     pub scenario_id: String,
@@ -1221,6 +1235,39 @@ pub async fn list_references(
         "scenarioId": params.scenario_id,
         "references": references,
         "count": references.len(),
+    }))
+}
+
+pub async fn set_scenario_metadata(
+    server: &SmoMcpServer,
+    params: SetScenarioMetadataParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    if params.name.is_none() && params.description.is_none() {
+        return Err(err(
+            "At least one of 'name' or 'description' must be provided",
+        ));
+    }
+
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    if let Some(name) = &params.name {
+        target["name"] = serde_json::Value::String(name.clone());
+    }
+    if let Some(description) = &params.description {
+        target["description"] = serde_json::Value::String(description.clone());
+    }
+
+    let (version, new_version) =
+        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+    json_result(serde_json::json!({
+        "success": true,
+        "scenarioId": params.scenario_id,
+        "version": version,
+        "newVersion": new_version,
+        "name": params.name,
+        "description": params.description,
     }))
 }
 

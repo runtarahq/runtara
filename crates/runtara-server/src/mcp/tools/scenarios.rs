@@ -98,6 +98,16 @@ pub struct DeployScenarioParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeployLatestParams {
+    #[schemars(description = "Scenario ID")]
+    pub scenario_id: String,
+    #[schemars(
+        description = "Version to compile and deploy (defaults to latest). Use after building the graph with mutation tools."
+    )]
+    pub version: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PreflightCompileParams {
     #[schemars(description = "Scenario ID")]
     pub scenario_id: String,
@@ -476,6 +486,194 @@ pub async fn deploy_scenario(
             "binaryChecksum": compile_result.get("binaryChecksum"),
         },
         "warnings": update_result.get("warnings"),
+    });
+
+    if !child_compilations.is_empty() {
+        response["childScenarios"] = serde_json::json!({
+            "count": child_compilations.len(),
+            "compilations": child_compilations,
+        });
+    }
+
+    json_result(response)
+}
+
+pub async fn deploy_latest(
+    server: &SmoMcpServer,
+    params: DeployLatestParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("scenario_id", &params.scenario_id)?;
+
+    // Fetch scenario to get graph and resolve version
+    let qs = match params.version {
+        Some(v) => format!("?versionNumber={}", v),
+        None => String::new(),
+    };
+    let scenario = api_get(
+        server,
+        &format!("/api/runtime/scenarios/{}{}", params.scenario_id, qs),
+    )
+    .await?;
+
+    let version = scenario
+        .pointer("/data/latestVersion")
+        .or_else(|| scenario.pointer("/data/latest_version"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
+        .or(params.version)
+        .ok_or_else(|| err("Could not determine version to deploy"))?;
+
+    let version = params.version.unwrap_or(version);
+
+    let graph = scenario
+        .pointer("/data/definition/executionGraph")
+        .or_else(|| scenario.pointer("/data/executionGraph"))
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    // Validate graph
+    let graph_validation = api_post(
+        server,
+        "/api/runtime/scenarios/graph/validate",
+        Some(graph.clone()),
+    )
+    .await
+    .ok();
+
+    let has_graph_errors = graph_validation
+        .as_ref()
+        .and_then(|v| v.get("errors"))
+        .and_then(|e| e.as_array())
+        .is_some_and(|a| !a.is_empty());
+
+    if has_graph_errors {
+        return json_result(serde_json::json!({
+            "success": false,
+            "message": "Graph has validation errors — fix before deploying",
+            "scenarioId": params.scenario_id,
+            "version": version,
+            "compiled": false,
+            "validationErrors": { "graph": graph_validation },
+        }));
+    }
+
+    // Validate mappings
+    let mapping_validation = api_post(
+        server,
+        &format!(
+            "/api/runtime/scenarios/{}/validate-mappings?versionNumber={}",
+            params.scenario_id, version
+        ),
+        None,
+    )
+    .await
+    .ok();
+
+    let has_mapping_errors = mapping_validation
+        .as_ref()
+        .and_then(|v| v.get("errorCount"))
+        .and_then(|c| c.as_u64())
+        .is_some_and(|c| c > 0);
+
+    if has_mapping_errors {
+        return json_result(serde_json::json!({
+            "success": false,
+            "message": format!("Version {} has mapping errors — fix before deploying", version),
+            "scenarioId": params.scenario_id,
+            "version": version,
+            "compiled": false,
+            "validationErrors": { "mappings": mapping_validation },
+        }));
+    }
+
+    // Cascade-compile child scenarios
+    let child_refs = extract_child_refs(&graph);
+    let mut child_compilations = Vec::new();
+
+    if !child_refs.is_empty() {
+        let mut seen_children = std::collections::HashSet::new();
+        for child_ref in &child_refs {
+            if !seen_children.insert(child_ref.child_scenario_id.clone()) {
+                continue;
+            }
+
+            let child_result = api_get(
+                server,
+                &format!("/api/runtime/scenarios/{}", child_ref.child_scenario_id),
+            )
+            .await
+            .map_err(|_| {
+                err(format!(
+                    "Child scenario '{}' (step '{}') not found. Deploy it first.",
+                    child_ref.child_scenario_id, child_ref.step_id
+                ))
+            })?;
+
+            let resolved_version =
+                resolve_child_version(&child_ref.child_version, &child_result).ok_or_else(
+                    || {
+                        err(format!(
+                            "Cannot resolve version '{}' for child scenario '{}'",
+                            child_ref.child_version, child_ref.child_scenario_id
+                        ))
+                    },
+                )?;
+
+            let child_compile = api_post(
+                server,
+                &format!(
+                    "/api/runtime/scenarios/{}/versions/{}/compile",
+                    child_ref.child_scenario_id, resolved_version
+                ),
+                None,
+            )
+            .await
+            .map_err(|e| {
+                err(format!(
+                    "Failed to compile child scenario '{}' version {}: {}",
+                    child_ref.child_scenario_id, resolved_version, e
+                ))
+            })?;
+
+            child_compilations.push(serde_json::json!({
+                "childScenarioId": child_ref.child_scenario_id,
+                "version": resolved_version,
+                "status": if child_compile.get("imageId").is_some() { "compiled" } else { "unknown" },
+            }));
+        }
+    }
+
+    // Compile
+    let compile_result = api_post(
+        server,
+        &format!(
+            "/api/runtime/scenarios/{}/versions/{}/compile",
+            params.scenario_id, version
+        ),
+        None,
+    )
+    .await?;
+
+    // Set current version
+    let _ = api_post(
+        server,
+        &format!(
+            "/api/runtime/scenarios/{}/versions/{}/set-current",
+            params.scenario_id, version
+        ),
+        None,
+    )
+    .await?;
+
+    let mut response = serde_json::json!({
+        "success": true,
+        "message": format!("Scenario deployed successfully (version {})", version),
+        "scenarioId": params.scenario_id,
+        "version": version,
+        "compilation": {
+            "binarySize": compile_result.get("binarySize"),
+            "binaryChecksum": compile_result.get("binaryChecksum"),
+        },
     });
 
     if !child_compilations.is_empty() {
