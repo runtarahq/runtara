@@ -134,6 +134,16 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Pre-check a scenario for compilation readiness. Reports validation errors, child scenario dependencies, and blockers without compiling."
+    )]
+    async fn preflight_compile(
+        &self,
+        params: Parameters<tools::scenarios::PreflightCompileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::scenarios::preflight_compile(self, params.0).await
+    }
+
+    #[tool(
         description = "Compare two versions of a scenario. Shows added, removed, and changed steps."
     )]
     async fn diff_scenario_versions(
@@ -213,6 +223,38 @@ impl SmoMcpServer {
         params: Parameters<tools::executions::ExecuteScenarioWaitParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::executions::execute_scenario_wait(self, params.0).await
+    }
+
+    // ===== Debugging Tools =====
+
+    #[tool(
+        description = "Inspect a step's execution: shows status, resolved inputs with source values, outputs, and errors. One call replaces manual get_step_summaries + reference tracing."
+    )]
+    async fn inspect_step(
+        &self,
+        params: Parameters<tools::executions::InspectStepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::executions::inspect_step(self, params.0).await
+    }
+
+    #[tool(
+        description = "Resolve a reference path (e.g., steps.X.outputs.Y) against a specific execution instance. Shows the actual runtime value and its source."
+    )]
+    async fn trace_reference(
+        &self,
+        params: Parameters<tools::executions::TraceReferenceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::executions::trace_reference(self, params.0).await
+    }
+
+    #[tool(
+        description = "Diagnose why an execution failed. Returns the failing step, its resolved inputs, error details, and execution summary in one call."
+    )]
+    async fn why_execution_failed(
+        &self,
+        params: Parameters<tools::executions::WhyExecutionFailedParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::executions::why_execution_failed(self, params.0).await
     }
 
     // ===== Step & Agent Metadata Tools =====
@@ -327,6 +369,16 @@ impl SmoMcpServer {
     // ===== Graph Mutation Tools =====
     // Each mutation: fetches latest graph → mutates → saves in-place via PUT .../versions/{v}/graph.
     // First mutation on a scenario creates a new version; subsequent mutations update that same version.
+
+    #[tool(
+        description = "Add an Agent step from a capability. Validates the agent/capability exist, creates the step with correct fields, and optionally connects it. Returns the step's expected inputs for mapping."
+    )]
+    async fn add_agent_step(
+        &self,
+        params: Parameters<tools::graph_mutations::AddAgentStepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::add_agent_step(self, params.0).await
+    }
 
     #[tool(
         description = "Add a step to a scenario's execution graph. First call creates a new version; subsequent calls update it in-place."
@@ -528,11 +580,12 @@ impl ServerHandler for SmoMcpServer {
             .with_instructions(
                 "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
-                **Scenarios**: list_scenarios, get_scenario, create_scenario, update_scenario, compile_scenario, deploy_scenario, set_current_version, diff_scenario_versions, validate_graph, validate_mappings\n\
+                **Scenarios**: list_scenarios, get_scenario, create_scenario, update_scenario, compile_scenario, deploy_scenario, preflight_compile, set_current_version, diff_scenario_versions, validate_graph, validate_mappings\n\
                 **Execution**: execute_scenario, execute_scenario_sync, execute_scenario_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
+                **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
-                **Graph Mutations**: add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Use list_references before set_mapping to discover available references.\n\
+                **Graph Mutations**: add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Use list_references before set_mapping to discover available references.\n\
                 **Signals**: list_pending_signals, get_signal_schema, submit_signal_response — interact with WaitForSignal / human-in-the-loop steps in running executions\n\
                 **Connections**: list_connections (supports integration_id filter)\n\n\
                 ## DSL Reference Quick Guide\n\n\
