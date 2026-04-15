@@ -105,3 +105,16 @@ pub fn object_model_max_connections() -> u32 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(5)
 }
+
+/// Whether the object model uses soft delete (default: true).
+///
+/// Applied when tables are created: `true` adds a `deleted` column and a
+/// partial index; `false` issues hard `DELETE` statements. Changing this
+/// after tables exist only affects delete behavior — the column/index are
+/// fixed at DDL time.
+pub fn object_model_soft_delete() -> bool {
+    std::env::var("OBJECT_MODEL_SOFT_DELETE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true)
+}

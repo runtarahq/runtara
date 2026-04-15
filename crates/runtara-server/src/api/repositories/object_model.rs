@@ -42,7 +42,9 @@ impl ObjectStoreManager {
     /// All tenants will share the same ObjectStore instance backed by this pool.
     pub async fn from_pool(pool: PgPool) -> Result<Self, runtara_object_store::ObjectStoreError> {
         // Use builder with empty URL since we're using an existing pool
-        let config = StoreConfig::builder("").build();
+        let config = StoreConfig::builder("")
+            .soft_delete(crate::config::object_model_soft_delete())
+            .build();
         let store = ObjectStore::from_pool(pool, config).await?;
 
         let manager = Self {
@@ -81,7 +83,9 @@ impl ObjectStoreManager {
 
         // Create new store for this tenant
         let database_url = self.database_url.replace("{tenant_id}", tenant_id);
-        let config = StoreConfig::builder(&database_url).build();
+        let config = StoreConfig::builder(&database_url)
+            .soft_delete(crate::config::object_model_soft_delete())
+            .build();
         let store = ObjectStore::new(config).await?;
         let store = Arc::new(store);
 
@@ -121,7 +125,9 @@ impl ObjectStoreManager {
         }
 
         // Create new store for this database URL
-        let config = StoreConfig::builder(database_url).build();
+        let config = StoreConfig::builder(database_url)
+            .soft_delete(crate::config::object_model_soft_delete())
+            .build();
         let store = ObjectStore::new(config).await?;
         let store = Arc::new(store);
 

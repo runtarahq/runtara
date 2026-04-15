@@ -22,7 +22,8 @@ impl<'a> DdlGenerator<'a> {
     /// Creates a table with:
     /// - User-defined columns
     /// - Auto-managed columns based on config: id, created_at, updated_at
-    /// - Optional soft-delete column (deleted) if enabled in config
+    /// - `deleted` tombstone column (always present; the runtime soft_delete
+    ///   flag decides whether deletes flip the flag or issue a hard DELETE)
     pub fn generate_create_table(&self, table_name: &str, columns: &[ColumnDefinition]) -> String {
         let quoted_table = quote_identifier(table_name);
 
@@ -48,10 +49,7 @@ impl<'a> DdlGenerator<'a> {
             column_defs.push("updated_at TIMESTAMPTZ DEFAULT NOW()".to_string());
         }
 
-        // Add soft-delete column if enabled
-        if self.config.soft_delete {
-            column_defs.push("deleted BOOLEAN DEFAULT FALSE".to_string());
-        }
+        column_defs.push("deleted BOOLEAN DEFAULT FALSE".to_string());
 
         format!("CREATE TABLE {} ({})", quoted_table, column_defs.join(", "))
     }
@@ -169,24 +167,17 @@ impl<'a> DdlGenerator<'a> {
 
     /// Generate default index for efficient querying
     ///
-    /// Creates an index on created_at for efficient time-based queries.
-    /// If soft-delete is enabled, includes a WHERE clause to filter deleted rows.
+    /// Partial index on created_at that excludes tombstoned rows — since reads
+    /// always filter `deleted = FALSE`, this keeps the common path fast.
     pub fn generate_default_index(&self, table_name: &str) -> String {
         let quoted_table = quote_identifier(table_name);
         let index_name = format!("idx_{}_default", table_name);
         let quoted_index = quote_identifier(&index_name);
 
-        if self.config.soft_delete {
-            format!(
-                "CREATE INDEX {} ON {}(created_at DESC) WHERE deleted = FALSE",
-                quoted_index, quoted_table
-            )
-        } else {
-            format!(
-                "CREATE INDEX {} ON {}(created_at DESC)",
-                quoted_index, quoted_table
-            )
-        }
+        format!(
+            "CREATE INDEX {} ON {}(created_at DESC) WHERE deleted = FALSE",
+            quoted_index, quoted_table
+        )
     }
 
     /// Format a single column definition for CREATE TABLE or ALTER TABLE ADD COLUMN
@@ -226,7 +217,7 @@ mod tests {
         StoreConfig::builder("postgres://localhost/test").build()
     }
 
-    fn config_no_soft_delete() -> StoreConfig {
+    fn config_hard_delete() -> StoreConfig {
         StoreConfig::builder("postgres://localhost/test")
             .soft_delete(false)
             .build()
@@ -237,7 +228,6 @@ mod tests {
             .auto_id(false)
             .auto_created_at(false)
             .auto_updated_at(false)
-            .soft_delete(false)
             .build()
     }
 
@@ -246,7 +236,6 @@ mod tests {
             .auto_id(true)
             .auto_created_at(false)
             .auto_updated_at(false)
-            .soft_delete(false)
             .build()
     }
 
@@ -255,7 +244,6 @@ mod tests {
             .auto_id(false)
             .auto_created_at(true)
             .auto_updated_at(true)
-            .soft_delete(false)
             .build()
     }
 
@@ -286,8 +274,10 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_create_table_no_soft_delete() {
-        let config = config_no_soft_delete();
+    fn test_generate_create_table_always_has_deleted_column() {
+        // Deleted column is always emitted — the soft_delete flag controls
+        // runtime delete behavior, not schema shape.
+        let config = config_hard_delete();
         let generator = DdlGenerator::new(&config);
 
         let columns = vec![ColumnDefinition::new("name", ColumnType::String)];
@@ -297,7 +287,7 @@ mod tests {
         assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
         assert!(ddl.contains("created_at TIMESTAMPTZ"));
         assert!(ddl.contains("updated_at TIMESTAMPTZ"));
-        assert!(!ddl.contains("deleted BOOLEAN"));
+        assert!(ddl.contains("deleted BOOLEAN"));
     }
 
     #[test]
@@ -318,7 +308,8 @@ mod tests {
         assert!(ddl.contains("\"id\" TEXT NOT NULL"));
         assert!(!ddl.contains("created_at"));
         assert!(!ddl.contains("updated_at"));
-        assert!(!ddl.contains("deleted"));
+        // `deleted` is always present
+        assert!(ddl.contains("deleted BOOLEAN"));
     }
 
     #[test]
@@ -333,7 +324,7 @@ mod tests {
         assert!(ddl.contains("id VARCHAR(255) PRIMARY KEY"));
         assert!(!ddl.contains("created_at"));
         assert!(!ddl.contains("updated_at"));
-        assert!(!ddl.contains("deleted"));
+        assert!(ddl.contains("deleted BOOLEAN"));
     }
 
     #[test]
@@ -348,7 +339,7 @@ mod tests {
         assert!(!ddl.contains("id VARCHAR(255) PRIMARY KEY DEFAULT"));
         assert!(ddl.contains("created_at TIMESTAMPTZ"));
         assert!(ddl.contains("updated_at TIMESTAMPTZ"));
-        assert!(!ddl.contains("deleted"));
+        assert!(ddl.contains("deleted BOOLEAN"));
     }
 
     #[test]
@@ -504,29 +495,17 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_default_index_with_soft_delete() {
-        let config = default_config();
-        let generator = DdlGenerator::new(&config);
-
-        let ddl = generator.generate_default_index("products");
-
-        assert_eq!(
-            ddl,
-            "CREATE INDEX \"idx_products_default\" ON \"products\"(created_at DESC) WHERE deleted = FALSE"
-        );
-    }
-
-    #[test]
-    fn test_generate_default_index_without_soft_delete() {
-        let config = config_no_soft_delete();
-        let generator = DdlGenerator::new(&config);
-
-        let ddl = generator.generate_default_index("items");
-
-        assert_eq!(
-            ddl,
-            "CREATE INDEX \"idx_items_default\" ON \"items\"(created_at DESC)"
-        );
+    fn test_generate_default_index_is_always_partial() {
+        // Partial index always excludes tombstones, regardless of the runtime
+        // soft_delete flag — reads always filter `deleted = FALSE`.
+        for config in [default_config(), config_hard_delete()] {
+            let generator = DdlGenerator::new(&config);
+            let ddl = generator.generate_default_index("products");
+            assert_eq!(
+                ddl,
+                "CREATE INDEX \"idx_products_default\" ON \"products\"(created_at DESC) WHERE deleted = FALSE"
+            );
+        }
     }
 
     // ==================== ALTER TABLE Tests ====================

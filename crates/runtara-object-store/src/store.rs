@@ -77,15 +77,11 @@ impl ObjectStore {
                 columns JSONB NOT NULL,
                 indexes JSONB,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(){}
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                deleted BOOLEAN DEFAULT FALSE
             )
             "#,
-            metadata_table,
-            if self.config.soft_delete {
-                ",\n                deleted BOOLEAN DEFAULT FALSE"
-            } else {
-                ""
-            }
+            metadata_table
         );
 
         sqlx::query(&create_sql).execute(&self.pool).await?;
@@ -131,25 +127,14 @@ impl ObjectStore {
             .map(serde_json::to_value)
             .transpose()?;
 
-        let insert_sql = if self.config.soft_delete {
-            format!(
-                r#"
-                INSERT INTO {} (id, name, description, table_name, columns, indexes, deleted)
-                VALUES ($1, $2, $3, $4, $5, $6, FALSE)
-                RETURNING created_at, updated_at
-                "#,
-                metadata_table
-            )
-        } else {
-            format!(
-                r#"
-                INSERT INTO {} (id, name, description, table_name, columns, indexes)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING created_at, updated_at
-                "#,
-                metadata_table
-            )
-        };
+        let insert_sql = format!(
+            r#"
+            INSERT INTO {} (id, name, description, table_name, columns, indexes)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING created_at, updated_at
+            "#,
+            metadata_table
+        );
 
         let row = sqlx::query(&insert_sql)
             .bind(&schema_id)
@@ -197,25 +182,14 @@ impl ObjectStore {
     pub async fn get_schema(&self, name: &str) -> Result<Option<Schema>> {
         let metadata_table = quote_identifier(&self.config.metadata_table);
 
-        let select_sql = if self.config.soft_delete {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE name = $1 AND deleted = FALSE
-                "#,
-                metadata_table
-            )
-        } else {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE name = $1
-                "#,
-                metadata_table
-            )
-        };
+        let select_sql = format!(
+            r#"
+            SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
+            FROM {}
+            WHERE name = $1 AND deleted = FALSE
+            "#,
+            metadata_table
+        );
 
         let result = sqlx::query(&select_sql)
             .bind(name)
@@ -232,25 +206,14 @@ impl ObjectStore {
     pub async fn get_schema_by_id(&self, id: &str) -> Result<Option<Schema>> {
         let metadata_table = quote_identifier(&self.config.metadata_table);
 
-        let select_sql = if self.config.soft_delete {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE id = $1 AND deleted = FALSE
-                "#,
-                metadata_table
-            )
-        } else {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE id = $1
-                "#,
-                metadata_table
-            )
-        };
+        let select_sql = format!(
+            r#"
+            SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
+            FROM {}
+            WHERE id = $1 AND deleted = FALSE
+            "#,
+            metadata_table
+        );
 
         let result = sqlx::query(&select_sql)
             .bind(id)
@@ -267,25 +230,14 @@ impl ObjectStore {
     async fn schema_by_table(&self, table_name: &str) -> Result<Option<Schema>> {
         let metadata_table = quote_identifier(&self.config.metadata_table);
 
-        let select_sql = if self.config.soft_delete {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE table_name = $1 AND deleted = FALSE
-                "#,
-                metadata_table
-            )
-        } else {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE table_name = $1
-                "#,
-                metadata_table
-            )
-        };
+        let select_sql = format!(
+            r#"
+            SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
+            FROM {}
+            WHERE table_name = $1 AND deleted = FALSE
+            "#,
+            metadata_table
+        );
 
         let result = sqlx::query(&select_sql)
             .bind(table_name)
@@ -302,26 +254,15 @@ impl ObjectStore {
     pub async fn list_schemas(&self) -> Result<Vec<Schema>> {
         let metadata_table = quote_identifier(&self.config.metadata_table);
 
-        let select_sql = if self.config.soft_delete {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                WHERE deleted = FALSE
-                ORDER BY created_at DESC
-                "#,
-                metadata_table
-            )
-        } else {
-            format!(
-                r#"
-                SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-                FROM {}
-                ORDER BY created_at DESC
-                "#,
-                metadata_table
-            )
-        };
+        let select_sql = format!(
+            r#"
+            SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
+            FROM {}
+            WHERE deleted = FALSE
+            ORDER BY created_at DESC
+            "#,
+            metadata_table
+        );
 
         let rows = sqlx::query(&select_sql).fetch_all(&self.pool).await?;
 
@@ -359,22 +300,15 @@ impl ObjectStore {
             set_clauses.push(format!("indexes = ${}", param_idx));
         }
 
-        let where_clause = if self.config.soft_delete {
-            "name = $1 AND deleted = FALSE"
-        } else {
-            "name = $1"
-        };
-
         let update_sql = format!(
             r#"
             UPDATE {}
             SET {}
-            WHERE {}
+            WHERE name = $1 AND deleted = FALSE
             RETURNING id, created_at, updated_at, name, description, table_name, columns, indexes
             "#,
             metadata_table,
             set_clauses.join(", "),
-            where_clause
         );
 
         let mut query = sqlx::query(&update_sql).bind(name);
@@ -563,17 +497,10 @@ impl ObjectStore {
             select_columns.push(quote_identifier(&col.name));
         }
 
-        let where_clause = if self.config.soft_delete {
-            "id = $1 AND deleted = FALSE"
-        } else {
-            "id = $1"
-        };
-
         let select_sql = format!(
-            "SELECT {} FROM {} WHERE {}",
+            "SELECT {} FROM {} WHERE id = $1 AND deleted = FALSE",
             select_columns.join(", "),
             quote_identifier(&schema.table_name),
-            where_clause
         );
 
         let row = sqlx::query(&select_sql)
@@ -661,17 +588,10 @@ impl ObjectStore {
             return Ok(()); // Nothing to update
         }
 
-        let where_clause = if self.config.soft_delete {
-            "id = $1 AND deleted = FALSE"
-        } else {
-            "id = $1"
-        };
-
         let update_sql = format!(
-            "UPDATE {} SET {} WHERE {}",
+            "UPDATE {} SET {} WHERE id = $1 AND deleted = FALSE",
             quote_identifier(&schema.table_name),
             set_clauses.join(", "),
-            where_clause
         );
 
         let mut query = sqlx::query(&update_sql).bind(instance_id);
@@ -803,11 +723,7 @@ impl ObjectStore {
             build_condition_clause(&condition, &mut param_idx, &schema)
                 .map_err(ObjectStoreError::InvalidCondition)?;
 
-        let base_where = if self.config.soft_delete {
-            format!("deleted = FALSE AND ({})", where_clause)
-        } else {
-            format!("({})", where_clause)
-        };
+        let base_where = format!("deleted = FALSE AND ({})", where_clause);
 
         let update_sql = format!(
             "UPDATE {} SET {} WHERE {}",
@@ -1288,11 +1204,7 @@ impl ObjectStore {
         let order_by_clause = build_order_by_clause(&filter.sort_by, &filter.sort_order, schema)
             .map_err(ObjectStoreError::validation)?;
 
-        let base_where = if self.config.soft_delete {
-            format!("deleted = FALSE AND ({})", where_clause)
-        } else {
-            format!("({})", where_clause)
-        };
+        let base_where = format!("deleted = FALSE AND ({})", where_clause);
 
         // Count query
         let count_query = format!(
