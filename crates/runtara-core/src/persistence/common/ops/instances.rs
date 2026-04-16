@@ -446,12 +446,15 @@ macro_rules! impl_instance_ops {
                 Ok(records)
             }
 
-            /// `SELECT 1` — returns true if the database is reachable.
+            /// Single-row probe via the dialect's health-check SQL.
+            /// Returns `true` iff the query completes without error.
             pub(crate) async fn op_health_check_db(
                 pool: &$Pool,
             ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::dialect::Dialect;
+                let sql = <$Dialect>::sql_health_check();
                 let result: ::core::result::Result<(i64,), _> =
-                    ::sqlx::query_as("SELECT 1").fetch_one(pool).await;
+                    ::sqlx::query_as(sql).fetch_one(pool).await;
                 Ok(result.is_ok())
             }
 

@@ -165,6 +165,13 @@ pub trait Dialect: Send + Sync + 'static {
     /// SQL for acknowledging a pending signal (bind: instance_id).
     fn sql_acknowledge_signal() -> &'static str;
 
+    /// SQL for `health_check_db`. Must return a single `BIGINT` (i64)
+    /// column so the shared op can decode as `(i64,)` on both
+    /// backends — Postgres casts the literal via `::bigint` because
+    /// `SELECT 1` alone produces a 32-bit `integer`; SQLite's
+    /// untyped `SELECT 1` decodes as i64 natively.
+    fn sql_health_check() -> &'static str;
+
     /// SQL for `list_events` with a dialect-appropriate ORDER BY
     /// direction substituted (callers pass `"ASC"` or `"DESC"`).
     /// Binds: instance_id, event_type, subtype, created_after,
