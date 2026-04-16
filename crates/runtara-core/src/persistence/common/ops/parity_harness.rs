@@ -306,10 +306,13 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::PgPool;
     use sqlx::sqlite::SqlitePoolOptions;
+    use testcontainers::ContainerAsync;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::postgres::Postgres;
 
-    use crate::migrations::SQLITE as MIGRATOR;
-    use crate::persistence::SqlitePersistence;
+    use crate::persistence::{PostgresPersistence, SqlitePersistence};
 
     #[tokio::test]
     async fn sqlite_backend_passes_parity_sequence() {
@@ -318,9 +321,64 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("create in-memory SQLite pool");
-        MIGRATOR.run(&pool).await.expect("run SQLite migrations");
+        crate::migrations::SQLITE
+            .run(&pool)
+            .await
+            .expect("run SQLite migrations");
 
         let backend = SqlitePersistence::new(pool);
         run_parity_sequence(&backend).await;
+    }
+
+    /// Run the same parity sequence against Postgres. Uses
+    /// `TEST_RUNTARA_DATABASE_URL` if set; otherwise spins up a
+    /// Postgres container via testcontainers. Skips gracefully if
+    /// neither path is available (no Docker on the host and no env
+    /// var), so `cargo test` stays green on machines that can't run
+    /// containers.
+    #[tokio::test]
+    async fn postgres_backend_passes_parity_sequence() {
+        let Some((pool, _container)) = postgres_test_pool().await else {
+            eprintln!(
+                "Skipping PG parity test: TEST_RUNTARA_DATABASE_URL unset and \
+                 testcontainers failed to start a Postgres container (is Docker running?)"
+            );
+            return;
+        };
+        let backend = PostgresPersistence::new(pool);
+        run_parity_sequence(&backend).await;
+    }
+
+    /// Obtain a Postgres pool for the parity test. Prefers
+    /// `TEST_RUNTARA_DATABASE_URL` (for CI / local developer setups
+    /// that already have a database running), then falls back to a
+    /// fresh testcontainers-managed container. Returns `None` if
+    /// neither works — callers treat that as "skip".
+    ///
+    /// When a container is returned, keeping its handle alive keeps
+    /// the container running; callers hold it in a `_container` bind.
+    async fn postgres_test_pool() -> Option<(PgPool, Option<ContainerAsync<Postgres>>)> {
+        if let Ok(url) = std::env::var("TEST_RUNTARA_DATABASE_URL") {
+            let pool = PgPool::connect(&url).await.ok()?;
+            // Ensure pgcrypto for `gen_random_uuid()` used by migrations.
+            sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+                .execute(&pool)
+                .await
+                .ok()?;
+            crate::migrations::POSTGRES.run(&pool).await.ok()?;
+            return Some((pool, None));
+        }
+
+        let container = Postgres::default().start().await.ok()?;
+        let host = container.get_host().await.ok()?;
+        let port = container.get_host_port_ipv4(5432).await.ok()?;
+        let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+        let pool = PgPool::connect(&url).await.ok()?;
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+            .execute(&pool)
+            .await
+            .ok()?;
+        crate::migrations::POSTGRES.run(&pool).await.ok()?;
+        Some((pool, Some(container)))
     }
 }
