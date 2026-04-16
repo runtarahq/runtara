@@ -19,14 +19,15 @@
 pub mod checkpoints;
 pub mod events;
 pub mod instances;
+pub mod retention;
 pub mod signals;
 pub mod sleep;
 pub mod step_summaries;
-// pub mod retention;       // Phase 5
 
 pub(crate) use checkpoints::impl_checkpoint_ops;
 pub(crate) use events::impl_event_ops;
 pub(crate) use instances::impl_instance_ops;
+pub(crate) use retention::impl_retention_ops;
 pub(crate) use signals::impl_signal_ops;
 pub(crate) use sleep::impl_sleep_ops;
 pub(crate) use step_summaries::impl_step_summary_ops;

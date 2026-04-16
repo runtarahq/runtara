@@ -115,6 +115,11 @@ crate::persistence::common::ops::impl_step_summary_ops!(
     SqlitePool,
     crate::persistence::dialect::SqliteDialect
 );
+crate::persistence::common::ops::impl_retention_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
 
 #[async_trait::async_trait]
 impl Persistence for SqlitePersistence {
@@ -541,46 +546,11 @@ impl Persistence for SqlitePersistence {
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            r#"
-            SELECT instance_id
-            FROM instances
-            WHERE status IN ('completed', 'failed', 'cancelled')
-              AND finished_at IS NOT NULL
-              AND finished_at < ?1
-            ORDER BY finished_at ASC
-            LIMIT ?2
-            "#,
-        )
-        .bind(older_than)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|(id,)| id).collect())
+        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
-        if instance_ids.is_empty() {
-            return Ok(0);
-        }
-
-        // SQLite doesn't support ANY(), so use IN with a prepared list
-        let placeholders: Vec<String> = (1..=instance_ids.len())
-            .map(|i| format!("?{}", i))
-            .collect();
-        let query = format!(
-            "DELETE FROM instances WHERE instance_id IN ({})",
-            placeholders.join(", ")
-        );
-
-        let mut sqlx_query = sqlx::query(&query);
-        for id in instance_ids {
-            sqlx_query = sqlx_query.bind(id);
-        }
-
-        let result = sqlx_query.execute(&self.pool).await?;
-        Ok(result.rows_affected())
+        Self::op_delete_instances_batch(&self.pool, instance_ids).await
     }
 }
 

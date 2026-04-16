@@ -73,6 +73,11 @@ crate::persistence::common::ops::impl_step_summary_ops!(
     PgPool,
     crate::persistence::dialect::PostgresDialect
 );
+crate::persistence::common::ops::impl_retention_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
 
 // ============================================================================
 // Remaining Instance Operations (pre-shared — migrated in later phases)
@@ -761,67 +766,19 @@ impl Persistence for PostgresPersistence {
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
-        get_terminal_instances_older_than(&self.pool, older_than, limit).await
+        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
-        delete_instances_batch(&self.pool, instance_ids).await
+        Self::op_delete_instances_batch(&self.pool, instance_ids).await
     }
 }
 
-/// Get terminal instance IDs older than the specified timestamp.
-///
-/// Only returns instances with terminal status: completed, failed, cancelled.
-/// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
-pub async fn get_terminal_instances_older_than(
-    pool: &PgPool,
-    older_than: DateTime<Utc>,
-    limit: i64,
-) -> Result<Vec<String>, CoreError> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        r#"
-        SELECT instance_id
-        FROM instances
-        WHERE status IN ('completed', 'failed', 'cancelled')
-          AND finished_at IS NOT NULL
-          AND finished_at < $1
-        ORDER BY finished_at ASC
-        LIMIT $2
-        "#,
-    )
-    .bind(older_than)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
-/// Delete instances by their IDs.
-///
-/// This deletes from the instances table; child tables with ON DELETE CASCADE
-/// are automatically cleaned up by the database.
-///
-/// Returns the count of deleted instances.
-pub async fn delete_instances_batch(
-    pool: &PgPool,
-    instance_ids: &[String],
-) -> Result<u64, CoreError> {
-    if instance_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let result = sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1)")
-        .bind(instance_ids)
-        .execute(pool)
-        .await?;
-
-    Ok(result.rows_affected())
-}
-
-// `list_instances` is migrated to the shared layer:
-// see PostgresPersistence::op_list_instances
-// (crate::persistence::common::ops::instances).
+// `get_terminal_instances_older_than`, `delete_instances_batch`,
+// `list_instances` are migrated to the shared layer:
+// see PostgresPersistence::op_get_terminal_instances_older_than /
+// op_delete_instances_batch / op_list_instances
+// (crate::persistence::common::ops::{retention, instances}).
 
 #[cfg(test)]
 mod tests {

@@ -259,6 +259,41 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .expect("instance must still exist post-complete");
     assert_eq!(record.status, "completed");
 
+    // --- retention sweep ----------------------------------------------------
+    // The instance finished moments ago; using a slightly-future cutoff
+    // guarantees it appears in the terminal sweep. An empty-list delete
+    // is a no-op (returns 0).
+    let empty_deleted = backend
+        .delete_instances_batch(&[])
+        .await
+        .expect("delete_instances_batch with empty slice failed");
+    assert_eq!(empty_deleted, 0);
+
+    let cutoff = Utc::now() + Duration::seconds(60);
+    let terminal = backend
+        .get_terminal_instances_older_than(cutoff, 50)
+        .await
+        .expect("get_terminal_instances_older_than failed");
+    assert!(
+        terminal.iter().any(|id| id == &instance_id),
+        "completed instance must appear in terminal sweep before cutoff"
+    );
+
+    let deleted = backend
+        .delete_instances_batch(std::slice::from_ref(&instance_id))
+        .await
+        .expect("delete_instances_batch failed");
+    assert_eq!(deleted, 1, "exactly one instance should be deleted");
+
+    let post_delete = backend
+        .get_instance(&instance_id)
+        .await
+        .expect("get_instance after delete failed");
+    assert!(
+        post_delete.is_none(),
+        "instance row must be gone after delete_instances_batch"
+    );
+
     // --- health -------------------------------------------------------------
     assert!(
         backend

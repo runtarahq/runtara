@@ -4,11 +4,39 @@
 //! `json_extract` + `CAST(... AS TEXT)` for JSON access over BLOB payloads,
 //! plain `LIKE`, fanned-out `IN (?, ?, ...)`, `julianday` for duration math.
 
+use crate::error::CoreError;
+
 use super::{Dialect, EnumKind, TakeCustomSignalPlan};
 
 /// Zero-sized SQLite dialect implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqliteDialect;
+
+impl SqliteDialect {
+    /// DELETE a batch of instances using a fanned `IN (?, ?, ...)`.
+    /// SQLite can't bind `&[String]` as a single parameter like
+    /// Postgres can — one bind per element is required. See
+    /// [`Self::in_list`] for the fragment form.
+    pub(crate) async fn exec_delete_instances_batch(
+        pool: &sqlx::SqlitePool,
+        instance_ids: &[String],
+    ) -> Result<u64, CoreError> {
+        if instance_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = (1..=instance_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("DELETE FROM instances WHERE instance_id IN ({placeholders})");
+        let mut query = sqlx::query(&sql);
+        for id in instance_ids {
+            query = query.bind(id);
+        }
+        let result = query.execute(pool).await?;
+        Ok(result.rows_affected())
+    }
+}
 
 impl Dialect for SqliteDialect {
     type Database = sqlx::Sqlite;

@@ -3,11 +3,36 @@
 //! Postgres dialect: `$N` placeholders, enum type casts, JSONB operators,
 //! `ILIKE`, `ANY($1)` for batch `IN`, `EXTRACT(MILLISECONDS FROM ...)`.
 
+use crate::error::CoreError;
+
 use super::{Dialect, EnumKind, TakeCustomSignalPlan};
 
 /// Zero-sized Postgres dialect implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PostgresDialect;
+
+impl PostgresDialect {
+    /// DELETE a batch of instances using PG's native array + `ANY`.
+    /// Single bind of `&[String]` — sqlx encodes it as `TEXT[]`.
+    ///
+    /// The binding is backend-specific enough (SQLite fans out with one
+    /// bind per element) that the shared retention macro delegates to
+    /// this inherent helper rather than trying to unify inside the
+    /// macro.
+    pub(crate) async fn exec_delete_instances_batch(
+        pool: &sqlx::PgPool,
+        instance_ids: &[String],
+    ) -> Result<u64, CoreError> {
+        if instance_ids.is_empty() {
+            return Ok(0);
+        }
+        let result = sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1)")
+            .bind(instance_ids)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+}
 
 impl Dialect for PostgresDialect {
     type Database = sqlx::Postgres;
