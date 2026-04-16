@@ -95,3 +95,18 @@ pub fn runtime_router(config: ConnectionsConfig) -> Router {
         )
         .with_state(state)
 }
+
+/// Admin router for operator-triggered maintenance.
+///
+/// Mount on a localhost-only / internal interface — endpoints are not
+/// authenticated.
+///
+/// Endpoints:
+/// - `POST /reencrypt` — re-encrypt all connection parameters with the
+///   current cipher. Optional `?tenant_id=…` query parameter to scope.
+pub fn admin_router(config: ConnectionsConfig) -> Router {
+    let state = ConnectionsState::from_config(config);
+    Router::new()
+        .route("/reencrypt", post(handler::admin::reencrypt_handler))
+        .with_state(state)
+}

@@ -33,7 +33,7 @@ impl ConnectionsFacade {
     // ── Repository helpers (cheap to construct per call) ─────────────────
 
     fn repo(&self) -> ConnectionRepository {
-        ConnectionRepository::new(self.state.db_pool.clone())
+        ConnectionRepository::new(self.state.db_pool.clone(), self.state.cipher.clone())
     }
 
     fn rate_limit_service(&self) -> RateLimitService {
@@ -125,6 +125,30 @@ impl ConnectionsFacade {
     ) -> Result<HashSet<String>, ConnectionsError> {
         self.repo()
             .get_existing_ids(tenant_id, connection_ids)
+            .await
+            .map_err(ConnectionsError::Database)
+    }
+
+    // ── Migration ──────────────────────────────────────────────────────
+
+    /// Whether the configured cipher actually encrypts data at rest.
+    ///
+    /// Returns `false` when the crate is running with [`crate::crypto::noop::NoOpCipher`].
+    pub fn is_encryption_enabled(&self) -> bool {
+        self.state.cipher.is_encrypting()
+    }
+
+    /// Re-encrypt every connection row (optionally scoped to one tenant) with
+    /// the current cipher. Idempotent; safe to call repeatedly.
+    ///
+    /// Use this after enabling encryption for the first time, or after
+    /// rotating the encryption key.
+    pub async fn reencrypt_all(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<crate::repository::connections::ReencryptionStats, ConnectionsError> {
+        self.repo()
+            .reencrypt_all(tenant_id)
             .await
             .map_err(ConnectionsError::Database)
     }

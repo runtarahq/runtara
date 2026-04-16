@@ -1,8 +1,17 @@
 //! Connection Repository
 //!
-//! Handles all database operations for connection management
+//! Handles all database operations for connection management.
+//!
+//! SECURITY: This is the only layer that reads or writes `connection_parameters`
+//! directly. Encryption at rest is applied here — writes encrypt via
+//! [`CredentialCipher::encrypt`], reads decrypt via [`CredentialCipher::decrypt`].
+//! Consumers of the facade always see plaintext.
+//!
 //! SECURITY: Provides methods to explicitly exclude connection_parameters from queries
 
+use std::sync::Arc;
+
+use crate::crypto::CredentialCipher;
 use crate::types::*;
 use sqlx::PgPool;
 
@@ -13,11 +22,53 @@ fn parse_rate_limit_config(value: Option<serde_json::Value>) -> Option<RateLimit
 
 pub struct ConnectionRepository {
     pool: PgPool,
+    cipher: Arc<dyn CredentialCipher>,
 }
 
 impl ConnectionRepository {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    /// Construct a repository with a cipher for at-rest encryption.
+    pub fn new(pool: PgPool, cipher: Arc<dyn CredentialCipher>) -> Self {
+        Self { pool, cipher }
+    }
+
+    /// Encrypt connection parameters for storage. `None` in → `None` out.
+    ///
+    /// Treats cipher failure as a database error so callers can propagate it
+    /// without introducing a new error variant. Logs the underlying cause.
+    fn seal(
+        &self,
+        plaintext: Option<&serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+        let Some(value) = plaintext else {
+            return Ok(None);
+        };
+        match self.cipher.encrypt(value) {
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to encrypt connection parameters");
+                Err(sqlx::Error::Encode(format!("cipher encrypt: {}", e).into()))
+            }
+        }
+    }
+
+    /// Decrypt connection parameters after retrieval. `None` in → `None` out.
+    ///
+    /// Plaintext values (e.g., rows written before encryption was enabled)
+    /// pass through unchanged — the cipher handles the envelope check.
+    fn unseal(
+        &self,
+        stored: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+        let Some(value) = stored else {
+            return Ok(None);
+        };
+        match self.cipher.decrypt(&value) {
+            Ok(plaintext) => Ok(Some(plaintext)),
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to decrypt connection parameters");
+                Err(sqlx::Error::Decode(format!("cipher decrypt: {}", e).into()))
+            }
+        }
     }
 
     /// Create a new connection
@@ -33,6 +84,9 @@ impl ConnectionRepository {
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok());
 
+        // Encrypt connection_parameters at rest (no-op if cipher is NoOp).
+        let sealed_parameters = self.seal(request.connection_parameters.as_ref())?;
+
         sqlx::query(
             r#"
             INSERT INTO connection_data_entity
@@ -44,7 +98,7 @@ impl ConnectionRepository {
         .bind(tenant_id)
         .bind(&request.title)
         .bind(&request.connection_subtype)
-        .bind(&request.connection_parameters)
+        .bind(&sealed_parameters)
         .bind(&request.integration_id)
         .bind(request.valid_until.as_ref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&chrono::Utc))))
         .bind(status.as_str())
@@ -334,6 +388,13 @@ impl ConnectionRepository {
             updates.join(", ")
         );
 
+        // Pre-encrypt parameters (if any) before binding — must live long
+        // enough for the bind to reference it.
+        let sealed_parameters = match request.connection_parameters.as_ref() {
+            Some(plain) => Some(self.seal(Some(plain))?.unwrap_or(serde_json::Value::Null)),
+            None => None,
+        };
+
         // Execute update with dynamic bindings
         let mut query = sqlx::query(&query_str).bind(id).bind(tenant_id);
 
@@ -343,7 +404,7 @@ impl ConnectionRepository {
         if let Some(ref connection_subtype) = request.connection_subtype {
             query = query.bind(connection_subtype);
         }
-        if let Some(ref connection_parameters) = request.connection_parameters {
+        if let Some(ref connection_parameters) = sealed_parameters {
             query = query.bind(connection_parameters);
         }
         if let Some(ref integration_id) = request.integration_id {
@@ -584,25 +645,27 @@ impl ConnectionRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(result.map(
-            |(
-                id,
-                tid,
-                integration_id,
-                connection_subtype,
-                connection_parameters,
-                rate_limit_config,
-            )| {
-                ConnectionWithParameters {
+        result
+            .map(
+                |(
                     id,
-                    tenant_id: Some(tid),
+                    tid,
                     integration_id,
                     connection_subtype,
                     connection_parameters,
                     rate_limit_config,
-                }
-            },
-        ))
+                )| {
+                    Ok::<_, sqlx::Error>(ConnectionWithParameters {
+                        id,
+                        tenant_id: Some(tid),
+                        integration_id,
+                        connection_subtype,
+                        connection_parameters: self.unseal(connection_parameters)?,
+                        rate_limit_config,
+                    })
+                },
+            )
+            .transpose()
     }
 
     /// Look up a connection by ID (without tenant filter) including credentials.
@@ -635,25 +698,27 @@ impl ConnectionRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(result.map(
-            |(
-                id,
-                tid,
-                integration_id,
-                connection_subtype,
-                connection_parameters,
-                rate_limit_config,
-            )| {
-                ConnectionWithParameters {
+        result
+            .map(
+                |(
                     id,
-                    tenant_id: Some(tid),
+                    tid,
                     integration_id,
                     connection_subtype,
                     connection_parameters,
                     rate_limit_config,
-                }
-            },
-        ))
+                )| {
+                    Ok::<_, sqlx::Error>(ConnectionWithParameters {
+                        id,
+                        tenant_id: Some(tid),
+                        integration_id,
+                        connection_subtype,
+                        connection_parameters: self.unseal(connection_parameters)?,
+                        rate_limit_config,
+                    })
+                },
+            )
+            .transpose()
     }
 
     /// Get the default file storage connection for a tenant.
@@ -687,25 +752,27 @@ impl ConnectionRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(result.map(
-            |(
-                id,
-                tid,
-                integration_id,
-                connection_subtype,
-                connection_parameters,
-                rate_limit_config,
-            )| {
-                ConnectionWithParameters {
+        result
+            .map(
+                |(
                     id,
-                    tenant_id: Some(tid),
+                    tid,
                     integration_id,
                     connection_subtype,
                     connection_parameters,
                     rate_limit_config,
-                }
-            },
-        ))
+                )| {
+                    Ok::<_, sqlx::Error>(ConnectionWithParameters {
+                        id,
+                        tenant_id: Some(tid),
+                        integration_id,
+                        connection_subtype,
+                        connection_parameters: self.unseal(connection_parameters)?,
+                        rate_limit_config,
+                    })
+                },
+            )
+            .transpose()
     }
 
     /// Clear any existing default file storage for the tenant.
@@ -733,6 +800,9 @@ impl ConnectionRepository {
         parameters: &serde_json::Value,
         status: &str,
     ) -> Result<u64, sqlx::Error> {
+        let sealed = self
+            .seal(Some(parameters))?
+            .unwrap_or(serde_json::Value::Null);
         let result = sqlx::query(
             r#"
             UPDATE connection_data_entity
@@ -744,12 +814,111 @@ impl ConnectionRepository {
         )
         .bind(id)
         .bind(tenant_id)
-        .bind(parameters)
+        .bind(&sealed)
         .bind(status)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// Re-encrypt all rows for a given tenant (or all tenants if `tenant_id`
+    /// is `None`) using the current cipher.
+    ///
+    /// Idempotent: plaintext rows get encrypted; already-encrypted rows are
+    /// decrypted and re-encrypted (possibly with a new key ID, if the cipher
+    /// has been rotated). Rows with `NULL` parameters are skipped.
+    ///
+    /// Returns statistics about the migration.
+    pub async fn reencrypt_all(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<ReencryptionStats, sqlx::Error> {
+        // Stream all rows with non-null parameters. We process row-by-row to
+        // keep memory flat on large deployments.
+        let rows: Vec<(String, String, Option<serde_json::Value>)> = if let Some(tid) = tenant_id {
+            sqlx::query_as(
+                "SELECT id, tenant_id, connection_parameters FROM connection_data_entity \
+                 WHERE tenant_id = $1 AND connection_parameters IS NOT NULL",
+            )
+            .bind(tid)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, tenant_id, connection_parameters FROM connection_data_entity \
+                 WHERE connection_parameters IS NOT NULL",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut stats = ReencryptionStats {
+            scanned: rows.len(),
+            reencrypted: 0,
+            unchanged: 0,
+            failed: 0,
+        };
+
+        for (id, tid, stored) in rows {
+            let Some(stored_value) = stored else {
+                stats.unchanged += 1;
+                continue;
+            };
+            // Decrypt (or passthrough if plaintext), then encrypt with the current cipher.
+            let plaintext = match self.cipher.decrypt(&stored_value) {
+                Ok(v) => v,
+                Err(e) => {
+                    stats.failed += 1;
+                    tracing::error!(
+                        connection_id = %id,
+                        tenant_id = %tid,
+                        error = %e,
+                        "reencrypt_all: decrypt failed, skipping row"
+                    );
+                    continue;
+                }
+            };
+            let new_envelope = match self.cipher.encrypt(&plaintext) {
+                Ok(v) => v,
+                Err(e) => {
+                    stats.failed += 1;
+                    tracing::error!(
+                        connection_id = %id,
+                        tenant_id = %tid,
+                        error = %e,
+                        "reencrypt_all: encrypt failed, skipping row"
+                    );
+                    continue;
+                }
+            };
+            sqlx::query(
+                "UPDATE connection_data_entity SET connection_parameters = $3 \
+                 WHERE id = $1 AND tenant_id = $2",
+            )
+            .bind(&id)
+            .bind(&tid)
+            .bind(&new_envelope)
+            .execute(&self.pool)
+            .await?;
+            stats.reencrypted += 1;
+        }
+
+        Ok(stats)
+    }
+}
+
+/// Summary returned by [`ConnectionRepository::reencrypt_all`].
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReencryptionStats {
+    /// Number of rows inspected.
+    pub scanned: usize,
+    /// Rows successfully re-encrypted (decrypt + encrypt + write).
+    pub reencrypted: usize,
+    /// Rows that had `NULL` parameters and were skipped.
+    pub unchanged: usize,
+    /// Rows that failed to decrypt or encrypt and were skipped.
+    pub failed: usize,
 }
 
 /// Internal struct for connection data including parameters

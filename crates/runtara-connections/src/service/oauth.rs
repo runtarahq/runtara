@@ -3,6 +3,9 @@
 //! Handles authorization URL generation, code-to-token exchange, and
 //! token storage in connection parameters.
 
+use std::sync::Arc;
+
+use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::repository::oauth::OAuthRepository;
 use rand::RngCore;
@@ -48,10 +51,10 @@ pub struct OAuthService {
 }
 
 impl OAuthService {
-    pub fn new(pool: PgPool, public_base_url: String) -> Self {
+    pub fn new(pool: PgPool, cipher: Arc<dyn CredentialCipher>, public_base_url: String) -> Self {
         Self {
             oauth_repo: OAuthRepository::new(pool.clone()),
-            connection_repo: ConnectionRepository::new(pool),
+            connection_repo: ConnectionRepository::new(pool, cipher),
             public_base_url,
         }
     }

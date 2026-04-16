@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use sqlx::PgPool;
+
+use crate::crypto::CredentialCipher;
 
 /// Configuration for the connections crate.
 ///
@@ -19,6 +23,12 @@ pub struct ConnectionsConfig {
 
     /// Shared HTTP client for outbound requests (OAuth token exchange, etc.).
     pub http_client: reqwest::Client,
+
+    /// Cipher for at-rest encryption of `connection_parameters`.
+    ///
+    /// Typically constructed via [`crate::crypto::cipher_from_env`]. Use
+    /// [`crate::crypto::noop::NoOpCipher`] for local development only.
+    pub cipher: Arc<dyn CredentialCipher>,
 }
 
 /// Runtime state shared across all handlers in the connections crate.
@@ -31,6 +41,7 @@ pub struct ConnectionsState {
     pub redis_url: Option<String>,
     pub public_base_url: String,
     pub http_client: reqwest::Client,
+    pub cipher: Arc<dyn CredentialCipher>,
 }
 
 impl ConnectionsState {
@@ -40,6 +51,7 @@ impl ConnectionsState {
             redis_url: config.redis_url,
             public_base_url: config.public_base_url,
             http_client: config.http_client,
+            cipher: config.cipher,
         }
     }
 }
@@ -47,5 +59,11 @@ impl ConnectionsState {
 impl axum::extract::FromRef<ConnectionsState> for PgPool {
     fn from_ref(state: &ConnectionsState) -> PgPool {
         state.db_pool.clone()
+    }
+}
+
+impl axum::extract::FromRef<ConnectionsState> for Arc<dyn CredentialCipher> {
+    fn from_ref(state: &ConnectionsState) -> Arc<dyn CredentialCipher> {
+        state.cipher.clone()
     }
 }

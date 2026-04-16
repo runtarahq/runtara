@@ -40,7 +40,7 @@ pub async fn authorize_handler(
     State(state): State<ConnectionsState>,
     Path(id): Path<String>,
 ) -> Result<Json<OAuthAuthorizeResponse>, (axum::http::StatusCode, Json<ErrorResponse>)> {
-    let service = OAuthService::new(state.db_pool, state.public_base_url);
+    let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
 
     match service.generate_authorization_url(&id, &tenant_id).await {
         Ok(url) => Ok(Json(OAuthAuthorizeResponse {
@@ -118,7 +118,7 @@ pub async fn callback_handler(
         _ => return oauth_response_html(None, false, "Missing authorization code"),
     };
 
-    let service = OAuthService::new(state.db_pool, state.public_base_url);
+    let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
 
     match service.handle_callback(&oauth_state, &code).await {
         Ok(connection_id) => oauth_response_html(Some(&connection_id), true, ""),

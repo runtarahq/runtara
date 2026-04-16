@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::rate_limits::{RateLimitService, ServiceError};
 use crate::types::*;
@@ -23,10 +24,11 @@ use crate::types::*;
 pub async fn list_rate_limits_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Query(query): Query<ListRateLimitsQuery>,
 ) -> Result<Json<ListRateLimitsResponse>, (StatusCode, Json<Value>)> {
     // Create service with db pool for period stats queries
-    let repository = Arc::new(ConnectionRepository::new(pool.clone()));
+    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
     let service = RateLimitService::with_db_pool(repository, pool);
 
     // Use interval from query, defaulting to 24h
@@ -96,10 +98,11 @@ pub async fn list_rate_limits_handler(
 pub async fn get_connection_rate_limit_status_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(id): Path<String>,
 ) -> Result<Json<GetRateLimitStatusResponse>, (StatusCode, Json<Value>)> {
     // Create service
-    let repository = Arc::new(ConnectionRepository::new(pool));
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = RateLimitService::new(repository);
 
     match service
@@ -145,10 +148,11 @@ pub async fn get_connection_rate_limit_status_handler(
 pub async fn get_connection_rate_limit_timeline_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(id): Path<String>,
     Query(query): Query<RateLimitTimelineQuery>,
 ) -> Result<Json<RateLimitTimelineResponse>, (StatusCode, Json<Value>)> {
-    let repository = Arc::new(ConnectionRepository::new(pool.clone()));
+    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
     let service = RateLimitService::with_db_pool(repository, pool);
 
     match service
@@ -204,11 +208,12 @@ pub async fn get_connection_rate_limit_timeline_handler(
 pub async fn get_connection_rate_limit_history_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(id): Path<String>,
     Query(query): Query<RateLimitHistoryQuery>,
 ) -> Result<Json<RateLimitHistoryResponse>, (StatusCode, Json<Value>)> {
     // Create service with db pool for timeline queries
-    let repository = Arc::new(ConnectionRepository::new(pool.clone()));
+    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
     let service = RateLimitService::with_db_pool(repository, pool);
 
     match service

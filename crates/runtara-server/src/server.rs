@@ -585,13 +585,17 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         pool: pool.clone(),
     };
 
-    // Construct connections crate config and facade
+    // Construct connections crate config and facade.
+    // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
+    // back to NoOp (plaintext at rest) with a loud warning if missing. See
+    // runtara_connections::crypto::cipher_from_env for details.
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
         redis_url: crate::valkey::build_redis_url(),
         public_base_url: std::env::var("PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:8080".to_string()),
         http_client: reqwest::Client::new(),
+        cipher: runtara_connections::cipher_from_env(),
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());
@@ -1392,6 +1396,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Path: /api/connections/{tenant_id}/{connection_id}
     let internal_routes = runtara_connections::runtime_router(connections_config.clone());
 
+    // Connections admin routes (operator-triggered maintenance, e.g. re-encrypt).
+    // Crate-owned so the HTTP surface stays colocated with the domain logic.
+    let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
+
     // Internal Object Model API routes (called by integration agents in scenario binaries)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
     // These are only accessible from localhost (scenario containers use pasta networking).
@@ -1608,6 +1616,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     let internal_app = Router::new()
         .nest("/api/connections", internal_routes)
+        .nest("/api/internal/connections-admin", connections_admin_routes)
         .merge(internal_object_model_routes)
         .merge(internal_proxy_routes)
         .merge(internal_agent_routes)

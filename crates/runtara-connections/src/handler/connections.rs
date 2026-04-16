@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::service::connections::{ConnectionService, ServiceError};
 use crate::service::rate_limits::RateLimitService;
@@ -21,10 +22,11 @@ use crate::types::*;
 pub async fn create_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // Create service with repository
-    let repository = Arc::new(ConnectionRepository::new(pool));
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository);
 
     match service.create_connection(payload, &tenant_id).await {
@@ -69,10 +71,11 @@ pub async fn create_connection_handler(
 pub async fn list_connections_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Query(params): Query<ListConnectionsQuery>,
 ) -> Result<Json<ListConnectionsResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
-    let repository = Arc::new(ConnectionRepository::new(pool.clone()));
+    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
     let service = ConnectionService::new(repository.clone());
 
     match service
@@ -146,10 +149,11 @@ pub async fn list_connections_handler(
 pub async fn get_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(id): Path<String>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
-    let repository = Arc::new(ConnectionRepository::new(pool));
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository);
 
     match service.get_connection(&id, &tenant_id).await {
@@ -181,11 +185,12 @@ pub async fn get_connection_handler(
 pub async fn update_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
-    let repository = Arc::new(ConnectionRepository::new(pool));
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository);
 
     match service.update_connection(&id, &tenant_id, payload).await {
@@ -232,10 +237,11 @@ pub async fn update_connection_handler(
 pub async fn delete_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
-    let repository = Arc::new(ConnectionRepository::new(pool));
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository);
 
     match service.delete_connection(&id, &tenant_id).await {
@@ -279,11 +285,12 @@ pub async fn delete_connection_handler(
 pub async fn get_connections_by_operator_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path(operator_name): Path<String>,
     Query(params): Query<ListConnectionsQuery>,
 ) -> Result<Json<ListConnectionsResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
-    let repository = Arc::new(ConnectionRepository::new(pool));
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository);
 
     match service
@@ -436,6 +443,7 @@ pub async fn get_connection_type_handler(
 // No OpenAPI annotation — this is an internal-only endpoint (not exposed via gateway)
 pub async fn get_connection_for_runtime_handler(
     State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
     Path((tenant_id, connection_id)): Path<(String, String)>,
     Query(query): Query<RuntimeConnectionQuery>,
 ) -> Result<Json<RuntimeConnectionResponse>, (StatusCode, Json<Value>)> {
@@ -462,7 +470,7 @@ pub async fn get_connection_for_runtime_handler(
     };
 
     // Create services with db pool for rate limit event tracking
-    let repository = Arc::new(ConnectionRepository::new(pool.clone()));
+    let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
     let rate_limit_service = Arc::new(RateLimitService::with_db_pool(repository.clone(), pool));
     let service = ConnectionService::with_rate_limit_service(repository, rate_limit_service);
 
