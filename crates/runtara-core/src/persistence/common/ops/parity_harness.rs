@@ -123,14 +123,20 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         created_at: Utc::now(),
         subtype: Some("parity-test".to_string()),
     };
-    backend.insert_event(&event).await.expect("insert_event failed");
+    backend
+        .insert_event(&event)
+        .await
+        .expect("insert_event failed");
 
     let filter = ListEventsFilter::default();
     let events = backend
         .list_events(&instance_id, &filter, 50, 0)
         .await
         .expect("list_events failed");
-    assert!(!events.is_empty(), "list_events must return the inserted event");
+    assert!(
+        !events.is_empty(),
+        "list_events must return the inserted event"
+    );
 
     let event_count = backend
         .count_events(&instance_id, &filter)

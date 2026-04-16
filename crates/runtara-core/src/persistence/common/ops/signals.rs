@@ -52,10 +52,7 @@ macro_rules! impl_signal_ops {
             ) -> ::core::result::Result<(), $crate::error::CoreError> {
                 use $crate::persistence::dialect::Dialect;
                 let sql = <$Dialect>::sql_acknowledge_signal();
-                ::sqlx::query(sql)
-                    .bind(instance_id)
-                    .execute(pool)
-                    .await?;
+                ::sqlx::query(sql).bind(instance_id).execute(pool).await?;
                 Ok(())
             }
 
@@ -89,10 +86,10 @@ macro_rules! impl_signal_ops {
                         delete_sql,
                     } => {
                         let mut tx = pool.begin().await?;
-                        let record = ::sqlx::query_as::<
-                            _,
-                            $crate::persistence::CustomSignalRecord,
-                        >(select_sql)
+                        let record =
+                            ::sqlx::query_as::<_, $crate::persistence::CustomSignalRecord>(
+                                select_sql,
+                            )
                             .bind(instance_id)
                             .bind(checkpoint_id)
                             .fetch_optional(&mut *tx)
