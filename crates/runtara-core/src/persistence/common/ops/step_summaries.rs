@@ -43,12 +43,15 @@ macro_rules! impl_step_summary_ops {
                 $crate::error::CoreError,
             > {
                 use ::sqlx::Row;
-                use $crate::persistence::common::filters::{sort_direction_sql, step_status_filter_str};
+                use $crate::persistence::common::filters::{
+                    sort_direction_sql, step_status_filter_str,
+                };
                 use $crate::persistence::common::row::{decode_json_text, parse_step_status};
                 use $crate::persistence::dialect::Dialect;
 
                 let order_direction = sort_direction_sql(filter.sort_order);
-                let status_filter: ::core::option::Option<&str> = filter.status.map(step_status_filter_str);
+                let status_filter: ::core::option::Option<&str> =
+                    filter.status.map(step_status_filter_str);
                 let sql = <$Dialect>::sql_list_step_summaries(order_direction);
 
                 let rows = ::sqlx::query(&sql)
@@ -95,7 +98,8 @@ macro_rules! impl_step_summary_ops {
             ) -> ::core::result::Result<i64, $crate::error::CoreError> {
                 use $crate::persistence::common::filters::step_status_filter_str;
                 use $crate::persistence::dialect::Dialect;
-                let status_filter: ::core::option::Option<&str> = filter.status.map(step_status_filter_str);
+                let status_filter: ::core::option::Option<&str> =
+                    filter.status.map(step_status_filter_str);
                 let sql = <$Dialect>::sql_count_step_summaries();
                 let count: (i64,) = ::sqlx::query_as(sql)
                     .bind(instance_id)

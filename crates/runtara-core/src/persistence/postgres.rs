@@ -849,9 +849,13 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result =
-            PostgresPersistence::op_update_instance_status(&pool, &instance_id.to_string(), "running", Some(Utc::now()))
-                .await;
+        let result = PostgresPersistence::op_update_instance_status(
+            &pool,
+            &instance_id.to_string(),
+            "running",
+            Some(Utc::now()),
+        )
+        .await;
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
@@ -874,8 +878,12 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result =
-            PostgresPersistence::op_update_instance_checkpoint(&pool, &instance_id.to_string(), "checkpoint-1").await;
+        let result = PostgresPersistence::op_update_instance_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "checkpoint-1",
+        )
+        .await;
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
@@ -898,8 +906,13 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let output_data = b"success output";
-        let result =
-            PostgresPersistence::op_complete_instance(&pool, &instance_id.to_string(), Some(output_data), None).await;
+        let result = PostgresPersistence::op_complete_instance(
+            &pool,
+            &instance_id.to_string(),
+            Some(output_data),
+            None,
+        )
+        .await;
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
@@ -923,8 +936,13 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result =
-            PostgresPersistence::op_complete_instance(&pool, &instance_id.to_string(), None, Some("test error")).await;
+        let result = PostgresPersistence::op_complete_instance(
+            &pool,
+            &instance_id.to_string(),
+            None,
+            Some("test error"),
+        )
+        .await;
         assert!(result.is_ok());
 
         let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
@@ -949,12 +967,15 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let state = b"test state data";
-        let result = PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state).await;
+        let result =
+            PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state)
+                .await;
         assert!(result.is_ok());
 
-        let checkpoint = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
-            .await
-            .unwrap();
+        let checkpoint =
+            PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+                .await
+                .unwrap();
         assert!(checkpoint.is_some());
         assert_eq!(checkpoint.unwrap().state, state.to_vec());
 
@@ -972,19 +993,30 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         // Save first checkpoint
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
-            .await
-            .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-1",
+            b"state-1",
+        )
+        .await
+        .unwrap();
 
         // Save again with same ID (should update)
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-2")
-            .await
-            .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-1",
+            b"state-2",
+        )
+        .await
+        .unwrap();
 
-        let checkpoint = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
-            .await
-            .unwrap()
-            .unwrap();
+        let checkpoint =
+            PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(checkpoint.state, b"state-2".to_vec());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1000,12 +1032,22 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
-            .await
-            .unwrap();
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
-            .await
-            .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-1",
+            b"state-1",
+        )
+        .await
+        .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-2",
+            b"state-2",
+        )
+        .await
+        .unwrap();
 
         let cp1 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
@@ -1032,18 +1074,33 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
-            .await
-            .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-1",
+            b"state-1",
+        )
+        .await
+        .unwrap();
         // Small delay to ensure different timestamps
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
-            .await
-            .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-2",
+            b"state-2",
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-3", b"state-3")
-            .await
-            .unwrap();
+        PostgresPersistence::op_save_checkpoint(
+            &pool,
+            &instance_id.to_string(),
+            "cp-3",
+            b"state-3",
+        )
+        .await
+        .unwrap();
 
         let latest = load_latest_checkpoint(&pool, &instance_id.to_string())
             .await
@@ -1065,9 +1122,10 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
-            .await
-            .unwrap();
+        let result =
+            PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
+                .await
+                .unwrap();
         assert!(result.is_none());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1217,17 +1275,25 @@ mod tests {
             .unwrap();
 
         // First take should retrieve and delete
-        let signal = PostgresPersistence::op_take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
-            .await
-            .unwrap()
-            .expect("custom signal should exist");
+        let signal = PostgresPersistence::op_take_pending_custom_signal(
+            &pool,
+            &instance_id.to_string(),
+            "wait-1",
+        )
+        .await
+        .unwrap()
+        .expect("custom signal should exist");
         assert_eq!(signal.checkpoint_id, "wait-1");
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
         // Second take should return none
-        let signal = PostgresPersistence::op_take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
-            .await
-            .unwrap();
+        let signal = PostgresPersistence::op_take_pending_custom_signal(
+            &pool,
+            &instance_id.to_string(),
+            "wait-1",
+        )
+        .await
+        .unwrap();
         assert!(signal.is_none());
 
         cleanup_test_instance(&pool, instance_id).await;
@@ -1263,7 +1329,9 @@ mod tests {
         .await
         .unwrap();
 
-        let count = PostgresPersistence::op_count_active_instances(&pool).await.unwrap();
+        let count = PostgresPersistence::op_count_active_instances(&pool)
+            .await
+            .unwrap();
         assert!(count >= 2); // At least our 2 test instances
 
         cleanup_test_instance(&pool, instance1).await;
