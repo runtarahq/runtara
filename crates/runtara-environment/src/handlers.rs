@@ -7,6 +7,7 @@
 use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -18,6 +19,42 @@ use crate::error::Result;
 use crate::image_registry::{ImageBuilder, ImageRegistry, RunnerType};
 use crate::runner::oci::create_bundle_at_path;
 use crate::runner::{LaunchOptions, Runner, RunnerHandle};
+
+/// Shared drain state for the environment runtime.
+///
+/// When `is_draining()` returns true:
+/// - `spawn_container_monitor` exits its poll loop early.
+/// - The crash branch of `spawn_container_monitor` writes `status=suspended +
+///   termination_reason="shutdown_requested"` instead of `failed + crashed`,
+///   because an in-flight instance dying during drain is a graceful outcome.
+/// - `HeartbeatMonitor` pauses scanning so it doesn't mark an in-progress
+///   instance as failed while we're waiting for it to checkpoint.
+#[derive(Debug, Default, Clone)]
+pub struct DrainController {
+    inner: Arc<DrainInner>,
+}
+
+#[derive(Debug, Default)]
+struct DrainInner {
+    flag: AtomicBool,
+}
+
+impl DrainController {
+    /// Create a new drain controller in the not-draining state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mark draining as active. Idempotent.
+    pub fn set(&self) {
+        self.inner.flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns `true` if drain has been requested.
+    pub fn is_draining(&self) -> bool {
+        self.inner.flag.load(Ordering::SeqCst)
+    }
+}
 
 /// Convert a path to absolute if it's relative.
 ///
@@ -55,6 +92,8 @@ pub struct EnvironmentHandlerState {
     pub data_dir: PathBuf,
     /// Request timeout for database operations.
     pub request_timeout: Duration,
+    /// Drain signal observed by container monitors and workers.
+    pub drain: DrainController,
 }
 
 /// Default request timeout for database operations (30 seconds).
@@ -86,12 +125,19 @@ impl EnvironmentHandlerState {
             core_addr,
             data_dir: ensure_absolute_path(data_dir),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            drain: DrainController::new(),
         }
     }
 
     /// Set the request timeout for database operations.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    /// Attach an externally-managed drain controller.
+    pub fn with_drain(mut self, drain: DrainController) -> Self {
+        self.drain = drain;
         self
     }
 
@@ -571,6 +617,7 @@ pub async fn handle_start_instance(
                 state.persistence.clone(),
                 timeout,
                 pid,
+                state.drain.clone(),
             );
 
             Ok(StartInstanceResponse {
@@ -916,6 +963,7 @@ pub async fn handle_resume_instance(
                 state.persistence.clone(),
                 options.timeout,
                 pid,
+                state.drain.clone(),
             );
 
             Ok(ResumeInstanceResponse {
@@ -967,6 +1015,7 @@ pub fn spawn_container_monitor(
     persistence: Arc<dyn Persistence>,
     timeout: Duration,
     pid: Option<i32>,
+    drain: DrainController,
 ) {
     let instance_id = handle.instance_id.clone();
 
@@ -1142,15 +1191,29 @@ pub fn spawn_container_monitor(
                             );
                         }
                         _ => {
-                            // Status is still "running" or instance not found — process crashed
+                            // Process died without a terminal SDK event. If the environment
+                            // is draining, this is the expected force-kill path — mark the
+                            // instance as `suspended + shutdown_requested` so restart-time
+                            // heartbeat-monitor recovery treats it as a normal suspension
+                            // rather than a crash.
+                            let (status, termination_reason, error_msg) = if drain.is_draining() {
+                                (
+                                    "suspended",
+                                    "shutdown_requested",
+                                    "Process terminated during graceful shutdown",
+                                )
+                            } else {
+                                ("failed", "crashed", "Process terminated without SDK event")
+                            };
+
                             match persistence
                                 .complete_instance_with_termination_if_running(
                                     &instance_id,
-                                    "failed",
-                                    Some("crashed"),
+                                    status,
+                                    Some(termination_reason),
                                     None,
                                     None,
-                                    Some("Process terminated without SDK event"),
+                                    Some(error_msg),
                                     stderr.as_deref(),
                                     None,
                                 )
@@ -1158,11 +1221,19 @@ pub fn spawn_container_monitor(
                             {
                                 Ok(applied) => {
                                     if applied {
-                                        warn!(
-                                            instance_id = %instance_id,
-                                            pid = ?pid,
-                                            "Process terminated without SDK event - marked as crashed"
-                                        );
+                                        if drain.is_draining() {
+                                            info!(
+                                                instance_id = %instance_id,
+                                                pid = ?pid,
+                                                "Process terminated during drain - suspended for shutdown"
+                                            );
+                                        } else {
+                                            warn!(
+                                                instance_id = %instance_id,
+                                                pid = ?pid,
+                                                "Process terminated without SDK event - marked as crashed"
+                                            );
+                                        }
                                     } else {
                                         info!(
                                             instance_id = %instance_id,
@@ -1174,7 +1245,7 @@ pub fn spawn_container_monitor(
                                     error!(
                                         instance_id = %instance_id,
                                         error = %e,
-                                        "Failed to mark instance as crashed"
+                                        "Failed to mark instance terminal state"
                                     );
                                 }
                             }

@@ -73,6 +73,9 @@ pub enum SignalType {
     Pause,
     /// Resume paused execution.
     Resume,
+    /// Server draining: suspend at next checkpoint so the instance can be
+    /// resumed after restart.
+    Shutdown,
 }
 
 impl From<SignalType> for i32 {
@@ -81,6 +84,7 @@ impl From<SignalType> for i32 {
             SignalType::Cancel => 0,
             SignalType::Pause => 1,
             SignalType::Resume => 2,
+            SignalType::Shutdown => 3,
         }
     }
 }

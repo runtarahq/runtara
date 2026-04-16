@@ -18,6 +18,12 @@
 
 use runtara_dsl::{ExecutionGraph, Step};
 use runtara_workflows::compile::{CompilationInput, compile_scenario};
+
+// Force-link agent crate so inventory can discover capability metadata at
+// validation time. Without this, the validator reports "Available
+// capabilities: (none)" for every agent step.
+#[allow(unused_imports)]
+use runtara_agents as _;
 use runtara_workflows::validation::validate_workflow;
 use std::collections::HashMap;
 use std::fs;

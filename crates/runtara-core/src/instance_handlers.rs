@@ -4,6 +4,7 @@
 //!
 //! These handlers process requests from instances (registration, checkpoints, events, signals, etc.)
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -23,6 +24,11 @@ pub enum SignalType {
     SignalPause = 1,
     /// Resume paused execution.
     SignalResume = 2,
+    /// Server draining: suspend at next checkpoint so the instance can be
+    /// resumed after restart. Behaves like a cancel from the SDK's perspective
+    /// but transitions the instance to `suspended + termination_reason="shutdown_requested"`
+    /// rather than `cancelled`.
+    SignalShutdown = 3,
 }
 
 impl From<SignalType> for i32 {
@@ -290,6 +296,7 @@ impl SignalAck {
             0 => SignalType::SignalCancel,
             1 => SignalType::SignalPause,
             2 => SignalType::SignalResume,
+            3 => SignalType::SignalShutdown,
             _ => SignalType::SignalCancel,
         }
     }
@@ -362,18 +369,60 @@ pub struct RetryAttemptEvent {
 use crate::error::CoreError;
 use crate::persistence::{EventRecord, Persistence};
 
+/// Error string returned by `handle_register_instance` when the core is
+/// draining. The HTTP layer maps this to `503 Service Unavailable`.
+pub const ERROR_SERVER_DRAINING: &str = "server draining";
+
+/// Error string returned by `handle_register_instance` when the active-instance
+/// count has reached `RUNTARA_MAX_CONCURRENT_INSTANCES`. The HTTP layer maps
+/// this to `429 Too Many Requests`.
+pub const ERROR_MAX_CONCURRENT_INSTANCES: &str = "max concurrent instances reached";
+
 /// Shared state for instance handlers.
 ///
 /// Contains the persistence implementation shared across all handlers.
 pub struct InstanceHandlerState {
     /// Persistence implementation.
     pub persistence: Arc<dyn Persistence>,
+    /// Max concurrent instances allowed (enforced at register time).
+    /// 0 disables the check.
+    pub max_concurrent_instances: u32,
+    /// When set, new-instance registration is refused with
+    /// `ERROR_SERVER_DRAINING`. In-flight handlers (checkpoint, event, signal
+    /// ack) continue to serve so running instances can suspend cleanly.
+    pub draining: Arc<AtomicBool>,
 }
 
 impl InstanceHandlerState {
     /// Create a new instance handler state with the given persistence backend.
+    ///
+    /// Uses a disabled concurrency cap (0) — prefer `with_limits` for production.
     pub fn new(persistence: Arc<dyn Persistence>) -> Self {
-        Self { persistence }
+        Self {
+            persistence,
+            max_concurrent_instances: 0,
+            draining: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Create a new instance handler state with a concurrency cap.
+    pub fn with_limits(persistence: Arc<dyn Persistence>, max_concurrent_instances: u32) -> Self {
+        Self {
+            persistence,
+            max_concurrent_instances,
+            draining: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Handle to the draining flag so external coordinators (server, environment)
+    /// can request drain.
+    pub fn draining_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.draining)
+    }
+
+    /// Returns `true` when registration of NEW instances is being refused.
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::SeqCst)
     }
 }
 
@@ -418,7 +467,24 @@ pub async fn handle_register_instance(
         });
     }
 
-    // 3. If checkpoint_id provided, verify it exists
+    // 3. Refuse new registrations when the core is draining. Existing instances
+    //    (which already have a row in persistence) can still resume.
+    let instance_exists = state
+        .persistence
+        .get_instance(&request.instance_id)
+        .await
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+
+    if !instance_exists && state.is_draining() {
+        info!("Refusing registration: server draining");
+        return Ok(RegisterInstanceResponse {
+            success: false,
+            error: ERROR_SERVER_DRAINING.to_string(),
+        });
+    }
+
+    // 4. If checkpoint_id provided, verify it exists
     if let Some(ref cp_id) = request.checkpoint_id {
         let checkpoint = state
             .persistence
@@ -443,13 +509,27 @@ pub async fn handle_register_instance(
         }
     }
 
-    // 4. Check if instance exists, create if not (self-registration)
-    let instance_exists = state
-        .persistence
-        .get_instance(&request.instance_id)
-        .await
-        .map(|opt| opt.is_some())
-        .unwrap_or(false);
+    // 5. Enforce RUNTARA_MAX_CONCURRENT_INSTANCES for fresh registrations.
+    //    Resumes are allowed past the cap (they already consumed a slot).
+    if !instance_exists && state.max_concurrent_instances > 0 {
+        match state.persistence.count_active_instances().await {
+            Ok(active) if active >= state.max_concurrent_instances as i64 => {
+                warn!(
+                    active,
+                    limit = state.max_concurrent_instances,
+                    "Refusing registration: max concurrent instances reached"
+                );
+                return Ok(RegisterInstanceResponse {
+                    success: false,
+                    error: ERROR_MAX_CONCURRENT_INSTANCES.to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "Failed to count active instances; allowing registration");
+            }
+        }
+    }
 
     if !instance_exists {
         // Self-registration: create instance record
@@ -642,6 +722,7 @@ async fn get_pending_signal(persistence: &dyn Persistence, instance_id: &str) ->
                 "cancel" => SignalType::SignalCancel,
                 "pause" => SignalType::SignalPause,
                 "resume" => SignalType::SignalResume,
+                "shutdown" => SignalType::SignalShutdown,
                 _ => return None,
             };
             Some(Signal {
@@ -1044,6 +1125,7 @@ pub async fn handle_poll_signals(
             "cancel" => SignalType::SignalCancel,
             "pause" => SignalType::SignalPause,
             "resume" => SignalType::SignalResume,
+            "shutdown" => SignalType::SignalShutdown,
             _ => {
                 warn!(signal_type = %sig.signal_type, "Unknown signal type");
                 SignalType::SignalCancel
@@ -1123,6 +1205,25 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
             SignalType::SignalResume => {
                 // Instance should resume execution
                 debug!("Resume signal acknowledged");
+            }
+            SignalType::SignalShutdown => {
+                // Suspend with termination_reason so the instance can be resumed
+                // after restart. Retain "suspended" status so heartbeat-monitor
+                // recovery treats it as a normal suspension.
+                state
+                    .persistence
+                    .complete_instance_with_termination(
+                        &ack.instance_id,
+                        "suspended",
+                        Some("shutdown_requested"),
+                        None, // exit_code
+                        None, // output
+                        None, // error
+                        None, // stderr
+                        None, // checkpoint_id (preserved by persistence impl)
+                    )
+                    .await?;
+                info!("Instance suspended for shutdown");
             }
         }
     } else {
@@ -1216,6 +1317,7 @@ pub fn map_signal_type(signal_type: SignalType) -> &'static str {
         SignalType::SignalCancel => "cancel",
         SignalType::SignalPause => "pause",
         SignalType::SignalResume => "resume",
+        SignalType::SignalShutdown => "shutdown",
     }
 }
 
@@ -1269,6 +1371,7 @@ mod tests {
         custom_signals: Mutex<HashMap<(String, String), CustomSignalRecord>>,
         fail_register: Mutex<bool>,
         fail_status_update: Mutex<bool>,
+        active_instance_count: Mutex<Option<i64>>,
     }
 
     impl MockPersistence {
@@ -1281,7 +1384,14 @@ mod tests {
                 custom_signals: Mutex::new(HashMap::new()),
                 fail_register: Mutex::new(false),
                 fail_status_update: Mutex::new(false),
+                active_instance_count: Mutex::new(None),
             }
+        }
+
+        /// Override the value returned by `count_active_instances` (default: 0).
+        fn with_active_count(self, count: i64) -> Self {
+            *self.active_instance_count.lock().unwrap() = Some(count);
+            self
         }
 
         fn with_instance(self, instance: InstanceRecord) -> Self {
@@ -1669,7 +1779,7 @@ mod tests {
         }
 
         async fn count_active_instances(&self) -> std::result::Result<i64, CoreError> {
-            Ok(0)
+            Ok(self.active_instance_count.lock().unwrap().unwrap_or(0))
         }
 
         async fn set_instance_sleep(
@@ -1769,6 +1879,7 @@ mod tests {
         assert_eq!(map_signal_type(SignalType::SignalCancel), "cancel");
         assert_eq!(map_signal_type(SignalType::SignalPause), "pause");
         assert_eq!(map_signal_type(SignalType::SignalResume), "resume");
+        assert_eq!(map_signal_type(SignalType::SignalShutdown), "shutdown");
     }
 
     #[test]
@@ -2134,6 +2245,105 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_signal_ack_shutdown_persists_suspended() {
+        let persistence = Arc::new(
+            MockPersistence::new()
+                .with_instance(make_instance("inst-1", "tenant-1", "running"))
+                .with_signal(make_signal("inst-1", "shutdown")),
+        );
+        let state = InstanceHandlerState::new(persistence.clone());
+
+        let ack = SignalAck {
+            instance_id: "inst-1".to_string(),
+            signal_type: SignalType::SignalShutdown as i32,
+            acknowledged: true,
+        };
+
+        handle_signal_ack(&state, ack).await.unwrap();
+
+        // Instance should be suspended with termination_reason=shutdown_requested,
+        // NOT cancelled or failed.
+        let inst = persistence
+            .get_instance("inst-1")
+            .await
+            .unwrap()
+            .expect("instance still present");
+        assert_eq!(inst.status, "suspended");
+        assert_eq!(
+            inst.termination_reason.as_deref(),
+            Some("shutdown_requested")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_rejected_when_draining() {
+        let persistence = Arc::new(MockPersistence::new());
+        let state = InstanceHandlerState::new(persistence);
+        state.draining.store(true, Ordering::SeqCst);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "new-inst".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let resp = handle_register_instance(&state, request).await.unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.error, ERROR_SERVER_DRAINING);
+    }
+
+    #[tokio::test]
+    async fn test_register_existing_instance_allowed_during_drain() {
+        // Existing (resuming) instances must still be able to register — we only
+        // want to keep out fresh work.
+        let persistence = Arc::new(
+            MockPersistence::new().with_instance(make_instance("inst-1", "tenant-1", "running")),
+        );
+        let state = InstanceHandlerState::new(persistence);
+        state.draining.store(true, Ordering::SeqCst);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "inst-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let resp = handle_register_instance(&state, request).await.unwrap();
+        assert!(resp.success, "drain should not block resuming instances");
+    }
+
+    #[tokio::test]
+    async fn test_register_rejected_when_max_concurrent_reached() {
+        let persistence = Arc::new(MockPersistence::new().with_active_count(32));
+        let state = InstanceHandlerState::with_limits(persistence, 32);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "new-inst".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let resp = handle_register_instance(&state, request).await.unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.error, ERROR_MAX_CONCURRENT_INSTANCES);
+    }
+
+    #[tokio::test]
+    async fn test_register_under_cap_allowed() {
+        let persistence = Arc::new(MockPersistence::new().with_active_count(5));
+        let state = InstanceHandlerState::with_limits(persistence, 32);
+
+        let request = RegisterInstanceRequest {
+            instance_id: "new-inst".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            checkpoint_id: None,
+        };
+
+        let resp = handle_register_instance(&state, request).await.unwrap();
+        assert!(resp.success);
     }
 
     // ========================================================================

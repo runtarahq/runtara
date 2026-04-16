@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
+use crate::shutdown::ShutdownSignal;
 use crate::types::CancellationHandle;
 use crate::valkey::ValkeyConfig;
 use crate::valkey::client::ValkeyClient;
@@ -77,13 +78,14 @@ impl Default for TriggerWorkerConfig {
 
 /// Background worker that consumes trigger events from Valkey streams
 /// and executes scenarios using the ExecutionEngine.
-#[instrument(skip(pool, running_executions, runtime_client, valkey_config))]
+#[instrument(skip(pool, running_executions, runtime_client, valkey_config, shutdown))]
 pub async fn run(
     pool: PgPool,
     running_executions: Arc<DashMap<Uuid, CancellationHandle>>,
     runtime_client: Option<Arc<RuntimeClient>>,
     valkey_config: ValkeyConfig,
     worker_config: TriggerWorkerConfig,
+    shutdown: ShutdownSignal,
 ) {
     let worker_id = format!("trigger-worker-{}", Uuid::new_v4());
     let tenant_id = worker_config.tenant_id.clone();
@@ -143,6 +145,11 @@ pub async fn run(
     // 1. Process pending events (retries) using XAUTOCLAIM
     // 2. Process new events using XREADGROUP
     loop {
+        if shutdown.is_shutting_down() {
+            info!(worker_id = %worker_id, "Trigger worker exiting on shutdown signal");
+            return;
+        }
+
         // PHASE 1: Process pending events (retries)
         // These are events that weren't ACKed (e.g., NotCompiled errors)
         match consumer

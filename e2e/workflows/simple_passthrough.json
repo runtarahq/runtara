@@ -16,6 +16,11 @@
   "entryPoint": "finish",
   "executionPlan": [],
   "variables": {},
-  "inputSchema": {},
+  "inputSchema": {
+    "input": {
+      "type": "object",
+      "description": "Passthrough input data"
+    }
+  },
   "outputSchema": {}
 }

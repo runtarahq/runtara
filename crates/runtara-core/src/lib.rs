@@ -132,7 +132,9 @@
 //! |----------|----------|---------|-------------|
 //! | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
 //! | `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
-//! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances |
+//! | `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Max concurrent instances. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests`. Resumes are not counted. Set to `0` to disable. |
+//! | `RUNTARA_SHUTDOWN_GRACE_MS` | No | `60000` | On SIGTERM/SIGINT, how long to wait for running instances to reach a checkpoint before force-stopping. |
+//! | `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` | No | `5000` | On SIGTERM/SIGINT, how long to wait for intake workers to finish their current unit of work. |
 //!
 //! # Modules
 //!

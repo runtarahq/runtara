@@ -95,14 +95,43 @@ async fn main() -> anyhow::Result<()> {
         "Runtara server ready (Environment + embedded Core)"
     );
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    // Wait for shutdown signal (SIGINT or SIGTERM)
+    wait_for_shutdown_signal().await?;
     info!("Shutdown signal received");
 
-    // Graceful shutdown
+    // Checkpoint-aware drain before taking the HTTP server down.
+    let shutdown_grace = parse_shutdown_grace();
+    runtime.drain(shutdown_grace).await?;
     runtime.shutdown().await?;
 
     info!("Runtara Environment shut down");
 
     Ok(())
+}
+
+/// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; on non-Unix fall back
+/// to SIGINT only.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r.map_err(Into::into),
+        _ = sigterm.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    tokio::signal::ctrl_c().await.map_err(Into::into)
+}
+
+fn parse_shutdown_grace() -> std::time::Duration {
+    const DEFAULT_MS: u64 = 60_000;
+    let ms = std::env::var("RUNTARA_SHUTDOWN_GRACE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MS);
+    std::time::Duration::from_millis(ms)
 }

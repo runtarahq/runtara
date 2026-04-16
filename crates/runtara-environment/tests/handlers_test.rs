@@ -10,10 +10,11 @@ use chrono::Utc;
 use runtara_core::persistence::{Persistence, PostgresPersistence};
 use runtara_environment::db;
 use runtara_environment::handlers::{
-    EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest, ResumeInstanceRequest,
-    StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest, handle_get_capability,
-    handle_health_check, handle_list_agents, handle_register_image, handle_resume_instance,
-    handle_start_instance, handle_stop_instance, handle_test_capability, spawn_container_monitor,
+    DrainController, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
+    ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
+    handle_get_capability, handle_health_check, handle_list_agents, handle_register_image,
+    handle_resume_instance, handle_start_instance, handle_stop_instance, handle_test_capability,
+    spawn_container_monitor,
 };
 use runtara_environment::image_registry::{ImageRegistry, RunnerType};
 use runtara_environment::runner::MockRunner;
@@ -1298,6 +1299,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         persistence.clone(),
         Duration::from_millis(100),
         None, // No PID for test
+        DrainController::new(),
     );
 
     // Wait for the timeout to trigger (100ms timeout + some buffer for processing)
@@ -1391,6 +1393,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
         persistence.clone(),
         Duration::from_secs(10),
         None, // No PID for test
+        DrainController::new(),
     );
 
     // Wait for the container to complete (10ms delay + buffer)
@@ -1484,6 +1487,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
         persistence.clone(),
         Duration::from_millis(200),
         None, // No PID for test
+        DrainController::new(),
     );
 
     // Simulate Core marking instance as "completed" BEFORE timeout fires

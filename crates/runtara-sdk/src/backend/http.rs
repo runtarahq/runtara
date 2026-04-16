@@ -340,6 +340,7 @@ fn parse_signal_type(s: &str) -> SignalType {
         "cancel" => SignalType::Cancel,
         "pause" => SignalType::Pause,
         "resume" => SignalType::Resume,
+        "shutdown" => SignalType::Shutdown,
         _ => SignalType::Cancel, // safe default
     }
 }
@@ -349,6 +350,7 @@ fn signal_type_str(st: &SignalType) -> &'static str {
         SignalType::Cancel => "cancel",
         SignalType::Pause => "pause",
         SignalType::Resume => "resume",
+        SignalType::Shutdown => "shutdown",
     }
 }
 

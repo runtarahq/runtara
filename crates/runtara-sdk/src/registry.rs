@@ -232,6 +232,42 @@ pub fn acknowledge_pause() {
     }
 }
 
+/// Acknowledge a shutdown signal to runtara-core.
+///
+/// The server has asked this instance to suspend at the next checkpoint
+/// boundary so it can be resumed after restart. This function:
+///
+/// 1. Flips the local cancellation flag so `is_cancelled()` / `with_cancellation()`
+///    short-circuit any in-flight cooperative work.
+/// 2. Sends a `Shutdown` signal ack to core, which transitions the instance
+///    to `suspended` with `termination_reason = "shutdown_requested"`.
+///
+/// # Example
+///
+/// ```ignore
+/// if checkpoint_result.should_suspend_on_shutdown() {
+///     acknowledge_shutdown();
+///     sdk.suspended()?;
+///     return Ok(());
+/// }
+/// ```
+pub fn acknowledge_shutdown() {
+    use crate::types::SignalType;
+
+    // Flip the local flag so any remaining cooperative work exits.
+    trigger_cancellation();
+
+    if let Some(sdk_mutex) = SDK_INSTANCE.get() {
+        match sdk_mutex.lock() {
+            Ok(sdk_guard) => match sdk_guard.acknowledge_signal(SignalType::Shutdown) {
+                Ok(()) => info!("Shutdown acknowledged to core"),
+                Err(e) => warn!(error = %e, "Failed to acknowledge shutdown signal"),
+            },
+            Err(e) => warn!(error = %e, "Failed to lock SDK for shutdown acknowledgment"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Note: These tests can't run in parallel due to global state.

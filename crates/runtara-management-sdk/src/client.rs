@@ -1014,6 +1014,7 @@ impl ManagementSdk {
         let signal_str = match signal_type {
             SignalType::Cancel => "cancel",
             SignalType::Pause => "pause",
+            SignalType::Shutdown => "shutdown",
             SignalType::Resume => unreachable!(),
         };
 
@@ -1064,6 +1065,14 @@ impl ManagementSdk {
     /// Send a pause signal to an instance.
     pub async fn pause_instance(&self, instance_id: &str) -> Result<()> {
         self.send_signal(instance_id, SignalType::Pause, None).await
+    }
+
+    /// Send a shutdown signal to an instance. The SDK is expected to suspend
+    /// at the next checkpoint boundary so the instance can be resumed after
+    /// server restart.
+    pub async fn shutdown_instance(&self, instance_id: &str) -> Result<()> {
+        self.send_signal(instance_id, SignalType::Shutdown, None)
+            .await
     }
 
     /// Send a custom signal to a specific checkpoint/signal ID.

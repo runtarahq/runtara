@@ -87,7 +87,7 @@ use tracing::{debug, error, info, warn};
 use crate::cleanup_worker::{CleanupWorker, CleanupWorkerConfig};
 use crate::container_registry::ContainerRegistry;
 use crate::db_cleanup_worker::{DbCleanupWorker, DbCleanupWorkerConfig};
-use crate::handlers::EnvironmentHandlerState;
+use crate::handlers::{DrainController, EnvironmentHandlerState};
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
 use crate::runner::Runner;
@@ -355,6 +355,10 @@ impl EnvironmentRuntimeConfig {
             None
         };
 
+        // Create shared drain controller so workers and the container monitor
+        // all observe the same state.
+        let drain = DrainController::new();
+
         // Create handler state
         let state = Arc::new(
             EnvironmentHandlerState::new(
@@ -364,7 +368,8 @@ impl EnvironmentRuntimeConfig {
                 self.core_addr.clone(),
                 self.data_dir.clone(),
             )
-            .with_request_timeout(self.request_timeout),
+            .with_request_timeout(self.request_timeout)
+            .with_drain(drain.clone()),
         );
 
         // Recover orphaned containers from previous Environment run
@@ -386,7 +391,8 @@ impl EnvironmentRuntimeConfig {
             self.persistence.clone(),
             self.runner.clone(),
             wake_config,
-        );
+        )
+        .with_drain(drain.clone());
 
         let wake_shutdown = wake_scheduler.shutdown_handle();
 
@@ -418,7 +424,8 @@ impl EnvironmentRuntimeConfig {
             self.persistence.clone(),
             self.runner.clone(),
             heartbeat_config,
-        );
+        )
+        .with_drain(drain.clone());
         let heartbeat_shutdown = heartbeat_monitor.shutdown_handle();
 
         let heartbeat_handle = tokio::spawn(async move {
@@ -477,6 +484,7 @@ impl EnvironmentRuntimeConfig {
             image_cleanup_shutdown,
             state,
             bind_addr,
+            drain,
         })
     }
 }
@@ -508,6 +516,7 @@ pub struct EnvironmentRuntime {
     image_cleanup_shutdown: Arc<Notify>,
     state: Arc<EnvironmentHandlerState>,
     bind_addr: SocketAddr,
+    drain: DrainController,
 }
 
 impl EnvironmentRuntime {
@@ -524,6 +533,178 @@ impl EnvironmentRuntime {
     /// Get a reference to the shared handler state.
     pub fn state(&self) -> &Arc<EnvironmentHandlerState> {
         &self.state
+    }
+
+    /// Handle to the drain controller so external coordinators (e.g. the
+    /// server's shutdown coordinator) can flip it.
+    pub fn drain_handle(&self) -> DrainController {
+        self.drain.clone()
+    }
+
+    /// Graceful drain of active runners.
+    ///
+    /// Flips the drain flag (pausing heartbeat scans and steering the
+    /// container monitor's crash branch), writes a `"shutdown"` signal to
+    /// every active instance so its SDK suspends at the next checkpoint,
+    /// then polls up to `grace` for each one to reach a terminal status.
+    /// Any stragglers are force-stopped via `Runner::stop()` and persisted
+    /// as `suspended + shutdown_requested` — the restart-time heartbeat
+    /// monitor then resumes them from their last checkpoint.
+    ///
+    /// Returns when all tracked instances are terminal or the grace period
+    /// expires, whichever comes first. Safe to call multiple times.
+    pub async fn drain(&self, grace: Duration) -> Result<()> {
+        self.drain.set();
+        info!(grace_secs = grace.as_secs(), "EnvironmentRuntime draining");
+
+        if let Some(core) = self.core_runtime.as_ref() {
+            core.set_draining();
+        }
+
+        let container_registry = ContainerRegistry::new(self.state.pool.clone());
+        let active = match container_registry.list_all_registered().await {
+            Ok(list) => list,
+            Err(e) => {
+                warn!(error = %e, "Failed to list active containers; aborting drain");
+                return Ok(());
+            }
+        };
+
+        if active.is_empty() {
+            info!("No active instances to drain");
+            return Ok(());
+        }
+
+        info!(active_count = active.len(), "Signalling active instances");
+
+        // Write signal + cancellation token for every active instance.
+        for info in &active {
+            if let Err(e) = self
+                .state
+                .persistence
+                .insert_signal(&info.instance_id, "shutdown", &[])
+                .await
+            {
+                warn!(
+                    instance_id = %info.instance_id,
+                    error = %e,
+                    "Failed to insert shutdown signal"
+                );
+            }
+            if let Err(e) = container_registry
+                .request_cancellation(&info.instance_id, grace, "shutdown_requested")
+                .await
+            {
+                warn!(
+                    instance_id = %info.instance_id,
+                    error = %e,
+                    "Failed to write cancellation token"
+                );
+            }
+        }
+
+        // Poll for terminal states.
+        let deadline = tokio::time::Instant::now() + grace;
+        let poll_interval = Duration::from_millis(500);
+        let mut remaining = active.clone();
+        while !remaining.is_empty() && tokio::time::Instant::now() < deadline {
+            remaining = self
+                .filter_non_terminal(&self.state.persistence, remaining)
+                .await;
+            if remaining.is_empty() {
+                break;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        if remaining.is_empty() {
+            info!("All instances drained gracefully");
+            return Ok(());
+        }
+
+        warn!(
+            stragglers = remaining.len(),
+            "Grace period expired; force-stopping remaining instances"
+        );
+
+        for info in remaining {
+            let handle = crate::runner::RunnerHandle {
+                handle_id: info.container_id.clone(),
+                instance_id: info.instance_id.clone(),
+                tenant_id: info.tenant_id.clone(),
+                started_at: info.started_at,
+                spawned_pid: info.pid.map(|p| p as u32),
+                child: None,
+            };
+            if let Err(e) = self.state.runner.stop(&handle).await {
+                warn!(
+                    instance_id = %info.instance_id,
+                    error = %e,
+                    "Runner::stop() failed during drain"
+                );
+            }
+            if let Err(e) = self
+                .state
+                .persistence
+                .complete_instance_with_termination_if_running(
+                    &info.instance_id,
+                    "suspended",
+                    Some("shutdown_requested"),
+                    None, // exit_code
+                    None, // output
+                    Some("Force-stopped after grace period expired during shutdown"),
+                    None, // stderr
+                    None, // checkpoint_id
+                )
+                .await
+            {
+                warn!(
+                    instance_id = %info.instance_id,
+                    error = %e,
+                    "Failed to persist suspended-on-shutdown state"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn filter_non_terminal(
+        &self,
+        persistence: &Arc<dyn Persistence>,
+        candidates: Vec<crate::container_registry::ContainerInfo>,
+    ) -> Vec<crate::container_registry::ContainerInfo> {
+        let mut still_active = Vec::with_capacity(candidates.len());
+        for info in candidates {
+            match persistence.get_instance(&info.instance_id).await {
+                Ok(Some(inst))
+                    if matches!(
+                        inst.status.as_str(),
+                        "suspended" | "completed" | "failed" | "cancelled"
+                    ) =>
+                {
+                    debug!(
+                        instance_id = %info.instance_id,
+                        status = %inst.status,
+                        "Instance drained"
+                    );
+                }
+                Ok(Some(_)) => still_active.push(info),
+                Ok(None) => {
+                    // Instance row is gone — treat as drained.
+                    debug!(instance_id = %info.instance_id, "Instance row missing; treating as drained");
+                }
+                Err(e) => {
+                    warn!(
+                        instance_id = %info.instance_id,
+                        error = %e,
+                        "Failed to read instance status during drain; keeping in queue"
+                    );
+                    still_active.push(info);
+                }
+            }
+        }
+        still_active
     }
 
     /// Gracefully shut down the runtime.

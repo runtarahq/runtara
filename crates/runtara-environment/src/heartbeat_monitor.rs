@@ -26,6 +26,7 @@ use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
 use crate::container_registry::ContainerRegistry;
+use crate::handlers::DrainController;
 use crate::runner::{Runner, RunnerHandle};
 
 /// Configuration for the heartbeat monitor.
@@ -65,6 +66,7 @@ pub struct HeartbeatMonitor {
     container_registry: ContainerRegistry,
     config: HeartbeatMonitorConfig,
     shutdown: Arc<Notify>,
+    drain: DrainController,
 }
 
 /// Information about a stale container.
@@ -108,7 +110,16 @@ impl HeartbeatMonitor {
             container_registry,
             config,
             shutdown: Arc::new(Notify::new()),
+            drain: DrainController::new(),
         }
+    }
+
+    /// Attach an externally-managed drain controller. While draining, the
+    /// monitor skips stale-instance scans so it doesn't race a graceful
+    /// suspend and mark an in-progress instance as failed.
+    pub fn with_drain(mut self, drain: DrainController) -> Self {
+        self.drain = drain;
+        self
     }
 
     /// Get a handle that can be used to signal shutdown.
@@ -146,6 +157,12 @@ impl HeartbeatMonitor {
                 }
 
                 _ = tokio::time::sleep(self.config.poll_interval) => {
+                    if self.drain.is_draining() {
+                        // During drain, in-progress instances are racing to
+                        // checkpoint; skip scanning to avoid marking them as failed.
+                        debug!("Heartbeat monitor skipping scan during drain");
+                        continue;
+                    }
                     if let Err(e) = self.check_stale_instances().await {
                         error!(error = %e, "Failed to check stale instances");
                     }

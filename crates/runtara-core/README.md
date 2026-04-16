@@ -134,7 +134,9 @@ when their wake time arrives.
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
 | `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
-| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances |
+| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests` with `Retry-After: 30`. Resumes of existing instances are not counted against the cap. Set to `0` to disable the check. |
+| `RUNTARA_SHUTDOWN_GRACE_MS` | No | `60000` | On SIGTERM/SIGINT, how long to wait for running instances to reach a checkpoint and suspend. Stragglers are force-stopped and persisted as `status=suspended, termination_reason=shutdown_requested`, then resumed after restart. |
+| `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` | No | `5000` | On SIGTERM/SIGINT, how long to wait for intake workers (trigger/compilation/cron/cleanup) to finish their current unit of work before being aborted. |
 
 ## Database
 

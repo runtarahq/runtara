@@ -30,6 +30,9 @@ pub enum SignalType {
     Pause,
     /// Resume paused execution
     Resume,
+    /// Server shutdown in progress. Instance should checkpoint and exit
+    /// cleanly (status=suspended), to be resumed after restart.
+    Shutdown,
 }
 
 /// A signal received from runtara-core.
@@ -98,7 +101,17 @@ impl CheckpointResult {
     pub fn should_exit(&self) -> bool {
         matches!(
             self.pending_signal.as_ref().map(|s| s.signal_type),
-            Some(SignalType::Pause) | Some(SignalType::Cancel)
+            Some(SignalType::Pause) | Some(SignalType::Cancel) | Some(SignalType::Shutdown)
+        )
+    }
+
+    /// Check if the instance should suspend at this checkpoint because the
+    /// server is draining. Unlike `should_cancel`, the instance is expected
+    /// to be resumed after restart.
+    pub fn should_suspend_on_shutdown(&self) -> bool {
+        matches!(
+            self.pending_signal.as_ref().map(|s| s.signal_type),
+            Some(SignalType::Shutdown)
         )
     }
 }

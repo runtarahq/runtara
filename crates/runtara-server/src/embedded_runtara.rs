@@ -136,6 +136,21 @@ impl EmbeddedRuntara {
         self.core.is_running() && self.environment.is_running()
     }
 
+    /// Checkpoint-aware drain of active runners. Flips the environment's
+    /// drain flag, signals each in-flight instance to suspend at the next
+    /// checkpoint, and force-stops any that don't reach one within `grace`.
+    /// Safe to call before [`Self::shutdown`].
+    pub async fn drain(
+        &self,
+        grace: std::time::Duration,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.environment
+            .drain(grace)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+        Ok(())
+    }
+
     /// Gracefully shut down both servers.
     pub async fn shutdown(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Shutting down embedded Runtara servers...");
