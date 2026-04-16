@@ -418,12 +418,15 @@ impl RuntaraSdk {
         Ok(())
     }
 
-    /// Check for any actionable signal (cancel or pause) and return appropriate error.
+    /// Check for any actionable signal (cancel, pause, or shutdown) and return
+    /// appropriate error. On `Shutdown`, the caller is expected to suspend at
+    /// the next checkpoint so the instance resumes after server restart.
     pub fn check_signals(&mut self) -> Result<()> {
         if let Some(signal) = self.poll_signal()? {
             match signal.signal_type {
                 SignalType::Cancel => return Err(SdkError::Cancelled),
                 SignalType::Pause => return Err(SdkError::Paused),
+                SignalType::Shutdown => return Err(SdkError::ShuttingDown),
                 SignalType::Resume => {
                     // Resume is informational, cache it but don't error
                     self.pending_signal = Some(signal);

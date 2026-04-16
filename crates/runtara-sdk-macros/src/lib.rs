@@ -267,7 +267,7 @@ fn generate_no_retry_wrapper(
                                 // to prevent deadlock (it needs to acquire the same mutex)
                                 drop(__sdk_guard);
 
-                                // Check for pending pause/cancel signals
+                                // Check for pending pause/cancel/shutdown signals
                                 if checkpoint_result.should_cancel() {
                                     ::tracing::info!(
                                         function = #fn_name_str,
@@ -278,6 +278,15 @@ fn generate_no_retry_wrapper(
                                     ::runtara_sdk::acknowledge_cancellation();
                                     // Return error immediately to stop execution
                                     return Err("Instance cancelled".to_string().into());
+                                } else if checkpoint_result.should_suspend_on_shutdown() {
+                                    ::tracing::info!(
+                                        function = #fn_name_str,
+                                        "Shutdown signal detected - suspending at checkpoint"
+                                    );
+                                    // Ack to core (status -> suspended, termination_reason="shutdown_requested")
+                                    // and flip local cancellation flag so remaining cooperative work exits
+                                    ::runtara_sdk::acknowledge_shutdown();
+                                    return Err("Instance suspended for shutdown".to_string().into());
                                 } else if checkpoint_result.should_pause() {
                                     ::tracing::info!(
                                         function = #fn_name_str,
@@ -523,7 +532,7 @@ fn generate_retry_wrapper(
                                         // to prevent deadlock (it needs to acquire the same mutex)
                                         drop(__sdk_guard);
 
-                                        // Check for pending pause/cancel signals
+                                        // Check for pending pause/cancel/shutdown signals
                                         if checkpoint_result.should_cancel() {
                                             ::tracing::info!(
                                                 function = #fn_name_str,
@@ -534,6 +543,14 @@ fn generate_retry_wrapper(
                                             ::runtara_sdk::acknowledge_cancellation();
                                             // Return error immediately to stop execution
                                             return Err("Instance cancelled".to_string().into());
+                                        } else if checkpoint_result.should_suspend_on_shutdown() {
+                                            ::tracing::info!(
+                                                function = #fn_name_str,
+                                                "Shutdown signal detected - suspending at checkpoint"
+                                            );
+                                            // Ack to core (status -> suspended, termination_reason="shutdown_requested")
+                                            ::runtara_sdk::acknowledge_shutdown();
+                                            return Err("Instance suspended for shutdown".to_string().into());
                                         } else if checkpoint_result.should_pause() {
                                             ::tracing::info!(
                                                 function = #fn_name_str,

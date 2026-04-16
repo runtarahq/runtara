@@ -164,9 +164,10 @@ pub struct SuccessResponse {
 
 fn signal_type_to_string(st: i32) -> String {
     match st {
-        0 => "cancel".to_string(), // SignalCancel
-        1 => "pause".to_string(),  // SignalPause
-        2 => "resume".to_string(), // SignalResume
+        0 => "cancel".to_string(),   // SignalCancel
+        1 => "pause".to_string(),    // SignalPause
+        2 => "resume".to_string(),   // SignalResume
+        3 => "shutdown".to_string(), // SignalShutdown
         _ => format!("unknown({})", st),
     }
 }
@@ -207,14 +208,26 @@ async fn register_handler(
                 })
                 .into_response()
             } else {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(RegisterResponse {
-                        success: false,
-                        error: Some(resp.error),
-                    }),
-                )
-                    .into_response()
+                let status = match resp.error.as_str() {
+                    instance_handlers::ERROR_SERVER_DRAINING => StatusCode::SERVICE_UNAVAILABLE,
+                    instance_handlers::ERROR_MAX_CONCURRENT_INSTANCES => {
+                        StatusCode::TOO_MANY_REQUESTS
+                    }
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                let body = Json(RegisterResponse {
+                    success: false,
+                    error: Some(resp.error),
+                });
+                // Surface Retry-After for the rate-limited/draining cases so SDK
+                // clients can back off sensibly.
+                if status == StatusCode::SERVICE_UNAVAILABLE
+                    || status == StatusCode::TOO_MANY_REQUESTS
+                {
+                    (status, [("Retry-After", "30")], body).into_response()
+                } else {
+                    (status, body).into_response()
+                }
             }
         }
         Err(e) => {
@@ -637,6 +650,7 @@ async fn signal_ack_handler(
         "cancel" => SignalType::SignalCancel as i32,
         "pause" => SignalType::SignalPause as i32,
         "resume" => SignalType::SignalResume as i32,
+        "shutdown" => SignalType::SignalShutdown as i32,
         _ => {
             return (
                 StatusCode::BAD_REQUEST,

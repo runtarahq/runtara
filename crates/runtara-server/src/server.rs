@@ -758,6 +758,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Create running executions map for cancellation support
     let running_executions = Arc::new(DashMap::new());
 
+    // Build the shutdown coordinator. It shares the DashMap of running
+    // executions so SIGTERM/SIGINT can signal each for graceful drain.
+    let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::from_env(
+        running_executions.clone(),
+        runtime_client.clone(),
+    ));
+    let shutdown_signal = shutdown_coordinator.signal();
+
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
 
@@ -813,6 +821,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // NOTE: Trigger worker does NOT compile - it only executes pre-compiled scenarios.
         // Compilation is handled by the compilation worker.
         let trigger_worker_tenant_id = tenant_id.clone();
+        let trigger_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
             let worker_config = workers::trigger_worker::TriggerWorkerConfig {
                 tenant_id: trigger_worker_tenant_id,
@@ -827,6 +836,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 trigger_runtime_client,
                 trigger_worker_config,
                 worker_config,
+                trigger_shutdown,
             )
             .await;
         });
@@ -835,6 +845,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // This worker handles async compilation requests queued by save operations
         let compilation_pool = pool.clone();
         let compilation_runtime_client = runtime_client.clone();
+        let compilation_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
             let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
                 compilation_worker_config.connection_url(),
@@ -844,6 +855,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 compilation_pool,
                 compilation_runtime_client,
                 worker_config,
+                compilation_shutdown,
             )
             .await;
         });
@@ -852,13 +864,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let cron_pool = pool.clone();
         let cron_redis_url = cron_config.connection_url();
         let cron_tenant_id = tenant_id.clone();
+        let cron_shutdown = shutdown_signal.clone();
         tokio::spawn(async move {
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
                 check_interval_secs: 60,
             };
 
-            workers::cron_scheduler::run(cron_pool, cron_redis_url, scheduler_config).await;
+            workers::cron_scheduler::run(
+                cron_pool,
+                cron_redis_url,
+                scheduler_config,
+                cron_shutdown,
+            )
+            .await;
         });
 
         // NOTE: Container monitoring is now handled directly by runtara-environment.
@@ -1729,25 +1748,51 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Run both servers concurrently
-    let public_server = axum::serve(public_listener, public_app);
-    let internal_server = axum::serve(internal_listener, internal_app);
+    // Run both axum servers with graceful shutdown hooks. Each waits on its
+    // own clone of the shutdown signal so neither exits prematurely.
+    let public_shutdown = shutdown_signal.clone();
+    let internal_shutdown = shutdown_signal.clone();
+    let public_server = axum::serve(public_listener, public_app)
+        .with_graceful_shutdown(async move { public_shutdown.wait().await });
+    let internal_server = axum::serve(internal_listener, internal_app)
+        .with_graceful_shutdown(async move { internal_shutdown.wait().await });
 
-    tokio::select! {
-        result = public_server => {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "Public API server error");
-            }
+    // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
+    // concurrently with the servers — exiting is driven by the flag, not by
+    // whichever server happens to error first.
+    let signal_coordinator = shutdown_coordinator.clone();
+    let signal_task = tokio::spawn(async move {
+        if let Err(e) = wait_for_shutdown_signal().await {
+            tracing::error!(error = %e, "Signal handler failed");
         }
-        result = internal_server => {
-            if let Err(e) = result {
-                tracing::error!(error = %e, "Internal API server error");
-            }
-        }
+        tracing::info!("Shutdown signal received");
+        signal_coordinator.request_shutdown();
+    });
+
+    let (public_result, internal_result) = tokio::join!(public_server, internal_server);
+    if let Err(e) = public_result {
+        tracing::error!(error = %e, "Public API server error");
+    }
+    if let Err(e) = internal_result {
+        tracing::error!(error = %e, "Internal API server error");
     }
 
-    // Gracefully shutdown embedded Runtara server
+    // Make sure the flag is set even if the servers stopped for another reason.
+    shutdown_coordinator.request_shutdown();
+    signal_task.abort();
+
+    // Drain running executions: flip each cancel_flag, send Shutdown signal
+    // via the runtime client, wait up to RUNTARA_SHUTDOWN_GRACE_MS.
+    tracing::info!("Draining running executions before stopping embedded services");
+    shutdown_coordinator.drain_executions().await;
+
+    // Gracefully shutdown embedded Runtara server (core + environment).
+    // Must happen AFTER execution drain — instances need core alive to checkpoint.
     if let Some(runtara) = embedded_runtara {
+        println!("Draining embedded Runtara environment...");
+        if let Err(e) = runtara.drain(shutdown_coordinator.grace()).await {
+            eprintln!("Error draining embedded Runtara: {}", e);
+        }
         println!("Shutting down embedded Runtara server...");
         if let Err(e) = runtara.shutdown().await {
             eprintln!("Error shutting down embedded Runtara: {}", e);
@@ -1758,6 +1803,23 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     observability::shutdown_telemetry();
 
     Ok(())
+}
+
+/// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix; non-Unix falls back to
+/// SIGINT only.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r,
+        _ = sigterm.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 /// Run server-specific database migrations (scenarios, api_keys, triggers, connections).

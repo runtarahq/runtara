@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::triggers::InvocationTrigger;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
+use crate::shutdown::ShutdownSignal;
 
 /// Configuration for the cron scheduler
 #[derive(Debug, Clone)]
@@ -35,8 +36,13 @@ impl Default for CronSchedulerConfig {
 }
 
 /// Background worker that schedules cron-triggered scenario executions
-#[instrument(skip(pool, redis_url))]
-pub async fn run(pool: PgPool, redis_url: String, config: CronSchedulerConfig) {
+#[instrument(skip(pool, redis_url, shutdown))]
+pub async fn run(
+    pool: PgPool,
+    redis_url: String,
+    config: CronSchedulerConfig,
+    shutdown: ShutdownSignal,
+) {
     let scheduler_id = format!("cron-scheduler-{}", Uuid::new_v4());
     let tenant_id = config.tenant_id.clone();
 
@@ -53,7 +59,29 @@ pub async fn run(pool: PgPool, redis_url: String, config: CronSchedulerConfig) {
     let mut interval = tokio::time::interval(Duration::from_secs(config.check_interval_secs));
 
     loop {
-        interval.tick().await;
+        // Exit promptly on shutdown without waiting out the next full tick
+        // (which would otherwise be up to config.check_interval_secs).
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = async {
+                // Poll the shutdown flag until set. Use a short cadence so we
+                // don't add noticeable wake-up latency but avoid a tight spin.
+                loop {
+                    if shutdown.is_shutting_down() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            } => {
+                info!(scheduler_id = %scheduler_id, "Cron scheduler exiting on shutdown signal");
+                return;
+            }
+        }
+
+        if shutdown.is_shutting_down() {
+            info!(scheduler_id = %scheduler_id, "Cron scheduler exiting on shutdown signal");
+            return;
+        }
 
         debug!(scheduler_id = %scheduler_id, "Checking for due cron triggers");
 

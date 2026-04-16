@@ -14,6 +14,7 @@ use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::api::services::compilation::CompilationService;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
+use crate::shutdown::ShutdownSignal;
 use crate::valkey::compilation_queue::{CompilationQueue, CompilationRequest};
 
 /// Configuration for the compilation worker
@@ -41,11 +42,12 @@ impl CompilationWorkerConfig {
 }
 
 /// Background worker that consumes compilation requests from the queue
-#[instrument(skip(pool, runtime_client, config))]
+#[instrument(skip(pool, runtime_client, config, shutdown))]
 pub async fn run(
     pool: PgPool,
     runtime_client: Option<Arc<RuntimeClient>>,
     config: CompilationWorkerConfig,
+    shutdown: ShutdownSignal,
 ) {
     let worker_id = format!("compilation-worker-{}", uuid::Uuid::new_v4());
 
@@ -95,6 +97,11 @@ pub async fn run(
     let dequeue_timeout = Duration::from_secs(config.dequeue_timeout_secs);
 
     loop {
+        if shutdown.is_shutting_down() {
+            info!(worker_id = %worker_id, "Compilation worker exiting on shutdown signal");
+            return;
+        }
+
         // Dequeue next compilation request (blocking with timeout)
         match queue.dequeue(dequeue_timeout).await {
             Ok(Some(request)) => {

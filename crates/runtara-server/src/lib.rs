@@ -11,6 +11,7 @@ pub mod middleware;
 pub mod observability;
 pub mod runtime_client;
 pub mod server;
+pub mod shutdown;
 pub mod step_events;
 pub mod types;
 pub mod valkey;

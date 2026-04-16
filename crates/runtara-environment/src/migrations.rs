@@ -79,9 +79,14 @@ pub async fn migrator() -> Result<Migrator, MigrateError> {
 /// This function creates a combined migrator with both runtara-core
 /// and environment migrations, then runs them as a single unified set.
 ///
+/// `set_ignore_missing(true)` allows the migrator to coexist with
+/// server-level migrations (which share the same `_sqlx_migrations`
+/// table when all components use the same database).
+///
 /// Safe to call multiple times; already-applied migrations are skipped.
 pub async fn run(pool: &sqlx::PgPool) -> Result<(), MigrateError> {
-    let migrator = migrator().await?;
+    let mut migrator = migrator().await?;
+    migrator.set_ignore_missing(true);
     migrator.run(pool).await
 }
 

@@ -391,7 +391,9 @@ The tables below reflect the current code paths in the workspace, not older tran
 |----------|----------|---------|-------------|
 | `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
 | `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP API port |
-| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Max concurrent instances |
+| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Max concurrent instances. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests` with `Retry-After: 30`. Resumes of existing instances are not counted. |
+| `RUNTARA_SHUTDOWN_GRACE_MS` | No | `60000` | On SIGTERM/SIGINT, how long to wait for running instances to reach a checkpoint and suspend before force-stopping. Stragglers persist as `status=suspended, termination_reason=shutdown_requested` and are resumed after restart. |
+| `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` | No | `5000` | On SIGTERM/SIGINT, how long to wait for intake workers (trigger/compilation/cron/cleanup) to finish their current unit of work before being aborted. |
 
 ### `runtara-environment`
 

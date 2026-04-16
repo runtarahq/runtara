@@ -36,6 +36,11 @@
     }
   ],
   "variables": {},
-  "inputSchema": {},
+  "inputSchema": {
+    "input": {
+      "type": "object",
+      "description": "Workflow input containing delay_ms"
+    }
+  },
   "outputSchema": {}
 }

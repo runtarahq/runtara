@@ -311,6 +311,11 @@ pub enum SdkError {
     #[error("instance paused")]
     Paused,
 
+    /// Server requested graceful shutdown; instance should suspend and be
+    /// resumed after restart.
+    #[error("server shutting down; instance suspended")]
+    ShuttingDown,
+
     /// Serialization/deserialization error
     #[error("serialization error: {0}")]
     Serialization(String),

@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
-use crate::handlers::spawn_container_monitor;
+use crate::handlers::{DrainController, spawn_container_monitor};
 use crate::image_registry::ImageRegistry;
 use crate::runner::{LaunchOptions, Runner};
 
@@ -52,6 +52,7 @@ pub struct WakeScheduler {
     image_registry: ImageRegistry,
     config: WakeSchedulerConfig,
     shutdown: Arc<Notify>,
+    drain: DrainController,
 }
 
 impl WakeScheduler {
@@ -73,7 +74,15 @@ impl WakeScheduler {
             image_registry,
             config,
             shutdown: Arc::new(Notify::new()),
+            drain: DrainController::new(),
         }
+    }
+
+    /// Attach an externally-managed drain controller so spawned monitors
+    /// observe the same drain state.
+    pub fn with_drain(mut self, drain: DrainController) -> Self {
+        self.drain = drain;
+        self
     }
 
     /// Get a handle to signal shutdown.
@@ -249,6 +258,7 @@ impl WakeScheduler {
                     self.persistence.clone(),
                     options.timeout,
                     pid,
+                    self.drain.clone(),
                 );
             }
             Err(e) => {

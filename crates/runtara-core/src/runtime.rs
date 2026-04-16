@@ -34,6 +34,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use tokio::task::JoinHandle;
@@ -47,6 +48,7 @@ use crate::server::InstanceServerState;
 pub struct CoreRuntimeBuilder {
     persistence: Option<Arc<dyn Persistence>>,
     bind_addr: SocketAddr,
+    max_concurrent_instances: u32,
 }
 
 impl std::fmt::Debug for CoreRuntimeBuilder {
@@ -54,6 +56,7 @@ impl std::fmt::Debug for CoreRuntimeBuilder {
         f.debug_struct("CoreRuntimeBuilder")
             .field("persistence", &self.persistence.as_ref().map(|_| "..."))
             .field("bind_addr", &self.bind_addr)
+            .field("max_concurrent_instances", &self.max_concurrent_instances)
             .finish()
     }
 }
@@ -63,6 +66,7 @@ impl Default for CoreRuntimeBuilder {
         Self {
             persistence: None,
             bind_addr: "0.0.0.0:8001".parse().unwrap(),
+            max_concurrent_instances: 0,
         }
     }
 }
@@ -87,6 +91,14 @@ impl CoreRuntimeBuilder {
         self
     }
 
+    /// Enforce a ceiling on the number of active instances. New-registration
+    /// requests beyond the cap are rejected with `429 Too Many Requests`.
+    /// Default (`0`) disables the check.
+    pub fn max_concurrent_instances(mut self, limit: u32) -> Self {
+        self.max_concurrent_instances = limit;
+        self
+    }
+
     /// Build the runtime configuration.
     ///
     /// Returns an error if required fields are missing.
@@ -98,6 +110,7 @@ impl CoreRuntimeBuilder {
         Ok(CoreRuntimeConfig {
             persistence,
             bind_addr: self.bind_addr,
+            max_concurrent_instances: self.max_concurrent_instances,
         })
     }
 }
@@ -106,6 +119,7 @@ impl CoreRuntimeBuilder {
 pub struct CoreRuntimeConfig {
     persistence: Arc<dyn Persistence>,
     bind_addr: SocketAddr,
+    max_concurrent_instances: u32,
 }
 
 impl std::fmt::Debug for CoreRuntimeConfig {
@@ -113,6 +127,7 @@ impl std::fmt::Debug for CoreRuntimeConfig {
         f.debug_struct("CoreRuntimeConfig")
             .field("persistence", &"...")
             .field("bind_addr", &self.bind_addr)
+            .field("max_concurrent_instances", &self.max_concurrent_instances)
             .finish()
     }
 }
@@ -120,7 +135,11 @@ impl std::fmt::Debug for CoreRuntimeConfig {
 impl CoreRuntimeConfig {
     /// Start the runtime, spawning the HTTP server task.
     pub async fn start(self) -> Result<CoreRuntime> {
-        let state = Arc::new(InstanceHandlerState::new(self.persistence));
+        let state = Arc::new(InstanceHandlerState::with_limits(
+            self.persistence,
+            self.max_concurrent_instances,
+        ));
+        let draining = state.draining_handle();
 
         let bind_addr = self.bind_addr;
         let server_state = state.clone();
@@ -134,6 +153,7 @@ impl CoreRuntimeConfig {
             server_handle,
             state,
             bind_addr,
+            draining,
         })
     }
 }
@@ -148,6 +168,7 @@ pub struct CoreRuntime {
     server_handle: JoinHandle<anyhow::Result<()>>,
     state: Arc<InstanceServerState>,
     bind_addr: SocketAddr,
+    draining: Arc<AtomicBool>,
 }
 
 impl CoreRuntime {
@@ -171,6 +192,24 @@ impl CoreRuntime {
     /// Get a reference to the persistence layer.
     pub fn persistence(&self) -> &Arc<dyn Persistence> {
         &self.state.persistence
+    }
+
+    /// Mark the runtime as draining.
+    ///
+    /// New-registration requests will be refused with `503 Service Unavailable`
+    /// after this is set. In-flight operations (checkpoint, event, signal ack)
+    /// keep working so running instances can reach a checkpoint and suspend.
+    ///
+    /// This does NOT stop the HTTP server; call [`shutdown`](Self::shutdown)
+    /// after the drain grace period to do that.
+    pub fn set_draining(&self) {
+        self.draining.store(true, Ordering::SeqCst);
+        info!("CoreRuntime draining: refusing new registrations");
+    }
+
+    /// Handle to the draining flag so external coordinators can flip it.
+    pub fn draining_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.draining)
     }
 
     /// Gracefully shut down the runtime.
