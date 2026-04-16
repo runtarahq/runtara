@@ -16,14 +16,16 @@
 //! [`crate::persistence::postgres`] and [`crate::persistence::sqlite`]
 //! remain authoritative.
 
-// Submodules will be populated in subsequent phases.
-// pub mod instances;
-// pub mod sleep;
-// pub mod checkpoints;
-// pub mod signals;
-// pub mod events;
-// pub mod step_summaries;
-// pub mod retention;
+pub mod instances;
+pub mod sleep;
+// pub mod checkpoints;     // Phase 3
+// pub mod signals;         // Phase 3
+// pub mod events;          // Phase 4
+// pub mod step_summaries;  // Phase 4
+// pub mod retention;       // Phase 5
+
+pub(crate) use instances::impl_instance_ops;
+pub(crate) use sleep::impl_sleep_ops;
 
 #[cfg(test)]
 pub mod parity_harness;

@@ -41,6 +41,16 @@ impl Dialect for PostgresDialect {
         format!("EXTRACT(MILLISECONDS FROM ({a} - {b}))::bigint")
     }
 
+    fn select_status_col() -> &'static str {
+        "status::text as status"
+    }
+
+    fn normalize_timestamp(expr: &str) -> String {
+        // PG's `timestamp` / `timestamptz` comparisons handle both sides
+        // natively — no wrapping needed.
+        expr.to_string()
+    }
+
     fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan {
         // Both backends currently keep the transactional plan (see SYN-394 plan).
         // Flipping PG to the atomic `DELETE ... RETURNING` form is a follow-up

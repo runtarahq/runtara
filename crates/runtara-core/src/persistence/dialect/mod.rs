@@ -83,6 +83,27 @@ pub trait Dialect: Send + Sync + 'static {
     /// `NOW()` can still inline it.
     const NOW: &'static str = "CURRENT_TIMESTAMP";
 
+    /// SELECT projection expression for the `status` column of an enum-typed
+    /// column that must be decoded as `String`.
+    ///
+    /// - Postgres: `"status::text as status"` — `status` is a PG enum and
+    ///   sqlx can't decode it into `String` without the cast.
+    /// - SQLite: `"status"` — `status` is already `TEXT`.
+    fn select_status_col() -> &'static str;
+
+    /// Wrap a timestamp expression so it compares correctly with another
+    /// normalized timestamp.
+    ///
+    /// - Postgres: returns the expression verbatim — native `timestamp`
+    ///   comparisons already work.
+    /// - SQLite: wraps in `datetime(...)`, which parses both the
+    ///   RFC3339/ISO-with-zone form that sqlx-chrono binds and the
+    ///   space-separated `"YYYY-MM-DD HH:MM:SS"` form produced by
+    ///   `CURRENT_TIMESTAMP`, normalizing both sides before comparison.
+    ///   Without this wrap, SQLite compares TEXT lexicographically and
+    ///   rejects rows because `'T'` > `' '` (space).
+    fn normalize_timestamp(expr: &str) -> String;
+
     /// SQL expression extracting a JSON text field from a `BYTEA`/`BLOB`
     /// payload column.
     ///

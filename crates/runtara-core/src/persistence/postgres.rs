@@ -36,344 +36,32 @@ use super::{
 };
 
 // ============================================================================
-// Instance Operations
+// Shared Operations (SYN-394)
 // ============================================================================
+// The instance + sleep families live in crate::persistence::common::ops and
+// are materialized onto PostgresPersistence via the macros below. The inline
+// free functions they replaced have been removed; callers in this module's
+// tests (see the `tests` submodule) reach the shared ops through
+// `PostgresPersistence::op_*` instead.
 
-/// Create a new instance record.
-pub async fn create_instance(
-    pool: &PgPool,
-    instance_id: &str,
-    tenant_id: &str,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at)
-        VALUES ($1, $2, 1, 'pending'::instance_status, NOW())
-        "#,
-    )
-    .bind(instance_id)
-    .bind(tenant_id)
-    .execute(pool)
-    .await?;
+crate::persistence::common::ops::impl_instance_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_sleep_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
 
-    Ok(())
-}
+// ============================================================================
+// Remaining Instance Operations (pre-shared — migrated in later phases)
+// ============================================================================
 
 /// UUID used for self-registered instances (no image/definition).
 /// This is a well-known UUID that indicates the instance registered itself.
 pub const SELF_REGISTERED_DEFINITION_ID: Uuid = Uuid::from_u128(0);
-
-/// Create a self-registered instance record.
-/// Used when an instance registers itself without being started via the management API.
-/// Get an instance by ID.
-pub async fn get_instance(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<InstanceRecord>, CoreError> {
-    let record = sqlx::query_as::<_, InstanceRecord>(
-        r#"
-        SELECT instance_id, tenant_id, definition_version,
-               status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, input, output, error, sleep_until
-        FROM instances
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
-
-/// Update instance status.
-pub async fn update_instance_status(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    started_at: Option<DateTime<Utc>>,
-) -> Result<(), CoreError> {
-    let result = if let Some(started) = started_at {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = $2::instance_status, started_at = $3
-            WHERE instance_id = $1
-            "#,
-        )
-        .bind(instance_id)
-        .bind(status)
-        .bind(started)
-        .execute(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = $2::instance_status
-            WHERE instance_id = $1
-            "#,
-        )
-        .bind(instance_id)
-        .bind(status)
-        .execute(pool)
-        .await?
-    };
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Update instance's current checkpoint ID.
-pub async fn update_instance_checkpoint(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET checkpoint_id = $2
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Mark instance as completed (success or failure).
-pub async fn complete_instance(
-    pool: &PgPool,
-    instance_id: &str,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-) -> Result<(), CoreError> {
-    let status = if error.is_some() {
-        "failed"
-    } else {
-        "completed"
-    };
-
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            finished_at = NOW(),
-            output = $3,
-            error = $4
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(output)
-    .bind(error)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Complete an instance with extended fields (stderr, checkpoint).
-///
-/// This is the full version that supports all fields needed by Environment.
-pub async fn complete_instance_extended(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            output = $3,
-            error = $4,
-            stderr = COALESCE($5, stderr),
-            checkpoint_id = COALESCE($6, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Complete an instance only if its current status is 'running'.
-///
-/// This prevents race conditions where both Core (via SDK) and Environment
-/// (via container monitor) try to complete the same instance.
-/// Returns true if the update was applied, false if skipped.
-pub async fn complete_instance_if_running(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<bool, CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            output = $3,
-            error = $4,
-            stderr = COALESCE($5, stderr),
-            checkpoint_id = COALESCE($6, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1 AND status = 'running'
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
-
-/// Complete an instance with termination tracking metadata.
-///
-/// This version includes `termination_reason` and `exit_code` for unambiguous
-/// identification of how/why the instance terminated.
-#[allow(clippy::too_many_arguments)]
-pub async fn complete_instance_with_termination(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    termination_reason: Option<&str>,
-    exit_code: Option<i32>,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            termination_reason = COALESCE($3::termination_reason, termination_reason),
-            exit_code = COALESCE($4, exit_code),
-            output = $5,
-            error = $6,
-            stderr = COALESCE($7, stderr),
-            checkpoint_id = COALESCE($8, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(termination_reason)
-    .bind(exit_code)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Complete an instance with termination tracking, only if status is 'running'.
-///
-/// Returns true if the update was applied, false if skipped (instance already
-/// has a terminal status).
-#[allow(clippy::too_many_arguments)]
-pub async fn complete_instance_with_termination_if_running(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    termination_reason: Option<&str>,
-    exit_code: Option<i32>,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<bool, CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            termination_reason = COALESCE($3::termination_reason, termination_reason),
-            exit_code = COALESCE($4, exit_code),
-            output = $5,
-            error = $6,
-            stderr = COALESCE($7, stderr),
-            checkpoint_id = COALESCE($8, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1 AND status = 'running'
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(termination_reason)
-    .bind(exit_code)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
 
 /// Update execution metrics for an instance.
 ///
@@ -426,26 +114,8 @@ pub async fn update_instance_stderr(
     Ok(())
 }
 
-/// Store input data for an instance.
-pub async fn store_instance_input(
-    pool: &PgPool,
-    instance_id: &str,
-    input: &[u8],
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET input = $2
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(input)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
+// `store_instance_input` is migrated to the shared layer:
+// see PostgresPersistence::op_store_instance_input (crate::persistence::common::ops::instances).
 
 // ============================================================================
 // Checkpoint Operations
@@ -1209,111 +879,19 @@ pub async fn acknowledge_signal(pool: &PgPool, instance_id: &str) -> Result<(), 
     Ok(())
 }
 
-// ============================================================================
-// Health Operations
-// ============================================================================
-
-/// Count active instances (running or suspended).
-pub async fn count_active_instances(pool: &PgPool) -> Result<i64, CoreError> {
-    let row: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM instances
-        WHERE status IN ('running', 'suspended')
-        "#,
-    )
-    .fetch_one(pool)
-    .await?;
-
-    Ok(row.0)
-}
-
-// ============================================================================
-// Sleep Operations
-// ============================================================================
-
-/// Set the sleep_until timestamp for an instance.
-pub async fn set_instance_sleep(
-    pool: &PgPool,
-    instance_id: &str,
-    sleep_until: DateTime<Utc>,
-) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET sleep_until = $2
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(sleep_until)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Clear the sleep_until timestamp for an instance.
-pub async fn clear_instance_sleep(pool: &PgPool, instance_id: &str) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET sleep_until = NULL
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Get instances that are due to wake (sleep_until <= now).
-pub async fn get_sleeping_instances_due(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<InstanceRecord>, CoreError> {
-    let records = sqlx::query_as::<_, InstanceRecord>(
-        r#"
-        SELECT instance_id, tenant_id, definition_version,
-               status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, output, error, sleep_until
-        FROM instances
-        WHERE sleep_until IS NOT NULL
-          AND sleep_until <= NOW()
-          AND status = 'suspended'
-        ORDER BY sleep_until ASC
-        LIMIT $1
-        "#,
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(records)
-}
+// Health, sleep, and active-count operations are migrated to the shared layer:
+// see PostgresPersistence::op_health_check_db, op_count_active_instances,
+// op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
+// (crate::persistence::common::ops::{instances, sleep}).
 
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
-        create_instance(&self.pool, instance_id, tenant_id).await
+        Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
-        get_instance(&self.pool, instance_id).await
+        Self::op_get_instance(&self.pool, instance_id).await
     }
 
     async fn update_instance_status(
@@ -1322,7 +900,7 @@ impl Persistence for PostgresPersistence {
         status: &str,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
-        update_instance_status(&self.pool, instance_id, status, started_at).await
+        Self::op_update_instance_status(&self.pool, instance_id, status, started_at).await
     }
 
     async fn update_instance_checkpoint(
@@ -1330,7 +908,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
-        update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
+        Self::op_update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn complete_instance(
@@ -1339,7 +917,7 @@ impl Persistence for PostgresPersistence {
         output: Option<&[u8]>,
         error: Option<&str>,
     ) -> Result<(), CoreError> {
-        complete_instance(&self.pool, instance_id, output, error).await
+        Self::op_complete_instance(&self.pool, instance_id, output, error).await
     }
 
     async fn save_checkpoint(
@@ -1462,15 +1040,15 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        list_instances(&self.pool, tenant_id, status, limit, offset).await
+        Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
     }
 
     async fn health_check_db(&self) -> Result<bool, CoreError> {
-        health_check_db(&self.pool).await
+        Self::op_health_check_db(&self.pool).await
     }
 
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
-        count_active_instances(&self.pool).await
+        Self::op_count_active_instances(&self.pool).await
     }
 
     async fn set_instance_sleep(
@@ -1478,18 +1056,18 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        set_instance_sleep(&self.pool, instance_id, sleep_until).await
+        Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
     }
 
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
-        clear_instance_sleep(&self.pool, instance_id).await
+        Self::op_clear_instance_sleep(&self.pool, instance_id).await
     }
 
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        get_sleeping_instances_due(&self.pool, limit).await
+        Self::op_get_sleeping_instances_due(&self.pool, limit).await
     }
 
     async fn list_events(
@@ -1537,7 +1115,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        complete_instance_extended(
+        Self::op_complete_instance_extended(
             &self.pool,
             instance_id,
             status,
@@ -1558,7 +1136,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        complete_instance_if_running(
+        Self::op_complete_instance_if_running(
             &self.pool,
             instance_id,
             status,
@@ -1581,7 +1159,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        complete_instance_with_termination(
+        Self::op_complete_instance_with_termination(
             &self.pool,
             instance_id,
             status,
@@ -1606,7 +1184,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        complete_instance_with_termination_if_running(
+        Self::op_complete_instance_with_termination_if_running(
             &self.pool,
             instance_id,
             status,
@@ -1638,7 +1216,7 @@ impl Persistence for PostgresPersistence {
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
-        store_instance_input(&self.pool, instance_id, input).await
+        Self::op_store_instance_input(&self.pool, instance_id, input).await
     }
 
     async fn get_terminal_instances_older_than(
@@ -1652,12 +1230,6 @@ impl Persistence for PostgresPersistence {
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
         delete_instances_batch(&self.pool, instance_ids).await
     }
-}
-
-/// Check database health.
-pub async fn health_check_db(pool: &PgPool) -> Result<bool, CoreError> {
-    let result: Result<(i32,), _> = sqlx::query_as("SELECT 1").fetch_one(pool).await;
-    Ok(result.is_ok())
 }
 
 /// Get terminal instance IDs older than the specified timestamp.
@@ -1710,57 +1282,9 @@ pub async fn delete_instances_batch(
     Ok(result.rows_affected())
 }
 
-/// List instances with optional filtering.
-pub async fn list_instances(
-    pool: &PgPool,
-    tenant_id: Option<&str>,
-    status_filter: Option<&str>,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<InstanceRecord>, CoreError> {
-    let mut query = String::from(
-        r#"
-        SELECT instance_id, tenant_id, definition_version,
-               status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, output, error, sleep_until
-        FROM instances
-        WHERE 1=1
-        "#,
-    );
-
-    let mut params: Vec<String> = Vec::new();
-    let mut param_idx = 1;
-
-    if let Some(tid) = tenant_id {
-        query.push_str(&format!(" AND tenant_id = ${}", param_idx));
-        params.push(tid.to_string());
-        param_idx += 1;
-    }
-
-    if let Some(status) = status_filter {
-        query.push_str(&format!(" AND status::text = ${}", param_idx));
-        params.push(status.to_string());
-        param_idx += 1;
-    }
-
-    query.push_str(&format!(
-        " ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
-        param_idx,
-        param_idx + 1
-    ));
-
-    // Build and execute the query dynamically
-    let mut sqlx_query = sqlx::query_as::<_, InstanceRecord>(&query);
-
-    for param in &params {
-        sqlx_query = sqlx_query.bind(param);
-    }
-    sqlx_query = sqlx_query.bind(limit).bind(offset);
-
-    let records = sqlx_query.fetch_all(pool).await?;
-
-    Ok(records)
-}
+// `list_instances` is migrated to the shared layer:
+// see PostgresPersistence::op_list_instances
+// (crate::persistence::common::ops::instances).
 
 #[cfg(test)]
 mod tests {
@@ -1810,7 +1334,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = get_instance(&pool, &instance_id.to_string()).await;
+        let result = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string()).await;
         assert!(result.is_ok());
         let instance = result.unwrap();
         assert!(instance.is_some());
@@ -1832,11 +1356,11 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let result =
-            update_instance_status(&pool, &instance_id.to_string(), "running", Some(Utc::now()))
+            PostgresPersistence::op_update_instance_status(&pool, &instance_id.to_string(), "running", Some(Utc::now()))
                 .await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1857,10 +1381,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let result =
-            update_instance_checkpoint(&pool, &instance_id.to_string(), "checkpoint-1").await;
+            PostgresPersistence::op_update_instance_checkpoint(&pool, &instance_id.to_string(), "checkpoint-1").await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1881,10 +1405,10 @@ mod tests {
 
         let output_data = b"success output";
         let result =
-            complete_instance(&pool, &instance_id.to_string(), Some(output_data), None).await;
+            PostgresPersistence::op_complete_instance(&pool, &instance_id.to_string(), Some(output_data), None).await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1906,10 +1430,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let result =
-            complete_instance(&pool, &instance_id.to_string(), None, Some("test error")).await;
+            PostgresPersistence::op_complete_instance(&pool, &instance_id.to_string(), None, Some("test error")).await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -2228,14 +1752,24 @@ mod tests {
         create_test_instance(&pool, instance2, "test-tenant").await;
 
         // Set one to running, one to suspended
-        update_instance_status(&pool, &instance1.to_string(), "running", None)
-            .await
-            .unwrap();
-        update_instance_status(&pool, &instance2.to_string(), "suspended", None)
-            .await
-            .unwrap();
+        PostgresPersistence::op_update_instance_status(
+            &pool,
+            &instance1.to_string(),
+            "running",
+            None,
+        )
+        .await
+        .unwrap();
+        PostgresPersistence::op_update_instance_status(
+            &pool,
+            &instance2.to_string(),
+            "suspended",
+            None,
+        )
+        .await
+        .unwrap();
 
-        let count = count_active_instances(&pool).await.unwrap();
+        let count = PostgresPersistence::op_count_active_instances(&pool).await.unwrap();
         assert!(count >= 2); // At least our 2 test instances
 
         cleanup_test_instance(&pool, instance1).await;
@@ -2249,7 +1783,7 @@ mod tests {
             return;
         };
 
-        let result = health_check_db(&pool).await;
+        let result = PostgresPersistence::op_health_check_db(&pool).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }

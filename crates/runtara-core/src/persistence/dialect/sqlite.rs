@@ -53,6 +53,17 @@ impl Dialect for SqliteDialect {
         format!("CAST((julianday({a}) - julianday({b})) * 86400000 AS INTEGER)")
     }
 
+    fn select_status_col() -> &'static str {
+        "status"
+    }
+
+    fn normalize_timestamp(expr: &str) -> String {
+        // SQLite stores timestamps as TEXT; wrap in datetime() so both
+        // sides of a comparison normalize to the canonical
+        // "YYYY-MM-DD HH:MM:SS" form (handles RFC3339 with `T`/`Z` input).
+        format!("datetime({expr})")
+    }
+
     fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan {
         TakeCustomSignalPlan::Transactional {
             select_sql: "SELECT instance_id, checkpoint_id, payload, created_at \

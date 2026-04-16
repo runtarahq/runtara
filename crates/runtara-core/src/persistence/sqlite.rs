@@ -85,38 +85,26 @@ impl SqlitePersistence {
     }
 }
 
+// Instance + sleep families materialized by the shared macros (SYN-394).
+crate::persistence::common::ops::impl_instance_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_sleep_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+
 #[async_trait::async_trait]
 impl Persistence for SqlitePersistence {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at)
-            VALUES (?, ?, 1, 'pending', CURRENT_TIMESTAMP)
-            "#,
-        )
-        .bind(instance_id)
-        .bind(tenant_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
-        let record = sqlx::query_as::<_, InstanceRecord>(
-            r#"
-            SELECT instance_id, tenant_id, definition_version,
-                   status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, input, output, error, sleep_until
-            FROM instances
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(record)
+        Self::op_get_instance(&self.pool, instance_id).await
     }
 
     async fn update_instance_status(
@@ -125,34 +113,7 @@ impl Persistence for SqlitePersistence {
         status: &str,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
-        if let Some(started) = started_at {
-            sqlx::query(
-                r#"
-                UPDATE instances
-                SET status = ?, started_at = ?
-                WHERE instance_id = ?
-                "#,
-            )
-            .bind(status)
-            .bind(started)
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                UPDATE instances
-                SET status = ?
-                WHERE instance_id = ?
-                "#,
-            )
-            .bind(status)
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-        }
-
-        Ok(())
+        Self::op_update_instance_status(&self.pool, instance_id, status, started_at).await
     }
 
     async fn update_instance_checkpoint(
@@ -160,19 +121,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET checkpoint_id = ?
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn complete_instance(
@@ -181,26 +130,7 @@ impl Persistence for SqlitePersistence {
         output: Option<&[u8]>,
         error: Option<&str>,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = CASE
-                    WHEN ?1 IS NOT NULL THEN 'failed'
-                    ELSE 'completed'
-                END,
-                finished_at = CURRENT_TIMESTAMP,
-                output = ?2,
-                error = ?1
-            WHERE instance_id = ?3
-            "#,
-        )
-        .bind(error)
-        .bind(output)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_complete_instance(&self.pool, instance_id, output, error).await
     }
 
     async fn complete_instance_extended(
@@ -212,28 +142,16 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                output = ?2,
-                error = ?3,
-                stderr = ?4,
-                checkpoint_id = COALESCE(?5, checkpoint_id)
-            WHERE instance_id = ?6
-            "#,
+        Self::op_complete_instance_extended(
+            &self.pool,
+            instance_id,
+            status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn complete_instance_if_running(
@@ -245,29 +163,16 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                output = ?2,
-                error = ?3,
-                stderr = ?4,
-                checkpoint_id = COALESCE(?5, checkpoint_id)
-            WHERE instance_id = ?6
-              AND status = 'running'
-            "#,
+        Self::op_complete_instance_if_running(
+            &self.pool,
+            instance_id,
+            status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected() > 0)
+        .await
     }
 
     async fn complete_instance_with_termination(
@@ -281,32 +186,18 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                termination_reason = COALESCE(?2, termination_reason),
-                exit_code = COALESCE(?3, exit_code),
-                output = ?4,
-                error = ?5,
-                stderr = ?6,
-                checkpoint_id = COALESCE(?7, checkpoint_id)
-            WHERE instance_id = ?8
-            "#,
+        Self::op_complete_instance_with_termination(
+            &self.pool,
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(termination_reason)
-        .bind(exit_code)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn complete_instance_with_termination_if_running(
@@ -320,33 +211,18 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                termination_reason = COALESCE(?2, termination_reason),
-                exit_code = COALESCE(?3, exit_code),
-                output = ?4,
-                error = ?5,
-                stderr = ?6,
-                checkpoint_id = COALESCE(?7, checkpoint_id)
-            WHERE instance_id = ?8
-              AND status = 'running'
-            "#,
+        Self::op_complete_instance_with_termination_if_running(
+            &self.pool,
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(termination_reason)
-        .bind(exit_code)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected() > 0)
+        .await
     }
 
     async fn update_instance_metrics(
@@ -393,19 +269,7 @@ impl Persistence for SqlitePersistence {
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET input = ?1
-            WHERE instance_id = ?2
-            "#,
-        )
-        .bind(input)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_store_instance_input(&self.pool, instance_id, input).await
     }
 
     async fn save_checkpoint(
@@ -677,45 +541,15 @@ impl Persistence for SqlitePersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        let records = sqlx::query_as::<_, InstanceRecord>(
-            r#"
-            SELECT instance_id, tenant_id, definition_version,
-                   status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error, sleep_until
-            FROM instances
-            WHERE (?1 IS NULL OR tenant_id = ?1)
-              AND (?2 IS NULL OR status = ?2)
-            ORDER BY created_at DESC
-            LIMIT ?3 OFFSET ?4
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(status)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(records)
+        Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
     }
 
     async fn health_check_db(&self) -> Result<bool, CoreError> {
-        let result: Result<(i64,), _> = sqlx::query_as("SELECT 1").fetch_one(&self.pool).await;
-        Ok(result.is_ok())
+        Self::op_health_check_db(&self.pool).await
     }
 
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
-        let row: (i64,) = sqlx::query_as(
-            r#"
-            SELECT COUNT(*)
-            FROM instances
-            WHERE status IN ('running', 'suspended')
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(row.0)
+        Self::op_count_active_instances(&self.pool).await
     }
 
     async fn set_instance_sleep(
@@ -723,70 +557,18 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET sleep_until = ?
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(sleep_until)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(CoreError::InstanceNotFound {
-                instance_id: instance_id.to_string(),
-            });
-        }
-
-        Ok(())
+        Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
     }
 
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET sleep_until = NULL
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(CoreError::InstanceNotFound {
-                instance_id: instance_id.to_string(),
-            });
-        }
-
-        Ok(())
+        Self::op_clear_instance_sleep(&self.pool, instance_id).await
     }
 
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        let records = sqlx::query_as::<_, InstanceRecord>(
-            r#"
-            SELECT instance_id, tenant_id, definition_version,
-                   status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error, sleep_until
-            FROM instances
-            WHERE sleep_until IS NOT NULL
-              AND sleep_until <= datetime('now')
-              AND status = 'suspended'
-            ORDER BY sleep_until ASC
-            LIMIT ?
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(records)
+        Self::op_get_sleeping_instances_due(&self.pool, limit).await
     }
 
     async fn list_events(

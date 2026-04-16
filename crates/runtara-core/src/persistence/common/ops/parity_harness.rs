@@ -170,25 +170,35 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
     let _ = StepStatus::Running;
 
     // --- sleep cycle --------------------------------------------------------
-    // Phase 1 (SYN-394) only smoke-tests set/clear/query connectivity. The
-    // SQLite path compares `sleep_until` (stored by sqlx-chrono as RFC3339)
-    // against `datetime('now')` (no `T`, no fractional, no zone) and the
-    // string comparison currently rejects matching rows — a real bug that
-    // Phase 2 (sleep family migration) will fix via a normalized comparison.
-    // Tighten this assertion to `.any(..)` once Phase 2 lands.
+    // Verifies both the "not due yet" (running) and "due now" (suspended +
+    // past sleep_until) cases. Phase 2 of SYN-394 normalized SQLite's
+    // timestamp comparison in `op_get_sleeping_instances_due` so this
+    // assertion now holds on both backends.
     let wake_at = Utc::now() - Duration::seconds(30);
     backend
         .set_instance_sleep(&instance_id, wake_at)
         .await
         .expect("set_instance_sleep failed");
+    let due = backend
+        .get_sleeping_instances_due(50)
+        .await
+        .expect("get_sleeping_instances_due failed");
+    assert!(
+        due.iter().all(|r| r.instance_id != instance_id),
+        "instance in 'running' must not appear as due to wake"
+    );
     backend
         .update_instance_status(&instance_id, "suspended", None)
         .await
         .expect("update_instance_status suspended failed");
-    let _due = backend
+    let due = backend
         .get_sleeping_instances_due(50)
         .await
-        .expect("get_sleeping_instances_due failed");
+        .expect("get_sleeping_instances_due failed (after suspend)");
+    assert!(
+        due.iter().any(|r| r.instance_id == instance_id),
+        "suspended instance with past sleep_until must be due to wake"
+    );
     backend
         .clear_instance_sleep(&instance_id)
         .await
