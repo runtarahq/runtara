@@ -432,19 +432,15 @@ pub async fn update_instance(
     let tenant_id = extract_tenant_id(&headers)?;
 
     // Use the object store directly via the manager (by schema name, not schema ID)
-    let store = crate::api::services::object_model::get_store(
-        &state.manager,
-        None,
-        None,
-        &tenant_id,
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-    })?;
+    let store =
+        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
 
     match store
         .update_instance(&schema_name, &instance_id, request.data)

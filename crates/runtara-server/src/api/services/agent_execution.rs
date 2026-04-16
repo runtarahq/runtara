@@ -9,7 +9,6 @@
 //! into the runtara-server binary.
 
 use serde_json::Value;
-use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
@@ -50,21 +49,12 @@ pub struct ExecutionResult {
 /// Agent execution service — runs agent capabilities directly in the host process.
 #[derive(Clone)]
 pub struct AgentExecutionService {
-    pool: PgPool,
-    connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
+    connections: Arc<runtara_connections::ConnectionsFacade>,
 }
 
 impl AgentExecutionService {
-    pub fn new(pool: PgPool) -> Self {
-        Self {
-            pool,
-            connections: None,
-        }
-    }
-
-    pub fn with_connections(mut self, facade: Arc<runtara_connections::ConnectionsFacade>) -> Self {
-        self.connections = Some(facade);
-        self
+    pub fn new(connections: Arc<runtara_connections::ConnectionsFacade>) -> Self {
+        Self { connections }
     }
 
     /// Execute an agent capability with the given input.
@@ -158,13 +148,8 @@ impl AgentExecutionService {
         tenant_id: &str,
         connection_id: &str,
     ) -> Result<Value, AgentExecutionError> {
-        let facade = self.connections.as_ref().ok_or_else(|| {
-            AgentExecutionError::DatabaseError(
-                "ConnectionsFacade not configured on AgentExecutionService".to_string(),
-            )
-        })?;
-
-        let conn = facade
+        let conn = self
+            .connections
             .get_with_parameters(connection_id, tenant_id)
             .await
             .map_err(|e| {
@@ -192,4 +177,3 @@ impl AgentExecutionService {
         }))
     }
 }
-

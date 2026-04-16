@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use super::aws_signing::AwsSigningParams;
 use super::token_cache::{
-    self, DeferredAuth, TokenRequestBody, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    self, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS, DeferredAuth, TokenRequestBody,
 };
 
 pub struct ResolvedConnectionAuth {

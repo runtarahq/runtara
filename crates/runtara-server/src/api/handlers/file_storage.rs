@@ -355,9 +355,10 @@ pub async fn get_object_info(
     Query(params): Query<FileStorageQueryParams>,
 ) -> Result<Json<FileMetadataResponse>, (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
-    let metadata = FileStorageService::head_object(&connections, connection_id, &tenant_id, &bucket, &key)
-        .await
-        .map_err(error_response)?;
+    let metadata =
+        FileStorageService::head_object(&connections, connection_id, &tenant_id, &bucket, &key)
+            .await
+            .map_err(error_response)?;
 
     Ok(Json(FileMetadataResponse {
         content_type: metadata.content_type,

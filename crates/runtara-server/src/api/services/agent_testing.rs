@@ -4,7 +4,6 @@
 //! Agents are executed via the universal dispatcher in runtara-environment.
 
 use serde_json::Value;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -91,7 +90,6 @@ pub struct AgentTestingService {
     enabled: bool,
     rate_limiter: RateLimiter,
     dispatcher_service: Option<Arc<DispatcherService>>,
-    pool: Option<PgPool>,
     connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
 }
 
@@ -101,25 +99,16 @@ impl AgentTestingService {
     /// # Arguments
     /// * `enabled` - Whether agent testing is enabled
     /// * `dispatcher_service` - Optional dispatcher service for executing agents
-    /// * `pool` - Optional database pool for loading connections
-    pub fn new(
-        enabled: bool,
-        dispatcher_service: Option<Arc<DispatcherService>>,
-        pool: Option<PgPool>,
-    ) -> Self {
+    pub fn new(enabled: bool, dispatcher_service: Option<Arc<DispatcherService>>) -> Self {
         Self {
             enabled,
             rate_limiter: RateLimiter::new(),
             dispatcher_service,
-            pool,
             connections: None,
         }
     }
 
-    pub fn with_connections(
-        mut self,
-        facade: Arc<runtara_connections::ConnectionsFacade>,
-    ) -> Self {
+    pub fn with_connections(mut self, facade: Arc<runtara_connections::ConnectionsFacade>) -> Self {
         self.connections = Some(facade);
         self
     }

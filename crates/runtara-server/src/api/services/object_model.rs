@@ -49,10 +49,7 @@ pub(crate) async fn resolve_database_url(
             }
 
             let params = conn.connection_parameters.as_ref().ok_or_else(|| {
-                ServiceError::ValidationError(format!(
-                    "Connection '{}' has no parameters",
-                    conn_id
-                ))
+                ServiceError::ValidationError(format!("Connection '{}' has no parameters", conn_id))
             })?;
 
             let db_url = params

@@ -13,7 +13,6 @@ use crate::auth::provider_auth::{self, ResolvedConnectionAuth};
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
-use crate::service::connections::ConnectionService;
 use crate::service::rate_limits::RateLimitService;
 use crate::types::{ConnectionDto, RateLimitEventType};
 
@@ -35,10 +34,6 @@ impl ConnectionsFacade {
 
     fn repo(&self) -> ConnectionRepository {
         ConnectionRepository::new(self.state.db_pool.clone())
-    }
-
-    fn connection_service(&self) -> ConnectionService {
-        ConnectionService::new(Arc::new(self.repo()))
     }
 
     fn rate_limit_service(&self) -> RateLimitService {

@@ -34,9 +34,9 @@ use crate::api::dto::scenarios::{
     VersionSchemasResponse, WorkflowValidationErrorResponse, validate_scenario_inputs,
 };
 use crate::api::repositories::scenarios::ScenarioRepository;
-use runtara_connections::ConnectionsFacade;
 use crate::api::services::scenarios::{ScenarioService, ServiceError};
 use crate::runtime_client::RuntimeClient;
+use runtara_connections::ConnectionsFacade;
 
 use crate::types::MemoryTier;
 
@@ -615,11 +615,10 @@ pub async fn clone_scenario_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, runtime_client), fields(scenario_id = %scenario_id, version = %version))]
+#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id, version = %version))]
 pub async fn compile_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     Path((scenario_id, version)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
@@ -1021,11 +1020,10 @@ pub async fn validate_mappings_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, trigger_stream, request), fields(scenario_id = %scenario_id))]
+#[instrument(skip(pool, trigger_stream, request), fields(scenario_id = %scenario_id))]
 pub async fn execute_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(trigger_stream): State<
         Option<Arc<crate::api::repositories::trigger_stream::TriggerStreamPublisher>>,
     >,
@@ -1144,11 +1142,10 @@ pub async fn execute_scenario_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
 pub async fn get_execution_metrics_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -1225,11 +1222,10 @@ pub async fn get_execution_metrics_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, runtime_client), fields(scenario_id = %scenario_id, instance_id = %instance_id))]
+#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id, instance_id = %instance_id))]
 pub async fn get_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((scenario_id, instance_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
@@ -1321,11 +1317,10 @@ pub async fn get_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, runtime_client), fields(scenario_id = %scenario_id))]
+#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id))]
 pub async fn list_instances_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(scenario_id): Path<String>,
     Query(query): Query<ListInstancesQuery>,
@@ -1547,11 +1542,10 @@ pub async fn replay_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, running_executions, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, running_executions, runtime_client), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(running_executions): State<Arc<dashmap::DashMap<Uuid, crate::types::CancellationHandle>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
@@ -1658,11 +1652,10 @@ pub async fn stop_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -1767,11 +1760,10 @@ pub async fn pause_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -2185,11 +2177,10 @@ pub async fn get_step_subinstances_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections))]
+#[instrument(skip(pool))]
 pub async fn get_scenario_dependencies_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     Path(scenario_id): Path<String>,
     Query(params): Query<serde_json::Value>,
 ) -> Result<Json<GetDependenciesResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -2253,11 +2244,10 @@ pub async fn get_scenario_dependencies_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, connections))]
+#[instrument(skip(pool))]
 pub async fn get_scenario_dependents_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
     Path(scenario_id): Path<String>,
     Query(params): Query<serde_json::Value>,
 ) -> Result<Json<GetDependentsResponse>, (StatusCode, Json<ErrorResponse>)> {

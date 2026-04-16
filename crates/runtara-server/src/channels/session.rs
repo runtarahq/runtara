@@ -13,12 +13,12 @@ use uuid::Uuid;
 use crate::api::dto::triggers::TriggerType;
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, parse_debug_event};
 use crate::api::repositories::scenarios::ScenarioRepository;
-use runtara_connections::ConnectionsFacade;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::executions::ExecutionService;
 use crate::api::services::{session_queue, session_token};
 use crate::runtime_client::RuntimeClient;
+use runtara_connections::ConnectionsFacade;
 
 use super::channel::{Channel, TelegramChannel};
 use super::collector;

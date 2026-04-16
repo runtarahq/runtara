@@ -64,7 +64,6 @@ pub struct ProxyResponse {
     pub body_raw: Option<String>,
 }
 
-
 // ============================================================================
 // Handler
 // ============================================================================
@@ -128,12 +127,7 @@ pub async fn execute_proxy_request(
 
         // Record rate limit event for analytics tracking
         let _ = facade
-            .record_credential_request(
-                connection_id,
-                tenant_id,
-                &RateLimitEventType::Request,
-                None,
-            )
+            .record_credential_request(connection_id, tenant_id, &RateLimitEventType::Request, None)
             .await;
 
         // Resolve URL against connection base URL
@@ -172,8 +166,9 @@ pub async fn execute_proxy_request(
         // 429 with Retry-After so the agent's #[durable] retry loop can use
         // durable_sleep() (suspendable/resumable) to wait.
         if crate::config::adaptive_rate_limiting_enabled()
-            && let Err(retry_after_ms) =
-                facade.check_rate_limit(connection_id, &conn.rate_limit_config).await
+            && let Err(retry_after_ms) = facade
+                .check_rate_limit(connection_id, &conn.rate_limit_config)
+                .await
         {
             // Record rate_limited event for analytics
             let _ = facade

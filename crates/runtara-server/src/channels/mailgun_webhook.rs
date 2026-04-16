@@ -332,7 +332,6 @@ async fn upload_attachments_to_storage(
     }
 
     let expected_tenant = crate::config::tenant_id();
-    let pool = router.pool();
 
     // Resolve S3 client from the tenant's default s3_compatible connection.
     let s3_client =

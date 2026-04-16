@@ -898,12 +898,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             match dispatcher_service.initialize(&tenant_id).await {
                 Ok(image_id) => {
                     println!("✓ Agent dispatcher ready (image: {})", image_id);
-                    let service = AgentTestingService::new(
-                        true,
-                        Some(dispatcher_service),
-                        Some(pool.clone()),
-                    )
-                    .with_connections(connections_facade.clone());
+                    let service = AgentTestingService::new(true, Some(dispatcher_service))
+                        .with_connections(connections_facade.clone());
                     Some(service)
                 }
                 Err(e) => {
@@ -1237,9 +1233,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                pool.clone(),
-            )
-            .with_connections(connections_facade.clone()),
+                connections_facade.clone(),
+            ),
             connections: connections_facade.clone(),
         })
         // Apply JWT authentication middleware to all tenant-scoped routes
@@ -1250,16 +1245,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
     // Mounted as a separate router with tenant bridge middleware
-    let connections_tenant_routes = runtara_connections::connections_router(
-        connections_config.clone(),
-    )
-    .layer(axum::middleware::from_fn(
-        crate::middleware::tenant_auth::inject_connections_tenant_id,
-    ))
-    .layer(from_fn_with_state(
-        auth_state.clone(),
-        crate::middleware::auth::authenticate,
-    ));
+    let connections_tenant_routes =
+        runtara_connections::connections_router(connections_config.clone())
+            .layer(axum::middleware::from_fn(
+                crate::middleware::tenant_auth::inject_connections_tenant_id,
+            ))
+            .layer(from_fn_with_state(
+                auth_state.clone(),
+                crate::middleware::auth::authenticate,
+            ));
 
     // Object Model routes (separate router to help type inference)
     // These routes use Arc<ObjectModelState> state extraction
@@ -1491,9 +1485,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                pool.clone(),
-            )
-            .with_connections(connections_facade.clone()),
+                connections_facade.clone(),
+            ),
             connections: connections_facade.clone(),
         });
 
@@ -1558,9 +1551,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // OAuth2 callback route (public, no JWT — called by OAuth provider redirect)
     // Now served by the runtara-connections crate
-    let oauth_callback_routes = runtara_connections::oauth_callback_router(
-        connections_config.clone(),
-    );
+    let oauth_callback_routes =
+        runtara_connections::oauth_callback_router(connections_config.clone());
 
     // =========================================================================
     // Public API server — accessible externally / via API gateway
