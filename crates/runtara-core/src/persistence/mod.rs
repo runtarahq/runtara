@@ -2,6 +2,8 @@
 //!
 //! This module defines the persistence abstraction and backend implementations.
 
+pub mod common;
+pub mod dialect;
 pub mod postgres;
 pub mod sqlite;
 
