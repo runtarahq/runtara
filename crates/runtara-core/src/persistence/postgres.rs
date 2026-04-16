@@ -30,350 +30,62 @@ impl PostgresPersistence {
 // ============================================================================
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, EventSortOrder, InstanceRecord,
-    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepStatus,
-    StepSummaryRecord, WakeEntry,
+    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
+    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord, WakeEntry,
 };
 
 // ============================================================================
-// Instance Operations
+// Shared Operations (SYN-394)
 // ============================================================================
+// The instance + sleep families live in crate::persistence::common::ops and
+// are materialized onto PostgresPersistence via the macros below. The inline
+// free functions they replaced have been removed; callers in this module's
+// tests (see the `tests` submodule) reach the shared ops through
+// `PostgresPersistence::op_*` instead.
 
-/// Create a new instance record.
-pub async fn create_instance(
-    pool: &PgPool,
-    instance_id: &str,
-    tenant_id: &str,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at)
-        VALUES ($1, $2, 1, 'pending'::instance_status, NOW())
-        "#,
-    )
-    .bind(instance_id)
-    .bind(tenant_id)
-    .execute(pool)
-    .await?;
+crate::persistence::common::ops::impl_instance_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_sleep_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_checkpoint_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_signal_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_event_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_step_summary_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_retention_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
 
-    Ok(())
-}
+// ============================================================================
+// Remaining Instance Operations (pre-shared — migrated in later phases)
+// ============================================================================
 
 /// UUID used for self-registered instances (no image/definition).
 /// This is a well-known UUID that indicates the instance registered itself.
 pub const SELF_REGISTERED_DEFINITION_ID: Uuid = Uuid::from_u128(0);
-
-/// Create a self-registered instance record.
-/// Used when an instance registers itself without being started via the management API.
-/// Get an instance by ID.
-pub async fn get_instance(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<InstanceRecord>, CoreError> {
-    let record = sqlx::query_as::<_, InstanceRecord>(
-        r#"
-        SELECT instance_id, tenant_id, definition_version,
-               status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, input, output, error, sleep_until
-        FROM instances
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
-
-/// Update instance status.
-pub async fn update_instance_status(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    started_at: Option<DateTime<Utc>>,
-) -> Result<(), CoreError> {
-    let result = if let Some(started) = started_at {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = $2::instance_status, started_at = $3
-            WHERE instance_id = $1
-            "#,
-        )
-        .bind(instance_id)
-        .bind(status)
-        .bind(started)
-        .execute(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = $2::instance_status
-            WHERE instance_id = $1
-            "#,
-        )
-        .bind(instance_id)
-        .bind(status)
-        .execute(pool)
-        .await?
-    };
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Update instance's current checkpoint ID.
-pub async fn update_instance_checkpoint(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET checkpoint_id = $2
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Mark instance as completed (success or failure).
-pub async fn complete_instance(
-    pool: &PgPool,
-    instance_id: &str,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-) -> Result<(), CoreError> {
-    let status = if error.is_some() {
-        "failed"
-    } else {
-        "completed"
-    };
-
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            finished_at = NOW(),
-            output = $3,
-            error = $4
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(output)
-    .bind(error)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Complete an instance with extended fields (stderr, checkpoint).
-///
-/// This is the full version that supports all fields needed by Environment.
-pub async fn complete_instance_extended(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            output = $3,
-            error = $4,
-            stderr = COALESCE($5, stderr),
-            checkpoint_id = COALESCE($6, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Complete an instance only if its current status is 'running'.
-///
-/// This prevents race conditions where both Core (via SDK) and Environment
-/// (via container monitor) try to complete the same instance.
-/// Returns true if the update was applied, false if skipped.
-pub async fn complete_instance_if_running(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<bool, CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            output = $3,
-            error = $4,
-            stderr = COALESCE($5, stderr),
-            checkpoint_id = COALESCE($6, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1 AND status = 'running'
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
-
-/// Complete an instance with termination tracking metadata.
-///
-/// This version includes `termination_reason` and `exit_code` for unambiguous
-/// identification of how/why the instance terminated.
-#[allow(clippy::too_many_arguments)]
-pub async fn complete_instance_with_termination(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    termination_reason: Option<&str>,
-    exit_code: Option<i32>,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            termination_reason = COALESCE($3::termination_reason, termination_reason),
-            exit_code = COALESCE($4, exit_code),
-            output = $5,
-            error = $6,
-            stderr = COALESCE($7, stderr),
-            checkpoint_id = COALESCE($8, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(termination_reason)
-    .bind(exit_code)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-/// Complete an instance with termination tracking, only if status is 'running'.
-///
-/// Returns true if the update was applied, false if skipped (instance already
-/// has a terminal status).
-#[allow(clippy::too_many_arguments)]
-pub async fn complete_instance_with_termination_if_running(
-    pool: &PgPool,
-    instance_id: &str,
-    status: &str,
-    termination_reason: Option<&str>,
-    exit_code: Option<i32>,
-    output: Option<&[u8]>,
-    error: Option<&str>,
-    stderr: Option<&str>,
-    checkpoint_id: Option<&str>,
-) -> Result<bool, CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET status = $2::instance_status,
-            termination_reason = COALESCE($3::termination_reason, termination_reason),
-            exit_code = COALESCE($4, exit_code),
-            output = $5,
-            error = $6,
-            stderr = COALESCE($7, stderr),
-            checkpoint_id = COALESCE($8, checkpoint_id),
-            finished_at = CASE
-                WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN NOW()
-                ELSE finished_at
-            END
-        WHERE instance_id = $1 AND status = 'running'
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status)
-    .bind(termination_reason)
-    .bind(exit_code)
-    .bind(output)
-    .bind(error)
-    .bind(stderr)
-    .bind(checkpoint_id)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
 
 /// Update execution metrics for an instance.
 ///
@@ -426,80 +138,17 @@ pub async fn update_instance_stderr(
     Ok(())
 }
 
-/// Store input data for an instance.
-pub async fn store_instance_input(
-    pool: &PgPool,
-    instance_id: &str,
-    input: &[u8],
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE instances
-        SET input = $2
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(input)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
+// `store_instance_input` is migrated to the shared layer:
+// see PostgresPersistence::op_store_instance_input (crate::persistence::common::ops::instances).
 
 // ============================================================================
 // Checkpoint Operations
 // ============================================================================
-
-/// Save a checkpoint (append-only).
-/// Uses ON CONFLICT to handle duplicate checkpoint IDs gracefully.
-pub async fn save_checkpoint(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-    state: &[u8],
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at)
-        VALUES ($1, $2, $3, NOW())
-        ON CONFLICT (instance_id, checkpoint_id) DO UPDATE
-        SET state = EXCLUDED.state, created_at = NOW()
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .bind(state)
-    .execute(pool)
-    .await
-    .map_err(|e| CoreError::CheckpointSaveFailed {
-        instance_id: instance_id.to_string(),
-        reason: e.to_string(),
-    })?;
-
-    Ok(())
-}
-
-/// Load a specific checkpoint by ID.
-pub async fn load_checkpoint(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-) -> Result<Option<CheckpointRecord>, CoreError> {
-    let record = sqlx::query_as::<_, CheckpointRecord>(
-        r#"
-        SELECT id, instance_id, checkpoint_id, state, created_at
-        FROM checkpoints
-        WHERE instance_id = $1 AND checkpoint_id = $2
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
+// `save_checkpoint`, `load_checkpoint`, `list_checkpoints`, `count_checkpoints`
+// are migrated to the shared layer:
+// see PostgresPersistence::op_save_checkpoint / op_load_checkpoint /
+// op_list_checkpoints / op_count_checkpoints
+// (crate::persistence::common::ops::checkpoints).
 
 /// Load the latest checkpoint for an instance.
 pub async fn load_latest_checkpoint(
@@ -520,40 +169,6 @@ pub async fn load_latest_checkpoint(
     .await?;
 
     Ok(record)
-}
-
-/// List checkpoints for an instance with filtering and pagination.
-pub async fn list_checkpoints(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id_filter: Option<&str>,
-    limit: i64,
-    offset: i64,
-    created_after: Option<DateTime<Utc>>,
-    created_before: Option<DateTime<Utc>>,
-) -> Result<Vec<CheckpointRecord>, CoreError> {
-    let records = sqlx::query_as::<_, CheckpointRecord>(
-        r#"
-        SELECT id, instance_id, checkpoint_id, state, created_at
-        FROM checkpoints
-        WHERE instance_id = $1
-          AND ($2::TEXT IS NULL OR checkpoint_id = $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3)
-          AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4)
-        ORDER BY created_at DESC
-        LIMIT $5 OFFSET $6
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id_filter)
-    .bind(created_after)
-    .bind(created_before)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(records)
 }
 
 /// Retry attempt record from the database.
@@ -635,34 +250,6 @@ pub async fn load_retry_history(
     .await?;
 
     Ok(records)
-}
-
-/// Count checkpoints for an instance with filtering.
-pub async fn count_checkpoints(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id_filter: Option<&str>,
-    created_after: Option<DateTime<Utc>>,
-    created_before: Option<DateTime<Utc>>,
-) -> Result<i64, CoreError> {
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM checkpoints
-        WHERE instance_id = $1
-          AND ($2::TEXT IS NULL OR checkpoint_id = $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3)
-          AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4)
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id_filter)
-    .bind(created_after)
-    .bind(created_before)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count.0)
 }
 
 // ============================================================================
@@ -754,335 +341,11 @@ pub async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), Core
     Ok(())
 }
 
-/// List events for an instance with filtering and pagination.
-///
-/// Supports filtering by event_type, subtype, time range, full-text search
-/// in the JSON payload, and scope hierarchy filtering. Sort order can be
-/// configured via filter.sort_order (defaults to DESC - newest first).
-pub async fn list_events(
-    pool: &PgPool,
-    instance_id: &str,
-    filter: &ListEventsFilter,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<EventRecord>, CoreError> {
-    // For PostgreSQL, we use convert_from to search text within BYTEA payload
-    // The payload is expected to be valid UTF-8 JSON when subtype is set
-    // Scope filtering uses JSONB operators on the payload for efficient querying
-
-    // Determine sort order - ASC or DESC based on filter
-    let order_direction = match filter.sort_order {
-        EventSortOrder::Asc => "ASC",
-        EventSortOrder::Desc => "DESC",
-    };
-
-    // Build query with dynamic ORDER BY
-    // Note: ORDER BY direction cannot be parameterized, so we use format!
-    // The direction is from a trusted enum, so this is safe from injection
-    let query = format!(
-        r#"
-        SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, created_at, subtype
-        FROM instance_events
-        WHERE instance_id = $1
-          AND ($2::TEXT IS NULL OR event_type::text = $2)
-          AND ($3::TEXT IS NULL OR subtype = $3)
-          AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4)
-          AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5)
-          AND ($6::TEXT IS NULL OR (
-              payload IS NOT NULL
-              AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%'
-          ))
-          AND ($7::TEXT IS NULL OR (
-              payload IS NOT NULL
-              AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7
-          ))
-          AND ($8::TEXT IS NULL OR (
-              payload IS NOT NULL
-              AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8
-          ))
-          AND (NOT $9 OR (
-              payload IS NULL
-              OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL
-          ))
-        ORDER BY created_at {}, id {}
-        LIMIT $10 OFFSET $11
-        "#,
-        order_direction, order_direction
-    );
-
-    let records = sqlx::query_as::<_, EventRecord>(&query)
-        .bind(instance_id)
-        .bind(&filter.event_type)
-        .bind(&filter.subtype)
-        .bind(filter.created_after)
-        .bind(filter.created_before)
-        .bind(&filter.payload_contains)
-        .bind(&filter.scope_id)
-        .bind(&filter.parent_scope_id)
-        .bind(filter.root_scopes_only)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
-
-    Ok(records)
-}
-
-/// Count events for an instance with filtering (including scope hierarchy filtering).
-pub async fn count_events(
-    pool: &PgPool,
-    instance_id: &str,
-    filter: &ListEventsFilter,
-) -> Result<i64, CoreError> {
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM instance_events
-        WHERE instance_id = $1
-          AND ($2::TEXT IS NULL OR event_type::text = $2)
-          AND ($3::TEXT IS NULL OR subtype = $3)
-          AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4)
-          AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5)
-          AND ($6::TEXT IS NULL OR (
-              payload IS NOT NULL
-              AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%'
-          ))
-          AND ($7::TEXT IS NULL OR (
-              payload IS NOT NULL
-              AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7
-          ))
-          AND ($8::TEXT IS NULL OR (
-              payload IS NOT NULL
-              AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8
-          ))
-          AND (NOT $9 OR (
-              payload IS NULL
-              OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL
-          ))
-        "#,
-    )
-    .bind(instance_id)
-    .bind(&filter.event_type)
-    .bind(&filter.subtype)
-    .bind(filter.created_after)
-    .bind(filter.created_before)
-    .bind(&filter.payload_contains)
-    .bind(&filter.scope_id)
-    .bind(&filter.parent_scope_id)
-    .bind(filter.root_scopes_only)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count.0)
-}
-
-// ============================================================================
-// Step Summary Operations (paired step_debug_start/end events)
-// ============================================================================
-
-/// List step summaries for an instance, pairing step_debug_start and step_debug_end events.
-///
-/// Uses a CTE to join start and end events by step_id, computing status and duration.
-/// Supports filtering by status, step_type, scope hierarchy, and sorting.
-pub async fn list_step_summaries(
-    pool: &PgPool,
-    instance_id: &str,
-    filter: &ListStepSummariesFilter,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<StepSummaryRecord>, CoreError> {
-    // Determine sort order
-    let order_direction = match filter.sort_order {
-        EventSortOrder::Asc => "ASC",
-        EventSortOrder::Desc => "DESC",
-    };
-
-    // Convert status filter to string for SQL CASE matching
-    let status_filter: Option<&str> = filter.status.map(|s| match s {
-        StepStatus::Running => "running",
-        StepStatus::Completed => "completed",
-        StepStatus::Failed => "failed",
-    });
-
-    // Build query with dynamic ORDER BY
-    let query = format!(
-        r#"
-        WITH start_events AS (
-            SELECT
-                id,
-                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
-                convert_from(payload, 'UTF8')::jsonb->>'step_name' as step_name,
-                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type,
-                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
-                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id,
-                convert_from(payload, 'UTF8')::jsonb->'inputs' as inputs,
-                created_at
-            FROM instance_events
-            WHERE instance_id = $1 AND subtype = 'step_debug_start'
-        ),
-        end_events AS (
-            SELECT
-                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
-                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
-                convert_from(payload, 'UTF8')::jsonb->'outputs' as outputs,
-                convert_from(payload, 'UTF8')::jsonb->'error' as error,
-                created_at
-            FROM instance_events
-            WHERE instance_id = $1 AND subtype = 'step_debug_end'
-        ),
-        paired AS (
-            SELECT
-                s.step_id,
-                s.step_name,
-                s.step_type,
-                s.scope_id,
-                s.parent_scope_id,
-                s.inputs,
-                s.created_at as started_at,
-                e.created_at as completed_at,
-                e.outputs,
-                e.error,
-                CASE
-                    WHEN e.step_id IS NULL THEN 'running'
-                    WHEN e.error IS NOT NULL AND e.error::text != 'null' THEN 'failed'
-                    ELSE 'completed'
-                END as status,
-                CASE
-                    WHEN e.created_at IS NOT NULL
-                    THEN EXTRACT(MILLISECONDS FROM (e.created_at - s.created_at))::bigint
-                    ELSE NULL
-                END as duration_ms,
-                s.id as sort_id
-            FROM start_events s
-            LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
-        )
-        SELECT
-            step_id, step_name, step_type, scope_id, parent_scope_id,
-            inputs, started_at, completed_at, outputs, error, status, duration_ms
-        FROM paired
-        WHERE ($2::TEXT IS NULL OR status = $2)
-          AND ($3::TEXT IS NULL OR step_type = $3)
-          AND ($4::TEXT IS NULL OR scope_id = $4)
-          AND ($5::TEXT IS NULL OR parent_scope_id = $5)
-          AND (NOT $6 OR parent_scope_id IS NULL)
-        ORDER BY sort_id {}
-        LIMIT $7 OFFSET $8
-        "#,
-        order_direction
-    );
-
-    // Execute query and map results
-    let rows = sqlx::query(&query)
-        .bind(instance_id)
-        .bind(status_filter)
-        .bind(&filter.step_type)
-        .bind(&filter.scope_id)
-        .bind(&filter.parent_scope_id)
-        .bind(filter.root_scopes_only)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
-
-    // Map rows to StepSummaryRecord
-    let mut records = Vec::with_capacity(rows.len());
-    for row in rows {
-        use sqlx::Row;
-
-        let status_str: &str = row.get("status");
-        let status = match status_str {
-            "running" => StepStatus::Running,
-            "failed" => StepStatus::Failed,
-            _ => StepStatus::Completed,
-        };
-
-        records.push(StepSummaryRecord {
-            step_id: row.get("step_id"),
-            step_name: row.get("step_name"),
-            step_type: row
-                .get::<Option<String>, _>("step_type")
-                .unwrap_or_default(),
-            status,
-            started_at: row.get("started_at"),
-            completed_at: row.get("completed_at"),
-            duration_ms: row.get("duration_ms"),
-            inputs: row.get("inputs"),
-            outputs: row.get("outputs"),
-            error: row.get("error"),
-            scope_id: row.get("scope_id"),
-            parent_scope_id: row.get("parent_scope_id"),
-        });
-    }
-
-    Ok(records)
-}
-
-/// Count step summaries for an instance with filtering.
-pub async fn count_step_summaries(
-    pool: &PgPool,
-    instance_id: &str,
-    filter: &ListStepSummariesFilter,
-) -> Result<i64, CoreError> {
-    // Convert status filter to string for SQL CASE matching
-    let status_filter: Option<&str> = filter.status.map(|s| match s {
-        StepStatus::Running => "running",
-        StepStatus::Completed => "completed",
-        StepStatus::Failed => "failed",
-    });
-
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        WITH start_events AS (
-            SELECT
-                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
-                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type,
-                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
-                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id
-            FROM instance_events
-            WHERE instance_id = $1 AND subtype = 'step_debug_start'
-        ),
-        end_events AS (
-            SELECT
-                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id,
-                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id,
-                convert_from(payload, 'UTF8')::jsonb->'error' as error
-            FROM instance_events
-            WHERE instance_id = $1 AND subtype = 'step_debug_end'
-        ),
-        paired AS (
-            SELECT
-                s.step_id,
-                s.step_type,
-                s.scope_id,
-                s.parent_scope_id,
-                CASE
-                    WHEN e.step_id IS NULL THEN 'running'
-                    WHEN e.error IS NOT NULL AND e.error::text != 'null' THEN 'failed'
-                    ELSE 'completed'
-                END as status
-            FROM start_events s
-            LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
-        )
-        SELECT COUNT(*)
-        FROM paired
-        WHERE ($2::TEXT IS NULL OR status = $2)
-          AND ($3::TEXT IS NULL OR step_type = $3)
-          AND ($4::TEXT IS NULL OR scope_id = $4)
-          AND ($5::TEXT IS NULL OR parent_scope_id = $5)
-          AND (NOT $6 OR parent_scope_id IS NULL)
-        "#,
-    )
-    .bind(instance_id)
-    .bind(status_filter)
-    .bind(&filter.step_type)
-    .bind(&filter.scope_id)
-    .bind(&filter.parent_scope_id)
-    .bind(filter.root_scopes_only)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count.0)
-}
+// `list_events`, `count_events`, `list_step_summaries`, `count_step_summaries`
+// are migrated to the shared layer:
+// see PostgresPersistence::op_list_events / op_count_events /
+// op_list_step_summaries / op_count_step_summaries
+// (crate::persistence::common::ops::{events, step_summaries}).
 
 // ============================================================================
 // Signal Operations
@@ -1153,167 +416,24 @@ pub async fn insert_custom_signal(
     Ok(())
 }
 
-/// Get pending signal for an instance (not yet acknowledged).
-pub async fn get_pending_signal(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<SignalRecord>, CoreError> {
-    let record = sqlx::query_as::<_, SignalRecord>(
-        r#"
-        SELECT instance_id, signal_type::text as signal_type, payload, created_at, acknowledged_at
-        FROM pending_signals
-        WHERE instance_id = $1 AND acknowledged_at IS NULL
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
+// `get_pending_signal`, `acknowledge_signal`, `take_pending_custom_signal`
+// are migrated to the shared layer:
+// see PostgresPersistence::op_get_pending_signal / op_acknowledge_signal /
+// op_take_pending_custom_signal (crate::persistence::common::ops::signals).
 
-    Ok(record)
-}
-
-/// Take a pending custom signal for a checkpoint (delete and return it).
-pub async fn take_pending_custom_signal(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-) -> Result<Option<CustomSignalRecord>, CoreError> {
-    let record = sqlx::query_as::<_, CustomSignalRecord>(
-        r#"
-        DELETE FROM pending_checkpoint_signals
-        WHERE instance_id = $1 AND checkpoint_id = $2
-        RETURNING instance_id, checkpoint_id, payload, created_at
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
-
-/// Acknowledge a signal.
-pub async fn acknowledge_signal(pool: &PgPool, instance_id: &str) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE pending_signals
-        SET acknowledged_at = NOW()
-        WHERE instance_id = $1 AND acknowledged_at IS NULL
-        "#,
-    )
-    .bind(instance_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
-// ============================================================================
-// Health Operations
-// ============================================================================
-
-/// Count active instances (running or suspended).
-pub async fn count_active_instances(pool: &PgPool) -> Result<i64, CoreError> {
-    let row: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM instances
-        WHERE status IN ('running', 'suspended')
-        "#,
-    )
-    .fetch_one(pool)
-    .await?;
-
-    Ok(row.0)
-}
-
-// ============================================================================
-// Sleep Operations
-// ============================================================================
-
-/// Set the sleep_until timestamp for an instance.
-pub async fn set_instance_sleep(
-    pool: &PgPool,
-    instance_id: &str,
-    sleep_until: DateTime<Utc>,
-) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET sleep_until = $2
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .bind(sleep_until)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Clear the sleep_until timestamp for an instance.
-pub async fn clear_instance_sleep(pool: &PgPool, instance_id: &str) -> Result<(), CoreError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE instances
-        SET sleep_until = NULL
-        WHERE instance_id = $1
-        "#,
-    )
-    .bind(instance_id)
-    .execute(pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(CoreError::InstanceNotFound {
-            instance_id: instance_id.to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-/// Get instances that are due to wake (sleep_until <= now).
-pub async fn get_sleeping_instances_due(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<InstanceRecord>, CoreError> {
-    let records = sqlx::query_as::<_, InstanceRecord>(
-        r#"
-        SELECT instance_id, tenant_id, definition_version,
-               status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, output, error, sleep_until
-        FROM instances
-        WHERE sleep_until IS NOT NULL
-          AND sleep_until <= NOW()
-          AND status = 'suspended'
-        ORDER BY sleep_until ASC
-        LIMIT $1
-        "#,
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(records)
-}
+// Health, sleep, and active-count operations are migrated to the shared layer:
+// see PostgresPersistence::op_health_check_db, op_count_active_instances,
+// op_set_instance_sleep, op_clear_instance_sleep, op_get_sleeping_instances_due
+// (crate::persistence::common::ops::{instances, sleep}).
 
 #[async_trait::async_trait]
 impl Persistence for PostgresPersistence {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
-        create_instance(&self.pool, instance_id, tenant_id).await
+        Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
-        get_instance(&self.pool, instance_id).await
+        Self::op_get_instance(&self.pool, instance_id).await
     }
 
     async fn update_instance_status(
@@ -1322,7 +442,7 @@ impl Persistence for PostgresPersistence {
         status: &str,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
-        update_instance_status(&self.pool, instance_id, status, started_at).await
+        Self::op_update_instance_status(&self.pool, instance_id, status, started_at).await
     }
 
     async fn update_instance_checkpoint(
@@ -1330,7 +450,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
-        update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
+        Self::op_update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn complete_instance(
@@ -1339,7 +459,7 @@ impl Persistence for PostgresPersistence {
         output: Option<&[u8]>,
         error: Option<&str>,
     ) -> Result<(), CoreError> {
-        complete_instance(&self.pool, instance_id, output, error).await
+        Self::op_complete_instance(&self.pool, instance_id, output, error).await
     }
 
     async fn save_checkpoint(
@@ -1348,7 +468,7 @@ impl Persistence for PostgresPersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
-        save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
+        Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
     }
 
     async fn load_checkpoint(
@@ -1356,7 +476,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        load_checkpoint(&self.pool, instance_id, checkpoint_id).await
+        Self::op_load_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn list_checkpoints(
@@ -1368,7 +488,7 @@ impl Persistence for PostgresPersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
-        list_checkpoints(
+        Self::op_list_checkpoints(
             &self.pool,
             instance_id,
             checkpoint_id,
@@ -1387,7 +507,7 @@ impl Persistence for PostgresPersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError> {
-        count_checkpoints(
+        Self::op_count_checkpoints(
             &self.pool,
             instance_id,
             checkpoint_id,
@@ -1414,11 +534,11 @@ impl Persistence for PostgresPersistence {
         &self,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        get_pending_signal(&self.pool, instance_id).await
+        Self::op_get_pending_signal(&self.pool, instance_id).await
     }
 
     async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
-        acknowledge_signal(&self.pool, instance_id).await
+        Self::op_acknowledge_signal(&self.pool, instance_id).await
     }
 
     async fn insert_custom_signal(
@@ -1435,7 +555,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
+        Self::op_take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
@@ -1462,15 +582,15 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        list_instances(&self.pool, tenant_id, status, limit, offset).await
+        Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
     }
 
     async fn health_check_db(&self) -> Result<bool, CoreError> {
-        health_check_db(&self.pool).await
+        Self::op_health_check_db(&self.pool).await
     }
 
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
-        count_active_instances(&self.pool).await
+        Self::op_count_active_instances(&self.pool).await
     }
 
     async fn set_instance_sleep(
@@ -1478,18 +598,18 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        set_instance_sleep(&self.pool, instance_id, sleep_until).await
+        Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
     }
 
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
-        clear_instance_sleep(&self.pool, instance_id).await
+        Self::op_clear_instance_sleep(&self.pool, instance_id).await
     }
 
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        get_sleeping_instances_due(&self.pool, limit).await
+        Self::op_get_sleeping_instances_due(&self.pool, limit).await
     }
 
     async fn list_events(
@@ -1499,7 +619,7 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EventRecord>, CoreError> {
-        list_events(&self.pool, instance_id, filter, limit, offset).await
+        Self::op_list_events(&self.pool, instance_id, filter, limit, offset).await
     }
 
     async fn count_events(
@@ -1507,7 +627,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
-        count_events(&self.pool, instance_id, filter).await
+        Self::op_count_events(&self.pool, instance_id, filter).await
     }
 
     async fn list_step_summaries(
@@ -1517,7 +637,7 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<StepSummaryRecord>, CoreError> {
-        list_step_summaries(&self.pool, instance_id, filter, limit, offset).await
+        Self::op_list_step_summaries(&self.pool, instance_id, filter, limit, offset).await
     }
 
     async fn count_step_summaries(
@@ -1525,7 +645,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         filter: &ListStepSummariesFilter,
     ) -> Result<i64, CoreError> {
-        count_step_summaries(&self.pool, instance_id, filter).await
+        Self::op_count_step_summaries(&self.pool, instance_id, filter).await
     }
 
     async fn complete_instance_extended(
@@ -1537,7 +657,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        complete_instance_extended(
+        Self::op_complete_instance_extended(
             &self.pool,
             instance_id,
             status,
@@ -1558,7 +678,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        complete_instance_if_running(
+        Self::op_complete_instance_if_running(
             &self.pool,
             instance_id,
             status,
@@ -1581,7 +701,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        complete_instance_with_termination(
+        Self::op_complete_instance_with_termination(
             &self.pool,
             instance_id,
             status,
@@ -1606,7 +726,7 @@ impl Persistence for PostgresPersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        complete_instance_with_termination_if_running(
+        Self::op_complete_instance_with_termination_if_running(
             &self.pool,
             instance_id,
             status,
@@ -1638,7 +758,7 @@ impl Persistence for PostgresPersistence {
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
-        store_instance_input(&self.pool, instance_id, input).await
+        Self::op_store_instance_input(&self.pool, instance_id, input).await
     }
 
     async fn get_terminal_instances_older_than(
@@ -1646,121 +766,19 @@ impl Persistence for PostgresPersistence {
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
-        get_terminal_instances_older_than(&self.pool, older_than, limit).await
+        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
-        delete_instances_batch(&self.pool, instance_ids).await
+        Self::op_delete_instances_batch(&self.pool, instance_ids).await
     }
 }
 
-/// Check database health.
-pub async fn health_check_db(pool: &PgPool) -> Result<bool, CoreError> {
-    let result: Result<(i32,), _> = sqlx::query_as("SELECT 1").fetch_one(pool).await;
-    Ok(result.is_ok())
-}
-
-/// Get terminal instance IDs older than the specified timestamp.
-///
-/// Only returns instances with terminal status: completed, failed, cancelled.
-/// Returns instance IDs ordered by finished_at (oldest first) for batch processing.
-pub async fn get_terminal_instances_older_than(
-    pool: &PgPool,
-    older_than: DateTime<Utc>,
-    limit: i64,
-) -> Result<Vec<String>, CoreError> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        r#"
-        SELECT instance_id
-        FROM instances
-        WHERE status IN ('completed', 'failed', 'cancelled')
-          AND finished_at IS NOT NULL
-          AND finished_at < $1
-        ORDER BY finished_at ASC
-        LIMIT $2
-        "#,
-    )
-    .bind(older_than)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows.into_iter().map(|(id,)| id).collect())
-}
-
-/// Delete instances by their IDs.
-///
-/// This deletes from the instances table; child tables with ON DELETE CASCADE
-/// are automatically cleaned up by the database.
-///
-/// Returns the count of deleted instances.
-pub async fn delete_instances_batch(
-    pool: &PgPool,
-    instance_ids: &[String],
-) -> Result<u64, CoreError> {
-    if instance_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let result = sqlx::query("DELETE FROM instances WHERE instance_id = ANY($1)")
-        .bind(instance_ids)
-        .execute(pool)
-        .await?;
-
-    Ok(result.rows_affected())
-}
-
-/// List instances with optional filtering.
-pub async fn list_instances(
-    pool: &PgPool,
-    tenant_id: Option<&str>,
-    status_filter: Option<&str>,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<InstanceRecord>, CoreError> {
-    let mut query = String::from(
-        r#"
-        SELECT instance_id, tenant_id, definition_version,
-               status::text as status, checkpoint_id, attempt, max_attempts,
-               created_at, started_at, finished_at, output, error, sleep_until
-        FROM instances
-        WHERE 1=1
-        "#,
-    );
-
-    let mut params: Vec<String> = Vec::new();
-    let mut param_idx = 1;
-
-    if let Some(tid) = tenant_id {
-        query.push_str(&format!(" AND tenant_id = ${}", param_idx));
-        params.push(tid.to_string());
-        param_idx += 1;
-    }
-
-    if let Some(status) = status_filter {
-        query.push_str(&format!(" AND status::text = ${}", param_idx));
-        params.push(status.to_string());
-        param_idx += 1;
-    }
-
-    query.push_str(&format!(
-        " ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
-        param_idx,
-        param_idx + 1
-    ));
-
-    // Build and execute the query dynamically
-    let mut sqlx_query = sqlx::query_as::<_, InstanceRecord>(&query);
-
-    for param in &params {
-        sqlx_query = sqlx_query.bind(param);
-    }
-    sqlx_query = sqlx_query.bind(limit).bind(offset);
-
-    let records = sqlx_query.fetch_all(pool).await?;
-
-    Ok(records)
-}
+// `get_terminal_instances_older_than`, `delete_instances_batch`,
+// `list_instances` are migrated to the shared layer:
+// see PostgresPersistence::op_get_terminal_instances_older_than /
+// op_delete_instances_batch / op_list_instances
+// (crate::persistence::common::ops::{retention, instances}).
 
 #[cfg(test)]
 mod tests {
@@ -1810,7 +828,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = get_instance(&pool, &instance_id.to_string()).await;
+        let result = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string()).await;
         assert!(result.is_ok());
         let instance = result.unwrap();
         assert!(instance.is_some());
@@ -1832,11 +850,11 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let result =
-            update_instance_status(&pool, &instance_id.to_string(), "running", Some(Utc::now()))
+            PostgresPersistence::op_update_instance_status(&pool, &instance_id.to_string(), "running", Some(Utc::now()))
                 .await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1857,10 +875,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let result =
-            update_instance_checkpoint(&pool, &instance_id.to_string(), "checkpoint-1").await;
+            PostgresPersistence::op_update_instance_checkpoint(&pool, &instance_id.to_string(), "checkpoint-1").await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1881,10 +899,10 @@ mod tests {
 
         let output_data = b"success output";
         let result =
-            complete_instance(&pool, &instance_id.to_string(), Some(output_data), None).await;
+            PostgresPersistence::op_complete_instance(&pool, &instance_id.to_string(), Some(output_data), None).await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1906,10 +924,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let result =
-            complete_instance(&pool, &instance_id.to_string(), None, Some("test error")).await;
+            PostgresPersistence::op_complete_instance(&pool, &instance_id.to_string(), None, Some("test error")).await;
         assert!(result.is_ok());
 
-        let instance = get_instance(&pool, &instance_id.to_string())
+        let instance = PostgresPersistence::op_get_instance(&pool, &instance_id.to_string())
             .await
             .unwrap()
             .unwrap();
@@ -1931,10 +949,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let state = b"test state data";
-        let result = save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state).await;
+        let result = PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state).await;
         assert!(result.is_ok());
 
-        let checkpoint = load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+        let checkpoint = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
             .unwrap();
         assert!(checkpoint.is_some());
@@ -1954,16 +972,16 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         // Save first checkpoint
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
             .await
             .unwrap();
 
         // Save again with same ID (should update)
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-2")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-2")
             .await
             .unwrap();
 
-        let checkpoint = load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+        let checkpoint = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
             .unwrap()
             .unwrap();
@@ -1982,20 +1000,20 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
             .await
             .unwrap();
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
             .await
             .unwrap();
 
-        let cp1 = load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+        let cp1 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(cp1.state, b"state-1".to_vec());
 
-        let cp2 = load_checkpoint(&pool, &instance_id.to_string(), "cp-2")
+        let cp2 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-2")
             .await
             .unwrap()
             .unwrap();
@@ -2014,16 +1032,16 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
             .await
             .unwrap();
         // Small delay to ensure different timestamps
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-3", b"state-3")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-3", b"state-3")
             .await
             .unwrap();
 
@@ -2047,7 +1065,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
+        let result = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
             .await
             .unwrap();
         assert!(result.is_none());
@@ -2106,7 +1124,7 @@ mod tests {
         let result = insert_signal(&pool, &instance_id.to_string(), "cancel", b"reason").await;
         assert!(result.is_ok());
 
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_some());
@@ -2131,7 +1149,7 @@ mod tests {
             .await
             .unwrap();
 
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_some());
@@ -2150,7 +1168,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_none());
@@ -2171,12 +1189,12 @@ mod tests {
         insert_signal(&pool, &instance_id.to_string(), "cancel", b"")
             .await
             .unwrap();
-        acknowledge_signal(&pool, &instance_id.to_string())
+        PostgresPersistence::op_acknowledge_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
 
         // Should no longer return as pending
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_none());
@@ -2199,7 +1217,7 @@ mod tests {
             .unwrap();
 
         // First take should retrieve and delete
-        let signal = take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+        let signal = PostgresPersistence::op_take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
             .await
             .unwrap()
             .expect("custom signal should exist");
@@ -2207,7 +1225,7 @@ mod tests {
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
         // Second take should return none
-        let signal = take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+        let signal = PostgresPersistence::op_take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
             .await
             .unwrap();
         assert!(signal.is_none());
@@ -2228,14 +1246,24 @@ mod tests {
         create_test_instance(&pool, instance2, "test-tenant").await;
 
         // Set one to running, one to suspended
-        update_instance_status(&pool, &instance1.to_string(), "running", None)
-            .await
-            .unwrap();
-        update_instance_status(&pool, &instance2.to_string(), "suspended", None)
-            .await
-            .unwrap();
+        PostgresPersistence::op_update_instance_status(
+            &pool,
+            &instance1.to_string(),
+            "running",
+            None,
+        )
+        .await
+        .unwrap();
+        PostgresPersistence::op_update_instance_status(
+            &pool,
+            &instance2.to_string(),
+            "suspended",
+            None,
+        )
+        .await
+        .unwrap();
 
-        let count = count_active_instances(&pool).await.unwrap();
+        let count = PostgresPersistence::op_count_active_instances(&pool).await.unwrap();
         assert!(count >= 2); // At least our 2 test instances
 
         cleanup_test_instance(&pool, instance1).await;
@@ -2249,7 +1277,7 @@ mod tests {
             return;
         };
 
-        let result = health_check_db(&pool).await;
+        let result = PostgresPersistence::op_health_check_db(&pool).await;
         assert!(result.is_ok());
         assert!(result.unwrap());
     }

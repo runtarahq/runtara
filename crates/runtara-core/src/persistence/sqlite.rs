@@ -9,9 +9,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use crate::error::CoreError;
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, EventSortOrder, InstanceRecord,
-    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepStatus,
-    StepSummaryRecord,
+    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
+    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -85,38 +84,51 @@ impl SqlitePersistence {
     }
 }
 
+// Shared operation families materialized by the macros (SYN-394).
+crate::persistence::common::ops::impl_instance_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_sleep_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_checkpoint_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_signal_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_event_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_step_summary_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_retention_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+
 #[async_trait::async_trait]
 impl Persistence for SqlitePersistence {
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO instances (instance_id, tenant_id, definition_version, status, created_at)
-            VALUES (?, ?, 1, 'pending', CURRENT_TIMESTAMP)
-            "#,
-        )
-        .bind(instance_id)
-        .bind(tenant_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }
 
     async fn get_instance(&self, instance_id: &str) -> Result<Option<InstanceRecord>, CoreError> {
-        let record = sqlx::query_as::<_, InstanceRecord>(
-            r#"
-            SELECT instance_id, tenant_id, definition_version,
-                   status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, input, output, error, sleep_until
-            FROM instances
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(record)
+        Self::op_get_instance(&self.pool, instance_id).await
     }
 
     async fn update_instance_status(
@@ -125,34 +137,7 @@ impl Persistence for SqlitePersistence {
         status: &str,
         started_at: Option<DateTime<Utc>>,
     ) -> Result<(), CoreError> {
-        if let Some(started) = started_at {
-            sqlx::query(
-                r#"
-                UPDATE instances
-                SET status = ?, started_at = ?
-                WHERE instance_id = ?
-                "#,
-            )
-            .bind(status)
-            .bind(started)
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-        } else {
-            sqlx::query(
-                r#"
-                UPDATE instances
-                SET status = ?
-                WHERE instance_id = ?
-                "#,
-            )
-            .bind(status)
-            .bind(instance_id)
-            .execute(&self.pool)
-            .await?;
-        }
-
-        Ok(())
+        Self::op_update_instance_status(&self.pool, instance_id, status, started_at).await
     }
 
     async fn update_instance_checkpoint(
@@ -160,19 +145,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET checkpoint_id = ?
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_update_instance_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn complete_instance(
@@ -181,26 +154,7 @@ impl Persistence for SqlitePersistence {
         output: Option<&[u8]>,
         error: Option<&str>,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = CASE
-                    WHEN ?1 IS NOT NULL THEN 'failed'
-                    ELSE 'completed'
-                END,
-                finished_at = CURRENT_TIMESTAMP,
-                output = ?2,
-                error = ?1
-            WHERE instance_id = ?3
-            "#,
-        )
-        .bind(error)
-        .bind(output)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_complete_instance(&self.pool, instance_id, output, error).await
     }
 
     async fn complete_instance_extended(
@@ -212,28 +166,16 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                output = ?2,
-                error = ?3,
-                stderr = ?4,
-                checkpoint_id = COALESCE(?5, checkpoint_id)
-            WHERE instance_id = ?6
-            "#,
+        Self::op_complete_instance_extended(
+            &self.pool,
+            instance_id,
+            status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn complete_instance_if_running(
@@ -245,29 +187,16 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                output = ?2,
-                error = ?3,
-                stderr = ?4,
-                checkpoint_id = COALESCE(?5, checkpoint_id)
-            WHERE instance_id = ?6
-              AND status = 'running'
-            "#,
+        Self::op_complete_instance_if_running(
+            &self.pool,
+            instance_id,
+            status,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected() > 0)
+        .await
     }
 
     async fn complete_instance_with_termination(
@@ -281,32 +210,18 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                termination_reason = COALESCE(?2, termination_reason),
-                exit_code = COALESCE(?3, exit_code),
-                output = ?4,
-                error = ?5,
-                stderr = ?6,
-                checkpoint_id = COALESCE(?7, checkpoint_id)
-            WHERE instance_id = ?8
-            "#,
+        Self::op_complete_instance_with_termination(
+            &self.pool,
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(termination_reason)
-        .bind(exit_code)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        .await
     }
 
     async fn complete_instance_with_termination_if_running(
@@ -320,33 +235,18 @@ impl Persistence for SqlitePersistence {
         stderr: Option<&str>,
         checkpoint_id: Option<&str>,
     ) -> Result<bool, CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET status = ?1,
-                finished_at = CURRENT_TIMESTAMP,
-                termination_reason = COALESCE(?2, termination_reason),
-                exit_code = COALESCE(?3, exit_code),
-                output = ?4,
-                error = ?5,
-                stderr = ?6,
-                checkpoint_id = COALESCE(?7, checkpoint_id)
-            WHERE instance_id = ?8
-              AND status = 'running'
-            "#,
+        Self::op_complete_instance_with_termination_if_running(
+            &self.pool,
+            instance_id,
+            status,
+            termination_reason,
+            exit_code,
+            output,
+            error,
+            stderr,
+            checkpoint_id,
         )
-        .bind(status)
-        .bind(termination_reason)
-        .bind(exit_code)
-        .bind(output)
-        .bind(error)
-        .bind(stderr)
-        .bind(checkpoint_id)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected() > 0)
+        .await
     }
 
     async fn update_instance_metrics(
@@ -393,19 +293,7 @@ impl Persistence for SqlitePersistence {
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE instances
-            SET input = ?1
-            WHERE instance_id = ?2
-            "#,
-        )
-        .bind(input)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_store_instance_input(&self.pool, instance_id, input).await
     }
 
     async fn save_checkpoint(
@@ -414,19 +302,7 @@ impl Persistence for SqlitePersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .bind(state)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
     }
 
     async fn load_checkpoint(
@@ -434,19 +310,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        let record = sqlx::query_as::<_, CheckpointRecord>(
-            r#"
-            SELECT id, instance_id, checkpoint_id, state, created_at
-            FROM checkpoints
-            WHERE instance_id = ? AND checkpoint_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(record)
+        Self::op_load_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn list_checkpoints(
@@ -458,29 +322,16 @@ impl Persistence for SqlitePersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
-        // Use SQLite's NULL coalescing pattern similar to Postgres
-        let rows = sqlx::query_as::<_, CheckpointRecord>(
-            r#"
-            SELECT id, instance_id, checkpoint_id, state, created_at
-            FROM checkpoints
-            WHERE instance_id = ?1
-              AND (?2 IS NULL OR checkpoint_id = ?2)
-              AND (?3 IS NULL OR created_at >= ?3)
-              AND (?4 IS NULL OR created_at < ?4)
-            ORDER BY created_at DESC
-            LIMIT ?5 OFFSET ?6
-            "#,
+        Self::op_list_checkpoints(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            limit,
+            offset,
+            created_after,
+            created_before,
         )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .bind(created_after)
-        .bind(created_before)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows)
+        .await
     }
 
     async fn count_checkpoints(
@@ -490,24 +341,14 @@ impl Persistence for SqlitePersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError> {
-        let count: (i64,) = sqlx::query_as(
-            r#"
-            SELECT COUNT(*)
-            FROM checkpoints
-            WHERE instance_id = ?1
-              AND (?2 IS NULL OR checkpoint_id = ?2)
-              AND (?3 IS NULL OR created_at >= ?3)
-              AND (?4 IS NULL OR created_at < ?4)
-            "#,
+        Self::op_count_checkpoints(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            created_after,
+            created_before,
         )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .bind(created_after)
-        .bind(created_before)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(count.0)
+        .await
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
@@ -558,33 +399,11 @@ impl Persistence for SqlitePersistence {
         &self,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        let record = sqlx::query_as::<_, SignalRecord>(
-            r#"
-            SELECT instance_id, signal_type, payload, created_at, acknowledged_at
-            FROM pending_signals
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(record)
+        Self::op_get_pending_signal(&self.pool, instance_id).await
     }
 
     async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE pending_signals
-            SET acknowledged_at = CURRENT_TIMESTAMP
-            WHERE instance_id = ? AND acknowledged_at IS NULL
-            "#,
-        )
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_acknowledge_signal(&self.pool, instance_id).await
     }
 
     async fn insert_custom_signal(
@@ -616,33 +435,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        let mut tx = self.pool.begin().await?;
-
-        let record = sqlx::query_as::<_, CustomSignalRecord>(
-            r#"
-            SELECT instance_id, checkpoint_id, payload, created_at
-            FROM pending_custom_signals
-            WHERE instance_id = ? AND checkpoint_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM pending_custom_signals
-            WHERE instance_id = ? AND checkpoint_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(record)
+        Self::op_take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
@@ -655,6 +448,10 @@ impl Persistence for SqlitePersistence {
         // Create a unique checkpoint_id for this retry attempt (matching Postgres behavior)
         let retry_checkpoint_id = format!("{}::retry::{}", checkpoint_id, attempt);
 
+        // SYN-394: wrap sqlx errors in `CheckpointSaveFailed` so callers see
+        // the instance context — Postgres already does this; SQLite previously
+        // relied on the blanket `From<sqlx::Error> for CoreError` impl and
+        // surfaced a generic `DatabaseError` instead.
         sqlx::query(
             r#"
             INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at)
@@ -665,7 +462,8 @@ impl Persistence for SqlitePersistence {
         .bind(&retry_checkpoint_id)
         .bind(error_message.unwrap_or("").as_bytes())
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| crate::persistence::common::error::wrap_checkpoint_save(e, instance_id))?;
 
         Ok(())
     }
@@ -677,45 +475,15 @@ impl Persistence for SqlitePersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        let records = sqlx::query_as::<_, InstanceRecord>(
-            r#"
-            SELECT instance_id, tenant_id, definition_version,
-                   status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error, sleep_until
-            FROM instances
-            WHERE (?1 IS NULL OR tenant_id = ?1)
-              AND (?2 IS NULL OR status = ?2)
-            ORDER BY created_at DESC
-            LIMIT ?3 OFFSET ?4
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(status)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(records)
+        Self::op_list_instances(&self.pool, tenant_id, status, limit, offset).await
     }
 
     async fn health_check_db(&self) -> Result<bool, CoreError> {
-        let result: Result<(i64,), _> = sqlx::query_as("SELECT 1").fetch_one(&self.pool).await;
-        Ok(result.is_ok())
+        Self::op_health_check_db(&self.pool).await
     }
 
     async fn count_active_instances(&self) -> Result<i64, CoreError> {
-        let row: (i64,) = sqlx::query_as(
-            r#"
-            SELECT COUNT(*)
-            FROM instances
-            WHERE status IN ('running', 'suspended')
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(row.0)
+        Self::op_count_active_instances(&self.pool).await
     }
 
     async fn set_instance_sleep(
@@ -723,70 +491,18 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         sleep_until: DateTime<Utc>,
     ) -> Result<(), CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET sleep_until = ?
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(sleep_until)
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(CoreError::InstanceNotFound {
-                instance_id: instance_id.to_string(),
-            });
-        }
-
-        Ok(())
+        Self::op_set_instance_sleep(&self.pool, instance_id, sleep_until).await
     }
 
     async fn clear_instance_sleep(&self, instance_id: &str) -> Result<(), CoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE instances
-            SET sleep_until = NULL
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(CoreError::InstanceNotFound {
-                instance_id: instance_id.to_string(),
-            });
-        }
-
-        Ok(())
+        Self::op_clear_instance_sleep(&self.pool, instance_id).await
     }
 
     async fn get_sleeping_instances_due(
         &self,
         limit: i64,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        let records = sqlx::query_as::<_, InstanceRecord>(
-            r#"
-            SELECT instance_id, tenant_id, definition_version,
-                   status as status, checkpoint_id, attempt, max_attempts,
-                   created_at, started_at, finished_at, output, error, sleep_until
-            FROM instances
-            WHERE sleep_until IS NOT NULL
-              AND sleep_until <= datetime('now')
-              AND status = 'suspended'
-            ORDER BY sleep_until ASC
-            LIMIT ?
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(records)
+        Self::op_get_sleeping_instances_due(&self.pool, limit).await
     }
 
     async fn list_events(
@@ -796,66 +512,7 @@ impl Persistence for SqlitePersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EventRecord>, CoreError> {
-        // For SQLite, we use CAST and LIKE for text search within BLOB payload
-        // The payload is expected to be valid UTF-8 JSON when subtype is set
-        // Scope filtering uses json_extract for efficient querying
-
-        // Determine sort order - ASC or DESC based on filter
-        let order_direction = match filter.sort_order {
-            EventSortOrder::Asc => "ASC",
-            EventSortOrder::Desc => "DESC",
-        };
-
-        // Build query with dynamic ORDER BY
-        // Note: ORDER BY direction cannot be parameterized, so we use format!
-        // The direction is from a trusted enum, so this is safe from injection
-        let query = format!(
-            r#"
-            SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype
-            FROM instance_events
-            WHERE instance_id = ?1
-              AND (?2 IS NULL OR event_type = ?2)
-              AND (?3 IS NULL OR subtype = ?3)
-              AND (?4 IS NULL OR created_at >= ?4)
-              AND (?5 IS NULL OR created_at < ?5)
-              AND (?6 IS NULL OR (
-                  payload IS NOT NULL
-                  AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
-              ))
-              AND (?7 IS NULL OR (
-                  payload IS NOT NULL
-                  AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7
-              ))
-              AND (?8 IS NULL OR (
-                  payload IS NOT NULL
-                  AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
-              ))
-              AND (NOT ?9 OR (
-                  payload IS NULL
-                  OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
-              ))
-            ORDER BY created_at {}, id {}
-            LIMIT ?10 OFFSET ?11
-            "#,
-            order_direction, order_direction
-        );
-
-        let records = sqlx::query_as::<_, EventRecord>(&query)
-            .bind(instance_id)
-            .bind(&filter.event_type)
-            .bind(&filter.subtype)
-            .bind(filter.created_after)
-            .bind(filter.created_before)
-            .bind(&filter.payload_contains)
-            .bind(&filter.scope_id)
-            .bind(&filter.parent_scope_id)
-            .bind(filter.root_scopes_only)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-
-        Ok(records)
+        Self::op_list_events(&self.pool, instance_id, filter, limit, offset).await
     }
 
     async fn count_events(
@@ -863,46 +520,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         filter: &ListEventsFilter,
     ) -> Result<i64, CoreError> {
-        let count: (i64,) = sqlx::query_as(
-            r#"
-            SELECT COUNT(*)
-            FROM instance_events
-            WHERE instance_id = ?1
-              AND (?2 IS NULL OR event_type = ?2)
-              AND (?3 IS NULL OR subtype = ?3)
-              AND (?4 IS NULL OR created_at >= ?4)
-              AND (?5 IS NULL OR created_at < ?5)
-              AND (?6 IS NULL OR (
-                  payload IS NOT NULL
-                  AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%'
-              ))
-              AND (?7 IS NULL OR (
-                  payload IS NOT NULL
-                  AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7
-              ))
-              AND (?8 IS NULL OR (
-                  payload IS NOT NULL
-                  AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8
-              ))
-              AND (NOT ?9 OR (
-                  payload IS NULL
-                  OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL
-              ))
-            "#,
-        )
-        .bind(instance_id)
-        .bind(&filter.event_type)
-        .bind(&filter.subtype)
-        .bind(filter.created_after)
-        .bind(filter.created_before)
-        .bind(&filter.payload_contains)
-        .bind(&filter.scope_id)
-        .bind(&filter.parent_scope_id)
-        .bind(filter.root_scopes_only)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(count.0)
+        Self::op_count_events(&self.pool, instance_id, filter).await
     }
 
     async fn list_step_summaries(
@@ -912,142 +530,7 @@ impl Persistence for SqlitePersistence {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<StepSummaryRecord>, CoreError> {
-        // Determine sort order
-        let order_direction = match filter.sort_order {
-            EventSortOrder::Asc => "ASC",
-            EventSortOrder::Desc => "DESC",
-        };
-
-        // Convert status filter to string for SQL CASE matching
-        let status_filter: Option<&str> = filter.status.map(|s| match s {
-            StepStatus::Running => "running",
-            StepStatus::Completed => "completed",
-            StepStatus::Failed => "failed",
-        });
-
-        // Build query with dynamic ORDER BY
-        // SQLite uses json_extract instead of PostgreSQL's jsonb operators
-        let query = format!(
-            r#"
-            WITH start_events AS (
-                SELECT
-                    id,
-                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
-                    json_extract(CAST(payload AS TEXT), '$.step_name') as step_name,
-                    json_extract(CAST(payload AS TEXT), '$.step_type') as step_type,
-                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
-                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id,
-                    json_extract(CAST(payload AS TEXT), '$.inputs') as inputs,
-                    created_at
-                FROM instance_events
-                WHERE instance_id = ?1 AND subtype = 'step_debug_start'
-            ),
-            end_events AS (
-                SELECT
-                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
-                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
-                    json_extract(CAST(payload AS TEXT), '$.outputs') as outputs,
-                    json_extract(CAST(payload AS TEXT), '$.error') as error,
-                    created_at
-                FROM instance_events
-                WHERE instance_id = ?1 AND subtype = 'step_debug_end'
-            ),
-            paired AS (
-                SELECT
-                    s.step_id,
-                    s.step_name,
-                    s.step_type,
-                    s.scope_id,
-                    s.parent_scope_id,
-                    s.inputs,
-                    s.created_at as started_at,
-                    e.created_at as completed_at,
-                    e.outputs,
-                    e.error,
-                    CASE
-                        WHEN e.step_id IS NULL THEN 'running'
-                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed'
-                        ELSE 'completed'
-                    END as status,
-                    CASE
-                        WHEN e.created_at IS NOT NULL
-                        THEN CAST((julianday(e.created_at) - julianday(s.created_at)) * 86400000 AS INTEGER)
-                        ELSE NULL
-                    END as duration_ms,
-                    s.id as sort_id
-                FROM start_events s
-                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
-            )
-            SELECT
-                step_id, step_name, step_type, scope_id, parent_scope_id,
-                inputs, started_at, completed_at, outputs, error, status, duration_ms
-            FROM paired
-            WHERE (?2 IS NULL OR status = ?2)
-              AND (?3 IS NULL OR step_type = ?3)
-              AND (?4 IS NULL OR scope_id = ?4)
-              AND (?5 IS NULL OR parent_scope_id = ?5)
-              AND (NOT ?6 OR parent_scope_id IS NULL)
-            ORDER BY sort_id {}
-            LIMIT ?7 OFFSET ?8
-            "#,
-            order_direction
-        );
-
-        // Execute query and map results
-        let rows = sqlx::query(&query)
-            .bind(instance_id)
-            .bind(status_filter)
-            .bind(&filter.step_type)
-            .bind(&filter.scope_id)
-            .bind(&filter.parent_scope_id)
-            .bind(filter.root_scopes_only)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-
-        // Map rows to StepSummaryRecord
-        let mut records = Vec::with_capacity(rows.len());
-        for row in rows {
-            use sqlx::Row;
-
-            let status_str: &str = row.get("status");
-            let status = match status_str {
-                "running" => StepStatus::Running,
-                "failed" => StepStatus::Failed,
-                _ => StepStatus::Completed,
-            };
-
-            // Parse JSON strings for inputs/outputs/error
-            let inputs: Option<serde_json::Value> = row
-                .get::<Option<String>, _>("inputs")
-                .and_then(|s| serde_json::from_str(&s).ok());
-            let outputs: Option<serde_json::Value> = row
-                .get::<Option<String>, _>("outputs")
-                .and_then(|s| serde_json::from_str(&s).ok());
-            let error: Option<serde_json::Value> = row
-                .get::<Option<String>, _>("error")
-                .and_then(|s| serde_json::from_str(&s).ok());
-
-            records.push(StepSummaryRecord {
-                step_id: row.get("step_id"),
-                step_name: row.get("step_name"),
-                step_type: row
-                    .get::<Option<String>, _>("step_type")
-                    .unwrap_or_default(),
-                status,
-                started_at: row.get("started_at"),
-                completed_at: row.get("completed_at"),
-                duration_ms: row.get("duration_ms"),
-                inputs,
-                outputs,
-                error,
-                scope_id: row.get("scope_id"),
-                parent_scope_id: row.get("parent_scope_id"),
-            });
-        }
-
-        Ok(records)
+        Self::op_list_step_summaries(&self.pool, instance_id, filter, limit, offset).await
     }
 
     async fn count_step_summaries(
@@ -1055,65 +538,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         filter: &ListStepSummariesFilter,
     ) -> Result<i64, CoreError> {
-        // Convert status filter to string for SQL CASE matching
-        let status_filter: Option<&str> = filter.status.map(|s| match s {
-            StepStatus::Running => "running",
-            StepStatus::Completed => "completed",
-            StepStatus::Failed => "failed",
-        });
-
-        let count: (i64,) = sqlx::query_as(
-            r#"
-            WITH start_events AS (
-                SELECT
-                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
-                    json_extract(CAST(payload AS TEXT), '$.step_type') as step_type,
-                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
-                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id
-                FROM instance_events
-                WHERE instance_id = ?1 AND subtype = 'step_debug_start'
-            ),
-            end_events AS (
-                SELECT
-                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id,
-                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id,
-                    json_extract(CAST(payload AS TEXT), '$.error') as error
-                FROM instance_events
-                WHERE instance_id = ?1 AND subtype = 'step_debug_end'
-            ),
-            paired AS (
-                SELECT
-                    s.step_id,
-                    s.step_type,
-                    s.scope_id,
-                    s.parent_scope_id,
-                    CASE
-                        WHEN e.step_id IS NULL THEN 'running'
-                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed'
-                        ELSE 'completed'
-                    END as status
-                FROM start_events s
-                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '')
-            )
-            SELECT COUNT(*)
-            FROM paired
-            WHERE (?2 IS NULL OR status = ?2)
-              AND (?3 IS NULL OR step_type = ?3)
-              AND (?4 IS NULL OR scope_id = ?4)
-              AND (?5 IS NULL OR parent_scope_id = ?5)
-              AND (NOT ?6 OR parent_scope_id IS NULL)
-            "#,
-        )
-        .bind(instance_id)
-        .bind(status_filter)
-        .bind(&filter.step_type)
-        .bind(&filter.scope_id)
-        .bind(&filter.parent_scope_id)
-        .bind(filter.root_scopes_only)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(count.0)
+        Self::op_count_step_summaries(&self.pool, instance_id, filter).await
     }
 
     async fn get_terminal_instances_older_than(
@@ -1121,52 +546,18 @@ impl Persistence for SqlitePersistence {
         older_than: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<String>, CoreError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            r#"
-            SELECT instance_id
-            FROM instances
-            WHERE status IN ('completed', 'failed', 'cancelled')
-              AND finished_at IS NOT NULL
-              AND finished_at < ?1
-            ORDER BY finished_at ASC
-            LIMIT ?2
-            "#,
-        )
-        .bind(older_than)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows.into_iter().map(|(id,)| id).collect())
+        Self::op_get_terminal_instances_older_than(&self.pool, older_than, limit).await
     }
 
     async fn delete_instances_batch(&self, instance_ids: &[String]) -> Result<u64, CoreError> {
-        if instance_ids.is_empty() {
-            return Ok(0);
-        }
-
-        // SQLite doesn't support ANY(), so use IN with a prepared list
-        let placeholders: Vec<String> = (1..=instance_ids.len())
-            .map(|i| format!("?{}", i))
-            .collect();
-        let query = format!(
-            "DELETE FROM instances WHERE instance_id IN ({})",
-            placeholders.join(", ")
-        );
-
-        let mut sqlx_query = sqlx::query(&query);
-        for id in instance_ids {
-            sqlx_query = sqlx_query.bind(id);
-        }
-
-        let result = sqlx_query.execute(&self.pool).await?;
-        Ok(result.rows_affected())
+        Self::op_delete_instances_batch(&self.pool, instance_ids).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::{EventSortOrder, StepStatus};
     use uuid::Uuid;
 
     /// Create an in-memory SQLite pool for testing.
