@@ -125,6 +125,12 @@ impl Dialect for PostgresDialect {
          WHERE instance_id = $1 AND acknowledged_at IS NULL"
     }
 
+    fn sql_health_check() -> &'static str {
+        // `SELECT 1` alone produces `integer` (i32). Cast to `bigint`
+        // so the shared op can decode as `(i64,)`.
+        "SELECT 1::bigint"
+    }
+
     fn sql_list_events(order_direction: &str) -> String {
         format!(
             "SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, created_at, subtype \

@@ -148,6 +148,11 @@ impl Dialect for SqliteDialect {
          WHERE instance_id = ?1 AND acknowledged_at IS NULL"
     }
 
+    fn sql_health_check() -> &'static str {
+        // SQLite's `SELECT 1` decodes as i64 natively — no cast needed.
+        "SELECT 1"
+    }
+
     fn sql_list_events(order_direction: &str) -> String {
         format!(
             "SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype \
