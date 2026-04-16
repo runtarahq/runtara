@@ -162,7 +162,7 @@ pub async fn create_instance(
     Json(request): Json<InternalCreateInstanceRequest>,
 ) -> Result<(StatusCode, Json<InternalCreateInstanceResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     let create_request = crate::api::dto::object_model::CreateInstanceRequest {
         schema_id: None,
@@ -200,7 +200,7 @@ pub async fn query_instances(
     Json(request): Json<InternalQueryInstancesRequest>,
 ) -> Result<(StatusCode, Json<InternalQueryInstancesResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     // If there are simple filters but no condition, convert simple filters to a condition
     if request.condition.is_some() || request.filters.is_empty() {
@@ -291,7 +291,7 @@ pub async fn check_instance_exists(
     Json(request): Json<InternalCheckExistsRequest>,
 ) -> Result<(StatusCode, Json<InternalCheckExistsResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     let condition = simple_filters_to_condition(&request.filters);
     let filter_request = FilterRequest {
@@ -343,7 +343,7 @@ pub async fn create_if_not_exists(
     Json(request): Json<InternalCreateIfNotExistsRequest>,
 ) -> Result<(StatusCode, Json<InternalCreateIfNotExistsResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     // First check existence
     let condition = simple_filters_to_condition(&request.match_filters);
@@ -434,7 +434,7 @@ pub async fn update_instance(
     // Use the object store directly via the manager (by schema name, not schema ID)
     let store = crate::api::services::object_model::get_store(
         &state.manager,
-        &state.pool,
+        None,
         None,
         &tenant_id,
     )
@@ -476,7 +476,7 @@ pub async fn get_schema(
     Path(name): Path<String>,
 ) -> Result<(StatusCode, Json<InternalGetSchemaResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service.get_schema_by_name(&name, &tenant_id, None).await {
         Ok(schema) => Ok((
@@ -513,7 +513,7 @@ pub async fn create_schema(
     Json(request): Json<CreateSchemaRequest>,
 ) -> Result<(StatusCode, Json<InternalCreateSchemaResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service.create_schema(request, &tenant_id, None).await {
         Ok(schema_id) => Ok((

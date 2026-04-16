@@ -10,6 +10,7 @@
 
 use serde_json::Value;
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
 
@@ -50,11 +51,20 @@ pub struct ExecutionResult {
 #[derive(Clone)]
 pub struct AgentExecutionService {
     pool: PgPool,
+    connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
 }
 
 impl AgentExecutionService {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            connections: None,
+        }
+    }
+
+    pub fn with_connections(mut self, facade: Arc<runtara_connections::ConnectionsFacade>) -> Self {
+        self.connections = Some(facade);
+        self
     }
 
     /// Execute an agent capability with the given input.
@@ -138,7 +148,7 @@ impl AgentExecutionService {
         }
     }
 
-    /// Load connection credentials from the database.
+    /// Load connection credentials via the connections facade.
     ///
     /// Returns a JSON object with `integration_id`, `connection_subtype`,
     /// `parameters`, and `rate_limit_config` — matching the `RawConnection`
@@ -148,33 +158,26 @@ impl AgentExecutionService {
         tenant_id: &str,
         connection_id: &str,
     ) -> Result<Value, AgentExecutionError> {
-        let row: Option<ConnectionRow> = sqlx::query_as(
-            r#"
-            SELECT
-                connection_subtype,
-                integration_id,
-                connection_parameters as parameters,
-                rate_limit_config
-            FROM connection_data_entity
-            WHERE tenant_id = $1 AND id = $2
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(connection_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            AgentExecutionError::DatabaseError(format!("Failed to query connection: {}", e))
+        let facade = self.connections.as_ref().ok_or_else(|| {
+            AgentExecutionError::DatabaseError(
+                "ConnectionsFacade not configured on AgentExecutionService".to_string(),
+            )
         })?;
 
-        let row = row.ok_or_else(|| {
-            AgentExecutionError::ConnectionNotFound(format!(
-                "Connection '{}' not found for tenant '{}'",
-                connection_id, tenant_id
-            ))
-        })?;
+        let conn = facade
+            .get_with_parameters(connection_id, tenant_id)
+            .await
+            .map_err(|e| {
+                AgentExecutionError::DatabaseError(format!("Failed to query connection: {}", e))
+            })?
+            .ok_or_else(|| {
+                AgentExecutionError::ConnectionNotFound(format!(
+                    "Connection '{}' not found for tenant '{}'",
+                    connection_id, tenant_id
+                ))
+            })?;
 
-        let integration_id = row.integration_id.ok_or_else(|| {
+        let integration_id = conn.integration_id.ok_or_else(|| {
             AgentExecutionError::ExecutionFailed(format!(
                 "Connection '{}' has no integration_id configured",
                 connection_id
@@ -183,18 +186,10 @@ impl AgentExecutionService {
 
         Ok(serde_json::json!({
             "integration_id": integration_id,
-            "connection_subtype": row.connection_subtype,
-            "parameters": row.parameters,
-            "rate_limit_config": row.rate_limit_config
+            "connection_subtype": conn.connection_subtype,
+            "parameters": conn.connection_parameters,
+            "rate_limit_config": conn.rate_limit_config
         }))
     }
 }
 
-/// Row structure for connection query
-#[derive(sqlx::FromRow)]
-struct ConnectionRow {
-    connection_subtype: Option<String>,
-    integration_id: Option<String>,
-    parameters: Option<Value>,
-    rate_limit_config: Option<Value>,
-}

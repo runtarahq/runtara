@@ -51,7 +51,7 @@ pub async fn export_csv(
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     let csv_bytes = csv_import_export::export_csv(
         &state.manager,
-        &state.pool,
+        &state.connections,
         &tenant_id,
         &schema_name,
         request,
@@ -106,7 +106,7 @@ pub async fn import_csv_preview(
 
     let preview = csv_import_export::preview_import(
         &state.manager,
-        &state.pool,
+        &state.connections,
         &tenant_id,
         &schema_name,
         &csv_data,
@@ -152,7 +152,7 @@ pub async fn import_csv(
 
     let result = csv_import_export::import_csv(
         &state.manager,
-        &state.pool,
+        &state.connections,
         &tenant_id,
         &schema_name,
         &csv_data,

@@ -34,6 +34,13 @@ rand = "0.9"
 hex = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2"
+url = "2"
+
+# Auth resolution (provider auth, token cache, SigV4 signing)
+dashmap = "6.1"
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
 
 # Error handling
 thiserror = "2"
@@ -46,3 +53,6 @@ runtara-dsl = { path = "../runtara-dsl" }
 
 # OpenAPI (optional)
 utoipa = { version = "5", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

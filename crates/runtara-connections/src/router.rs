@@ -1,4 +1,4 @@
-use crate::config::ConnectionsConfig;
+use crate::config::{ConnectionsConfig, ConnectionsState};
 use crate::handler;
 use axum::{
     Router,
@@ -8,6 +8,7 @@ use axum::{
 /// CRUD + type discovery + rate limit analytics router.
 /// The host app adds auth middleware and mounts at a chosen prefix.
 pub fn connections_router(config: ConnectionsConfig) -> Router {
+    let state = ConnectionsState::from_config(config);
     Router::new()
         .route(
             "/connections",
@@ -69,26 +70,28 @@ pub fn connections_router(config: ConnectionsConfig) -> Router {
             "/connections/{id}/rate-limit-timeline",
             get(handler::rate_limits::get_connection_rate_limit_timeline_handler),
         )
-        .with_state(config.db_pool)
+        .with_state(state)
 }
 
 /// OAuth callback router (public, no auth).
 pub fn oauth_callback_router(config: ConnectionsConfig) -> Router {
+    let state = ConnectionsState::from_config(config);
     Router::new()
         .route(
             "/{tenant_id}/callback",
             get(handler::oauth::callback_handler),
         )
-        .with_state(config.db_pool)
+        .with_state(state)
 }
 
 /// Runtime credential resolution router (internal, no auth).
 /// Tenant ID is extracted from the URL path.
 pub fn runtime_router(config: ConnectionsConfig) -> Router {
+    let state = ConnectionsState::from_config(config);
     Router::new()
         .route(
             "/{tenant_id}/{connection_id}",
             get(handler::connections::get_connection_for_runtime_handler),
         )
-        .with_state(config.db_pool)
+        .with_state(state)
 }

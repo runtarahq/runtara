@@ -11,8 +11,6 @@ use serde_json::Value;
 use sha2::Sha256;
 use tracing::{debug, warn};
 
-use crate::api::repositories::connections::ConnectionRepository;
-
 use super::session::{Attachment, ChannelRouter, InboundMessage};
 
 /// Mailgun inbound email webhook handler.
@@ -274,8 +272,8 @@ async fn fetch_stored_message(
     storage_url: &str,
 ) -> anyhow::Result<String> {
     let expected_tenant = crate::config::tenant_id();
-    let conn_repo = ConnectionRepository::new(router.pool().clone());
-    let conn = conn_repo
+    let conn = router
+        .connections()
         .get_with_parameters(connection_id, expected_tenant)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
@@ -339,7 +337,7 @@ async fn upload_attachments_to_storage(
     // Resolve S3 client from the tenant's default s3_compatible connection.
     let s3_client =
         match crate::api::services::file_storage::FileStorageService::resolve_default_s3_client(
-            pool,
+            router.connections(),
             expected_tenant,
         )
         .await
@@ -418,8 +416,8 @@ async fn upload_attachments_to_storage(
 /// Get the Mailgun API key from the connection parameters.
 async fn get_mailgun_api_key(router: &ChannelRouter, connection_id: &str) -> Option<String> {
     let expected_tenant = crate::config::tenant_id();
-    let conn_repo = ConnectionRepository::new(router.pool().clone());
-    let conn = match conn_repo
+    let conn = match router
+        .connections()
         .get_with_parameters(connection_id, expected_tenant)
         .await
     {
@@ -589,8 +587,8 @@ async fn verify_mailgun_signature(
     fields: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     let expected_tenant = crate::config::tenant_id();
-    let conn_repo = ConnectionRepository::new(router.pool().clone());
-    let conn = conn_repo
+    let conn = router
+        .connections()
         .get_with_parameters(connection_id, expected_tenant)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?

@@ -4,11 +4,11 @@
 //! Handles validation, orchestration, and error mapping
 
 use crate::api::dto::scenarios::*;
-use crate::api::repositories::connections::ConnectionRepository;
 use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
+use runtara_connections::ConnectionsFacade;
 use runtara_workflows::validation::validate_workflow;
 use serde_json::Value;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 pub struct ScenarioService {
     repository: Arc<ScenarioRepository>,
-    connection_repository: Arc<ConnectionRepository>,
+    connections: Arc<ConnectionsFacade>,
 }
 
 /// Validate a folder path for scenarios.
@@ -65,13 +65,10 @@ fn validate_path(path: &str) -> Result<(), ServiceError> {
 }
 
 impl ScenarioService {
-    pub fn new(
-        repository: Arc<ScenarioRepository>,
-        connection_repository: Arc<ConnectionRepository>,
-    ) -> Self {
+    pub fn new(repository: Arc<ScenarioRepository>, connections: Arc<ConnectionsFacade>) -> Self {
         Self {
             repository,
-            connection_repository,
+            connections,
         }
     }
 
@@ -417,7 +414,7 @@ impl ScenarioService {
         if !referenced_conn_ids.is_empty() {
             let conn_ids_vec: Vec<String> = referenced_conn_ids.iter().cloned().collect();
             let existing_conns = self
-                .connection_repository
+                .connections
                 .get_existing_ids(tenant_id, &conn_ids_vec)
                 .await
                 .map_err(|e| {
@@ -834,7 +831,7 @@ impl ScenarioService {
         if !referenced_conn_ids.is_empty() {
             let conn_ids_vec: Vec<String> = referenced_conn_ids.iter().cloned().collect();
             let existing_conns = self
-                .connection_repository
+                .connections
                 .get_existing_ids(tenant_id, &conn_ids_vec)
                 .await
                 .map_err(|e| {

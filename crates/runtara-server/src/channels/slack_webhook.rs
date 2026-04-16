@@ -10,8 +10,6 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use tracing::{debug, info, warn};
 
-use crate::api::repositories::connections::ConnectionRepository;
-
 use super::session::{Attachment, ChannelRouter, InboundMessage};
 
 /// Slack Events API webhook handler.
@@ -197,8 +195,8 @@ async fn load_signing_secret(
     connection_id: &str,
 ) -> anyhow::Result<String> {
     let expected_tenant = crate::config::tenant_id();
-    let conn_repo = ConnectionRepository::new(router.pool().clone());
-    let conn = conn_repo
+    let conn = router
+        .connections()
         .get_with_parameters(connection_id, expected_tenant)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
@@ -307,7 +305,7 @@ async fn upload_slack_attachments_to_storage(
     // Resolve S3 client from tenant's default s3_compatible connection.
     let s3_client =
         match crate::api::services::file_storage::FileStorageService::resolve_default_s3_client(
-            router.pool(),
+            router.connections(),
             expected_tenant,
         )
         .await
@@ -410,8 +408,8 @@ async fn download_slack_file(
 /// Load the bot_token from the Slack connection's parameters.
 async fn load_bot_token(router: &ChannelRouter, connection_id: &str) -> Option<String> {
     let expected_tenant = crate::config::tenant_id();
-    let conn_repo = ConnectionRepository::new(router.pool().clone());
-    let conn = match conn_repo
+    let conn = match router
+        .connections()
         .get_with_parameters(connection_id, expected_tenant)
         .await
     {

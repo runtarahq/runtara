@@ -3,13 +3,10 @@
 //! Business logic for S3-compatible file storage operations.
 //! Resolves connection parameters and delegates to the S3 client.
 
-use crate::api::repositories::connections::ConnectionRepository;
-use crate::api::services::connections::ConnectionService;
 use runtara_agents::integrations::s3_client::{
     BucketInfo, ObjectInfo, ObjectMetadata, S3Client, S3Error,
 };
-use sqlx::PgPool;
-use std::sync::Arc;
+use runtara_connections::ConnectionsFacade;
 
 // ============================================================================
 // Error type
@@ -82,33 +79,38 @@ impl FileStorageService {
     /// Uses the proxy pattern: the S3Client sends `X-Runtara-Connection-Id`
     /// on every request; the proxy resolves credentials and base URL.
     pub async fn resolve_s3_client(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
     ) -> Result<S3Client, FileStorageError> {
-        let connection_repository = Arc::new(ConnectionRepository::new(pool.clone()));
-        let connection_service = ConnectionService::new(connection_repository);
-
-        let conn = connection_service
-            .get_for_runtime(connection_id, tenant_id, None)
+        let conn = facade
+            .get_with_parameters(connection_id, tenant_id)
             .await
             .map_err(|e| {
                 FileStorageError::ConnectionError(format!(
-                    "Connection '{}' not found: {:?}",
+                    "Connection '{}' lookup failed: {:?}",
                     connection_id, e
+                ))
+            })?
+            .ok_or_else(|| {
+                FileStorageError::ConnectionError(format!(
+                    "Connection '{}' not found",
+                    connection_id
                 ))
             })?;
 
-        if conn.integration_id != "s3_compatible" {
+        let integration_id = conn.integration_id.as_deref().unwrap_or("");
+        if integration_id != "s3_compatible" {
             return Err(FileStorageError::ValidationError(format!(
                 "Connection '{}' has type '{}', expected 's3_compatible'",
-                connection_id, conn.integration_id
+                connection_id, integration_id
             )));
         }
 
         let path_style = conn
-            .parameters
-            .get("path_style")
+            .connection_parameters
+            .as_ref()
+            .and_then(|p| p.get("path_style"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
@@ -118,11 +120,10 @@ impl FileStorageService {
     /// Resolve the tenant's default file storage connection to an S3Client.
     /// Used by webhook channels that cannot provide an explicit connection ID.
     pub async fn resolve_default_s3_client(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         tenant_id: &str,
     ) -> Result<S3Client, FileStorageError> {
-        let repo = ConnectionRepository::new(pool.clone());
-        let conn = repo
+        let conn = facade
             .get_default_file_storage(tenant_id)
             .await
             .map_err(|e| {
@@ -152,32 +153,32 @@ impl FileStorageService {
     // ========================================================================
 
     pub async fn create_bucket(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
     ) -> Result<(), FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         s3_blocking(move || client.create_bucket(&bucket)).await
     }
 
     pub async fn list_buckets(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
     ) -> Result<Vec<BucketInfo>, FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         s3_blocking(move || client.list_buckets()).await
     }
 
     pub async fn delete_bucket(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
     ) -> Result<(), FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         s3_blocking(move || client.delete_bucket(&bucket)).await
     }
@@ -187,7 +188,7 @@ impl FileStorageService {
     // ========================================================================
 
     pub async fn list_objects(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
@@ -195,7 +196,7 @@ impl FileStorageService {
         max_keys: Option<u32>,
         continuation_token: Option<&str>,
     ) -> Result<(Vec<ObjectInfo>, Option<String>), FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         let prefix = prefix.map(|s| s.to_string());
         let continuation_token = continuation_token.map(|s| s.to_string());
@@ -211,7 +212,7 @@ impl FileStorageService {
     }
 
     pub async fn upload_object(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
@@ -226,7 +227,7 @@ impl FileStorageService {
             )));
         }
         let size = data.len() as u64;
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         let key = key.to_string();
         let content_type = content_type.map(|s| s.to_string());
@@ -236,13 +237,13 @@ impl FileStorageService {
     }
 
     pub async fn download_object(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
         key: &str,
     ) -> Result<(Vec<u8>, ObjectMetadata), FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         let key = key.to_string();
         s3_blocking(move || {
@@ -254,26 +255,26 @@ impl FileStorageService {
     }
 
     pub async fn head_object(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
         key: &str,
     ) -> Result<ObjectMetadata, FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         let key = key.to_string();
         s3_blocking(move || client.head_object(&bucket, &key)).await
     }
 
     pub async fn delete_object(
-        pool: &PgPool,
+        facade: &ConnectionsFacade,
         connection_id: &str,
         tenant_id: &str,
         bucket: &str,
         key: &str,
     ) -> Result<(), FileStorageError> {
-        let client = Self::resolve_s3_client(pool, connection_id, tenant_id).await?;
+        let client = Self::resolve_s3_client(facade, connection_id, tenant_id).await?;
         let bucket = bucket.to_string();
         let key = key.to_string();
         s3_blocking(move || client.delete_object(&bucket, &key)).await

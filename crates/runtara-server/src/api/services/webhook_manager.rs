@@ -4,17 +4,16 @@
 //! platform (Telegram, Slack, etc.) needs to be told where to send events.
 //! This module handles that lifecycle.
 
+use runtara_connections::ConnectionsFacade;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use std::sync::Arc;
 use tracing::{info, warn};
-
-use crate::api::repositories::connections::ConnectionRepository;
 
 /// Manages webhook registration with external platforms.
 ///
 /// Called by the trigger service when Channel triggers are created/updated/deleted.
 pub struct WebhookManager {
-    pool: PgPool,
+    facade: Arc<ConnectionsFacade>,
     http_client: reqwest::Client,
     /// Public base URL of this runtime instance (e.g. "https://runtime.example.com")
     base_url: Option<String>,
@@ -29,10 +28,10 @@ pub struct WebhookRegistration {
 }
 
 impl WebhookManager {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(facade: Arc<ConnectionsFacade>) -> Self {
         let base_url = std::env::var("WEBHOOK_BASE_URL").ok();
         Self {
-            pool,
+            facade,
             http_client: reqwest::Client::new(),
             base_url,
         }
@@ -173,9 +172,9 @@ impl WebhookManager {
         &self,
         connection_id: &str,
         tenant_id: &str,
-    ) -> Result<crate::api::repositories::connections::ConnectionWithParameters, WebhookError> {
-        let repo = ConnectionRepository::new(self.pool.clone());
-        repo.get_with_parameters(connection_id, tenant_id)
+    ) -> Result<runtara_connections::ConnectionWithParameters, WebhookError> {
+        self.facade
+            .get_with_parameters(connection_id, tenant_id)
             .await
             .map_err(|e| WebhookError::DatabaseError(e.to_string()))?
             .ok_or_else(|| {

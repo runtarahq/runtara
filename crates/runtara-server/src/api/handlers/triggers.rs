@@ -18,12 +18,17 @@ use crate::api::services::webhook_manager::{WebhookManager, extract_connection_i
 
 /// Best-effort webhook registration after a Channel trigger is created/activated.
 /// Stores the webhook secret in the trigger's configuration for request validation.
-async fn maybe_register_webhook(pool: &PgPool, trigger: &InvocationTrigger, tenant_id: &str) {
+async fn maybe_register_webhook(
+    pool: &PgPool,
+    connections: &Arc<runtara_connections::ConnectionsFacade>,
+    trigger: &InvocationTrigger,
+    tenant_id: &str,
+) {
     if trigger.trigger_type == TriggerType::Channel
         && trigger.active
         && let Some(conn_id) = extract_connection_id(&trigger.configuration)
     {
-        let manager = WebhookManager::new(pool.clone());
+        let manager = WebhookManager::new(connections.clone());
         match manager.register(conn_id, tenant_id).await {
             Ok(registration) => {
                 // Store webhook secret and platform in the trigger's configuration.
@@ -54,12 +59,16 @@ async fn maybe_register_webhook(pool: &PgPool, trigger: &InvocationTrigger, tena
 }
 
 /// Best-effort webhook unregistration after a Channel trigger is deactivated/deleted.
-async fn maybe_unregister_webhook(pool: &PgPool, trigger: &InvocationTrigger, tenant_id: &str) {
+async fn maybe_unregister_webhook(
+    connections: &Arc<runtara_connections::ConnectionsFacade>,
+    trigger: &InvocationTrigger,
+    tenant_id: &str,
+) {
     if trigger.trigger_type == TriggerType::Channel
         && trigger.active
         && let Some(conn_id) = extract_connection_id(&trigger.configuration)
     {
-        let manager = WebhookManager::new(pool.clone());
+        let manager = WebhookManager::new(connections.clone());
         if let Err(e) = manager.unregister(conn_id, tenant_id).await {
             tracing::warn!(error = %e, connection_id = %conn_id, "Failed to unregister webhook");
         }
@@ -82,6 +91,7 @@ async fn maybe_unregister_webhook(pool: &PgPool, trigger: &InvocationTrigger, te
 pub async fn create_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Json(request): Json<CreateInvocationTriggerRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
@@ -89,7 +99,7 @@ pub async fn create_invocation_trigger(
 
     match service.create_trigger(request, Some(&tenant_id)).await {
         Ok(trigger) => {
-            maybe_register_webhook(&pool, &trigger, &tenant_id).await;
+            maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
 
             // Re-read the trigger to get updated config (webhook_secret, platform).
             let trigger = service
@@ -241,6 +251,7 @@ pub async fn get_invocation_trigger(
 pub async fn update_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(id): Path<String>,
     Json(request): Json<UpdateInvocationTriggerRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
@@ -264,12 +275,12 @@ pub async fn update_invocation_trigger(
             let is_active_channel = trigger.trigger_type == TriggerType::Channel && trigger.active;
 
             if !was_active_channel && is_active_channel {
-                maybe_register_webhook(&pool, &trigger, &tenant_id).await;
+                maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
             } else if was_active_channel
                 && !is_active_channel
                 && let Some(ref old) = old_trigger
             {
-                maybe_unregister_webhook(&pool, old, &tenant_id).await;
+                maybe_unregister_webhook(&connections, old, &tenant_id).await;
             }
 
             // Re-read to get updated config.
@@ -334,6 +345,7 @@ pub async fn update_invocation_trigger(
 pub async fn delete_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
@@ -349,7 +361,7 @@ pub async fn delete_invocation_trigger(
     match service.delete_trigger(&id, Some(&tenant_id)).await {
         Ok(true) => {
             if let Some(ref old) = old_trigger {
-                maybe_unregister_webhook(&pool, old, &tenant_id).await;
+                maybe_unregister_webhook(&connections, old, &tenant_id).await;
             }
 
             let response = json!({

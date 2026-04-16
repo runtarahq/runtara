@@ -11,13 +11,19 @@ pub enum ConnectionsError {
     Conflict(String),
 
     #[error("Database error: {0}")]
-    Database(String),
+    Database(#[from] sqlx::Error),
 
     #[error("Redis error: {0}")]
     Redis(String),
 
     #[error("OAuth error: {0}")]
     OAuth(String),
+
+    #[error("Auth resolution error: {0}")]
+    AuthResolution(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 impl ConnectionsError {
@@ -31,6 +37,8 @@ impl ConnectionsError {
             Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::OAuth(_) => StatusCode::BAD_REQUEST,
+            Self::AuthResolution(_) => StatusCode::BAD_GATEWAY,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

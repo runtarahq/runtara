@@ -6,19 +6,17 @@
 
 use axum::http::HeaderMap;
 use hmac::{Hmac, Mac};
+use runtara_connections::ConnectionsFacade;
 use serde_json::Value;
 use sha2::Sha256;
-use sqlx::PgPool;
 use tracing::debug;
-
-use crate::api::repositories::connections::ConnectionRepository;
 
 /// Verify a webhook request against the trigger's linked connection.
 ///
 /// Returns Ok(()) if verification passes or if no verification is needed.
 /// Returns Err with a message if verification fails.
 pub async fn verify_webhook(
-    pool: &PgPool,
+    facade: &ConnectionsFacade,
     trigger_config: &Option<Value>,
     tenant_id: &str,
     headers: &HeaderMap,
@@ -33,8 +31,7 @@ pub async fn verify_webhook(
         None => return Ok(()),
     };
 
-    let repo = ConnectionRepository::new(pool.clone());
-    let conn = match repo.get_with_parameters(connection_id, tenant_id).await {
+    let conn = match facade.get_with_parameters(connection_id, tenant_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
             debug!(connection_id = %connection_id, "Webhook verification skipped: connection not found");

@@ -8,31 +8,21 @@
 
 use axum::{extract::State, http::StatusCode, response::Json};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use chrono::Utc;
-use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use runtara_connections::{AwsSigningParams, ConnectionsFacade, RateLimitEventType};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use sqlx::PgPool;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-
-use crate::api::dto::rate_limits::RateLimitEventType;
-use crate::api::repositories::connections::ConnectionRepository;
-use crate::api::services::rate_limits::RateLimitService;
-
-type HmacSha256 = Hmac<Sha256>;
 
 // ============================================================================
 // State
 // ============================================================================
 
 pub struct ProxyState {
-    pub pool: PgPool,
+    pub facade: Arc<ConnectionsFacade>,
     pub client: reqwest::Client,
-    pub redis_url: Option<String>,
 }
 
 // ============================================================================
@@ -74,7 +64,6 @@ pub struct ProxyResponse {
     pub body_raw: Option<String>,
 }
 
-use crate::api::services::proxy_auth;
 
 // ============================================================================
 // Handler
@@ -87,33 +76,24 @@ pub async fn proxy_handler(
     Json(request): Json<ProxyRequest>,
 ) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&headers)?;
-    execute_proxy_request(
-        &tenant_id,
-        &state.pool,
-        &state.client,
-        request,
-        state.redis_url.as_deref(),
-    )
-    .await
+    execute_proxy_request(&tenant_id, &state.facade, &state.client, request).await
 }
 
 /// Core proxy logic shared between internal and authenticated debug endpoints
 pub async fn execute_proxy_request(
     tenant_id: &str,
-    pool: &PgPool,
+    facade: &ConnectionsFacade,
     client: &reqwest::Client,
     request: ProxyRequest,
-    redis_url: Option<&str>,
 ) -> Result<(StatusCode, Json<ProxyResponse>), (StatusCode, Json<Value>)> {
     // Mutable copies we'll enrich with connection data
     let mut final_headers = request.headers.clone();
     let mut final_url = request.url.clone();
-    let mut aws_signing: Option<proxy_auth::AwsSigningParams> = None;
+    let mut aws_signing: Option<AwsSigningParams> = None;
 
     // ── Connection credential injection ──────────────────────────────────
     if let Some(ref connection_id) = request.connection_id {
-        let repo = ConnectionRepository::new(pool.clone());
-        let conn = repo
+        let conn = facade
             .get_with_parameters(connection_id, tenant_id)
             .await
             .map_err(|e| {
@@ -136,28 +116,24 @@ pub async fn execute_proxy_request(
             .cloned()
             .unwrap_or(json!({}));
 
-        let resolved = proxy_auth::resolve_connection_auth(
-            client,
-            connection_id,
-            integration_id,
-            &params,
-            &mut final_headers,
-        )
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("Credential resolution failed: {}", e)})),
-            )
-        })?;
+        let resolved = facade
+            .resolve_connection_auth(connection_id, integration_id, &params, &mut final_headers)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("Credential resolution failed: {}", e)})),
+                )
+            })?;
 
         // Record rate limit event for analytics tracking
-        let rate_limit_service = RateLimitService::with_db_pool(
-            Arc::new(ConnectionRepository::new(pool.clone())),
-            pool.clone(),
-        );
-        let _ = rate_limit_service
-            .record_credential_request(connection_id, tenant_id, &RateLimitEventType::Request, None)
+        let _ = facade
+            .record_credential_request(
+                connection_id,
+                tenant_id,
+                &RateLimitEventType::Request,
+                None,
+            )
             .await;
 
         // Resolve URL against connection base URL
@@ -191,21 +167,16 @@ pub async fn execute_proxy_request(
         aws_signing = resolved.aws_signing;
 
         // ── Pre-flight rate limit check ────────────────────────────────────
-        // If adaptive rate limiting is enabled and we have Redis, check the
-        // token bucket before dispatching upstream. When tokens are exhausted,
-        // return a synthetic 429 with Retry-After so the agent's #[durable]
-        // retry loop can use durable_sleep() (suspendable/resumable) to wait.
+        // If adaptive rate limiting is enabled, check the token bucket before
+        // dispatching upstream. When tokens are exhausted, return a synthetic
+        // 429 with Retry-After so the agent's #[durable] retry loop can use
+        // durable_sleep() (suspendable/resumable) to wait.
         if crate::config::adaptive_rate_limiting_enabled()
-            && let Some(redis_url) = redis_url
             && let Err(retry_after_ms) =
-                check_rate_limit(pool, redis_url, connection_id, &conn.rate_limit_config).await
+                facade.check_rate_limit(connection_id, &conn.rate_limit_config).await
         {
             // Record rate_limited event for analytics
-            let rate_limit_service = RateLimitService::with_db_pool(
-                Arc::new(ConnectionRepository::new(pool.clone())),
-                pool.clone(),
-            );
-            let _ = rate_limit_service
+            let _ = facade
                 .record_credential_request(
                     connection_id,
                     tenant_id,
@@ -225,8 +196,6 @@ pub async fn execute_proxy_request(
             );
 
             // Return synthetic 429 with precise Retry-After in milliseconds.
-            // We use a custom header `retry-after-ms` for sub-second precision,
-            // plus the standard `retry-after` in seconds as fallback.
             let retry_after_secs = (retry_after_ms / 1000).max(1);
             let mut headers = HashMap::new();
             headers.insert("retry-after".to_string(), retry_after_secs.to_string());
@@ -293,7 +262,7 @@ pub async fn execute_proxy_request(
             )
         })?;
         let payload = body_bytes.as_deref().unwrap_or(b"");
-        sign_request_v4(
+        runtara_connections::auth::aws_signing::sign_request_v4(
             &method,
             &parsed_url,
             &mut final_headers,
@@ -369,11 +338,7 @@ pub async fn execute_proxy_request(
             .or_else(|| resp_headers.get("Retry-After"))
             .and_then(|v| v.parse::<u64>().ok());
 
-        let rate_limit_service = RateLimitService::with_db_pool(
-            Arc::new(ConnectionRepository::new(pool.clone())),
-            pool.clone(),
-        );
-        let _ = rate_limit_service
+        let _ = facade
             .record_credential_request(
                 connection_id,
                 tenant_id,
@@ -406,274 +371,6 @@ pub async fn execute_proxy_request(
             body_raw: Some(raw_body),
         }),
     ))
-}
-
-// ============================================================================
-// Token bucket rate limit check
-// ============================================================================
-
-/// Lua script for atomic token bucket check-and-decrement.
-///
-/// KEYS[1] = rate_limit:{connection_id}
-/// ARGV[1] = requests_per_second (refill rate)
-/// ARGV[2] = burst_size (max tokens)
-/// ARGV[3] = now_ms (current timestamp in milliseconds)
-///
-/// Returns:
-///   1 if the request is allowed (token consumed)
-///   Negative value = -retry_after_ms if rate limited
-const TOKEN_BUCKET_LUA: &str = r#"
-local key = KEYS[1]
-local rps = tonumber(ARGV[1])
-local burst = tonumber(ARGV[2])
-local now_ms = tonumber(ARGV[3])
-
-local tokens = tonumber(redis.call('hget', key, 'tokens') or burst)
-local last_refill = tonumber(redis.call('hget', key, 'last_refill') or now_ms)
-
--- Refill tokens based on elapsed time
-local elapsed_ms = now_ms - last_refill
-if elapsed_ms > 0 then
-    local refill = (elapsed_ms / 1000.0) * rps
-    tokens = math.min(burst, tokens + refill)
-end
-
-if tokens >= 1 then
-    tokens = tokens - 1
-    redis.call('hset', key, 'tokens', tostring(tokens))
-    redis.call('hset', key, 'last_refill', tostring(now_ms))
-    return 1
-else
-    redis.call('hset', key, 'tokens', tostring(tokens))
-    redis.call('hset', key, 'last_refill', tostring(now_ms))
-    -- Compute wait time until one token is available
-    local wait_ms = math.ceil((1 - tokens) / rps * 1000)
-    return -wait_ms
-end
-"#;
-
-/// Check the token bucket for a connection and consume a token if available.
-///
-/// Returns `Ok(())` if the request is allowed (or if rate limiting is not
-/// configured for this connection). Returns `Err(retry_after_ms)` if the
-/// caller should wait before retrying.
-async fn check_rate_limit(
-    _pool: &PgPool,
-    redis_url: &str,
-    connection_id: &str,
-    rate_limit_config_json: &Option<serde_json::Value>,
-) -> Result<(), u64> {
-    // Parse rate limit config — if absent or invalid, allow the request
-    let config: crate::api::dto::rate_limits::RateLimitConfigDto = match rate_limit_config_json {
-        Some(v) => match serde_json::from_value(v.clone()) {
-            Ok(c) => c,
-            Err(_) => return Ok(()),
-        },
-        None => return Ok(()),
-    };
-
-    // Skip if requests_per_second is 0 (unconfigured)
-    if config.requests_per_second == 0 {
-        return Ok(());
-    }
-
-    // Connect to Redis
-    let client = match redis::Client::open(redis_url) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                connection_id = connection_id,
-                error = %e,
-                "Redis connect failed for rate limit check — allowing request"
-            );
-            return Ok(());
-        }
-    };
-
-    let mut conn = match client.get_multiplexed_async_connection().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                connection_id = connection_id,
-                error = %e,
-                "Redis connection failed for rate limit check — allowing request"
-            );
-            return Ok(());
-        }
-    };
-
-    let key = format!("rate_limit:{}", connection_id);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-
-    // Execute atomic Lua script
-    let result: Result<i64, redis::RedisError> = redis::Script::new(TOKEN_BUCKET_LUA)
-        .key(&key)
-        .arg(config.requests_per_second)
-        .arg(config.burst_size)
-        .arg(now_ms)
-        .invoke_async(&mut conn)
-        .await;
-
-    match result {
-        Ok(v) if v > 0 => Ok(()),
-        Ok(v) => {
-            // Negative value = -retry_after_ms
-            let retry_after_ms = (-v) as u64;
-            Err(retry_after_ms)
-        }
-        Err(e) => {
-            // Redis error — fail open, allow the request
-            tracing::warn!(
-                connection_id = connection_id,
-                error = %e,
-                "Token bucket Lua script failed — allowing request"
-            );
-            Ok(())
-        }
-    }
-}
-
-// ============================================================================
-// AWS Signature V4 signing
-// ============================================================================
-
-/// Sign an HTTP request using AWS Signature V4.
-///
-/// Computes the SigV4 signature and sets the `Authorization`, `X-Amz-Date`,
-/// `X-Amz-Content-Sha256`, and optionally `X-Amz-Security-Token` headers.
-#[allow(clippy::too_many_arguments)]
-fn sign_request_v4(
-    method: &str,
-    url: &url::Url,
-    headers: &mut HashMap<String, String>,
-    body: &[u8],
-    access_key: &str,
-    secret_key: &str,
-    region: &str,
-    service: &str,
-    session_token: Option<&str>,
-) {
-    let now = Utc::now();
-    let date_stamp = now.format("%Y%m%d").to_string();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-
-    // Payload hash
-    let payload_hash = hex::encode(Sha256::digest(body));
-
-    // Host header
-    let host = url.host_str().unwrap_or("localhost");
-    let host_with_port = if let Some(port) = url.port() {
-        format!("{}:{}", host, port)
-    } else {
-        host.to_string()
-    };
-
-    // Canonical URI (URL-encoded path)
-    let canonical_uri = if url.path().is_empty() {
-        "/".to_string()
-    } else {
-        url.path().to_string()
-    };
-
-    // Canonical query string (sorted)
-    let canonical_querystring = {
-        let mut pairs: Vec<(String, String)> = url
-            .query_pairs()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        pairs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        pairs
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&")
-    };
-
-    // Build sorted headers map for signing
-    let mut headers_map = BTreeMap::new();
-    headers_map.insert("host".to_string(), host_with_port.clone());
-    headers_map.insert("x-amz-content-sha256".to_string(), payload_hash.clone());
-    headers_map.insert("x-amz-date".to_string(), amz_date.clone());
-
-    // Include content-type in signing if present in request headers
-    for (k, v) in headers.iter() {
-        let lk = k.to_lowercase();
-        if lk == "content-type" {
-            headers_map.insert(lk, v.trim().to_string());
-        }
-    }
-
-    if let Some(token) = session_token {
-        headers_map.insert("x-amz-security-token".to_string(), token.to_string());
-    }
-
-    // Include extra S3 headers (x-amz-copy-source, etc.) in signing
-    for (k, v) in headers.iter() {
-        let lk = k.to_lowercase();
-        if lk.starts_with("x-amz-") && !headers_map.contains_key(&lk) {
-            headers_map.insert(lk, v.trim().to_string());
-        }
-    }
-
-    let signed_headers: Vec<String> = headers_map.keys().cloned().collect();
-    let signed_headers_str = signed_headers.join(";");
-
-    let canonical_headers: String = headers_map
-        .iter()
-        .map(|(k, v)| format!("{}:{}\n", k, v.trim()))
-        .collect();
-
-    let canonical_request = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        method,
-        canonical_uri,
-        canonical_querystring,
-        canonical_headers,
-        signed_headers_str,
-        payload_hash
-    );
-
-    let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        amz_date,
-        credential_scope,
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
-    );
-
-    // Calculate signing key
-    let k_date = hmac_sha256(
-        format!("AWS4{}", secret_key).as_bytes(),
-        date_stamp.as_bytes(),
-    );
-    let k_region = hmac_sha256(&k_date, region.as_bytes());
-    let k_service = hmac_sha256(&k_region, service.as_bytes());
-    let k_signing = hmac_sha256(&k_service, b"aws4_request");
-
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        access_key, credential_scope, signed_headers_str, signature
-    );
-
-    // Set the signing headers on the outbound request
-    headers.insert("Authorization".into(), authorization);
-    headers.insert("X-Amz-Date".into(), amz_date);
-    headers.insert("X-Amz-Content-Sha256".into(), payload_hash);
-    headers.insert("Host".into(), host_with_port);
-    if let Some(token) = session_token {
-        headers.insert("X-Amz-Security-Token".into(), token.to_string());
-    }
-}
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
 }
 
 // ============================================================================

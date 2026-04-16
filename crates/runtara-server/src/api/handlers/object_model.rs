@@ -29,6 +29,8 @@ pub struct ObjectModelState {
     pub manager: Arc<ObjectStoreManager>,
     /// Database pool for connection resolution
     pub pool: PgPool,
+    /// Connections facade for resolving connection IDs
+    pub connections: Arc<runtara_connections::ConnectionsFacade>,
 }
 
 // ============================================================================
@@ -129,7 +131,7 @@ pub async fn create_schema(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<CreateSchemaRequest>,
 ) -> Result<(StatusCode, Json<CreateSchemaResponse>), (StatusCode, Json<Value>)> {
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .create_schema(request, &tenant_id, params.connection_id.as_deref())
@@ -182,7 +184,7 @@ pub async fn list_schemas(
     State(state): State<Arc<ObjectModelState>>,
     Query(params): Query<ObjectModelQueryParams>,
 ) -> Result<(StatusCode, Json<ListSchemasResponse>), (StatusCode, Json<Value>)> {
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .list_schemas(
@@ -273,7 +275,7 @@ pub async fn get_instance_by_id(
     Path((schema_id, instance_id)): Path<(String, String)>,
     Query(params): Query<ConnectionQueryParams>,
 ) -> Result<(StatusCode, Json<GetInstanceResponse>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .get_instance_by_id(
@@ -368,7 +370,7 @@ pub async fn update_instance(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<UpdateInstanceRequest>,
 ) -> Result<(StatusCode, Json<UpdateInstanceResponse>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .update_instance(
@@ -443,7 +445,7 @@ pub async fn delete_instance(
     Path((schema_id, instance_id)): Path<(String, String)>,
     Query(params): Query<ConnectionQueryParams>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .delete_instance(
@@ -529,7 +531,7 @@ pub async fn bulk_delete_instances(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<BulkDeleteRequest>,
 ) -> Result<(StatusCode, Json<BulkDeleteResponse>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .bulk_delete_instances(
@@ -588,7 +590,7 @@ pub async fn get_schema_by_id(
     Path(id): Path<String>,
     Query(params): Query<ConnectionQueryParams>,
 ) -> Result<(StatusCode, Json<GetSchemaResponse>), (StatusCode, Json<Value>)> {
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .get_schema_by_id(&id, &tenant_id, params.connection_id.as_deref())
@@ -641,7 +643,7 @@ pub async fn get_schema_by_name(
     Path(name): Path<String>,
     Query(params): Query<ConnectionQueryParams>,
 ) -> Result<(StatusCode, Json<GetSchemaResponse>), (StatusCode, Json<Value>)> {
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .get_schema_by_name(&name, &tenant_id, params.connection_id.as_deref())
@@ -698,7 +700,7 @@ pub async fn update_schema(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<UpdateSchemaRequest>,
 ) -> Result<(StatusCode, Json<UpdateSchemaResponse>), (StatusCode, Json<Value>)> {
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .update_schema(&id, &tenant_id, request, params.connection_id.as_deref())
@@ -751,7 +753,7 @@ pub async fn delete_schema(
     Path(id): Path<String>,
     Query(params): Query<ConnectionQueryParams>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    let service = SchemaService::new(state.manager.clone(), state.pool.clone());
+    let service = SchemaService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .delete_schema(&id, &tenant_id, params.connection_id.as_deref())
@@ -855,7 +857,7 @@ pub async fn create_instance(
     Query(params): Query<ConnectionQueryParams>,
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<(StatusCode, Json<CreateInstanceResponse>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     tracing::debug!(
         schema_id = ?request.schema_id,
@@ -929,7 +931,7 @@ pub async fn get_instances_by_schema(
     Path(schema_id): Path<String>,
     Query(params): Query<ObjectModelQueryParams>,
 ) -> Result<(StatusCode, Json<ListInstancesResponse>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .get_instances_by_schema(
@@ -993,7 +995,7 @@ pub async fn get_instances_by_schema_name(
     Path(schema_name): Path<String>,
     Query(params): Query<ObjectModelQueryParams>,
 ) -> Result<(StatusCode, Json<ListInstancesResponse>), (StatusCode, Json<Value>)> {
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     match service
         .get_instances_by_schema_name(
@@ -1069,7 +1071,7 @@ pub async fn filter_instances(
     let offset = request.offset;
     let limit = request.limit;
 
-    let service = InstanceService::new(state.manager.clone(), state.pool.clone());
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
 
     tracing::info!("Calling service.filter_instances_by_schema");
     match service

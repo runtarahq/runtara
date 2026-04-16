@@ -33,8 +33,8 @@ use crate::api::dto::scenarios::{
     ScenarioInstanceDto, ScenarioVersionInfoDto, StepTypeInfo, UpdateTrackEventsRequest,
     VersionSchemasResponse, WorkflowValidationErrorResponse, validate_scenario_inputs,
 };
-use crate::api::repositories::connections::ConnectionRepository;
 use crate::api::repositories::scenarios::ScenarioRepository;
+use runtara_connections::ConnectionsFacade;
 use crate::api::services::scenarios::{ScenarioService, ServiceError};
 use crate::runtime_client::RuntimeClient;
 
@@ -122,17 +122,17 @@ pub struct ExecuteScenarioQuery {
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, request), fields(scenario_name = %request.name))]
+#[instrument(skip(pool, connections, request), fields(scenario_name = %request.name))]
 pub async fn create_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Json(request): Json<CreateScenarioRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service
@@ -176,14 +176,14 @@ pub async fn create_scenario_handler(
 pub async fn update_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(_runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(scenario_id): Path<String>,
     Json(request): Json<UpdateScenarioRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool.clone()));
-    let service = ScenarioService::new(repository.clone(), connection_repository);
+    let service = ScenarioService::new(repository.clone(), connections.clone());
 
     // Delegate to service (name/description are now inside execution_graph)
     let (version_num, warnings) = match service
@@ -270,12 +270,12 @@ pub async fn update_scenario_handler(
 pub async fn patch_version_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path((scenario_id, version)): Path<(String, i32)>,
     Json(request): Json<UpdateScenarioRequest>,
 ) -> (StatusCode, Json<Value>) {
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool.clone()));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     let warnings = match service
         .patch_version_graph(&tenant_id, &scenario_id, version, request.execution_graph)
@@ -313,18 +313,18 @@ pub async fn patch_version_graph_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, request), fields(scenario_id = %scenario_id, version = %version))]
+#[instrument(skip(pool, connections, request), fields(scenario_id = %scenario_id, version = %version))]
 pub async fn toggle_track_events_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Path((scenario_id, version)): Path<(String, i32)>,
     Json(request): Json<UpdateTrackEventsRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service
@@ -366,6 +366,7 @@ pub async fn toggle_track_events_handler(
 pub async fn list_scenarios_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Query(query): Query<ListScenariosQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -373,8 +374,7 @@ pub async fn list_scenarios_handler(
 
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service with pagination
     let page = query.page.unwrap_or(1);
@@ -442,14 +442,14 @@ pub async fn list_scenarios_handler(
 pub async fn get_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Path(scenario_id): Path<String>,
     Query(query): Query<GetScenarioQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service
@@ -484,13 +484,13 @@ pub async fn get_scenario_handler(
 pub async fn list_scenario_versions_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Path(scenario_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service.list_versions(&tenant_id, &scenario_id).await {
@@ -522,13 +522,13 @@ pub async fn list_scenario_versions_handler(
 pub async fn delete_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Path(scenario_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service.delete_scenario(&tenant_id, &scenario_id).await {
@@ -565,14 +565,14 @@ pub async fn delete_scenario_handler(
 pub async fn clone_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Path(scenario_id): Path<String>,
     Json(request): Json<CloneScenarioRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service
@@ -615,10 +615,11 @@ pub async fn clone_scenario_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id, version = %version))]
+#[instrument(skip(pool, connections, runtime_client), fields(scenario_id = %scenario_id, version = %version))]
 pub async fn compile_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     Path((scenario_id, version)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
@@ -930,17 +931,17 @@ pub struct ValidateMappingsQuery {
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool), fields(scenario_id = %scenario_id))]
+#[instrument(skip(pool, connections), fields(scenario_id = %scenario_id))]
 pub async fn validate_mappings_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(scenario_id): Path<String>,
     Query(query): Query<ValidateMappingsQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
     let scenario_repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(scenario_repository, connection_repository);
+    let service = ScenarioService::new(scenario_repository, connections.clone());
 
     // Validate mappings
     match service
@@ -1020,10 +1021,11 @@ pub async fn validate_mappings_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, trigger_stream, request), fields(scenario_id = %scenario_id))]
+#[instrument(skip(pool, connections, trigger_stream, request), fields(scenario_id = %scenario_id))]
 pub async fn execute_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(trigger_stream): State<
         Option<Arc<crate::api::repositories::trigger_stream::TriggerStreamPublisher>>,
     >,
@@ -1142,10 +1144,11 @@ pub async fn execute_scenario_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, connections, runtime_client), fields(instance_id = %instance_id))]
 pub async fn get_execution_metrics_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -1222,10 +1225,11 @@ pub async fn get_execution_metrics_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id, instance_id = %instance_id))]
+#[instrument(skip(pool, connections, runtime_client), fields(scenario_id = %scenario_id, instance_id = %instance_id))]
 pub async fn get_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((scenario_id, instance_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
@@ -1317,10 +1321,11 @@ pub async fn get_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id))]
+#[instrument(skip(pool, connections, runtime_client), fields(scenario_id = %scenario_id))]
 pub async fn list_instances_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(scenario_id): Path<String>,
     Query(query): Query<ListInstancesQuery>,
@@ -1542,10 +1547,11 @@ pub async fn replay_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, running_executions, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, connections, running_executions, runtime_client), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(running_executions): State<Arc<dashmap::DashMap<Uuid, crate::types::CancellationHandle>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
@@ -1652,10 +1658,11 @@ pub async fn stop_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, connections, runtime_client), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -1760,10 +1767,11 @@ pub async fn pause_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(pool, connections, runtime_client), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -1969,17 +1977,17 @@ fn map_service_error_to_response(error: ServiceError) -> (StatusCode, Json<Value
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool), fields(scenario_id = %scenario_id, version_number = %version_number))]
+#[instrument(skip(pool, connections), fields(scenario_id = %scenario_id, version_number = %version_number))]
 pub async fn set_current_version_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 
     Path((scenario_id, version_number)): Path<(String, i32)>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     // Delegate to service
     match service
@@ -2177,10 +2185,11 @@ pub async fn get_step_subinstances_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument]
+#[instrument(skip(pool, connections))]
 pub async fn get_scenario_dependencies_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(scenario_id): Path<String>,
     Query(params): Query<serde_json::Value>,
 ) -> Result<Json<GetDependenciesResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -2244,10 +2253,11 @@ pub async fn get_scenario_dependencies_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument]
+#[instrument(skip(pool, connections))]
 pub async fn get_scenario_dependents_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(scenario_id): Path<String>,
     Query(params): Query<serde_json::Value>,
 ) -> Result<Json<GetDependentsResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -2310,15 +2320,15 @@ pub async fn get_scenario_dependents_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument]
+#[instrument(skip(pool, connections))]
 pub async fn get_version_schemas_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path((scenario_id, version)): Path<(String, i32)>,
 ) -> Result<Json<VersionSchemasResponse>, (StatusCode, Json<ErrorResponse>)> {
     let repo = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repo = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repo, connection_repo);
+    let service = ScenarioService::new(repo, connections.clone());
 
     match service
         .get_version_schemas(&tenant_id, &scenario_id, version)
@@ -2371,13 +2381,13 @@ pub async fn get_version_schemas_handler(
 pub async fn move_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(id): Path<String>,
     Json(request): Json<MoveScenarioRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     match service.move_scenario(&tenant_id, &id, &request.path).await {
         Ok(response) => {
@@ -2405,11 +2415,11 @@ pub async fn move_scenario_handler(
 pub async fn list_folders_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     match service.list_folders(&tenant_id).await {
         Ok(response) => (
@@ -2435,12 +2445,12 @@ pub async fn list_folders_handler(
 pub async fn rename_folder_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Json(request): Json<RenameFolderRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(ScenarioRepository::new(pool.clone()));
-    let connection_repository = Arc::new(ConnectionRepository::new(pool));
-    let service = ScenarioService::new(repository, connection_repository);
+    let service = ScenarioService::new(repository, connections.clone());
 
     match service
         .rename_folder(&tenant_id, &request.old_path, &request.new_path)

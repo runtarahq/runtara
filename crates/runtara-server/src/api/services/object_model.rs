@@ -4,11 +4,9 @@
 //! Wraps repositories and provides the API expected by handlers.
 
 use crate::api::dto::object_model::*;
-use crate::api::repositories::connections::ConnectionRepository;
 use crate::api::repositories::object_model::ObjectStoreManager;
-use crate::api::services::connections::ConnectionService;
+use runtara_connections::ConnectionsFacade;
 use runtara_object_store::ObjectStore;
-use sqlx::PgPool;
 use std::sync::Arc;
 
 // ============================================================================
@@ -17,32 +15,47 @@ use std::sync::Arc;
 
 /// Resolves a connection_id to a database URL, or returns None for default database.
 pub(crate) async fn resolve_database_url(
-    pool: &PgPool,
+    facade: Option<&ConnectionsFacade>,
     connection_id: Option<&str>,
     tenant_id: &str,
 ) -> Result<Option<String>, ServiceError> {
     match connection_id {
         Some(conn_id) => {
-            let connection_repository = Arc::new(ConnectionRepository::new(pool.clone()));
-            let connection_service = ConnectionService::new(connection_repository);
-
-            let conn = connection_service
-                .get_for_runtime(conn_id, tenant_id, None)
+            let facade = facade.ok_or_else(|| {
+                ServiceError::ValidationError(
+                    "ConnectionsFacade required when connection_id is provided".to_string(),
+                )
+            })?;
+            let conn = facade
+                .get_with_parameters(conn_id, tenant_id)
                 .await
                 .map_err(|e| {
-                    ServiceError::NotFound(format!("Connection '{}' not found: {:?}", conn_id, e))
+                    ServiceError::NotFound(format!(
+                        "Connection '{}' lookup failed: {:?}",
+                        conn_id, e
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ServiceError::NotFound(format!("Connection '{}' not found", conn_id))
                 })?;
 
             // Verify connection type
-            if conn.integration_id != "postgres" {
+            let integration_id = conn.integration_id.as_deref().unwrap_or("");
+            if integration_id != "postgres" {
                 return Err(ServiceError::ValidationError(format!(
                     "Connection '{}' has type '{}', expected 'postgres'",
-                    conn_id, conn.integration_id
+                    conn_id, integration_id
                 )));
             }
 
-            let db_url = conn
-                .parameters
+            let params = conn.connection_parameters.as_ref().ok_or_else(|| {
+                ServiceError::ValidationError(format!(
+                    "Connection '{}' has no parameters",
+                    conn_id
+                ))
+            })?;
+
+            let db_url = params
                 .get("database_url")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
@@ -61,11 +74,11 @@ pub(crate) async fn resolve_database_url(
 /// Gets the appropriate ObjectStore based on connection_id or default.
 pub(crate) async fn get_store(
     manager: &ObjectStoreManager,
-    pool: &PgPool,
+    facade: Option<&ConnectionsFacade>,
     connection_id: Option<&str>,
     tenant_id: &str,
 ) -> Result<Arc<ObjectStore>, ServiceError> {
-    let database_url = resolve_database_url(pool, connection_id, tenant_id).await?;
+    let database_url = resolve_database_url(facade, connection_id, tenant_id).await?;
 
     match database_url {
         Some(url) => manager.get_store_by_url(&url).await.map_err(|e| {
@@ -83,12 +96,12 @@ pub(crate) async fn get_store(
 
 pub struct SchemaService {
     manager: Arc<ObjectStoreManager>,
-    pool: PgPool,
+    facade: Arc<ConnectionsFacade>,
 }
 
 impl SchemaService {
-    pub fn new(manager: Arc<ObjectStoreManager>, pool: PgPool) -> Self {
-        Self { manager, pool }
+    pub fn new(manager: Arc<ObjectStoreManager>, facade: Arc<ConnectionsFacade>) -> Self {
+        Self { manager, facade }
     }
 
     /// Create a new schema
@@ -104,7 +117,7 @@ impl SchemaService {
         SchemaValidator::validate_schema(&request.table_name, &request.columns, &request.indexes)
             .map_err(|e| ServiceError::ValidationError(e.to_string()))?;
 
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let store_request = runtara_object_store::CreateSchemaRequest {
             name: request.name.clone(),
@@ -136,7 +149,7 @@ impl SchemaService {
         limit: i64,
         connection_id: Option<&str>,
     ) -> Result<(Vec<Schema>, i64), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let all_schemas = store
             .list_schemas()
@@ -162,7 +175,7 @@ impl SchemaService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<Schema, ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let store_schema = store
             .get_schema_by_id(id)
@@ -181,7 +194,7 @@ impl SchemaService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<Schema, ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let store_schema = store
             .get_schema(name)
@@ -223,7 +236,7 @@ impl SchemaService {
             }
         }
 
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // First get the schema to find its name (ObjectStore.update_schema uses name)
         let existing = store
@@ -270,7 +283,7 @@ impl SchemaService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<(), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // First get the schema to find its name
         let existing = store
@@ -295,12 +308,12 @@ impl SchemaService {
 
 pub struct InstanceService {
     manager: Arc<ObjectStoreManager>,
-    pool: PgPool,
+    facade: Arc<ConnectionsFacade>,
 }
 
 impl InstanceService {
-    pub fn new(manager: Arc<ObjectStoreManager>, pool: PgPool) -> Self {
-        Self { manager, pool }
+    pub fn new(manager: Arc<ObjectStoreManager>, facade: Arc<ConnectionsFacade>) -> Self {
+        Self { manager, facade }
     }
 
     /// Create a new instance
@@ -317,7 +330,7 @@ impl InstanceService {
             ));
         }
 
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // Lookup schema by ID or name to get the schema name
         let schema_name = match (&request.schema_id, &request.schema_name) {
@@ -374,7 +387,7 @@ impl InstanceService {
         limit: i64,
         connection_id: Option<&str>,
     ) -> Result<(Vec<Instance>, i64), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // Lookup schema by ID
         let schema = store
@@ -409,7 +422,7 @@ impl InstanceService {
         limit: i64,
         connection_id: Option<&str>,
     ) -> Result<(Vec<Instance>, i64), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let filter = runtara_object_store::SimpleFilter::new(schema_name)
             .with_offset(offset as i32)
@@ -436,7 +449,7 @@ impl InstanceService {
         filter_request: FilterRequest,
         connection_id: Option<&str>,
     ) -> Result<(Vec<Instance>, i64), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         let store_filter = runtara_object_store::FilterRequest {
             condition: filter_request.condition.map(|c| c.into()),
@@ -475,7 +488,7 @@ impl InstanceService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<Option<Instance>, ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // Fetch schema first to get its name
         let schema = store
@@ -501,7 +514,7 @@ impl InstanceService {
         properties: serde_json::Value,
         connection_id: Option<&str>,
     ) -> Result<(), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // Fetch schema first to get its name
         let schema = store
@@ -532,7 +545,7 @@ impl InstanceService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<(), ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // Fetch schema first to get its name
         let schema = store
@@ -561,7 +574,7 @@ impl InstanceService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<usize, ServiceError> {
-        let store = get_store(&self.manager, &self.pool, connection_id, tenant_id).await?;
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
         // Fetch schema first to get its name
         let schema = store

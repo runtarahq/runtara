@@ -7,9 +7,10 @@ use crate::api::dto::csv_import_export::*;
 use crate::api::dto::object_model::{ColumnDefinition, ColumnType};
 use crate::api::repositories::object_model::ObjectStoreManager;
 use crate::api::services::object_model::{ServiceError, get_store};
+use runtara_connections::ConnectionsFacade;
 use runtara_object_store::FilterRequest as StoreFilterRequest;
-use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Page size for paginating through instances during export
 const EXPORT_PAGE_SIZE: i64 = 1000;
@@ -24,13 +25,13 @@ const EXPORT_PAGE_SIZE: i64 = 1000;
 /// and serializes to CSV format.
 pub async fn export_csv(
     manager: &ObjectStoreManager,
-    pool: &PgPool,
+    facade: &Arc<ConnectionsFacade>,
     tenant_id: &str,
     schema_name: &str,
     request: CsvExportRequest,
     connection_id: Option<&str>,
 ) -> Result<Vec<u8>, ServiceError> {
-    let store = get_store(manager, pool, connection_id, tenant_id).await?;
+    let store = get_store(manager, Some(facade.as_ref()), connection_id, tenant_id).await?;
 
     // Fetch schema to get column definitions
     let schema = store
@@ -149,13 +150,13 @@ fn json_value_to_csv_string(value: Option<&serde_json::Value>) -> String {
 /// Parse CSV headers and sample rows, auto-suggest column mappings.
 pub async fn preview_import(
     manager: &ObjectStoreManager,
-    pool: &PgPool,
+    facade: &Arc<ConnectionsFacade>,
     tenant_id: &str,
     schema_name: &str,
     csv_data: &[u8],
     connection_id: Option<&str>,
 ) -> Result<ImportPreviewResponse, ServiceError> {
-    let store = get_store(manager, pool, connection_id, tenant_id).await?;
+    let store = get_store(manager, Some(facade.as_ref()), connection_id, tenant_id).await?;
 
     // Fetch schema
     let schema = store
@@ -306,7 +307,7 @@ fn normalize_column_name(name: &str) -> String {
 /// Validates all rows first (atomic), then bulk inserts or upserts.
 pub async fn import_csv(
     manager: &ObjectStoreManager,
-    pool: &PgPool,
+    facade: &Arc<ConnectionsFacade>,
     tenant_id: &str,
     schema_name: &str,
     csv_data: &[u8],
@@ -341,7 +342,7 @@ pub async fn import_csv(
         }
     }
 
-    let store = get_store(manager, pool, connection_id, tenant_id)
+    let store = get_store(manager, Some(facade.as_ref()), connection_id, tenant_id)
         .await
         .map_err(CsvImportError::Service)?;
 

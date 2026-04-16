@@ -92,6 +92,7 @@ pub struct AgentTestingService {
     rate_limiter: RateLimiter,
     dispatcher_service: Option<Arc<DispatcherService>>,
     pool: Option<PgPool>,
+    connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
 }
 
 impl AgentTestingService {
@@ -111,7 +112,16 @@ impl AgentTestingService {
             rate_limiter: RateLimiter::new(),
             dispatcher_service,
             pool,
+            connections: None,
         }
+    }
+
+    pub fn with_connections(
+        mut self,
+        facade: Arc<runtara_connections::ConnectionsFacade>,
+    ) -> Self {
+        self.connections = Some(facade);
+        self
     }
 
     /// Check if agent testing is enabled
@@ -267,43 +277,29 @@ impl AgentTestingService {
         }
     }
 
-    /// Load connection data from the database
+    /// Load connection data via the connections facade
     async fn load_connection(
         &self,
         tenant_id: &str,
         connection_id: &str,
     ) -> Result<Value, ServiceError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            ServiceError::DatabaseError("Database pool not configured".to_string())
+        let facade = self.connections.as_ref().ok_or_else(|| {
+            ServiceError::DatabaseError("ConnectionsFacade not configured".to_string())
         })?;
 
-        // Query connection from database using runtime query (avoid compile-time DB check)
-        let row: Option<ConnectionRow> = sqlx::query_as(
-            r#"
-            SELECT
-                connection_subtype,
-                integration_id,
-                connection_parameters as parameters,
-                rate_limit_config
-            FROM connection_data_entity
-            WHERE tenant_id = $1 AND id = $2
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(connection_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| ServiceError::DatabaseError(format!("Failed to query connection: {}", e)))?;
-
-        let row = row.ok_or_else(|| {
-            ServiceError::ConnectionNotFound(format!(
-                "Connection '{}' not found for tenant '{}'",
-                connection_id, tenant_id
-            ))
-        })?;
+        let conn = facade
+            .get_with_parameters(connection_id, tenant_id)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(format!("Failed to query connection: {}", e)))?
+            .ok_or_else(|| {
+                ServiceError::ConnectionNotFound(format!(
+                    "Connection '{}' not found for tenant '{}'",
+                    connection_id, tenant_id
+                ))
+            })?;
 
         // integration_id is required for agents to work
-        let integration_id = row.integration_id.ok_or_else(|| {
+        let integration_id = conn.integration_id.ok_or_else(|| {
             ServiceError::ExecutionError(format!(
                 "Connection '{}' has no integration_id configured",
                 connection_id
@@ -314,20 +310,11 @@ impl AgentTestingService {
         // This will be injected as _connection field in agent input
         let connection_data = serde_json::json!({
             "integration_id": integration_id,
-            "connection_subtype": row.connection_subtype,
-            "parameters": row.parameters,
-            "rate_limit_config": row.rate_limit_config
+            "connection_subtype": conn.connection_subtype,
+            "parameters": conn.connection_parameters,
+            "rate_limit_config": conn.rate_limit_config
         });
 
         Ok(connection_data)
     }
-}
-
-/// Row structure for connection query
-#[derive(sqlx::FromRow)]
-struct ConnectionRow {
-    connection_subtype: Option<String>,
-    integration_id: Option<String>,
-    parameters: Option<Value>,
-    rate_limit_config: Option<Value>,
 }

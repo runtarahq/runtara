@@ -112,28 +112,14 @@ use runtime_client::RuntimeClient;
         api::handlers::file_storage::download_object,
         api::handlers::file_storage::get_object_info,
         api::handlers::file_storage::delete_object,
-        // Connection endpoints
-        api::handlers::connections::create_connection_handler,
-        api::handlers::connections::list_connections_handler,
-        api::handlers::connections::get_connection_handler,
-        api::handlers::connections::update_connection_handler,
-        api::handlers::connections::delete_connection_handler,
-        api::handlers::connections::get_connections_by_operator_handler,
-        api::handlers::connections::list_connection_categories_handler,
-        api::handlers::connections::list_connection_auth_types_handler,
-        api::handlers::connections::list_connection_types_handler,
-        api::handlers::connections::get_connection_type_handler,
+        // NOTE: Connection endpoints are now served by runtara-connections crate
         // Metrics endpoints
         api::metrics::get_scenario_metrics,
         api::metrics::get_scenario_stats,
         api::metrics::get_tenant_metrics,
         // Analytics endpoints
         api::analytics::get_system_analytics_handler,
-        // Rate Limit Analytics endpoints
-        api::handlers::rate_limits::list_rate_limits_handler,
-        api::handlers::rate_limits::get_connection_rate_limit_status_handler,
-        api::handlers::rate_limits::get_connection_rate_limit_history_handler,
-        api::handlers::rate_limits::get_connection_rate_limit_timeline_handler,
+        // NOTE: Rate limit analytics endpoints are now served by runtara-connections crate
         // Invocation Trigger endpoints
         api::handlers::triggers::create_invocation_trigger,
         api::handlers::triggers::list_invocation_triggers,
@@ -280,23 +266,7 @@ use runtime_client::RuntimeClient;
             api::dto::file_storage::FileMetadataResponse,
             api::dto::file_storage::UploadResponse,
             api::dto::file_storage::DeleteResponse,
-            api::dto::connections::ConnectionDto,
-            api::dto::connections::ConnectionStatus,
-            api::dto::connections::CreateConnectionRequest,
-            api::dto::connections::UpdateConnectionRequest,
-            api::dto::connections::ListConnectionsResponse,
-            api::dto::connections::ConnectionResponse,
-            api::dto::connections::CreateConnectionResponse,
-            api::dto::connections::ConnectionFieldDto,
-            api::dto::connections::ConnectionTypeDto,
-            api::dto::connections::ListConnectionTypesResponse,
-            api::dto::connections::ConnectionTypeResponse,
-            api::dto::connections::ConnectionCategory,
-            api::dto::connections::ConnectionCategoryDto,
-            api::dto::connections::ListConnectionCategoriesResponse,
-            api::dto::connections::ConnectionAuthType,
-            api::dto::connections::ConnectionAuthTypeDto,
-            api::dto::connections::ListConnectionAuthTypesResponse,
+            // NOTE: Connection DTOs are now in runtara-connections crate
             api::dto::triggers::InvocationTrigger,
             api::dto::triggers::TriggerType,
             api::dto::triggers::CreateInvocationTriggerRequest,
@@ -321,23 +291,7 @@ use runtime_client::RuntimeClient;
             api::analytics::MemoryInfo,
             api::analytics::DiskInfo,
             api::analytics::CpuInfo,
-            // Rate Limit Analytics DTOs
-            api::dto::rate_limits::RateLimitConfigDto,
-            api::dto::rate_limits::RateLimitStateDto,
-            api::dto::rate_limits::RateLimitMetricsDto,
-            api::dto::rate_limits::RateLimitStatusDto,
-            api::dto::rate_limits::GetRateLimitStatusResponse,
-            api::dto::rate_limits::ListRateLimitsResponse,
-            api::dto::rate_limits::ListRateLimitsQuery,
-            api::dto::rate_limits::PeriodStatsDto,
-            api::dto::rate_limits::RateLimitEventType,
-            api::dto::rate_limits::RateLimitEventDto,
-            api::dto::rate_limits::RateLimitHistoryQuery,
-            api::dto::rate_limits::RateLimitHistoryResponse,
-            api::dto::rate_limits::RateLimitTimelineQuery,
-            api::dto::rate_limits::RateLimitTimelineBucket,
-            api::dto::rate_limits::RateLimitTimelineData,
-            api::dto::rate_limits::RateLimitTimelineResponse,
+            // NOTE: Rate limit DTOs are now in runtara-connections crate
         )
     ),
     tags(
@@ -382,6 +336,8 @@ struct AppState {
     valkey_conn: Option<redis::aio::ConnectionManager>,
     /// Agent execution service for host-mediated agent calls from scenario instances
     agent_execution: api::services::agent_execution::AgentExecutionService,
+    /// Connections facade for unified connection operations
+    connections: Arc<runtara_connections::ConnectionsFacade>,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -441,6 +397,13 @@ impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> 
 impl axum::extract::FromRef<AppState> for api::services::agent_execution::AgentExecutionService {
     fn from_ref(state: &AppState) -> api::services::agent_execution::AgentExecutionService {
         state.agent_execution.clone()
+    }
+}
+
+// Implement FromRef to allow extracting connections facade from AppState
+impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFacade> {
+    fn from_ref(state: &AppState) -> Arc<runtara_connections::ConnectionsFacade> {
+        state.connections.clone()
     }
 }
 
@@ -621,6 +584,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         jwt_config: mcp_jwt_config,
         pool: pool.clone(),
     };
+
+    // Construct connections crate config and facade
+    let connections_config = runtara_connections::ConnectionsConfig {
+        db_pool: pool.clone(),
+        redis_url: crate::valkey::build_redis_url(),
+        public_base_url: std::env::var("PUBLIC_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+        http_client: reqwest::Client::new(),
+    };
+    let connections_state =
+        runtara_connections::ConnectionsState::from_config(connections_config.clone());
+    let connections_facade = Arc::new(runtara_connections::ConnectionsFacade::new(
+        connections_state,
+    ));
 
     // Spawn background task to warn when pool usage is high
     let pool_monitor = pool.clone();
@@ -925,7 +902,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                         true,
                         Some(dispatcher_service),
                         Some(pool.clone()),
-                    );
+                    )
+                    .with_connections(connections_facade.clone());
                     Some(service)
                 }
                 Err(e) => {
@@ -1125,55 +1103,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/scenarios/{id}/move",
             put(api::handlers::scenarios::move_scenario_handler),
         )
-        // Connection endpoints
-        .route(
-            "/api/runtime/connections",
-            post(api::handlers::connections::create_connection_handler),
-        )
-        .route(
-            "/api/runtime/connections",
-            get(api::handlers::connections::list_connections_handler),
-        )
-        .route(
-            "/api/runtime/connections/{id}",
-            get(api::handlers::connections::get_connection_handler),
-        )
-        .route(
-            "/api/runtime/connections/{id}",
-            put(api::handlers::connections::update_connection_handler),
-        )
-        .route(
-            "/api/runtime/connections/{id}",
-            delete(api::handlers::connections::delete_connection_handler),
-        )
-        // OAuth2 authorization URL generation (JWT-protected)
-        .route(
-            "/api/runtime/connections/{id}/oauth/authorize",
-            get(api::handlers::oauth::authorize_handler),
-        )
-        .route(
-            "/api/runtime/connections/operator/{operatorName}",
-            get(api::handlers::connections::get_connections_by_operator_handler),
-        )
-        // Connection categories endpoint
-        .route(
-            "/api/runtime/connections/categories",
-            get(api::handlers::connections::list_connection_categories_handler),
-        )
-        // Connection auth types endpoint
-        .route(
-            "/api/runtime/connections/auth-types",
-            get(api::handlers::connections::list_connection_auth_types_handler),
-        )
-        // Connection types endpoints (schema discovery)
-        .route(
-            "/api/runtime/connections/types",
-            get(api::handlers::connections::list_connection_types_handler),
-        )
-        .route(
-            "/api/runtime/connections/types/{integration_id}",
-            get(api::handlers::connections::get_connection_type_handler),
-        )
+        // NOTE: Connection CRUD, OAuth authorize, and type discovery routes are now
+        // served by runtara-connections crate — see connections_tenant_routes below.
         // Metrics endpoints
         .route(
             "/api/runtime/metrics/scenarios/{scenario_id}",
@@ -1192,23 +1123,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/analytics/system",
             get(api::analytics::get_system_analytics_handler),
         )
-        // Rate Limit Analytics endpoints
-        .route(
-            "/api/runtime/rate-limits",
-            get(api::handlers::rate_limits::list_rate_limits_handler),
-        )
-        .route(
-            "/api/runtime/connections/{id}/rate-limit-status",
-            get(api::handlers::rate_limits::get_connection_rate_limit_status_handler),
-        )
-        .route(
-            "/api/runtime/connections/{id}/rate-limit-history",
-            get(api::handlers::rate_limits::get_connection_rate_limit_history_handler),
-        )
-        .route(
-            "/api/runtime/connections/{id}/rate-limit-timeline",
-            get(api::handlers::rate_limits::get_connection_rate_limit_timeline_handler),
-        )
+        // NOTE: Rate limit analytics routes are now served by runtara-connections crate.
         // Invocation Trigger endpoints
         .route(
             "/api/runtime/triggers",
@@ -1323,7 +1238,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             valkey_conn: valkey_conn.clone(),
             agent_execution: api::services::agent_execution::AgentExecutionService::new(
                 pool.clone(),
-            ),
+            )
+            .with_connections(connections_facade.clone()),
+            connections: connections_facade.clone(),
         })
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
@@ -1331,11 +1248,25 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             crate::middleware::auth::authenticate,
         ));
 
+    // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
+    // Mounted as a separate router with tenant bridge middleware
+    let connections_tenant_routes = runtara_connections::connections_router(
+        connections_config.clone(),
+    )
+    .layer(axum::middleware::from_fn(
+        crate::middleware::tenant_auth::inject_connections_tenant_id,
+    ))
+    .layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth::authenticate,
+    ));
+
     // Object Model routes (separate router to help type inference)
     // These routes use Arc<ObjectModelState> state extraction
     let object_model_state = Arc::new(api::handlers::object_model::ObjectModelState {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
+        connections: connections_facade.clone(),
     });
 
     let object_model_routes = Router::new()
@@ -1453,7 +1384,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/files/{bucket}/{key}",
             delete(api::handlers::file_storage::delete_object),
         )
-        .with_state(pool.clone())
+        .with_state(connections_facade.clone())
         .route_layer(from_fn_with_state(
             auth_state.clone(),
             crate::middleware::auth::authenticate,
@@ -1463,27 +1394,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let public_routes = Router::new().route("/health", get(health_handler));
 
     // Internal API routes (called by scenario binaries, no tenant header required)
-    // These endpoints authenticate via path parameters instead of headers
-    let internal_routes = Router::new()
-        // Runtime connection endpoint (internal API for runtara-workflows)
-        // Path: /api/connections/{tenant_id}/{connection_id}
-        // Called by compiled scenario binaries to fetch connection credentials
-        .route(
-            "/api/connections/{tenant_id}/{connection_id}",
-            get(api::handlers::connections::get_connection_for_runtime_handler),
-        )
-        .with_state(AppState {
-            pool: pool.clone(),
-            object_store_manager: object_store_manager.clone(),
-            agent_testing: agent_testing.clone(),
-            running_executions: running_executions.clone(),
-            runtime_client: runtime_client.clone(),
-            trigger_stream: trigger_stream.clone(),
-            valkey_conn: valkey_conn.clone(),
-            agent_execution: api::services::agent_execution::AgentExecutionService::new(
-                pool.clone(),
-            ),
-        });
+    // Runtime connection endpoint now served by runtara-connections crate
+    // Path: /api/connections/{tenant_id}/{connection_id}
+    let internal_routes = runtara_connections::runtime_router(connections_config.clone());
 
     // Internal Object Model API routes (called by integration agents in scenario binaries)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
@@ -1491,6 +1404,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let internal_object_model_state = Arc::new(api::handlers::object_model::ObjectModelState {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
+        connections: connections_facade.clone(),
     });
     let internal_object_model_routes = Router::new()
         .route(
@@ -1526,9 +1440,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Internal HTTP proxy routes (called by WASM scenarios for credential injection)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
     let internal_proxy_state = Arc::new(api::handlers::internal_proxy::ProxyState {
-        pool: pool.clone(),
+        facade: connections_facade.clone(),
         client: reqwest::Client::new(),
-        redis_url: crate::valkey::build_redis_url(),
     });
     let internal_proxy_routes = Router::new()
         .route(
@@ -1579,7 +1492,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             valkey_conn: valkey_conn.clone(),
             agent_execution: api::services::agent_execution::AgentExecutionService::new(
                 pool.clone(),
-            ),
+            )
+            .with_connections(connections_facade.clone()),
+            connections: connections_facade.clone(),
         });
 
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
@@ -1589,6 +1504,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             let channel_router = Arc::new(channels::session::ChannelRouter::new(
                 rc.clone(),
                 pool.clone(),
+                connections_facade.clone(),
                 ts.clone(),
                 vc.clone(),
             ));
@@ -1641,12 +1557,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     // OAuth2 callback route (public, no JWT — called by OAuth provider redirect)
-    let oauth_callback_routes = Router::new()
-        .route(
-            "/api/oauth/{tenant_id}/callback",
-            get(api::handlers::oauth::callback_handler),
-        )
-        .with_state(pool.clone());
+    // Now served by the runtara-connections crate
+    let oauth_callback_routes = runtara_connections::oauth_callback_router(
+        connections_config.clone(),
+    );
 
     // =========================================================================
     // Public API server — accessible externally / via API gateway
@@ -1669,11 +1583,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     let public_app = Router::new()
         .merge(tenant_routes)
+        .nest("/api/runtime", connections_tenant_routes)
+        .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
         .merge(file_storage_routes)
         .merge(public_routes.clone())
         .merge(event_routes)
-        .merge(oauth_callback_routes)
         .merge(channel_routes)
         .merge(oidc_routes)
         .nest("/mcp", mcp_router);
@@ -1700,7 +1615,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Internal API server — localhost only, called by scenario binaries / WASM
     // =========================================================================
     let internal_app = Router::new()
-        .merge(internal_routes)
+        .nest("/api/connections", internal_routes)
         .merge(internal_object_model_routes)
         .merge(internal_proxy_routes)
         .merge(internal_agent_routes)

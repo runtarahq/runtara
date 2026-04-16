@@ -48,6 +48,7 @@ use crate::api::repositories::triggers::TriggerRepository;
 )]
 pub async fn capture_http_event(
     State(pool): State<PgPool>,
+    State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
     Path((trigger_id, action)): Path<(String, String)>,
     request: Request,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
@@ -142,7 +143,7 @@ pub async fn capture_http_event(
     // Verify webhook signature if the trigger has a linked connection.
     if let Some(ref body_bytes) = raw_body_bytes
         && let Err(e) = crate::api::services::webhook_verification::verify_webhook(
-            &pool,
+            &connections,
             &trigger.configuration,
             &tenant_id,
             &headers,

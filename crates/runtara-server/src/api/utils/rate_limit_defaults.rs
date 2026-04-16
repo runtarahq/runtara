@@ -4,7 +4,7 @@
 //! rate_limit_config. They are also exposed via the connection types API
 //! so the frontend can show the defaults in the UI.
 
-use crate::api::dto::rate_limits::RateLimitConfigDto;
+use runtara_connections::RateLimitConfigDto;
 
 /// Get the default rate limit configuration for a given integration_id.
 ///

@@ -10,8 +10,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
+use runtara_connections::ConnectionsFacade;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use std::sync::Arc;
 
 use crate::api::dto::file_storage::*;
 use crate::api::services::file_storage::{FileStorageError, FileStorageService};
@@ -57,11 +58,11 @@ fn error_response(e: FileStorageError) -> (StatusCode, Json<Value>) {
 )]
 pub async fn list_buckets(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Query(params): Query<FileStorageQueryParams>,
 ) -> Result<Json<ListBucketsResponse>, (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
-    let buckets = FileStorageService::list_buckets(&pool, connection_id, &tenant_id)
+    let buckets = FileStorageService::list_buckets(&connections, connection_id, &tenant_id)
         .await
         .map_err(error_response)?;
 
@@ -92,12 +93,12 @@ pub async fn list_buckets(
 )]
 pub async fn create_bucket(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Query(params): Query<FileStorageQueryParams>,
     Json(request): Json<CreateBucketRequest>,
 ) -> Result<(StatusCode, Json<CreateBucketResponse>), (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
-    FileStorageService::create_bucket(&pool, connection_id, &tenant_id, &request.name)
+    FileStorageService::create_bucket(&connections, connection_id, &tenant_id, &request.name)
         .await
         .map_err(error_response)?;
 
@@ -123,12 +124,12 @@ pub async fn create_bucket(
 )]
 pub async fn delete_bucket(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(bucket): Path<String>,
     Query(params): Query<FileStorageQueryParams>,
 ) -> Result<Json<DeleteResponse>, (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
-    FileStorageService::delete_bucket(&pool, connection_id, &tenant_id, &bucket)
+    FileStorageService::delete_bucket(&connections, connection_id, &tenant_id, &bucket)
         .await
         .map_err(error_response)?;
 
@@ -158,7 +159,7 @@ pub async fn delete_bucket(
 )]
 pub async fn list_objects(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(bucket): Path<String>,
     Query(params): Query<ListObjectsQueryParams>,
 ) -> Result<Json<ListObjectsResponse>, (StatusCode, Json<Value>)> {
@@ -169,7 +170,7 @@ pub async fn list_objects(
         )
     })?;
     let (objects, next_token) = FileStorageService::list_objects(
-        &pool,
+        &connections,
         connection_id,
         &tenant_id,
         &bucket,
@@ -217,7 +218,7 @@ pub async fn list_objects(
 )]
 pub async fn upload_object(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path(bucket): Path<String>,
     Query(params): Query<FileStorageQueryParams>,
     mut multipart: Multipart,
@@ -268,7 +269,7 @@ pub async fn upload_object(
 
     let connection_id = require_connection_id(&params)?;
     let size = FileStorageService::upload_object(
-        &pool,
+        &connections,
         connection_id,
         &tenant_id,
         &bucket,
@@ -307,13 +308,13 @@ pub async fn upload_object(
 )]
 pub async fn download_object(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<FileStorageQueryParams>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
     let (data, metadata) =
-        FileStorageService::download_object(&pool, connection_id, &tenant_id, &bucket, &key)
+        FileStorageService::download_object(&connections, connection_id, &tenant_id, &bucket, &key)
             .await
             .map_err(error_response)?;
 
@@ -349,12 +350,12 @@ pub async fn download_object(
 )]
 pub async fn get_object_info(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<FileStorageQueryParams>,
 ) -> Result<Json<FileMetadataResponse>, (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
-    let metadata = FileStorageService::head_object(&pool, connection_id, &tenant_id, &bucket, &key)
+    let metadata = FileStorageService::head_object(&connections, connection_id, &tenant_id, &bucket, &key)
         .await
         .map_err(error_response)?;
 
@@ -383,12 +384,12 @@ pub async fn get_object_info(
 )]
 pub async fn delete_object(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
+    State(connections): State<Arc<ConnectionsFacade>>,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<FileStorageQueryParams>,
 ) -> Result<Json<DeleteResponse>, (StatusCode, Json<Value>)> {
     let connection_id = require_connection_id(&params)?;
-    FileStorageService::delete_object(&pool, connection_id, &tenant_id, &bucket, &key)
+    FileStorageService::delete_object(&connections, connection_id, &tenant_id, &bucket, &key)
         .await
         .map_err(error_response)?;
 

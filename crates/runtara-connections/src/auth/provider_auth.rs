@@ -1,64 +1,25 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use chrono::{DateTime, Duration, Utc};
-use dashmap::DashMap;
 use reqwest::Client;
 use runtara_dsl::agent_meta::find_connection_type;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+
+use super::aws_signing::AwsSigningParams;
+use super::token_cache::{
+    self, DeferredAuth, TokenRequestBody, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+};
 
 pub struct ResolvedConnectionAuth {
     pub base_url: Option<String>,
     pub aws_signing: Option<AwsSigningParams>,
 }
 
-pub struct AwsSigningParams {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub region: String,
-    pub service: String,
-    pub session_token: Option<String>,
+pub(crate) struct ConnectionAuthDescriptor {
+    pub base_url: Option<String>,
+    pub aws_signing: Option<AwsSigningParams>,
+    pub deferred_auth: Option<DeferredAuth>,
 }
 
-#[derive(Clone)]
-struct CachedAccessToken {
-    access_token: String,
-    expires_at: Option<DateTime<Utc>>,
-}
-
-enum TokenRequestBody {
-    Json(Value),
-}
-
-enum DeferredAuth {
-    OAuth2ClientCredentials {
-        cache_key: String,
-        token_url: String,
-        header_name: String,
-        request_body: TokenRequestBody,
-        default_ttl_seconds: i64,
-    },
-    OAuth2RefreshToken {
-        cache_key: String,
-        token_url: String,
-        header_name: String,
-        client_id: String,
-        client_secret: String,
-        refresh_token: String,
-        fallback_access_token: Option<String>,
-        fallback_expires_at: Option<DateTime<Utc>>,
-    },
-}
-
-struct ConnectionAuthDescriptor {
-    base_url: Option<String>,
-    aws_signing: Option<AwsSigningParams>,
-    deferred_auth: Option<DeferredAuth>,
-}
-
-const TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
-const DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS: i64 = 24 * 60 * 60;
 const SHOPIFY_SCOPE_FIELDS: &[(&str, &str)] = &[
     ("scope_read_products", "read_products"),
     ("scope_write_products", "write_products"),
@@ -73,8 +34,6 @@ const SHOPIFY_SCOPE_FIELDS: &[(&str, &str)] = &[
     ("scope_write_fulfillments", "write_fulfillments"),
 ];
 
-static TOKEN_CACHE: OnceLock<DashMap<String, CachedAccessToken>> = OnceLock::new();
-
 pub async fn resolve_connection_auth(
     client: &Client,
     connection_id: &str,
@@ -85,7 +44,7 @@ pub async fn resolve_connection_auth(
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
 
     if let Some(deferred_auth) = descriptor.deferred_auth {
-        let resolved = resolve_deferred_auth(client, deferred_auth).await?;
+        let resolved = token_cache::resolve_deferred_auth(client, deferred_auth).await?;
         headers.insert(resolved.0, resolved.1);
     }
 
@@ -305,7 +264,7 @@ fn describe_shopify_client_credentials_auth(
     }
 
     Some(DeferredAuth::OAuth2ClientCredentials {
-        cache_key: build_token_cache_key(&[
+        cache_key: token_cache::build_token_cache_key(&[
             "shopify_client_credentials",
             connection_id,
             shop_domain,
@@ -332,176 +291,18 @@ fn describe_oauth_refresh_auth(
         .map(|config| config.token_url.to_string())?;
 
     Some(DeferredAuth::OAuth2RefreshToken {
-        cache_key: build_token_cache_key(&["oauth_refresh", connection_id, integration_id]),
+        cache_key: token_cache::build_token_cache_key(&[
+            "oauth_refresh",
+            connection_id,
+            integration_id,
+        ]),
         token_url,
         header_name: header_name.to_string(),
         client_id,
         client_secret,
         refresh_token,
         fallback_access_token: params["access_token"].as_str().map(|s| s.to_string()),
-        fallback_expires_at: parse_expiry(params["token_expires_at"].as_str()),
-    })
-}
-
-async fn resolve_deferred_auth(
-    client: &Client,
-    auth: DeferredAuth,
-) -> Result<(String, String), String> {
-    match auth {
-        DeferredAuth::OAuth2ClientCredentials {
-            cache_key,
-            token_url,
-            header_name,
-            request_body,
-            default_ttl_seconds,
-        } => {
-            let token = resolve_cached_token(&cache_key, || async {
-                exchange_client_credentials_token(
-                    client,
-                    &token_url,
-                    request_body,
-                    default_ttl_seconds,
-                )
-                .await
-            })
-            .await?;
-            Ok((header_name, token))
-        }
-        DeferredAuth::OAuth2RefreshToken {
-            cache_key,
-            token_url,
-            header_name,
-            client_id,
-            client_secret,
-            refresh_token,
-            fallback_access_token,
-            fallback_expires_at,
-        } => {
-            if let Some(access_token) = fallback_access_token
-                && token_is_fresh(fallback_expires_at)
-            {
-                cache_token(
-                    &cache_key,
-                    CachedAccessToken {
-                        access_token: access_token.clone(),
-                        expires_at: fallback_expires_at,
-                    },
-                );
-                return Ok((header_name, format!("Bearer {}", access_token)));
-            }
-
-            let token = resolve_cached_token(&cache_key, || async {
-                refresh_oauth_access_token(
-                    client,
-                    &token_url,
-                    &client_id,
-                    &client_secret,
-                    &refresh_token,
-                )
-                .await
-            })
-            .await?;
-            Ok((header_name, format!("Bearer {}", token)))
-        }
-    }
-}
-
-async fn resolve_cached_token<F, Fut>(cache_key: &str, fetch: F) -> Result<String, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<CachedAccessToken, String>>,
-{
-    if let Some(token) = get_fresh_cached_token(cache_key) {
-        return Ok(token);
-    }
-
-    let cached = fetch().await?;
-    let access_token = cached.access_token.clone();
-    cache_token(cache_key, cached);
-    Ok(access_token)
-}
-
-async fn exchange_client_credentials_token(
-    client: &Client,
-    token_url: &str,
-    request_body: TokenRequestBody,
-    default_ttl_seconds: i64,
-) -> Result<CachedAccessToken, String> {
-    let request = match request_body {
-        TokenRequestBody::Json(body) => client
-            .post(token_url)
-            .header("Content-Type", "application/json")
-            .json(&body),
-    };
-
-    let response = request
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("Token exchange request failed: {}", e))?;
-
-    parse_token_response(response, default_ttl_seconds).await
-}
-
-async fn refresh_oauth_access_token(
-    client: &Client,
-    token_url: &str,
-    client_id: &str,
-    client_secret: &str,
-    refresh_token: &str,
-) -> Result<CachedAccessToken, String> {
-    let body = form_urlencoded(&[
-        ("grant_type".to_string(), "refresh_token".to_string()),
-        ("client_id".to_string(), client_id.to_string()),
-        ("client_secret".to_string(), client_secret.to_string()),
-        ("refresh_token".to_string(), refresh_token.to_string()),
-    ]);
-
-    let response = client
-        .post(token_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| format!("OAuth token refresh request failed: {}", e))?;
-
-    parse_token_response(response, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS).await
-}
-
-async fn parse_token_response(
-    response: reqwest::Response,
-    default_ttl_seconds: i64,
-) -> Result<CachedAccessToken, String> {
-    let status = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
-
-    if !status.is_success() {
-        return Err(format!("Token endpoint returned {}: {}", status, body));
-    }
-
-    let access_token = body["access_token"]
-        .as_str()
-        .ok_or_else(|| format!("Token response missing access_token field: {}", body))?
-        .to_string();
-
-    let expires_at = body["expires_in"]
-        .as_i64()
-        .map(|ttl| Utc::now() + Duration::seconds(ttl))
-        .or_else(|| {
-            if default_ttl_seconds > 0 {
-                Some(Utc::now() + Duration::seconds(default_ttl_seconds))
-            } else {
-                None
-            }
-        });
-
-    Ok(CachedAccessToken {
-        access_token,
-        expires_at,
+        fallback_expires_at: token_cache::parse_expiry(params["token_expires_at"].as_str()),
     })
 }
 
@@ -514,44 +315,6 @@ fn collect_shopify_scopes(params: &Value) -> String {
         .join(",")
 }
 
-fn build_token_cache_key(parts: &[&str]) -> String {
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update(part.as_bytes());
-        hasher.update([0u8]);
-    }
-    hex::encode(hasher.finalize())
-}
-
-fn parse_expiry(value: Option<&str>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-fn token_is_fresh(expires_at: Option<DateTime<Utc>>) -> bool {
-    expires_at
-        .is_some_and(|expiry| expiry > Utc::now() + Duration::seconds(TOKEN_REFRESH_MARGIN_SECS))
-}
-
-fn token_cache() -> &'static DashMap<String, CachedAccessToken> {
-    TOKEN_CACHE.get_or_init(DashMap::new)
-}
-
-fn get_fresh_cached_token(cache_key: &str) -> Option<String> {
-    token_cache().get(cache_key).and_then(|entry| {
-        if token_is_fresh(entry.expires_at) {
-            Some(entry.access_token.clone())
-        } else {
-            None
-        }
-    })
-}
-
-fn cache_token(cache_key: &str, token: CachedAccessToken) {
-    token_cache().insert(cache_key.to_string(), token);
-}
-
 fn normalize_endpoint(endpoint: &str) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
@@ -560,25 +323,10 @@ fn normalize_endpoint(endpoint: &str) -> String {
     }
 }
 
-fn form_urlencoded(fields: &[(String, String)]) -> String {
-    fields
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-#[cfg(test)]
-fn clear_token_cache() {
-    token_cache().clear();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn collect_shopify_scopes_keeps_enabled_scopes_only() {
@@ -592,53 +340,5 @@ mod tests {
             collect_shopify_scopes(&params),
             "read_products,read_inventory"
         );
-    }
-
-    #[tokio::test]
-    async fn resolve_cached_token_uses_cache() {
-        clear_token_cache();
-        let call_count = Arc::new(AtomicUsize::new(0));
-
-        let first_counter = Arc::clone(&call_count);
-        let first = resolve_cached_token("cache-key", move || async move {
-            first_counter.fetch_add(1, Ordering::SeqCst);
-            Ok(CachedAccessToken {
-                access_token: "token-123".to_string(),
-                expires_at: Some(Utc::now() + Duration::minutes(30)),
-            })
-        })
-        .await
-        .unwrap();
-        assert_eq!(first, "token-123");
-
-        let second_counter = Arc::clone(&call_count);
-        let second = resolve_cached_token("cache-key", move || async move {
-            second_counter.fetch_add(1, Ordering::SeqCst);
-            Err("should not be called when cache is fresh".to_string())
-        })
-        .await
-        .unwrap();
-        assert_eq!(second, "token-123");
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn refresh_auth_uses_fallback_access_token_when_still_fresh() {
-        clear_token_cache();
-        let client = Client::new();
-        let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: "hubspot-cache".to_string(),
-            token_url: "https://example.com/token".to_string(),
-            header_name: "Authorization".to_string(),
-            client_id: "id".to_string(),
-            client_secret: "secret".to_string(),
-            refresh_token: "refresh".to_string(),
-            fallback_access_token: Some("existing-token".to_string()),
-            fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
-        };
-
-        let resolved = resolve_deferred_auth(&client, auth).await.unwrap();
-        assert_eq!(resolved.0, "Authorization");
-        assert_eq!(resolved.1, "Bearer existing-token");
     }
 }

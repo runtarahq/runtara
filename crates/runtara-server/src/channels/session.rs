@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::api::dto::triggers::TriggerType;
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, parse_debug_event};
-use crate::api::repositories::connections::ConnectionRepository;
 use crate::api::repositories::scenarios::ScenarioRepository;
+use runtara_connections::ConnectionsFacade;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::executions::ExecutionService;
@@ -79,6 +79,7 @@ pub struct ChannelRouter {
     sessions: Arc<DashMap<SessionKey, mpsc::Sender<InboundMessage>>>,
     client: Arc<RuntimeClient>,
     pool: PgPool,
+    connections: Arc<ConnectionsFacade>,
     trigger_stream: Arc<TriggerStreamPublisher>,
     valkey: ConnectionManager,
     http_client: reqwest::Client,
@@ -90,6 +91,7 @@ impl ChannelRouter {
     pub fn new(
         client: Arc<RuntimeClient>,
         pool: PgPool,
+        connections: Arc<ConnectionsFacade>,
         trigger_stream: Arc<TriggerStreamPublisher>,
         valkey: ConnectionManager,
     ) -> Self {
@@ -97,6 +99,7 @@ impl ChannelRouter {
             sessions: Arc::new(DashMap::new()),
             client,
             pool,
+            connections,
             trigger_stream,
             valkey,
             http_client: reqwest::Client::new(),
@@ -107,6 +110,11 @@ impl ChannelRouter {
     /// Access the database pool (used by platform-specific webhook handlers).
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Access the connections facade.
+    pub fn connections(&self) -> &Arc<ConnectionsFacade> {
+        &self.connections
     }
 
     /// Access the shared HTTP client (used for downloading external resources).
@@ -176,8 +184,8 @@ impl ChannelRouter {
         let conv_id = &msg.conv_id;
         let sender_id = &msg.sender_id;
         // Look up connection from DB.
-        let conn_repo = ConnectionRepository::new(self.pool.clone());
-        let conn = conn_repo
+        let conn = self
+            .connections
             .get_channel_connection(connection_id)
             .await
             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?

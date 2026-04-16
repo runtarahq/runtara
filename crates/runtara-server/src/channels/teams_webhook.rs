@@ -11,8 +11,6 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-use crate::api::repositories::connections::ConnectionRepository;
-
 use super::session::{ChannelRouter, InboundMessage};
 
 /// Cached JWKS keys for Bot Framework JWT validation.
@@ -225,8 +223,8 @@ async fn get_jwk(kid: &str) -> anyhow::Result<JwkKey> {
 /// Load the app_id from the Teams connection.
 async fn load_app_id(router: &ChannelRouter, connection_id: &str) -> anyhow::Result<String> {
     let expected_tenant = crate::config::tenant_id();
-    let conn_repo = ConnectionRepository::new(router.pool().clone());
-    let conn = conn_repo
+    let conn = router
+        .connections()
         .get_with_parameters(connection_id, expected_tenant)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?

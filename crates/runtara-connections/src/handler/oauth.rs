@@ -8,8 +8,8 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::Html;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
+use crate::config::ConnectionsState;
 use crate::service::oauth::{OAuthError, OAuthService};
 
 // ============================================================================
@@ -37,13 +37,10 @@ pub struct ErrorResponse {
 /// After user consent, the provider redirects to /api/oauth/{tenant_id}/callback.
 pub async fn authorize_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
-    State(pool): State<PgPool>,
+    State(state): State<ConnectionsState>,
     Path(id): Path<String>,
 ) -> Result<Json<OAuthAuthorizeResponse>, (axum::http::StatusCode, Json<ErrorResponse>)> {
-    let public_base_url =
-        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-
-    let service = OAuthService::new(pool, public_base_url);
+    let service = OAuthService::new(state.db_pool, state.public_base_url);
 
     match service.generate_authorization_url(&id, &tenant_id).await {
         Ok(url) => Ok(Json(OAuthAuthorizeResponse {
@@ -101,7 +98,7 @@ pub struct OAuthCallbackQuery {
 /// This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider
 /// redirecting the user's browser after consent.
 pub async fn callback_handler(
-    State(pool): State<PgPool>,
+    State(state): State<ConnectionsState>,
     Path(_tenant_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Html<String> {
@@ -111,7 +108,7 @@ pub async fn callback_handler(
         return oauth_response_html(None, false, &format!("{}: {}", error, desc));
     }
 
-    let state = match params.state {
+    let oauth_state = match params.state {
         Some(s) if !s.is_empty() => s,
         _ => return oauth_response_html(None, false, "Missing state parameter"),
     };
@@ -121,12 +118,9 @@ pub async fn callback_handler(
         _ => return oauth_response_html(None, false, "Missing authorization code"),
     };
 
-    let public_base_url =
-        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let service = OAuthService::new(state.db_pool, state.public_base_url);
 
-    let service = OAuthService::new(pool, public_base_url);
-
-    match service.handle_callback(&state, &code).await {
+    match service.handle_callback(&oauth_state, &code).await {
         Ok(connection_id) => oauth_response_html(Some(&connection_id), true, ""),
         Err(OAuthError::InvalidState) => oauth_response_html(
             None,
