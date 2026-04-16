@@ -54,6 +54,16 @@ crate::persistence::common::ops::impl_sleep_ops!(
     PgPool,
     crate::persistence::dialect::PostgresDialect
 );
+crate::persistence::common::ops::impl_checkpoint_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
+crate::persistence::common::ops::impl_signal_ops!(
+    PostgresPersistence,
+    PgPool,
+    crate::persistence::dialect::PostgresDialect
+);
 
 // ============================================================================
 // Remaining Instance Operations (pre-shared — migrated in later phases)
@@ -120,56 +130,11 @@ pub async fn update_instance_stderr(
 // ============================================================================
 // Checkpoint Operations
 // ============================================================================
-
-/// Save a checkpoint (append-only).
-/// Uses ON CONFLICT to handle duplicate checkpoint IDs gracefully.
-pub async fn save_checkpoint(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-    state: &[u8],
-) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at)
-        VALUES ($1, $2, $3, NOW())
-        ON CONFLICT (instance_id, checkpoint_id) DO UPDATE
-        SET state = EXCLUDED.state, created_at = NOW()
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .bind(state)
-    .execute(pool)
-    .await
-    .map_err(|e| CoreError::CheckpointSaveFailed {
-        instance_id: instance_id.to_string(),
-        reason: e.to_string(),
-    })?;
-
-    Ok(())
-}
-
-/// Load a specific checkpoint by ID.
-pub async fn load_checkpoint(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-) -> Result<Option<CheckpointRecord>, CoreError> {
-    let record = sqlx::query_as::<_, CheckpointRecord>(
-        r#"
-        SELECT id, instance_id, checkpoint_id, state, created_at
-        FROM checkpoints
-        WHERE instance_id = $1 AND checkpoint_id = $2
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
+// `save_checkpoint`, `load_checkpoint`, `list_checkpoints`, `count_checkpoints`
+// are migrated to the shared layer:
+// see PostgresPersistence::op_save_checkpoint / op_load_checkpoint /
+// op_list_checkpoints / op_count_checkpoints
+// (crate::persistence::common::ops::checkpoints).
 
 /// Load the latest checkpoint for an instance.
 pub async fn load_latest_checkpoint(
@@ -190,40 +155,6 @@ pub async fn load_latest_checkpoint(
     .await?;
 
     Ok(record)
-}
-
-/// List checkpoints for an instance with filtering and pagination.
-pub async fn list_checkpoints(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id_filter: Option<&str>,
-    limit: i64,
-    offset: i64,
-    created_after: Option<DateTime<Utc>>,
-    created_before: Option<DateTime<Utc>>,
-) -> Result<Vec<CheckpointRecord>, CoreError> {
-    let records = sqlx::query_as::<_, CheckpointRecord>(
-        r#"
-        SELECT id, instance_id, checkpoint_id, state, created_at
-        FROM checkpoints
-        WHERE instance_id = $1
-          AND ($2::TEXT IS NULL OR checkpoint_id = $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3)
-          AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4)
-        ORDER BY created_at DESC
-        LIMIT $5 OFFSET $6
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id_filter)
-    .bind(created_after)
-    .bind(created_before)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(records)
 }
 
 /// Retry attempt record from the database.
@@ -305,34 +236,6 @@ pub async fn load_retry_history(
     .await?;
 
     Ok(records)
-}
-
-/// Count checkpoints for an instance with filtering.
-pub async fn count_checkpoints(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id_filter: Option<&str>,
-    created_after: Option<DateTime<Utc>>,
-    created_before: Option<DateTime<Utc>>,
-) -> Result<i64, CoreError> {
-    let count: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM checkpoints
-        WHERE instance_id = $1
-          AND ($2::TEXT IS NULL OR checkpoint_id = $2)
-          AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3)
-          AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4)
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id_filter)
-    .bind(created_after)
-    .bind(created_before)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count.0)
 }
 
 // ============================================================================
@@ -823,61 +726,10 @@ pub async fn insert_custom_signal(
     Ok(())
 }
 
-/// Get pending signal for an instance (not yet acknowledged).
-pub async fn get_pending_signal(
-    pool: &PgPool,
-    instance_id: &str,
-) -> Result<Option<SignalRecord>, CoreError> {
-    let record = sqlx::query_as::<_, SignalRecord>(
-        r#"
-        SELECT instance_id, signal_type::text as signal_type, payload, created_at, acknowledged_at
-        FROM pending_signals
-        WHERE instance_id = $1 AND acknowledged_at IS NULL
-        "#,
-    )
-    .bind(instance_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
-
-/// Take a pending custom signal for a checkpoint (delete and return it).
-pub async fn take_pending_custom_signal(
-    pool: &PgPool,
-    instance_id: &str,
-    checkpoint_id: &str,
-) -> Result<Option<CustomSignalRecord>, CoreError> {
-    let record = sqlx::query_as::<_, CustomSignalRecord>(
-        r#"
-        DELETE FROM pending_checkpoint_signals
-        WHERE instance_id = $1 AND checkpoint_id = $2
-        RETURNING instance_id, checkpoint_id, payload, created_at
-        "#,
-    )
-    .bind(instance_id)
-    .bind(checkpoint_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(record)
-}
-
-/// Acknowledge a signal.
-pub async fn acknowledge_signal(pool: &PgPool, instance_id: &str) -> Result<(), CoreError> {
-    sqlx::query(
-        r#"
-        UPDATE pending_signals
-        SET acknowledged_at = NOW()
-        WHERE instance_id = $1 AND acknowledged_at IS NULL
-        "#,
-    )
-    .bind(instance_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
+// `get_pending_signal`, `acknowledge_signal`, `take_pending_custom_signal`
+// are migrated to the shared layer:
+// see PostgresPersistence::op_get_pending_signal / op_acknowledge_signal /
+// op_take_pending_custom_signal (crate::persistence::common::ops::signals).
 
 // Health, sleep, and active-count operations are migrated to the shared layer:
 // see PostgresPersistence::op_health_check_db, op_count_active_instances,
@@ -926,7 +778,7 @@ impl Persistence for PostgresPersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
-        save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
+        Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
     }
 
     async fn load_checkpoint(
@@ -934,7 +786,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        load_checkpoint(&self.pool, instance_id, checkpoint_id).await
+        Self::op_load_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn list_checkpoints(
@@ -946,7 +798,7 @@ impl Persistence for PostgresPersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
-        list_checkpoints(
+        Self::op_list_checkpoints(
             &self.pool,
             instance_id,
             checkpoint_id,
@@ -965,7 +817,7 @@ impl Persistence for PostgresPersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError> {
-        count_checkpoints(
+        Self::op_count_checkpoints(
             &self.pool,
             instance_id,
             checkpoint_id,
@@ -992,11 +844,11 @@ impl Persistence for PostgresPersistence {
         &self,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        get_pending_signal(&self.pool, instance_id).await
+        Self::op_get_pending_signal(&self.pool, instance_id).await
     }
 
     async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
-        acknowledge_signal(&self.pool, instance_id).await
+        Self::op_acknowledge_signal(&self.pool, instance_id).await
     }
 
     async fn insert_custom_signal(
@@ -1013,7 +865,7 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
+        Self::op_take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
@@ -1455,10 +1307,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let state = b"test state data";
-        let result = save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state).await;
+        let result = PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", state).await;
         assert!(result.is_ok());
 
-        let checkpoint = load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+        let checkpoint = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
             .unwrap();
         assert!(checkpoint.is_some());
@@ -1478,16 +1330,16 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         // Save first checkpoint
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
             .await
             .unwrap();
 
         // Save again with same ID (should update)
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-2")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-2")
             .await
             .unwrap();
 
-        let checkpoint = load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+        let checkpoint = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
             .unwrap()
             .unwrap();
@@ -1506,20 +1358,20 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
             .await
             .unwrap();
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
             .await
             .unwrap();
 
-        let cp1 = load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
+        let cp1 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-1")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(cp1.state, b"state-1".to_vec());
 
-        let cp2 = load_checkpoint(&pool, &instance_id.to_string(), "cp-2")
+        let cp2 = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "cp-2")
             .await
             .unwrap()
             .unwrap();
@@ -1538,16 +1390,16 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-1", b"state-1")
             .await
             .unwrap();
         // Small delay to ensure different timestamps
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-2", b"state-2")
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        save_checkpoint(&pool, &instance_id.to_string(), "cp-3", b"state-3")
+        PostgresPersistence::op_save_checkpoint(&pool, &instance_id.to_string(), "cp-3", b"state-3")
             .await
             .unwrap();
 
@@ -1571,7 +1423,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
+        let result = PostgresPersistence::op_load_checkpoint(&pool, &instance_id.to_string(), "nonexistent")
             .await
             .unwrap();
         assert!(result.is_none());
@@ -1630,7 +1482,7 @@ mod tests {
         let result = insert_signal(&pool, &instance_id.to_string(), "cancel", b"reason").await;
         assert!(result.is_ok());
 
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_some());
@@ -1655,7 +1507,7 @@ mod tests {
             .await
             .unwrap();
 
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_some());
@@ -1674,7 +1526,7 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_none());
@@ -1695,12 +1547,12 @@ mod tests {
         insert_signal(&pool, &instance_id.to_string(), "cancel", b"")
             .await
             .unwrap();
-        acknowledge_signal(&pool, &instance_id.to_string())
+        PostgresPersistence::op_acknowledge_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
 
         // Should no longer return as pending
-        let signal = get_pending_signal(&pool, &instance_id.to_string())
+        let signal = PostgresPersistence::op_get_pending_signal(&pool, &instance_id.to_string())
             .await
             .unwrap();
         assert!(signal.is_none());
@@ -1723,7 +1575,7 @@ mod tests {
             .unwrap();
 
         // First take should retrieve and delete
-        let signal = take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+        let signal = PostgresPersistence::op_take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
             .await
             .unwrap()
             .expect("custom signal should exist");
@@ -1731,7 +1583,7 @@ mod tests {
         assert_eq!(signal.payload.unwrap(), b"custom-payload".to_vec());
 
         // Second take should return none
-        let signal = take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
+        let signal = PostgresPersistence::op_take_pending_custom_signal(&pool, &instance_id.to_string(), "wait-1")
             .await
             .unwrap();
         assert!(signal.is_none());

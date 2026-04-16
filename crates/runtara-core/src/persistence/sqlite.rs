@@ -85,13 +85,23 @@ impl SqlitePersistence {
     }
 }
 
-// Instance + sleep families materialized by the shared macros (SYN-394).
+// Shared operation families materialized by the macros (SYN-394).
 crate::persistence::common::ops::impl_instance_ops!(
     SqlitePersistence,
     SqlitePool,
     crate::persistence::dialect::SqliteDialect
 );
 crate::persistence::common::ops::impl_sleep_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_checkpoint_ops!(
+    SqlitePersistence,
+    SqlitePool,
+    crate::persistence::dialect::SqliteDialect
+);
+crate::persistence::common::ops::impl_signal_ops!(
     SqlitePersistence,
     SqlitePool,
     crate::persistence::dialect::SqliteDialect
@@ -278,19 +288,7 @@ impl Persistence for SqlitePersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .bind(state)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
     }
 
     async fn load_checkpoint(
@@ -298,19 +296,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError> {
-        let record = sqlx::query_as::<_, CheckpointRecord>(
-            r#"
-            SELECT id, instance_id, checkpoint_id, state, created_at
-            FROM checkpoints
-            WHERE instance_id = ? AND checkpoint_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(record)
+        Self::op_load_checkpoint(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn list_checkpoints(
@@ -322,29 +308,16 @@ impl Persistence for SqlitePersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<Vec<CheckpointRecord>, CoreError> {
-        // Use SQLite's NULL coalescing pattern similar to Postgres
-        let rows = sqlx::query_as::<_, CheckpointRecord>(
-            r#"
-            SELECT id, instance_id, checkpoint_id, state, created_at
-            FROM checkpoints
-            WHERE instance_id = ?1
-              AND (?2 IS NULL OR checkpoint_id = ?2)
-              AND (?3 IS NULL OR created_at >= ?3)
-              AND (?4 IS NULL OR created_at < ?4)
-            ORDER BY created_at DESC
-            LIMIT ?5 OFFSET ?6
-            "#,
+        Self::op_list_checkpoints(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            limit,
+            offset,
+            created_after,
+            created_before,
         )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .bind(created_after)
-        .bind(created_before)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(rows)
+        .await
     }
 
     async fn count_checkpoints(
@@ -354,24 +327,14 @@ impl Persistence for SqlitePersistence {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError> {
-        let count: (i64,) = sqlx::query_as(
-            r#"
-            SELECT COUNT(*)
-            FROM checkpoints
-            WHERE instance_id = ?1
-              AND (?2 IS NULL OR checkpoint_id = ?2)
-              AND (?3 IS NULL OR created_at >= ?3)
-              AND (?4 IS NULL OR created_at < ?4)
-            "#,
+        Self::op_count_checkpoints(
+            &self.pool,
+            instance_id,
+            checkpoint_id,
+            created_after,
+            created_before,
         )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .bind(created_after)
-        .bind(created_before)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(count.0)
+        .await
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
@@ -422,33 +385,11 @@ impl Persistence for SqlitePersistence {
         &self,
         instance_id: &str,
     ) -> Result<Option<SignalRecord>, CoreError> {
-        let record = sqlx::query_as::<_, SignalRecord>(
-            r#"
-            SELECT instance_id, signal_type, payload, created_at, acknowledged_at
-            FROM pending_signals
-            WHERE instance_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(record)
+        Self::op_get_pending_signal(&self.pool, instance_id).await
     }
 
     async fn acknowledge_signal(&self, instance_id: &str) -> Result<(), CoreError> {
-        sqlx::query(
-            r#"
-            UPDATE pending_signals
-            SET acknowledged_at = CURRENT_TIMESTAMP
-            WHERE instance_id = ? AND acknowledged_at IS NULL
-            "#,
-        )
-        .bind(instance_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
+        Self::op_acknowledge_signal(&self.pool, instance_id).await
     }
 
     async fn insert_custom_signal(
@@ -480,33 +421,7 @@ impl Persistence for SqlitePersistence {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError> {
-        let mut tx = self.pool.begin().await?;
-
-        let record = sqlx::query_as::<_, CustomSignalRecord>(
-            r#"
-            SELECT instance_id, checkpoint_id, payload, created_at
-            FROM pending_custom_signals
-            WHERE instance_id = ? AND checkpoint_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            DELETE FROM pending_custom_signals
-            WHERE instance_id = ? AND checkpoint_id = ?
-            "#,
-        )
-        .bind(instance_id)
-        .bind(checkpoint_id)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
-        Ok(record)
+        Self::op_take_pending_custom_signal(&self.pool, instance_id, checkpoint_id).await
     }
 
     async fn save_retry_attempt(
@@ -519,6 +434,10 @@ impl Persistence for SqlitePersistence {
         // Create a unique checkpoint_id for this retry attempt (matching Postgres behavior)
         let retry_checkpoint_id = format!("{}::retry::{}", checkpoint_id, attempt);
 
+        // SYN-394: wrap sqlx errors in `CheckpointSaveFailed` so callers see
+        // the instance context — Postgres already does this; SQLite previously
+        // relied on the blanket `From<sqlx::Error> for CoreError` impl and
+        // surfaced a generic `DatabaseError` instead.
         sqlx::query(
             r#"
             INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at)
@@ -529,7 +448,8 @@ impl Persistence for SqlitePersistence {
         .bind(&retry_checkpoint_id)
         .bind(error_message.unwrap_or("").as_bytes())
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| crate::persistence::common::error::wrap_checkpoint_save(e, instance_id))?;
 
         Ok(())
     }

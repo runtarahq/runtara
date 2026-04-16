@@ -83,6 +83,24 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
         .expect("count_checkpoints failed");
     assert!(count >= 1);
 
+    // Filter: positive match by checkpoint_id.
+    let filtered = backend
+        .list_checkpoints(&instance_id, Some(checkpoint_id), 50, 0, None, None)
+        .await
+        .expect("list_checkpoints with filter failed");
+    assert!(filtered.iter().all(|c| c.checkpoint_id == checkpoint_id));
+    // Filter: negative match by checkpoint_id returns empty.
+    let empty = backend
+        .list_checkpoints(&instance_id, Some("ckpt-does-not-exist"), 50, 0, None, None)
+        .await
+        .expect("list_checkpoints with non-matching filter failed");
+    assert!(empty.is_empty());
+    let filtered_count = backend
+        .count_checkpoints(&instance_id, Some(checkpoint_id), None, None)
+        .await
+        .expect("count_checkpoints with filter failed");
+    assert!(filtered_count >= 1);
+
     // --- update instance checkpoint pointer --------------------------------
     backend
         .update_instance_checkpoint(&instance_id, checkpoint_id)

@@ -52,16 +52,52 @@ impl Dialect for PostgresDialect {
     }
 
     fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan {
-        // Both backends currently keep the transactional plan (see SYN-394 plan).
-        // Flipping PG to the atomic `DELETE ... RETURNING` form is a follow-up
-        // optimization that's independent of this refactor.
-        TakeCustomSignalPlan::Transactional {
-            select_sql: "SELECT instance_id, checkpoint_id, payload, created_at \
-                         FROM pending_checkpoint_signals \
-                         WHERE instance_id = $1 AND checkpoint_id = $2",
-            delete_sql: "DELETE FROM pending_checkpoint_signals \
-                         WHERE instance_id = $1 AND checkpoint_id = $2",
+        // Postgres's current inline code uses `DELETE ... RETURNING` for an
+        // atomic take-and-return. Preserving that.
+        TakeCustomSignalPlan::Atomic {
+            sql: "DELETE FROM pending_checkpoint_signals \
+                  WHERE instance_id = $1 AND checkpoint_id = $2 \
+                  RETURNING instance_id, checkpoint_id, payload, created_at",
         }
+    }
+
+    fn sql_save_checkpoint() -> &'static str {
+        "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
+         VALUES ($1, $2, $3, NOW()) \
+         ON CONFLICT (instance_id, checkpoint_id) DO UPDATE \
+         SET state = EXCLUDED.state, created_at = NOW()"
+    }
+
+    fn sql_list_checkpoints() -> &'static str {
+        "SELECT id, instance_id, checkpoint_id, state, created_at \
+         FROM checkpoints \
+         WHERE instance_id = $1 \
+           AND ($2::TEXT IS NULL OR checkpoint_id = $2) \
+           AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3) \
+           AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4) \
+         ORDER BY created_at DESC \
+         LIMIT $5 OFFSET $6"
+    }
+
+    fn sql_count_checkpoints() -> &'static str {
+        "SELECT COUNT(*) \
+         FROM checkpoints \
+         WHERE instance_id = $1 \
+           AND ($2::TEXT IS NULL OR checkpoint_id = $2) \
+           AND ($3::TIMESTAMPTZ IS NULL OR created_at >= $3) \
+           AND ($4::TIMESTAMPTZ IS NULL OR created_at < $4)"
+    }
+
+    fn sql_get_pending_signal() -> &'static str {
+        "SELECT instance_id, signal_type::text as signal_type, payload, created_at, acknowledged_at \
+         FROM pending_signals \
+         WHERE instance_id = $1 AND acknowledged_at IS NULL"
+    }
+
+    fn sql_acknowledge_signal() -> &'static str {
+        "UPDATE pending_signals \
+         SET acknowledged_at = NOW() \
+         WHERE instance_id = $1 AND acknowledged_at IS NULL"
     }
 }
 

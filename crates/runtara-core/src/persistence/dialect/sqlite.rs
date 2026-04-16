@@ -65,6 +65,9 @@ impl Dialect for SqliteDialect {
     }
 
     fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan {
+        // SQLite's take path is a transactional SELECT + DELETE (no RETURNING
+        // in the runtime this crate targets). Preserves the inline legacy
+        // behavior.
         TakeCustomSignalPlan::Transactional {
             select_sql: "SELECT instance_id, checkpoint_id, payload, created_at \
                          FROM pending_custom_signals \
@@ -72,6 +75,49 @@ impl Dialect for SqliteDialect {
             delete_sql: "DELETE FROM pending_custom_signals \
                          WHERE instance_id = ?1 AND checkpoint_id = ?2",
         }
+    }
+
+    fn sql_save_checkpoint() -> &'static str {
+        // Plain INSERT (no ON CONFLICT) — preserves legacy SQLite semantics
+        // where a duplicate `(instance_id, checkpoint_id)` raises a UNIQUE
+        // violation. Unifying to upsert is a separate decision.
+        "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
+         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)"
+    }
+
+    fn sql_list_checkpoints() -> &'static str {
+        "SELECT id, instance_id, checkpoint_id, state, created_at \
+         FROM checkpoints \
+         WHERE instance_id = ?1 \
+           AND (?2 IS NULL OR checkpoint_id = ?2) \
+           AND (?3 IS NULL OR created_at >= ?3) \
+           AND (?4 IS NULL OR created_at < ?4) \
+         ORDER BY created_at DESC \
+         LIMIT ?5 OFFSET ?6"
+    }
+
+    fn sql_count_checkpoints() -> &'static str {
+        "SELECT COUNT(*) \
+         FROM checkpoints \
+         WHERE instance_id = ?1 \
+           AND (?2 IS NULL OR checkpoint_id = ?2) \
+           AND (?3 IS NULL OR created_at >= ?3) \
+           AND (?4 IS NULL OR created_at < ?4)"
+    }
+
+    fn sql_get_pending_signal() -> &'static str {
+        // Legacy SQLite behavior: returns any row for the instance, including
+        // already-acknowledged ones. Postgres filters `acknowledged_at IS NULL`.
+        // Divergence preserved here and documented on the trait method.
+        "SELECT instance_id, signal_type, payload, created_at, acknowledged_at \
+         FROM pending_signals \
+         WHERE instance_id = ?1"
+    }
+
+    fn sql_acknowledge_signal() -> &'static str {
+        "UPDATE pending_signals \
+         SET acknowledged_at = CURRENT_TIMESTAMP \
+         WHERE instance_id = ?1 AND acknowledged_at IS NULL"
     }
 }
 

@@ -138,4 +138,30 @@ pub trait Dialect: Send + Sync + 'static {
 
     /// Plan for taking a pending custom signal atomically.
     fn sql_take_pending_custom_signal(&self) -> TakeCustomSignalPlan;
+
+    /// SQL for inserting/upserting a checkpoint row.
+    ///
+    /// Binds (in order): instance_id, checkpoint_id, state.
+    ///
+    /// - Postgres: `INSERT ... ON CONFLICT DO UPDATE` (idempotent upsert).
+    /// - SQLite: plain `INSERT` — a duplicate `(instance_id, checkpoint_id)`
+    ///   causes a UNIQUE-constraint violation. Preserves legacy behavior;
+    ///   unifying to upsert is a separate decision (not Phase 3 scope).
+    fn sql_save_checkpoint() -> &'static str;
+
+    /// SQL for `list_checkpoints` (binds: instance_id, checkpoint_id_filter,
+    /// created_after, created_before, limit, offset).
+    fn sql_list_checkpoints() -> &'static str;
+
+    /// SQL for `count_checkpoints` (binds: instance_id,
+    /// checkpoint_id_filter, created_after, created_before).
+    fn sql_count_checkpoints() -> &'static str;
+
+    /// SQL for selecting the pending signal for an instance (bind:
+    /// instance_id). Postgres returns only unacknowledged signals;
+    /// SQLite returns any signal row (legacy behavior preserved).
+    fn sql_get_pending_signal() -> &'static str;
+
+    /// SQL for acknowledging a pending signal (bind: instance_id).
+    fn sql_acknowledge_signal() -> &'static str;
 }
