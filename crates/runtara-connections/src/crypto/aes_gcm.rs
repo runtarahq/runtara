@@ -188,8 +188,8 @@ mod tests {
         assert_eq!(obj["v"], json!(1));
         assert_eq!(obj["alg"], json!("aes-256-gcm"));
         assert_eq!(obj["kid"], json!("kid-123"));
-        assert!(obj["nonce"].as_str().unwrap().len() > 0);
-        assert!(obj["ct"].as_str().unwrap().len() > 0);
+        assert!(!obj["nonce"].as_str().unwrap().is_empty());
+        assert!(!obj["ct"].as_str().unwrap().is_empty());
     }
 
     #[test]
