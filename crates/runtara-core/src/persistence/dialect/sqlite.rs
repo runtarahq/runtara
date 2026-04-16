@@ -119,6 +119,172 @@ impl Dialect for SqliteDialect {
          SET acknowledged_at = CURRENT_TIMESTAMP \
          WHERE instance_id = ?1 AND acknowledged_at IS NULL"
     }
+
+    fn sql_list_events(order_direction: &str) -> String {
+        format!(
+            "SELECT id, instance_id, event_type, checkpoint_id, payload, created_at, subtype \
+             FROM instance_events \
+             WHERE instance_id = ?1 \
+               AND (?2 IS NULL OR event_type = ?2) \
+               AND (?3 IS NULL OR subtype = ?3) \
+               AND (?4 IS NULL OR created_at >= ?4) \
+               AND (?5 IS NULL OR created_at < ?5) \
+               AND (?6 IS NULL OR ( \
+                   payload IS NOT NULL \
+                   AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%' \
+               )) \
+               AND (?7 IS NULL OR ( \
+                   payload IS NOT NULL \
+                   AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7 \
+               )) \
+               AND (?8 IS NULL OR ( \
+                   payload IS NOT NULL \
+                   AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8 \
+               )) \
+               AND (NOT ?9 OR ( \
+                   payload IS NULL \
+                   OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL \
+               )) \
+             ORDER BY created_at {order_direction}, id {order_direction} \
+             LIMIT ?10 OFFSET ?11"
+        )
+    }
+
+    fn sql_count_events() -> &'static str {
+        "SELECT COUNT(*) \
+         FROM instance_events \
+         WHERE instance_id = ?1 \
+           AND (?2 IS NULL OR event_type = ?2) \
+           AND (?3 IS NULL OR subtype = ?3) \
+           AND (?4 IS NULL OR created_at >= ?4) \
+           AND (?5 IS NULL OR created_at < ?5) \
+           AND (?6 IS NULL OR ( \
+               payload IS NOT NULL \
+               AND CAST(payload AS TEXT) LIKE '%' || ?6 || '%' \
+           )) \
+           AND (?7 IS NULL OR ( \
+               payload IS NOT NULL \
+               AND json_extract(CAST(payload AS TEXT), '$.scope_id') = ?7 \
+           )) \
+           AND (?8 IS NULL OR ( \
+               payload IS NOT NULL \
+               AND json_extract(CAST(payload AS TEXT), '$.parent_scope_id') = ?8 \
+           )) \
+           AND (NOT ?9 OR ( \
+               payload IS NULL \
+               OR json_extract(CAST(payload AS TEXT), '$.parent_scope_id') IS NULL \
+           ))"
+    }
+
+    fn sql_list_step_summaries(order_direction: &str) -> String {
+        // `inputs`/`outputs`/`error` are TEXT on SQLite because
+        // json_extract on a JSON object returns the serialized JSON
+        // string. The shared row mapper parses it back into
+        // `serde_json::Value`.
+        format!(
+            "WITH start_events AS ( \
+                SELECT \
+                    id, \
+                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
+                    json_extract(CAST(payload AS TEXT), '$.step_name') as step_name, \
+                    json_extract(CAST(payload AS TEXT), '$.step_type') as step_type, \
+                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
+                    json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id, \
+                    json_extract(CAST(payload AS TEXT), '$.inputs') as inputs, \
+                    created_at \
+                FROM instance_events \
+                WHERE instance_id = ?1 AND subtype = 'step_debug_start' \
+            ), \
+            end_events AS ( \
+                SELECT \
+                    json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
+                    json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
+                    json_extract(CAST(payload AS TEXT), '$.outputs') as outputs, \
+                    json_extract(CAST(payload AS TEXT), '$.error') as error, \
+                    created_at \
+                FROM instance_events \
+                WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
+            ), \
+            paired AS ( \
+                SELECT \
+                    s.step_id, \
+                    s.step_name, \
+                    s.step_type, \
+                    s.scope_id, \
+                    s.parent_scope_id, \
+                    s.inputs, \
+                    s.created_at as started_at, \
+                    e.created_at as completed_at, \
+                    e.outputs, \
+                    e.error, \
+                    CASE \
+                        WHEN e.step_id IS NULL THEN 'running' \
+                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                        ELSE 'completed' \
+                    END as status, \
+                    CASE \
+                        WHEN e.created_at IS NOT NULL \
+                        THEN CAST((julianday(e.created_at) - julianday(s.created_at)) * 86400000 AS INTEGER) \
+                        ELSE NULL \
+                    END as duration_ms, \
+                    s.id as sort_id \
+                FROM start_events s \
+                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+            ) \
+            SELECT \
+                step_id, step_name, step_type, scope_id, parent_scope_id, \
+                inputs, started_at, completed_at, outputs, error, status, duration_ms \
+            FROM paired \
+            WHERE (?2 IS NULL OR status = ?2) \
+              AND (?3 IS NULL OR step_type = ?3) \
+              AND (?4 IS NULL OR scope_id = ?4) \
+              AND (?5 IS NULL OR parent_scope_id = ?5) \
+              AND (NOT ?6 OR parent_scope_id IS NULL) \
+            ORDER BY sort_id {order_direction} \
+            LIMIT ?7 OFFSET ?8"
+        )
+    }
+
+    fn sql_count_step_summaries() -> &'static str {
+        "WITH start_events AS ( \
+            SELECT \
+                json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
+                json_extract(CAST(payload AS TEXT), '$.step_type') as step_type, \
+                json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
+                json_extract(CAST(payload AS TEXT), '$.parent_scope_id') as parent_scope_id \
+            FROM instance_events \
+            WHERE instance_id = ?1 AND subtype = 'step_debug_start' \
+        ), \
+        end_events AS ( \
+            SELECT \
+                json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
+                json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
+                json_extract(CAST(payload AS TEXT), '$.error') as error \
+            FROM instance_events \
+            WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
+        ), \
+        paired AS ( \
+            SELECT \
+                s.step_id, \
+                s.step_type, \
+                s.scope_id, \
+                s.parent_scope_id, \
+                CASE \
+                    WHEN e.step_id IS NULL THEN 'running' \
+                    WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                    ELSE 'completed' \
+                END as status \
+            FROM start_events s \
+            LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+        ) \
+        SELECT COUNT(*) \
+        FROM paired \
+        WHERE (?2 IS NULL OR status = ?2) \
+          AND (?3 IS NULL OR step_type = ?3) \
+          AND (?4 IS NULL OR scope_id = ?4) \
+          AND (?5 IS NULL OR parent_scope_id = ?5) \
+          AND (NOT ?6 OR parent_scope_id IS NULL)"
+    }
 }
 
 #[cfg(test)]

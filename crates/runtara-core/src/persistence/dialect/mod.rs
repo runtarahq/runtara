@@ -164,4 +164,29 @@ pub trait Dialect: Send + Sync + 'static {
 
     /// SQL for acknowledging a pending signal (bind: instance_id).
     fn sql_acknowledge_signal() -> &'static str;
+
+    /// SQL for `list_events` with a dialect-appropriate ORDER BY
+    /// direction substituted (callers pass `"ASC"` or `"DESC"`).
+    /// Binds: instance_id, event_type, subtype, created_after,
+    /// created_before, payload_contains, scope_id, parent_scope_id,
+    /// root_scopes_only, limit, offset.
+    fn sql_list_events(order_direction: &str) -> String;
+
+    /// SQL for `count_events`. Binds: instance_id, event_type, subtype,
+    /// created_after, created_before, payload_contains, scope_id,
+    /// parent_scope_id, root_scopes_only.
+    fn sql_count_events() -> &'static str;
+
+    /// SQL for `list_step_summaries`. The CTEs emit `inputs`/`outputs`/
+    /// `error` as TEXT (Postgres casts JSONB via `::text`; SQLite uses
+    /// `json_extract`) so the shared row mapper can parse them
+    /// identically.
+    /// Binds: instance_id, status_filter, step_type, scope_id,
+    /// parent_scope_id, root_scopes_only, limit, offset.
+    fn sql_list_step_summaries(order_direction: &str) -> String;
+
+    /// SQL for `count_step_summaries`. Binds: instance_id,
+    /// status_filter, step_type, scope_id, parent_scope_id,
+    /// root_scopes_only.
+    fn sql_count_step_summaries() -> &'static str;
 }

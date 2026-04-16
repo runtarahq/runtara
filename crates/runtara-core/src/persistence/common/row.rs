@@ -30,6 +30,19 @@ pub fn parse_step_status(s: &str) -> StepStatus {
     }
 }
 
+/// Parse a TEXT column that carries a JSON-serialized value into
+/// `serde_json::Value`, yielding `None` if the column is NULL or the
+/// text fails to parse.
+///
+/// Used by the shared `op_list_step_summaries` path: both backends'
+/// step-summary CTEs now emit `inputs`/`outputs`/`error` as TEXT (via
+/// Postgres `::text` cast on the JSONB extraction or SQLite
+/// `json_extract`). Parsing here centralizes what used to be two
+/// near-identical blocks in each backend.
+pub fn decode_json_text(text: Option<String>) -> Option<serde_json::Value> {
+    text.and_then(|s| serde_json::from_str(&s).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

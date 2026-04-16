@@ -99,6 +99,172 @@ impl Dialect for PostgresDialect {
          SET acknowledged_at = NOW() \
          WHERE instance_id = $1 AND acknowledged_at IS NULL"
     }
+
+    fn sql_list_events(order_direction: &str) -> String {
+        format!(
+            "SELECT id, instance_id, event_type::text as event_type, checkpoint_id, payload, created_at, subtype \
+             FROM instance_events \
+             WHERE instance_id = $1 \
+               AND ($2::TEXT IS NULL OR event_type::text = $2) \
+               AND ($3::TEXT IS NULL OR subtype = $3) \
+               AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4) \
+               AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5) \
+               AND ($6::TEXT IS NULL OR ( \
+                   payload IS NOT NULL \
+                   AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%' \
+               )) \
+               AND ($7::TEXT IS NULL OR ( \
+                   payload IS NOT NULL \
+                   AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7 \
+               )) \
+               AND ($8::TEXT IS NULL OR ( \
+                   payload IS NOT NULL \
+                   AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8 \
+               )) \
+               AND (NOT $9 OR ( \
+                   payload IS NULL \
+                   OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL \
+               )) \
+             ORDER BY created_at {order_direction}, id {order_direction} \
+             LIMIT $10 OFFSET $11"
+        )
+    }
+
+    fn sql_count_events() -> &'static str {
+        "SELECT COUNT(*) \
+         FROM instance_events \
+         WHERE instance_id = $1 \
+           AND ($2::TEXT IS NULL OR event_type::text = $2) \
+           AND ($3::TEXT IS NULL OR subtype = $3) \
+           AND ($4::TIMESTAMPTZ IS NULL OR created_at >= $4) \
+           AND ($5::TIMESTAMPTZ IS NULL OR created_at < $5) \
+           AND ($6::TEXT IS NULL OR ( \
+               payload IS NOT NULL \
+               AND convert_from(payload, 'UTF8') ILIKE '%' || $6 || '%' \
+           )) \
+           AND ($7::TEXT IS NULL OR ( \
+               payload IS NOT NULL \
+               AND convert_from(payload, 'UTF8')::jsonb->>'scope_id' = $7 \
+           )) \
+           AND ($8::TEXT IS NULL OR ( \
+               payload IS NOT NULL \
+               AND convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' = $8 \
+           )) \
+           AND (NOT $9 OR ( \
+               payload IS NULL \
+               OR convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' IS NULL \
+           ))"
+    }
+
+    fn sql_list_step_summaries(order_direction: &str) -> String {
+        // `inputs`/`outputs`/`error` are cast to TEXT so the shared row
+        // mapper can parse them with `serde_json::from_str`. Previously
+        // these were returned as JSONB and decoded directly into
+        // `serde_json::Value`; the TEXT form round-trips identically.
+        format!(
+            "WITH start_events AS ( \
+                SELECT \
+                    id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_name' as step_name, \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type, \
+                    convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id, \
+                    (convert_from(payload, 'UTF8')::jsonb->'inputs')::text as inputs, \
+                    created_at \
+                FROM instance_events \
+                WHERE instance_id = $1 AND subtype = 'step_debug_start' \
+            ), \
+            end_events AS ( \
+                SELECT \
+                    convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                    convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                    (convert_from(payload, 'UTF8')::jsonb->'outputs')::text as outputs, \
+                    (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
+                    created_at \
+                FROM instance_events \
+                WHERE instance_id = $1 AND subtype = 'step_debug_end' \
+            ), \
+            paired AS ( \
+                SELECT \
+                    s.step_id, \
+                    s.step_name, \
+                    s.step_type, \
+                    s.scope_id, \
+                    s.parent_scope_id, \
+                    s.inputs, \
+                    s.created_at as started_at, \
+                    e.created_at as completed_at, \
+                    e.outputs, \
+                    e.error, \
+                    CASE \
+                        WHEN e.step_id IS NULL THEN 'running' \
+                        WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                        ELSE 'completed' \
+                    END as status, \
+                    CASE \
+                        WHEN e.created_at IS NOT NULL \
+                        THEN EXTRACT(MILLISECONDS FROM (e.created_at - s.created_at))::bigint \
+                        ELSE NULL \
+                    END as duration_ms, \
+                    s.id as sort_id \
+                FROM start_events s \
+                LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+            ) \
+            SELECT \
+                step_id, step_name, step_type, scope_id, parent_scope_id, \
+                inputs, started_at, completed_at, outputs, error, status, duration_ms \
+            FROM paired \
+            WHERE ($2::TEXT IS NULL OR status = $2) \
+              AND ($3::TEXT IS NULL OR step_type = $3) \
+              AND ($4::TEXT IS NULL OR scope_id = $4) \
+              AND ($5::TEXT IS NULL OR parent_scope_id = $5) \
+              AND (NOT $6 OR parent_scope_id IS NULL) \
+            ORDER BY sort_id {order_direction} \
+            LIMIT $7 OFFSET $8"
+        )
+    }
+
+    fn sql_count_step_summaries() -> &'static str {
+        "WITH start_events AS ( \
+            SELECT \
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                convert_from(payload, 'UTF8')::jsonb->>'step_type' as step_type, \
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                convert_from(payload, 'UTF8')::jsonb->>'parent_scope_id' as parent_scope_id \
+            FROM instance_events \
+            WHERE instance_id = $1 AND subtype = 'step_debug_start' \
+        ), \
+        end_events AS ( \
+            SELECT \
+                convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
+                convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
+                (convert_from(payload, 'UTF8')::jsonb->'error')::text as error \
+            FROM instance_events \
+            WHERE instance_id = $1 AND subtype = 'step_debug_end' \
+        ), \
+        paired AS ( \
+            SELECT \
+                s.step_id, \
+                s.step_type, \
+                s.scope_id, \
+                s.parent_scope_id, \
+                CASE \
+                    WHEN e.step_id IS NULL THEN 'running' \
+                    WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                    ELSE 'completed' \
+                END as status \
+            FROM start_events s \
+            LEFT JOIN end_events e ON s.step_id = e.step_id AND COALESCE(s.scope_id, '') = COALESCE(e.scope_id, '') \
+        ) \
+        SELECT COUNT(*) \
+        FROM paired \
+        WHERE ($2::TEXT IS NULL OR status = $2) \
+          AND ($3::TEXT IS NULL OR step_type = $3) \
+          AND ($4::TEXT IS NULL OR scope_id = $4) \
+          AND ($5::TEXT IS NULL OR parent_scope_id = $5) \
+          AND (NOT $6 OR parent_scope_id IS NULL)"
+    }
 }
 
 #[cfg(test)]
