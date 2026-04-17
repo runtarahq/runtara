@@ -9,6 +9,7 @@ pub mod commerce;
 pub mod connection_types;
 pub mod errors;
 pub mod hubspot;
+pub mod integration_utils;
 pub mod mailgun;
 pub mod object_model;
 pub mod openai;

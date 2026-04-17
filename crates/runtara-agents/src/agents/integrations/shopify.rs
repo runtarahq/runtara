@@ -1,8 +1,4 @@
 use crate::connections::RawConnection;
-use crate::http::{
-    HttpBody, HttpMethod, HttpRequestInput, HttpResponse, HttpResponseBody, ResponseType,
-    http_request,
-};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 /// Shopify agent - Wrapper around HTTP agent for Shopify GraphQL Admin API
 /// This agent provides type-safe interfaces for common Shopify operations
@@ -12,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use super::errors::{http_status_error, permanent_error};
+use super::errors::permanent_error;
+use super::integration_utils::{PageCursor, ProxyHttpClient, extract_page};
 
 // ============================================================================
 // GRAPHQL QUERY CONSTANTS
@@ -833,55 +830,20 @@ fn execute_graphql_query(
     let relative_url = format!("/admin/api/{}/graphql.json", api_version);
 
     // Build GraphQL request body
-    let mut body_map = HashMap::new();
+    let mut body_map = serde_json::Map::new();
     body_map.insert("query".to_string(), json!(query));
     if let Some(vars) = variables {
         body_map.insert("variables".to_string(), vars);
     }
 
-    // Proxy injects credentials (X-Shopify-Access-Token) and resolves base URL
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    // ProxyHttpClient attaches X-Runtara-Connection-Id; proxy injects
+    // credentials (X-Shopify-Access-Token) and resolves base URL.
+    let response_body = ProxyHttpClient::new(connection, "SHOPIFY")
+        .post(relative_url)
+        .json_body(Value::Object(body_map))
+        .send_json()?;
 
-    let http_input = HttpRequestInput {
-        method: HttpMethod::Post,
-        url: relative_url.clone(),
-        headers,
-        query_parameters: HashMap::new(),
-        body: HttpBody(json!(body_map)),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response: HttpResponse = http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "SHOPIFY",
-            response.status_code,
-            "Shopify API request failed",
-            json!({"status_code": response.status_code}),
-        ));
-    }
-
-    // Extract JSON body
-    let response_body = match response.body {
-        HttpResponseBody::Json(body) => body,
-        _ => {
-            return Err(permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Expected JSON response from Shopify",
-                json!({}),
-            ));
-        }
-    };
-
-    // Check for GraphQL errors
+    // Check for GraphQL errors (preserved as Shopify-specific post-processing).
     if let Some(errors) = response_body.get("errors") {
         return Err(permanent_error(
             "SHOPIFY_GRAPHQL_ERROR",
@@ -5157,50 +5119,18 @@ pub fn commerce_get_products(
     // Use execute_graphql_query to make the request (handles URL building with https://)
     let response_json = execute_graphql_query(connection, query, None)?;
 
-    // Extract products from GraphQL response
-    let products_data = response_json
-        .get("data")
-        .and_then(|d| d.get("products"))
-        .and_then(|p| p.get("edges"))
-        .and_then(|e| e.as_array())
-        .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Invalid response structure",
-                json!({}),
-            )
-        })?;
-
-    let products: Vec<CommerceProduct> = products_data
-        .iter()
-        .filter_map(|edge| {
-            let node = edge.get("node")?;
-            Some(shopify_node_to_commerce_product(node))
-        })
-        .collect();
-
-    let page_info = response_json
-        .get("data")
-        .and_then(|d| d.get("products"))
-        .and_then(|p| p.get("pageInfo"));
-
-    let has_next_page = page_info
-        .and_then(|pi| pi.get("hasNextPage"))
-        .and_then(|hnp| hnp.as_bool())
-        .unwrap_or(false);
-
-    let next_cursor = if has_next_page {
-        page_info
-            .and_then(|pi| pi.get("endCursor"))
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
+    let page = extract_page(
+        response_json,
+        &PageCursor::GraphqlPageInfo {
+            path: vec!["data", "products"],
+        },
+        |node| Ok(shopify_node_to_commerce_product(node)),
+    )
+    .map_err(String::from)?;
 
     Ok(CommerceGetProductsOutput {
-        products,
-        next_cursor,
+        products: page.items,
+        next_cursor: page.next_cursor,
     })
 }
 

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use super::errors::{http_status_error, permanent_error};
+use super::integration_utils::{self as iu, ProxyHttpClient};
 
 // ============================================================================
 // Shared helpers
@@ -18,67 +19,20 @@ use super::errors::{http_status_error, permanent_error};
 
 /// Extract the connection reference, required for all Slack operations.
 fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
-    connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "SLACK_NO_CONNECTION",
-            "Slack Bot connection is required",
-            json!({}),
-        )
-    })
-}
-
-/// Build headers for Slack JSON API calls via proxy.
-fn slack_json_headers(connection: &RawConnection) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers.insert(
-        "Content-Type".to_string(),
-        "application/json; charset=utf-8".to_string(),
-    );
-    headers
+    iu::require_connection("SLACK", connection).map_err(String::from)
 }
 
 /// Call a Slack Web API method (JSON POST) and return the parsed response.
-/// Handles Slack's "200 OK with `ok: false`" error pattern.
-/// Uses proxy pattern: relative path + connection_id header.
+/// Handles Slack's "200 OK with `ok: false`" error pattern — the per-Slack-
+/// error-code mapping stays local to preserve the Slack-specific wire
+/// contract (e.g. `SLACK_CHANNEL_NOT_FOUND`).
 fn slack_api_call(method: &str, connection: &RawConnection, body: Value) -> Result<Value, String> {
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: format!("/api/{}", method),
-        headers: slack_json_headers(connection),
-        query_parameters: HashMap::new(),
-        body: HttpBody(body),
-        body_type: BodyType::Json,
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "SLACK",
-            response.status_code,
-            &format!("Slack API HTTP error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "SLACK_INVALID_RESPONSE",
-                "Unexpected response format from Slack API",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = ProxyHttpClient::new(connection, "SLACK")
+        .post(format!("/api/{}", method))
+        .header("Content-Type", "application/json; charset=utf-8")
+        .json_body(body)
+        .send_json()
+        .map_err(String::from)?;
 
     if response_json["ok"].as_bool() != Some(true) {
         let error = response_json["error"].as_str().unwrap_or("unknown_error");

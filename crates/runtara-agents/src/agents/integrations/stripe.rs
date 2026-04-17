@@ -4,35 +4,19 @@
 //! refunds, charges, and balance via the Stripe REST API.
 
 use crate::connections::RawConnection;
-use crate::http::{self, BodyType, HttpBody, HttpMethod, ResponseType};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::HashMap;
 
-use super::errors::{http_status_error, permanent_error};
+use super::integration_utils::{ProxyHttpClient, require_connection};
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
 fn extract_connection(conn: &Option<RawConnection>) -> Result<&RawConnection, String> {
-    conn.as_ref().ok_or_else(|| {
-        permanent_error(
-            "STRIPE_NO_CONNECTION",
-            "Connection is required for Stripe operations",
-            json!({}),
-        )
-    })
-}
-
-fn stripe_headers(connection: &RawConnection) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers
+    require_connection("STRIPE", conn).map_err(String::from)
 }
 
 fn stripe_get(
@@ -40,36 +24,12 @@ fn stripe_get(
     path: &str,
     query: HashMap<String, String>,
 ) -> Result<Value, String> {
-    let mut headers = stripe_headers(connection);
-    headers.insert("Content-Type".to_string(), "application/json".to_string());
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Get,
-        url: format!("/v1{}", path),
-        headers,
-        query_parameters: query,
-        body: HttpBody(Value::Null),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "STRIPE",
-            response.status_code,
-            &format!("Stripe API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    match response.body {
-        http::HttpResponseBody::Json(v) => Ok(v),
-        _ => Ok(json!({})),
-    }
+    ProxyHttpClient::new(connection, "STRIPE")
+        .get(format!("/v1{}", path))
+        .header("Content-Type", "application/json")
+        .query(query)
+        .send_json()
+        .map_err(String::from)
 }
 
 fn stripe_post(
@@ -77,79 +37,19 @@ fn stripe_post(
     path: &str,
     form_parts: Vec<(String, String)>,
 ) -> Result<Value, String> {
-    let mut headers = stripe_headers(connection);
-    headers.insert(
-        "Content-Type".to_string(),
-        "application/x-www-form-urlencoded".to_string(),
-    );
-
-    let form_body: String = form_parts
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoded(k), urlencoded(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: format!("/v1{}", path),
-        headers,
-        query_parameters: HashMap::new(),
-        body: HttpBody(Value::String(form_body)),
-        body_type: BodyType::Text,
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "STRIPE",
-            response.status_code,
-            &format!("Stripe API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    match response.body {
-        http::HttpResponseBody::Json(v) => Ok(v),
-        _ => Ok(json!({})),
-    }
+    ProxyHttpClient::new(connection, "STRIPE")
+        .post(format!("/v1{}", path))
+        .form_body(&form_parts)
+        .send_json()
+        .map_err(String::from)
 }
 
 fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, String> {
-    let mut headers = stripe_headers(connection);
-    headers.insert("Content-Type".to_string(), "application/json".to_string());
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Delete,
-        url: format!("/v1{}", path),
-        headers,
-        query_parameters: HashMap::new(),
-        body: HttpBody(Value::Null),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "STRIPE",
-            response.status_code,
-            &format!("Stripe API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    match response.body {
-        http::HttpResponseBody::Json(v) => Ok(v),
-        _ => Ok(json!({})),
-    }
+    ProxyHttpClient::new(connection, "STRIPE")
+        .delete(format!("/v1{}", path))
+        .header("Content-Type", "application/json")
+        .send_json()
+        .map_err(String::from)
 }
 
 /// Build pagination query parameters.
@@ -176,24 +76,6 @@ fn push_opt(parts: &mut Vec<(String, String)>, key: &str, val: &Option<String>) 
     {
         parts.push((key.to_string(), v.clone()));
     }
-}
-
-/// Simple URL encoding for form data.
-fn urlencoded(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            b' ' => result.push('+'),
-            _ => {
-                result.push('%');
-                result.push_str(&format!("{:02X}", b));
-            }
-        }
-    }
-    result
 }
 
 // ============================================================================
