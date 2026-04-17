@@ -48,7 +48,11 @@ macro_rules! impl_instance_ops {
                     .bind(instance_id)
                     .bind(tenant_id)
                     .execute(pool)
-                    .await?;
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "register_instance".into(),
+                        details: e.to_string(),
+                    })?;
                 Ok(())
             }
 
@@ -73,7 +77,11 @@ macro_rules! impl_instance_ops {
                 let record = ::sqlx::query_as::<_, $crate::persistence::InstanceRecord>(&sql)
                     .bind(instance_id)
                     .fetch_optional(pool)
-                    .await?;
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "get_instance".into(),
+                        details: e.to_string(),
+                    })?;
                 Ok(record)
             }
 
@@ -102,7 +110,11 @@ macro_rules! impl_instance_ops {
                         .bind(status)
                         .bind(ts)
                         .execute(pool)
-                        .await?
+                        .await
+                        .map_err(|e| $crate::error::CoreError::DatabaseError {
+                            operation: "update_instance_status".into(),
+                            details: e.to_string(),
+                        })?
                 } else {
                     let sql = format!(
                         "UPDATE instances \
@@ -113,7 +125,11 @@ macro_rules! impl_instance_ops {
                         .bind(instance_id)
                         .bind(status)
                         .execute(pool)
-                        .await?
+                        .await
+                        .map_err(|e| $crate::error::CoreError::DatabaseError {
+                            operation: "update_instance_status".into(),
+                            details: e.to_string(),
+                        })?
                 };
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
@@ -207,7 +223,11 @@ macro_rules! impl_instance_ops {
                     .bind(params.stderr)
                     .bind(params.checkpoint_id)
                     .execute(pool)
-                    .await?;
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "complete_instance".into(),
+                        details: e.to_string(),
+                    })?;
                 match params.guard {
                     CompleteInstanceGuard::OnlyRunning => Ok(result.rows_affected_generic() > 0),
                     CompleteInstanceGuard::Any => {

@@ -71,7 +71,11 @@ macro_rules! impl_checkpoint_ops {
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .fetch_optional(pool)
-                    .await?;
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "load_checkpoint".into(),
+                        details: e.to_string(),
+                    })?;
                 Ok(record)
             }
 

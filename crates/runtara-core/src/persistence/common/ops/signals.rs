@@ -39,7 +39,11 @@ macro_rules! impl_signal_ops {
                 let record = ::sqlx::query_as::<_, $crate::persistence::SignalRecord>(sql)
                     .bind(instance_id)
                     .fetch_optional(pool)
-                    .await?;
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "get_pending_signal".into(),
+                        details: e.to_string(),
+                    })?;
                 Ok(record)
             }
 
@@ -52,7 +56,14 @@ macro_rules! impl_signal_ops {
             ) -> ::core::result::Result<(), $crate::error::CoreError> {
                 use $crate::persistence::dialect::Dialect;
                 let sql = <$Dialect>::sql_acknowledge_signal();
-                ::sqlx::query(sql).bind(instance_id).execute(pool).await?;
+                ::sqlx::query(sql)
+                    .bind(instance_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "acknowledge_signal".into(),
+                        details: e.to_string(),
+                    })?;
                 Ok(())
             }
 

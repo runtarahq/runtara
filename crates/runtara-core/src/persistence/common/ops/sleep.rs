@@ -43,7 +43,11 @@ macro_rules! impl_sleep_ops {
                     .bind(instance_id)
                     .bind(sleep_until)
                     .execute(pool)
-                    .await?;
+                    .await
+                    .map_err(|e| $crate::error::CoreError::DatabaseError {
+                        operation: "set_instance_sleep".into(),
+                        details: e.to_string(),
+                    })?;
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
