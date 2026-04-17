@@ -431,114 +431,26 @@ pub trait Persistence: Send + Sync {
         checkpoint_id: &str,
     ) -> Result<(), CoreError>;
 
+    /// Transition an instance to a terminal or quasi-terminal state.
+    ///
+    /// Single consolidated entry point for what were previously five
+    /// overlapping `complete_instance*` variants. The behavior is
+    /// controlled entirely by the [`CompleteInstanceParams`] struct —
+    /// see its documentation for the per-field semantics (COALESCE vs.
+    /// overwrite, terminal-only `finished_at`, guard against races).
+    ///
+    /// Return value:
+    /// - `Ok(true)` — the update matched a row.
+    /// - `Ok(false)` — guarded update
+    ///   ([`CompleteInstanceGuard::OnlyRunning`]) skipped because the
+    ///   current status is not `running`. This is an expected outcome
+    ///   during races, not an error.
+    /// - `Err(CoreError::InstanceNotFound)` — unguarded update against
+    ///   a missing row.
     async fn complete_instance(
         &self,
-        instance_id: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-    ) -> Result<(), CoreError>;
-
-    /// Complete an instance with extended fields (stderr, checkpoint).
-    ///
-    /// This is an extended version of `complete_instance` that supports additional
-    /// fields needed by the Environment layer. The default implementation calls
-    /// the basic `complete_instance` and ignores the extra fields.
-    ///
-    /// Environment implementations should override this to store stderr and checkpoint.
-    async fn complete_instance_extended(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        _stderr: Option<&str>,
-        _checkpoint_id: Option<&str>,
-    ) -> Result<(), CoreError> {
-        // Default: delegate to basic complete_instance, ignoring stderr/checkpoint
-        let error_for_basic = if status == "failed" { error } else { None };
-        let output_for_basic = if status == "completed" { output } else { None };
-        self.complete_instance(instance_id, output_for_basic, error_for_basic)
-            .await
-    }
-
-    /// Complete an instance only if its current status is 'running'.
-    ///
-    /// This prevents race conditions where both Core (via SDK) and Environment
-    /// (via container monitor) try to complete the same instance. Returns true
-    /// if the update was applied, false if skipped.
-    ///
-    /// Default implementation always applies the update (no guard).
-    async fn complete_instance_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<bool, CoreError> {
-        // Default: always apply (returns true)
-        self.complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
-            .await?;
-        Ok(true)
-    }
-
-    /// Complete an instance with termination tracking metadata.
-    ///
-    /// This version includes `termination_reason` and `exit_code` for unambiguous
-    /// identification of how/why the instance terminated.
-    ///
-    /// Default implementation delegates to `complete_instance_extended`, ignoring
-    /// the termination fields.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_instance_with_termination(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<(), CoreError> {
-        // Default: delegate to extended, ignoring termination fields
-        let _ = termination_reason;
-        let _ = exit_code;
-        self.complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
-            .await
-    }
-
-    /// Complete an instance with termination tracking, only if status is 'running'.
-    ///
-    /// Returns true if the update was applied, false if skipped (instance already
-    /// has a terminal status).
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_instance_with_termination_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<bool, CoreError> {
-        // Default: always apply (returns true)
-        self.complete_instance_with_termination(
-            instance_id,
-            status,
-            termination_reason,
-            exit_code,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await?;
-        Ok(true)
-    }
+        params: CompleteInstanceParams<'_>,
+    ) -> Result<bool, CoreError>;
 
     /// Update execution metrics for an instance (memory, CPU usage).
     ///

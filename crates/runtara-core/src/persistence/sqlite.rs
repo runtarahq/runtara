@@ -9,8 +9,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use crate::error::CoreError;
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
+    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
@@ -150,103 +150,9 @@ impl Persistence for SqlitePersistence {
 
     async fn complete_instance(
         &self,
-        instance_id: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_complete_instance(&self.pool, instance_id, output, error).await
-    }
-
-    async fn complete_instance_extended(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_complete_instance_extended(
-            &self.pool,
-            instance_id,
-            status,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
-    async fn complete_instance_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
+        params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
-        Self::op_complete_instance_if_running(
-            &self.pool,
-            instance_id,
-            status,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
-    async fn complete_instance_with_termination(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_complete_instance_with_termination(
-            &self.pool,
-            instance_id,
-            status,
-            termination_reason,
-            exit_code,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
-    async fn complete_instance_with_termination_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<bool, CoreError> {
-        Self::op_complete_instance_with_termination_if_running(
-            &self.pool,
-            instance_id,
-            status,
-            termination_reason,
-            exit_code,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
+        Self::op_complete_instance_unified(&self.pool, params).await
     }
 
     async fn update_instance_metrics(
@@ -674,7 +580,9 @@ mod tests {
 
         let output_data = b"success output";
         persistence
-            .complete_instance(&instance_id, Some(output_data), None)
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "completed").with_output(output_data),
+            )
             .await
             .expect("Failed to complete instance");
 
@@ -701,7 +609,9 @@ mod tests {
             .unwrap();
 
         persistence
-            .complete_instance(&instance_id, None, Some("test error"))
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "failed").with_error("test error"),
+            )
             .await
             .expect("Failed to complete instance");
 
@@ -1212,16 +1122,14 @@ mod tests {
             .unwrap();
 
         persistence
-            .complete_instance_extended(
-                &instance_id,
-                "completed",
-                Some(b"output data"),
-                None,
-                Some("stderr output"),
-                Some("final-checkpoint"),
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "completed")
+                    .with_output(b"output data")
+                    .with_stderr("stderr output")
+                    .with_checkpoint("final-checkpoint"),
             )
             .await
-            .expect("Failed to complete instance extended");
+            .expect("Failed to complete instance");
 
         // Verify via raw query (InstanceRecord doesn't include stderr)
         let row: (String, Option<Vec<u8>>, Option<String>, Option<String>) = sqlx::query_as(
@@ -1254,13 +1162,10 @@ mod tests {
             .unwrap();
 
         let applied = persistence
-            .complete_instance_if_running(
-                &instance_id,
-                "completed",
-                Some(b"done"),
-                None,
-                None,
-                None,
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "completed")
+                    .if_running()
+                    .with_output(b"done"),
             )
             .await
             .expect("Failed to complete instance");
@@ -1288,13 +1193,10 @@ mod tests {
         // Status is 'pending', not 'running'
 
         let applied = persistence
-            .complete_instance_if_running(
-                &instance_id,
-                "completed",
-                Some(b"done"),
-                None,
-                None,
-                None,
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "completed")
+                    .if_running()
+                    .with_output(b"done"),
             )
             .await
             .expect("Query should succeed");

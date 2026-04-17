@@ -10,7 +10,7 @@ use super::mappers::map_event_type;
 use super::state::InstanceHandlerState;
 use super::types::{InstanceEvent, InstanceEventResponse, InstanceEventType, RetryAttemptEvent};
 use crate::error::CoreError;
-use crate::persistence::EventRecord;
+use crate::persistence::{CompleteInstanceParams, EventRecord};
 
 /// Handle instance event.
 ///
@@ -81,20 +81,16 @@ pub async fn handle_instance_event(
             } else {
                 Some(event.payload.as_slice())
             };
-            // Use _if_running to prevent race condition with PID monitor:
-            // If process crashed and PID monitor already set status to "failed",
-            // we should not overwrite it with "completed" from queued SDK event.
-            let applied = state
-                .persistence
-                .complete_instance_if_running(
-                    &event.instance_id,
-                    "completed",
-                    output,
-                    None,
-                    None,
-                    None,
-                )
-                .await?;
+            // Guard with `if_running()` to prevent race condition with PID monitor:
+            // if the process crashed and the PID monitor already set status to
+            // "failed", we should not overwrite it with "completed" from a queued
+            // SDK event.
+            let mut params =
+                CompleteInstanceParams::new(&event.instance_id, "completed").if_running();
+            if let Some(o) = output {
+                params = params.with_output(o);
+            }
+            let applied = state.persistence.complete_instance(params).await?;
             if applied {
                 info!("Instance completed successfully");
             } else {
@@ -107,17 +103,15 @@ pub async fn handle_instance_event(
             } else {
                 std::str::from_utf8(&event.payload).unwrap_or("Unknown error (binary payload)")
             };
-            // Use _if_running to prevent race condition with PID monitor:
-            // If PID monitor already set status to "failed", don't overwrite with SDK event.
+            // Guard with `if_running()` to prevent race condition with PID monitor:
+            // if the PID monitor already set status to "failed", don't overwrite
+            // with the SDK event.
             let applied = state
                 .persistence
-                .complete_instance_if_running(
-                    &event.instance_id,
-                    "failed",
-                    None,
-                    Some(error),
-                    None,
-                    None,
+                .complete_instance(
+                    CompleteInstanceParams::new(&event.instance_id, "failed")
+                        .if_running()
+                        .with_error(error),
                 )
                 .await?;
             if applied {
@@ -150,19 +144,16 @@ pub async fn handle_instance_event(
                             .await?;
                     }
 
-                    // Mark as suspended with termination_reason "sleeping"
-                    // Use _if_running to prevent race condition with PID monitor.
+                    // Mark as suspended with termination_reason "sleeping".
+                    // Guard with `if_running()` to prevent race condition with
+                    // the PID monitor.
                     let applied = state
                         .persistence
-                        .complete_instance_with_termination_if_running(
-                            &event.instance_id,
-                            "suspended",
-                            Some("sleeping"),
-                            None, // exit_code
-                            None, // output
-                            None, // error
-                            None, // stderr
-                            Some(checkpoint_id),
+                        .complete_instance(
+                            CompleteInstanceParams::new(&event.instance_id, "suspended")
+                                .if_running()
+                                .with_termination("sleeping", None)
+                                .with_checkpoint(checkpoint_id),
                         )
                         .await?;
 
@@ -179,17 +170,14 @@ pub async fn handle_instance_event(
                         );
                     }
                 } else {
-                    // Payload present but not valid sleep data - just suspend
-                    // Use _if_running to prevent race condition with PID monitor.
+                    // Payload present but not valid sleep data — just suspend.
+                    // Guard with `if_running()` to prevent race condition with
+                    // the PID monitor.
                     let applied = state
                         .persistence
-                        .complete_instance_if_running(
-                            &event.instance_id,
-                            "suspended",
-                            None,
-                            None,
-                            None,
-                            None,
+                        .complete_instance(
+                            CompleteInstanceParams::new(&event.instance_id, "suspended")
+                                .if_running(),
                         )
                         .await?;
                     if applied {
@@ -199,17 +187,13 @@ pub async fn handle_instance_event(
                     }
                 }
             } else {
-                // No payload or no checkpoint_id - simple suspend
-                // Use _if_running to prevent race condition with PID monitor.
+                // No payload or no checkpoint_id — simple suspend.
+                // Guard with `if_running()` to prevent race condition with the
+                // PID monitor.
                 let applied = state
                     .persistence
-                    .complete_instance_if_running(
-                        &event.instance_id,
-                        "suspended",
-                        None,
-                        None,
-                        None,
-                        None,
+                    .complete_instance(
+                        CompleteInstanceParams::new(&event.instance_id, "suspended").if_running(),
                     )
                     .await?;
                 if applied {

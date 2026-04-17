@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 
 use crate::container_registry::{ContainerInfo, ContainerRegistry};
 use crate::db;
@@ -628,15 +628,18 @@ pub async fn handle_start_instance(
         }
         Err(e) => {
             error!(error = %e, "Failed to launch instance");
+            let launch_error = format!("Launch failed: {}", e);
             let _ = state
                 .persistence
-                .complete_instance(&instance_id, None, Some(&format!("Launch failed: {}", e)))
+                .complete_instance(
+                    CompleteInstanceParams::new(&instance_id, "failed").with_error(&launch_error),
+                )
                 .await;
 
             Ok(StartInstanceResponse {
                 success: false,
                 instance_id,
-                error: Some(format!("Launch failed: {}", e)),
+                error: Some(launch_error),
             })
         }
     }
@@ -723,7 +726,10 @@ pub async fn handle_stop_instance(
     // Update instance status to cancelled via Persistence trait
     let _ = state
         .persistence
-        .complete_instance_extended(&request.instance_id, "cancelled", None, None, None, None)
+        .complete_instance(CompleteInstanceParams::new(
+            &request.instance_id,
+            "cancelled",
+        ))
         .await;
 
     // Clean up container registry
@@ -1183,19 +1189,14 @@ pub fn spawn_container_monitor(
                                 ("failed", "crashed", "Process terminated without SDK event")
                             };
 
-                            match persistence
-                                .complete_instance_with_termination_if_running(
-                                    &instance_id,
-                                    status,
-                                    Some(termination_reason),
-                                    None,
-                                    None,
-                                    Some(error_msg),
-                                    stderr.as_deref(),
-                                    None,
-                                )
-                                .await
-                            {
+                            let mut params = CompleteInstanceParams::new(&instance_id, status)
+                                .if_running()
+                                .with_termination(termination_reason, None)
+                                .with_error(error_msg);
+                            if let Some(s) = stderr.as_deref() {
+                                params = params.with_stderr(s);
+                            }
+                            match persistence.complete_instance(params).await {
                                 Ok(applied) => {
                                     if applied {
                                         if drain.is_draining() {
@@ -1243,15 +1244,11 @@ pub fn spawn_container_monitor(
 
                 // Update instance status to failed with termination_reason = "timeout"
                 if let Err(e) = persistence
-                    .complete_instance_with_termination_if_running(
-                        &instance_id,
-                        "failed",
-                        Some("timeout"),             // termination_reason
-                        None,                        // exit_code
-                        None,                        // output
-                        Some("Execution timed out"), // error
-                        None,                        // stderr
-                        None,                        // checkpoint_id
+                    .complete_instance(
+                        CompleteInstanceParams::new(&instance_id, "failed")
+                            .if_running()
+                            .with_termination("timeout", None)
+                            .with_error("Execution timed out"),
                     )
                     .await
                 {

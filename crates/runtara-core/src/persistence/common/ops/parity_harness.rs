@@ -13,7 +13,8 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::persistence::{
-    EventRecord, ListEventsFilter, ListStepSummariesFilter, Persistence, StepStatus,
+    CompleteInstanceParams, EventRecord, ListEventsFilter, ListStepSummariesFilter, Persistence,
+    StepStatus,
 };
 
 /// Run the full parity sequence against `backend`.
@@ -248,16 +249,13 @@ pub async fn run_parity_sequence<P: Persistence>(backend: &P) {
 
     // --- completion ---------------------------------------------------------
     backend
-        .complete_instance_extended(
-            &instance_id,
-            "completed",
-            Some(b"{\"result\":42}"),
-            None,
-            None,
-            Some(checkpoint_id),
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, "completed")
+                .with_output(b"{\"result\":42}")
+                .with_checkpoint(checkpoint_id),
         )
         .await
-        .expect("complete_instance_extended failed");
+        .expect("complete_instance failed");
     let record = backend
         .get_instance(&instance_id)
         .await

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use runtara_core::persistence::{EventRecord, Persistence};
+use runtara_core::persistence::{CompleteInstanceParams, EventRecord, Persistence};
 use tracing::{debug, info, instrument};
 
 use super::SdkBackend;
@@ -185,10 +185,9 @@ impl SdkBackend for EmbeddedBackend {
     #[instrument(skip(self, output), fields(instance_id = %self.instance_id, output_size = output.len()))]
     fn completed(&self, output: &[u8]) -> Result<()> {
         self.rt
-            .block_on(
-                self.persistence
-                    .complete_instance(&self.instance_id, Some(output), None),
-            )
+            .block_on(self.persistence.complete_instance(
+                CompleteInstanceParams::new(&self.instance_id, "completed").with_output(output),
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
@@ -212,10 +211,9 @@ impl SdkBackend for EmbeddedBackend {
     #[instrument(skip(self), fields(instance_id = %self.instance_id))]
     fn failed(&self, error: &str) -> Result<()> {
         self.rt
-            .block_on(
-                self.persistence
-                    .complete_instance(&self.instance_id, None, Some(error)),
-            )
+            .block_on(self.persistence.complete_instance(
+                CompleteInstanceParams::new(&self.instance_id, "failed").with_error(error),
+            ))
             .map_err(|e| SdkError::Internal(e.to_string()))?;
 
         let event = EventRecord {
@@ -657,23 +655,14 @@ mod tests {
             Ok(())
         }
 
-        async fn complete_instance(
-            &self,
-            instance_id: &str,
-            output: Option<&[u8]>,
-            error: Option<&str>,
-        ) -> CoreResult<()> {
+        async fn complete_instance(&self, params: CompleteInstanceParams<'_>) -> CoreResult<bool> {
             let mut instances = self.instances.write().await;
-            if let Some(inst) = instances.get_mut(instance_id) {
-                if error.is_some() {
-                    inst.status = "failed".to_string();
-                    inst.error = error.map(|e| e.to_string());
-                } else {
-                    inst.status = "completed".to_string();
-                    inst.output = output.map(|o| o.to_vec());
-                }
+            if let Some(inst) = instances.get_mut(params.instance_id) {
+                inst.status = params.status.to_string();
+                inst.output = params.output.map(|o| o.to_vec());
+                inst.error = params.error.map(|e| e.to_string());
             }
-            Ok(())
+            Ok(true)
         }
 
         async fn save_checkpoint(

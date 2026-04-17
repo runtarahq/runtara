@@ -252,8 +252,8 @@ mod tests {
     use super::*;
     use crate::error::CoreError;
     use crate::persistence::{
-        CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-        ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+        CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
+        ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
     };
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
@@ -297,11 +297,9 @@ mod tests {
 
         async fn complete_instance(
             &self,
-            _instance_id: &str,
-            _output: Option<&[u8]>,
-            _error: Option<&str>,
-        ) -> Result<(), CoreError> {
-            Ok(())
+            _params: CompleteInstanceParams<'_>,
+        ) -> Result<bool, CoreError> {
+            Ok(true)
         }
 
         async fn save_checkpoint(

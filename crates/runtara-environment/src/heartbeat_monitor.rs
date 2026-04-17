@@ -20,7 +20,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -351,15 +351,11 @@ impl HeartbeatMonitor {
 
         // Step 5: Mark instance as failed in Core persistence with termination tracking
         self.core_persistence
-            .complete_instance_with_termination_if_running(
-                &container.instance_id,
-                "failed",
-                Some("heartbeat_timeout"),
-                None, // exit_code
-                None, // output
-                Some(&error_message),
-                None, // stderr
-                None, // checkpoint_id
+            .complete_instance(
+                CompleteInstanceParams::new(&container.instance_id, "failed")
+                    .if_running()
+                    .with_termination("heartbeat_timeout", None)
+                    .with_error(&error_message),
             )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
@@ -470,15 +466,11 @@ impl HeartbeatMonitor {
 
         // Mark instance as failed in Core persistence with termination tracking
         self.core_persistence
-            .complete_instance_with_termination_if_running(
-                &instance.instance_id,
-                "failed",
-                Some("orphaned"),
-                None, // exit_code
-                None, // output
-                Some(&error_message),
-                None, // stderr
-                None, // checkpoint_id
+            .complete_instance(
+                CompleteInstanceParams::new(&instance.instance_id, "failed")
+                    .if_running()
+                    .with_termination("orphaned", None)
+                    .with_error(&error_message),
             )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;
@@ -528,15 +520,11 @@ impl HeartbeatMonitor {
 
             // Mark instance as failed in Core persistence
             self.core_persistence
-                .complete_instance_with_termination_if_running(
-                    &container.instance_id,
-                    "failed",
-                    Some("crashed"),
-                    None, // exit_code
-                    None, // output
-                    Some(&error_message),
-                    None, // stderr
-                    None, // checkpoint_id
+                .complete_instance(
+                    CompleteInstanceParams::new(&container.instance_id, "failed")
+                        .if_running()
+                        .with_termination("crashed", None)
+                        .with_error(&error_message),
                 )
                 .await
                 .map_err(|e| {

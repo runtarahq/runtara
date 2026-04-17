@@ -30,8 +30,9 @@ impl PostgresPersistence {
 // ============================================================================
 
 use super::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord, WakeEntry,
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
+    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    WakeEntry,
 };
 
 // ============================================================================
@@ -455,11 +456,9 @@ impl Persistence for PostgresPersistence {
 
     async fn complete_instance(
         &self,
-        instance_id: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_complete_instance(&self.pool, instance_id, output, error).await
+        params: CompleteInstanceParams<'_>,
+    ) -> Result<bool, CoreError> {
+        Self::op_complete_instance_unified(&self.pool, params).await
     }
 
     async fn save_checkpoint(
@@ -648,98 +647,6 @@ impl Persistence for PostgresPersistence {
         Self::op_count_step_summaries(&self.pool, instance_id, filter).await
     }
 
-    async fn complete_instance_extended(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_complete_instance_extended(
-            &self.pool,
-            instance_id,
-            status,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
-    async fn complete_instance_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<bool, CoreError> {
-        Self::op_complete_instance_if_running(
-            &self.pool,
-            instance_id,
-            status,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
-    async fn complete_instance_with_termination(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<(), CoreError> {
-        Self::op_complete_instance_with_termination(
-            &self.pool,
-            instance_id,
-            status,
-            termination_reason,
-            exit_code,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
-    async fn complete_instance_with_termination_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> Result<bool, CoreError> {
-        Self::op_complete_instance_with_termination_if_running(
-            &self.pool,
-            instance_id,
-            status,
-            termination_reason,
-            exit_code,
-            output,
-            error,
-            stderr,
-            checkpoint_id,
-        )
-        .await
-    }
-
     async fn update_instance_metrics(
         &self,
         instance_id: &str,
@@ -906,11 +813,10 @@ mod tests {
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
         let output_data = b"success output";
-        let result = PostgresPersistence::op_complete_instance(
+        let instance_id_str = instance_id.to_string();
+        let result = PostgresPersistence::op_complete_instance_unified(
             &pool,
-            &instance_id.to_string(),
-            Some(output_data),
-            None,
+            CompleteInstanceParams::new(&instance_id_str, "completed").with_output(output_data),
         )
         .await;
         assert!(result.is_ok());
@@ -936,11 +842,10 @@ mod tests {
         let instance_id = Uuid::new_v4();
         create_test_instance(&pool, instance_id, "test-tenant").await;
 
-        let result = PostgresPersistence::op_complete_instance(
+        let instance_id_str = instance_id.to_string();
+        let result = PostgresPersistence::op_complete_instance_unified(
             &pool,
-            &instance_id.to_string(),
-            None,
-            Some("test error"),
+            CompleteInstanceParams::new(&instance_id_str, "failed").with_error("test error"),
         )
         .await;
         assert!(result.is_ok());
