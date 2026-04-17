@@ -4,38 +4,19 @@
 //! via the HubSpot CRM API v3.
 
 use crate::connections::RawConnection;
-use crate::http::{self, HttpBody, HttpMethod, HttpResponseBody, ResponseType};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use super::errors::{http_status_error, permanent_error};
+use super::integration_utils::{ProxyHttpClient, require_connection};
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
 fn extract_connection(conn: &Option<RawConnection>) -> Result<&RawConnection, String> {
-    conn.as_ref().ok_or_else(|| {
-        permanent_error(
-            "HUBSPOT_NO_CONNECTION",
-            "Connection is required for HubSpot operations",
-            json!({}),
-        )
-    })
-}
-
-/// Build headers for HubSpot API calls via proxy.
-/// Proxy handles OAuth2 token refresh and credential injection.
-fn hubspot_headers(connection: &RawConnection) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers.insert("Content-Type".to_string(), "application/json".to_string());
-    headers
+    require_connection("HUBSPOT", conn).map_err(String::from)
 }
 
 fn hubspot_get(
@@ -43,120 +24,35 @@ fn hubspot_get(
     path: &str,
     query: HashMap<String, String>,
 ) -> Result<Value, String> {
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Get,
-        url: path.to_string(),
-        headers: hubspot_headers(connection),
-        query_parameters: query,
-        body: HttpBody(Value::Null),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "HUBSPOT",
-            response.status_code,
-            &format!("HubSpot API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    match response.body {
-        HttpResponseBody::Json(v) => Ok(v),
-        _ => Ok(json!({})),
-    }
+    ProxyHttpClient::new(connection, "HUBSPOT")
+        .get(path.to_string())
+        .query(query)
+        .send_json()
+        .map_err(String::from)
 }
 
 fn hubspot_post(connection: &RawConnection, path: &str, body: Value) -> Result<Value, String> {
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: path.to_string(),
-        headers: hubspot_headers(connection),
-        query_parameters: HashMap::new(),
-        body: HttpBody(body),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "HUBSPOT",
-            response.status_code,
-            &format!("HubSpot API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    match response.body {
-        HttpResponseBody::Json(v) => Ok(v),
-        _ => Ok(json!({})),
-    }
+    ProxyHttpClient::new(connection, "HUBSPOT")
+        .post(path.to_string())
+        .json_body(body)
+        .send_json()
+        .map_err(String::from)
 }
 
 fn hubspot_patch(connection: &RawConnection, path: &str, body: Value) -> Result<Value, String> {
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Patch,
-        url: path.to_string(),
-        headers: hubspot_headers(connection),
-        query_parameters: HashMap::new(),
-        body: HttpBody(body),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "HUBSPOT",
-            response.status_code,
-            &format!("HubSpot API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    match response.body {
-        HttpResponseBody::Json(v) => Ok(v),
-        _ => Ok(json!({})),
-    }
+    ProxyHttpClient::new(connection, "HUBSPOT")
+        .patch(path.to_string())
+        .json_body(body)
+        .send_json()
+        .map_err(String::from)
 }
 
 fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), String> {
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Delete,
-        url: path.to_string(),
-        headers: hubspot_headers(connection),
-        query_parameters: HashMap::new(),
-        body: HttpBody(Value::Null),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "HUBSPOT",
-            response.status_code,
-            &format!("HubSpot API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    Ok(())
+    ProxyHttpClient::new(connection, "HUBSPOT")
+        .delete(path.to_string())
+        .send_json()
+        .map(|_| ())
+        .map_err(String::from)
 }
 
 /// Build properties query param from an optional comma-separated list.
@@ -1825,33 +1721,11 @@ pub fn create_association(
     );
 
     // v4 associations use PUT
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Put,
-        url: path,
-        headers: hubspot_headers(connection),
-        query_parameters: HashMap::new(),
-        body: HttpBody(body),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "HUBSPOT",
-            response.status_code,
-            &format!("HubSpot API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let result = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => json!({}),
-    };
+    let result = ProxyHttpClient::new(connection, "HUBSPOT")
+        .put(path)
+        .json_body(body)
+        .send_json()
+        .map_err(String::from)?;
 
     Ok(CreateAssociationOutput { result })
 }
