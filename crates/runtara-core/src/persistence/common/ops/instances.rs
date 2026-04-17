@@ -140,6 +140,87 @@ macro_rules! impl_instance_ops {
                 not_found_if_empty::<<$Dialect as Dialect>::Database>(&result, instance_id)
             }
 
+            /// Unified `complete_instance` op covering all five legacy
+            /// variants via [`CompleteInstanceParams`].
+            ///
+            /// Semantics:
+            /// - `status` is set verbatim with the enum cast suffix.
+            /// - `output` and `error` are overwritten unconditionally (no
+            ///   COALESCE). This matches the legacy `_extended`/`_with_*`
+            ///   variants.
+            /// - `stderr`, `checkpoint_id`, `termination_reason`, and
+            ///   `exit_code` are COALESCEd: `None` leaves the column
+            ///   unchanged.
+            /// - `finished_at` is set to `NOW` only when the target status
+            ///   is terminal (`completed|failed|cancelled|suspended`).
+            ///   Non-terminal transitions preserve the existing value.
+            /// - [`CompleteInstanceGuard::OnlyRunning`] appends
+            ///   `AND status = 'running'` to the `WHERE` clause, turning
+            ///   a zero-row result into `Ok(false)` instead of
+            ///   `InstanceNotFound`.
+            /// - [`CompleteInstanceGuard::Any`] returns `Ok(true)` on
+            ///   success or `Err(InstanceNotFound)` on miss.
+            #[allow(dead_code)] // Wired in SYN-395 follow-up commit.
+            pub(crate) async fn op_complete_instance_unified(
+                pool: &$Pool,
+                params: $crate::persistence::CompleteInstanceParams<'_>,
+            ) -> ::core::result::Result<bool, $crate::error::CoreError> {
+                use $crate::persistence::CompleteInstanceGuard;
+                use $crate::persistence::common::error::{RowsAffected, not_found_if_empty};
+                use $crate::persistence::dialect::{Dialect, EnumKind};
+                let p1 = <$Dialect>::placeholder(1);
+                let p2 = <$Dialect>::placeholder(2);
+                let p3 = <$Dialect>::placeholder(3);
+                let p4 = <$Dialect>::placeholder(4);
+                let p5 = <$Dialect>::placeholder(5);
+                let p6 = <$Dialect>::placeholder(6);
+                let p7 = <$Dialect>::placeholder(7);
+                let p8 = <$Dialect>::placeholder(8);
+                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
+                let term_cast = <$Dialect>::enum_cast(EnumKind::TerminationReason);
+                let now = <$Dialect>::NOW;
+                let guard_clause = match params.guard {
+                    CompleteInstanceGuard::Any => "",
+                    CompleteInstanceGuard::OnlyRunning => " AND status = 'running'",
+                };
+                let sql = format!(
+                    "UPDATE instances \
+                     SET status = {p2}{status_cast}, \
+                         termination_reason = COALESCE({p3}{term_cast}, termination_reason), \
+                         exit_code = COALESCE({p4}, exit_code), \
+                         output = {p5}, \
+                         error = {p6}, \
+                         stderr = COALESCE({p7}, stderr), \
+                         checkpoint_id = COALESCE({p8}, checkpoint_id), \
+                         finished_at = CASE \
+                             WHEN {p2} IN ('completed', 'failed', 'cancelled', 'suspended') THEN {now} \
+                             ELSE finished_at \
+                         END \
+                     WHERE instance_id = {p1}{guard_clause}"
+                );
+                let result = ::sqlx::query(&sql)
+                    .bind(params.instance_id)
+                    .bind(params.status)
+                    .bind(params.termination_reason)
+                    .bind(params.exit_code)
+                    .bind(params.output)
+                    .bind(params.error)
+                    .bind(params.stderr)
+                    .bind(params.checkpoint_id)
+                    .execute(pool)
+                    .await?;
+                match params.guard {
+                    CompleteInstanceGuard::OnlyRunning => Ok(result.rows_affected_generic() > 0),
+                    CompleteInstanceGuard::Any => {
+                        not_found_if_empty::<<$Dialect as Dialect>::Database>(
+                            &result,
+                            params.instance_id,
+                        )?;
+                        Ok(true)
+                    }
+                }
+            }
+
             /// UPDATE status/output/error/finished_at for a terminal transition
             /// derived from presence of `error`. Status becomes `failed` if
             /// `error` is `Some`, otherwise `completed`.
