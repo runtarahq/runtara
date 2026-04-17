@@ -986,7 +986,7 @@ pub async fn handle_resume_instance(
 // ============================================================================
 
 /// Check if a process is alive by checking /proc/<pid> existence.
-fn is_process_alive(pid: i32) -> bool {
+pub(crate) fn is_process_alive(pid: i32) -> bool {
     std::path::Path::new(&format!("/proc/{}", pid)).exists()
 }
 
