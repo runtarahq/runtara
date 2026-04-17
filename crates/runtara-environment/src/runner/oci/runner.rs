@@ -1155,6 +1155,24 @@ impl Runner for OciRunner {
         self.is_container_running(&handle.handle_id).await
     }
 
+    async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
+        // Prefer the captured wrapper PID over `crun state`: /proc/<pid> avoids
+        // spawning a subprocess every tick and mirrors the previous monitor
+        // logic exactly. Falls back to `is_container_running` only when no PID
+        // was captured (rare edge case).
+        loop {
+            let alive = if let Some(pid) = handle.spawned_pid {
+                crate::handlers::is_process_alive(pid as i32)
+            } else {
+                self.is_container_running(&handle.handle_id).await
+            };
+            if !alive {
+                return;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
         self.kill_container(&handle.handle_id).await?;
         tokio::time::sleep(Duration::from_millis(100)).await;

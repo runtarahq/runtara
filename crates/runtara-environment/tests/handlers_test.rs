@@ -6,13 +6,14 @@ mod common;
 
 use chrono::Utc;
 use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
     DrainController, EnvironmentHandlerState, GetCapabilityRequest, RegisterImageRequest,
     ResumeInstanceRequest, StartInstanceRequest, StopInstanceRequest, TestCapabilityRequest,
-    handle_get_capability, handle_health_check, handle_list_agents, handle_register_image,
-    handle_resume_instance, handle_start_instance, handle_stop_instance, handle_test_capability,
-    spawn_container_monitor,
+    detect_stale_monitor, handle_get_capability, handle_health_check, handle_list_agents,
+    handle_register_image, handle_resume_instance, handle_start_instance, handle_stop_instance,
+    handle_test_capability, spawn_container_monitor,
 };
 use runtara_environment::image_registry::{ImageRegistry, RunnerType};
 use runtara_environment::runner::MockRunner;
@@ -1517,4 +1518,124 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
 
     // Cleanup
     cleanup(&pool, Some(&instance_id), None).await;
+}
+
+/// Helper: build a `ContainerInfo` populated with the fields the registry stores.
+fn make_container_info(instance_id: &str, tenant_id: &str, container_id: &str) -> ContainerInfo {
+    ContainerInfo {
+        container_id: container_id.to_string(),
+        instance_id: instance_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        binary_path: "/usr/bin/test".to_string(),
+        bundle_path: Some("/tmp/bundle".to_string()),
+        started_at: Utc::now(),
+        pid: None,
+        timeout_seconds: Some(60),
+        process_killed: false,
+    }
+}
+
+/// Verify `detect_stale_monitor`'s three branches: mismatched container_id is
+/// stale, missing entry is stale, matching entry is fresh.
+#[tokio::test]
+async fn test_detect_stale_monitor_registry_cleared() {
+    skip_if_no_db!();
+    let Some(pool) = get_test_pool().await else {
+        eprintln!("Skipping test: could not connect to database");
+        return;
+    };
+
+    let registry = ContainerRegistry::new(pool.clone());
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-stale-monitor";
+
+    // 1. No registry entry → stale.
+    assert!(
+        detect_stale_monitor(&registry, &instance_id, "monitor-handle").await,
+        "Missing registry entry should be considered stale"
+    );
+
+    // 2. Registry entry whose container_id != monitor_handle_id → stale.
+    let other_handle = "other-handle-id";
+    registry
+        .register(&make_container_info(&instance_id, tenant_id, other_handle))
+        .await
+        .expect("Failed to register container");
+    assert!(
+        detect_stale_monitor(&registry, &instance_id, "monitor-handle").await,
+        "Mismatched container_id should be considered stale"
+    );
+
+    // 3. Registry entry whose container_id matches → fresh.
+    let monitor_handle = "monitor-handle";
+    registry
+        .register(&make_container_info(
+            &instance_id,
+            tenant_id,
+            monitor_handle,
+        ))
+        .await
+        .expect("Failed to update registered container");
+    assert!(
+        !detect_stale_monitor(&registry, &instance_id, monitor_handle).await,
+        "Matching container_id should be considered fresh"
+    );
+
+    // Cleanup
+    cleanup(&pool, Some(&instance_id), None).await;
+}
+
+/// Verify the default `Runner::wait_for_exit` impl returns once `is_running`
+/// flips to false. Uses the never-completing MockRunner so the exit only
+/// happens via an explicit `stop` call from the test.
+#[tokio::test]
+async fn test_wait_for_exit_default_impl_returns_on_not_running() {
+    let runner = Arc::new(MockRunner::never_completing());
+    let instance_id = Uuid::new_v4().to_string();
+    let tenant_id = "test-tenant-wait-for-exit";
+
+    let handle = runner
+        .launch_detached(&LaunchOptions {
+            instance_id: instance_id.clone(),
+            tenant_id: tenant_id.to_string(),
+            bundle_path: PathBuf::from("/test/bundle"),
+            input: serde_json::json!({}),
+            timeout: Duration::from_secs(10),
+            runtara_core_addr: "127.0.0.1:8001".to_string(),
+            checkpoint_id: None,
+            env: std::collections::HashMap::new(),
+        })
+        .await
+        .expect("Failed to launch detached");
+
+    assert!(
+        runner.is_running(&handle).await,
+        "Runner should be running before stop"
+    );
+
+    // Drive wait_for_exit concurrently with the stop that flips `running`.
+    let runner_for_stop = runner.clone();
+    let handle_for_stop = handle.clone();
+    let stopper = tokio::spawn(async move {
+        // Brief delay so wait_for_exit observes a "running" state first.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        runner_for_stop.stop(&handle_for_stop).await.unwrap();
+    });
+
+    let waited = tokio::time::timeout(
+        Duration::from_millis(200),
+        runner.wait_for_exit(&handle, Duration::from_millis(5)),
+    )
+    .await;
+
+    stopper.await.unwrap();
+
+    assert!(
+        waited.is_ok(),
+        "wait_for_exit should return promptly once is_running flips to false"
+    );
+    assert!(
+        !runner.is_running(&handle).await,
+        "Runner should report not running after wait_for_exit returns"
+    );
 }

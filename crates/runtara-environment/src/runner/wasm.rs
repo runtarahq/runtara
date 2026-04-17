@@ -640,6 +640,27 @@ impl Runner for WasmRunner {
         }
     }
 
+    async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
+        // Prefer waiting on the owned Child handle: this blocks until the
+        // wasmtime process has fully exited (and stdio has been flushed),
+        // which is what the monitor needs before reading SDK-written status.
+        //
+        // tokio::process::Child::wait is cancel-safe, so dropping this future
+        // when the surrounding select! fires the timeout branch is safe.
+        // No other code locks `handle.child` after the monitor starts.
+        if let Some(child_arc) = handle.child.clone() {
+            let mut guard = child_arc.lock().await;
+            if let Some(child) = guard.as_mut() {
+                let _ = child.wait().await;
+            }
+            *guard = None;
+            return;
+        }
+        while self.is_running(handle).await {
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     async fn stop(&self, handle: &RunnerHandle) -> Result<()> {
         if let Some(pid) = handle.spawned_pid {
             debug!(pid = pid, instance_id = %handle.instance_id, "Killing wasmtime process");
