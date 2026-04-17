@@ -8,6 +8,7 @@
 //! Scenarios are compiled to native binaries for the host platform.
 
 use runtara_dsl::ExecutionGraph;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -24,17 +25,80 @@ use crate::paths::get_scenario_json_path;
 // Rustc Error Parsing
 // ============================================================================
 
+/// A single rustc diagnostic parsed from `--error-format=json` output.
+///
+/// Only the fields we actually inspect are modeled; everything uses
+/// `#[serde(default)]` so the struct tolerates schema additions in newer
+/// toolchains without failing to deserialize.
+#[derive(Debug, Deserialize)]
+struct RustcDiagnostic {
+    #[serde(rename = "$message_type", default)]
+    message_type: Option<String>,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    code: Option<RustcCode>,
+    #[serde(default)]
+    level: String,
+    #[serde(default)]
+    rendered: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RustcCode {
+    code: String,
+}
+
+/// Parse newline-delimited rustc JSON diagnostics from stderr.
+///
+/// Lines that do not start with `{` or fail to deserialize are silently
+/// dropped. Returns only entries at `level == "error"` and of kind
+/// `diagnostic` (or unspecified, for forward-compat).
+fn parse_json_diagnostics(stderr: &str) -> Vec<RustcDiagnostic> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with('{') {
+                return None;
+            }
+            serde_json::from_str::<RustcDiagnostic>(trimmed).ok()
+        })
+        .filter(|d| {
+            d.level == "error" && matches!(d.message_type.as_deref(), Some("diagnostic") | None)
+        })
+        .collect()
+}
+
+/// Maximum characters of rendered rustc output to include in the fallback
+/// user-facing error. Keeps API/CLI payloads bounded.
+const FALLBACK_RENDER_CAP: usize = 500;
+
+fn truncate_for_display(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= FALLBACK_RENDER_CAP {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(FALLBACK_RENDER_CAP).collect();
+    format!("{}…", head)
+}
+
+fn error_code(d: &RustcDiagnostic) -> Option<&str> {
+    d.code.as_ref().map(|c| c.code.as_str())
+}
+
 /// Parse rustc stderr and provide a user-friendly error message.
 ///
-/// This function attempts to extract meaningful information from rustc errors
-/// and provide actionable suggestions.
+/// Consumes JSON diagnostics produced by `rustc --error-format=json`. The
+/// structured output is stable across toolchain releases, unlike the English
+/// text of individual error messages.
 fn parse_rustc_error(stderr: &str, target: &str) -> String {
-    // Check for common errors and provide helpful suggestions
+    let diagnostics = parse_json_diagnostics(stderr);
 
-    // Missing target
-    if stderr.contains("error[E0463]")
-        && stderr.contains("can't find crate")
-        && stderr.contains("can't find crate for `std`")
+    // Rule 1: E0463 + missing `std` -> suggest rustup target add.
+    if diagnostics
+        .iter()
+        .any(|d| error_code(d) == Some("E0463") && d.message.contains("`std`"))
     {
         return format!(
             "Compilation failed: The Rust standard library for target '{}' is not installed.\n\n\
@@ -43,8 +107,14 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
         );
     }
 
-    // Target not installed
-    if stderr.contains("could not find specification for target") {
+    // Rule 2: unknown target specification -> suggest rustup target add.
+    // Case-insensitive: historical rustc releases have emitted both
+    // "could not find specification" and "Could not find specification".
+    if diagnostics.iter().any(|d| {
+        d.message
+            .to_lowercase()
+            .contains("could not find specification for target")
+    }) {
         return format!(
             "Compilation failed: Target '{}' is not installed.\n\n\
              To fix this, run:\n  rustup target add {}",
@@ -52,18 +122,26 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
         );
     }
 
-    // Linker not found (common on Linux for musl)
-    if stderr.contains("linker") && stderr.contains("not found") && target.contains("musl") {
+    // Rule 3: missing linker on a musl target.
+    if target.contains("musl")
+        && diagnostics
+            .iter()
+            .any(|d| d.message.contains("linker") && d.message.contains("not found"))
+    {
         return "Compilation failed: The musl linker is not installed.\n\n\
                  To fix this on Ubuntu/Debian, run:\n  sudo apt install musl-tools\n\n\
                  To fix this on Fedora/RHEL, run:\n  sudo dnf install musl-gcc"
             .to_string();
     }
 
-    // Can't find crate (stdlib not compiled)
-    if stderr.contains("can't find crate for")
-        && let Some(crate_name) = extract_pattern(stderr, "can't find crate for `", "`")
-    {
+    // Rules 4 & 5: E0463 for any other crate -> stdlib build hint.
+    if let Some(crate_name) = diagnostics.iter().find_map(|d| {
+        if error_code(d) == Some("E0463") {
+            extract_pattern(&d.message, "can't find crate for `", "`").map(str::to_string)
+        } else {
+            None
+        }
+    }) {
         if crate_name == "runtara_workflow_stdlib" {
             return format!(
                 "Compilation failed: The workflow stdlib library is not compiled.\n\n\
@@ -80,11 +158,14 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
         );
     }
 
-    // Unresolved import
-    if stderr.contains("error[E0432]")
-        && stderr.contains("unresolved import")
-        && let Some(import) = extract_pattern(stderr, "unresolved import `", "`")
-    {
+    // Rule 6: E0432 unresolved import -> codegen bug with import name.
+    if let Some(import) = diagnostics.iter().find_map(|d| {
+        if error_code(d) == Some("E0432") {
+            extract_pattern(&d.message, "unresolved import `", "`").map(str::to_string)
+        } else {
+            None
+        }
+    }) {
         return format!(
             "Compilation failed: Unresolved import '{}'.\n\n\
                  This is likely a code generation bug. Please report this issue.",
@@ -92,33 +173,47 @@ fn parse_rustc_error(stderr: &str, target: &str) -> String {
         );
     }
 
-    // Type errors (usually code generation bugs)
-    if stderr.contains("error[E0308]") && stderr.contains("mismatched types") {
+    // Rule 7: E0308 mismatched types -> codegen bug.
+    if diagnostics
+        .iter()
+        .any(|d| error_code(d) == Some("E0308") && d.message.contains("mismatched types"))
+    {
         return "Compilation failed: Type mismatch in generated code.\n\n\
              This is likely a code generation bug. Please report this issue."
             .to_string();
     }
 
-    // Borrow checker errors (usually code generation bugs)
-    if stderr.contains("error[E0382]")
-        || stderr.contains("error[E0502]")
-        || stderr.contains("error[E0499]")
+    // Rule 8: borrow checker codegen bugs.
+    if diagnostics
+        .iter()
+        .any(|d| matches!(error_code(d), Some("E0382") | Some("E0502") | Some("E0499")))
     {
         return "Compilation failed: Borrow checker error in generated code.\n\n\
              This is likely a code generation bug. Please report this issue."
             .to_string();
     }
 
-    // Extract first error message for unknown errors
-    if let Some(first_error) = extract_first_error(stderr) {
+    // Rule 9: generic fallback using the first parsed diagnostic.
+    if let Some(first) = diagnostics.first() {
+        let display = first.rendered.as_deref().unwrap_or(&first.message);
         return format!(
             "Compilation failed: {}\n\n\
              If this error persists, please contact support.",
-            first_error
+            truncate_for_display(display)
         );
     }
 
-    // Fallback: generic message
+    // Rule 10: no JSON diagnostics parsed. If stderr has any raw text (rare —
+    // e.g. a driver panic before JSON emission), surface the head of it;
+    // otherwise emit the generic message.
+    let raw = stderr.trim();
+    if !raw.is_empty() {
+        return format!(
+            "Compilation failed: {}\n\n\
+             If this error persists, please contact support.",
+            truncate_for_display(raw)
+        );
+    }
     "Compilation failed. Please contact support if this issue persists.".to_string()
 }
 
@@ -128,26 +223,6 @@ fn extract_pattern<'a>(text: &'a str, prefix: &str, suffix: &str) -> Option<&'a 
     let rest = &text[start..];
     let end = rest.find(suffix)?;
     Some(&rest[..end])
-}
-
-/// Extract the first error message from rustc output.
-fn extract_first_error(stderr: &str) -> Option<String> {
-    for line in stderr.lines() {
-        let line = line.trim();
-        if line.starts_with("error[E") {
-            // Extract the error message after the code
-            if let Some(msg_start) = line.find("]: ") {
-                let msg = &line[msg_start + 3..];
-                return Some(msg.to_string());
-            }
-        } else if line.starts_with("error:") {
-            let msg = line.trim_start_matches("error:").trim();
-            if !msg.is_empty() {
-                return Some(msg.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// Get the native target triple for the current host platform
@@ -569,6 +644,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     cmd.arg(format!("--target={}", target))
         .arg("--crate-type=bin")
         .arg("--edition=2024")
+        .arg("--error-format=json")
         .arg("-C")
         .arg(format!("opt-level={}", opt_level))
         .arg("-C")
@@ -919,5 +995,174 @@ mod tests {
             }
         });
         assert!(!workflow_has_side_effects(&workflow));
+    }
+
+    // ========================================================================
+    // parse_rustc_error tests
+    //
+    // Fixtures are minimal newline-delimited JSON diagnostics mirroring
+    // `rustc --error-format=json` output (rustc 1.90). Only the fields the
+    // parser inspects (`$message_type`, `level`, `code`, `message`,
+    // `rendered`) are included.
+    // ========================================================================
+
+    const TARGET: &str = "aarch64-unknown-linux-musl";
+
+    const E0463_STD: &str = r#"{"$message_type":"diagnostic","message":"can't find crate for `std`","code":{"code":"E0463","explanation":null},"level":"error","rendered":"error[E0463]: can't find crate for `std`\n"}
+{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","rendered":"error: aborting due to 1 previous error\n"}
+"#;
+
+    const TARGET_SPEC_MISSING: &str = r#"{"$message_type":"diagnostic","message":"Error loading target specification: Could not find specification for target \"aarch64-unknown-linux-musl\". Run `rustc --print target-list` for a list of built-in targets","code":null,"level":"error","rendered":"error: Error loading target specification: Could not find specification for target \"aarch64-unknown-linux-musl\"\n"}
+"#;
+
+    const LINKER_NOT_FOUND: &str = r#"{"$message_type":"diagnostic","message":"linker `musl-gcc` not found","code":null,"level":"error","rendered":"error: linker `musl-gcc` not found\n"}
+{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","rendered":"error: aborting due to 1 previous error\n"}
+"#;
+
+    const E0463_STDLIB: &str = r#"{"$message_type":"diagnostic","message":"can't find crate for `runtara_workflow_stdlib`","code":{"code":"E0463","explanation":null},"level":"error","rendered":"error[E0463]: can't find crate for `runtara_workflow_stdlib`\n"}
+"#;
+
+    const E0463_OTHER_CRATE: &str = r#"{"$message_type":"diagnostic","message":"can't find crate for `serde`","code":{"code":"E0463","explanation":null},"level":"error","rendered":"error[E0463]: can't find crate for `serde`\n"}
+"#;
+
+    const E0432_UNRESOLVED_IMPORT: &str = r#"{"$message_type":"diagnostic","message":"unresolved import `foo::bar`","code":{"code":"E0432","explanation":null},"level":"error","rendered":"error[E0432]: unresolved import `foo::bar`\n"}
+"#;
+
+    const E0308_MISMATCH: &str = r#"{"$message_type":"diagnostic","message":"mismatched types","code":{"code":"E0308","explanation":null},"level":"error","rendered":"error[E0308]: mismatched types\n"}
+"#;
+
+    const E0382_BORROW: &str = r#"{"$message_type":"diagnostic","message":"borrow of moved value: `x`","code":{"code":"E0382","explanation":null},"level":"error","rendered":"error[E0382]: borrow of moved value: `x`\n"}
+"#;
+
+    const UNKNOWN_CODE: &str = r#"{"$message_type":"diagnostic","message":"attributes are not yet allowed on `if` expressions","code":{"code":"E0658","explanation":null},"level":"error","rendered":"error[E0658]: attributes are not yet allowed on `if` expressions\n"}
+"#;
+
+    const NON_JSON_STDERR: &str = "rustc panicked: something went terribly wrong\n";
+
+    #[test]
+    fn parse_rustc_error_e0463_std() {
+        let msg = parse_rustc_error(E0463_STD, TARGET);
+        assert!(
+            msg.contains("rustup target add aarch64-unknown-linux-musl"),
+            "msg was: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_rustc_error_target_spec_missing() {
+        let msg = parse_rustc_error(TARGET_SPEC_MISSING, TARGET);
+        assert!(msg.contains("rustup target add"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_linker_not_found_musl() {
+        let msg = parse_rustc_error(LINKER_NOT_FOUND, TARGET);
+        assert!(msg.contains("musl-tools"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_linker_not_found_non_musl_falls_through() {
+        // Same linker message but target doesn't contain "musl": rule 3
+        // should not fire; we fall through to rule 9 (generic wrapper).
+        let msg = parse_rustc_error(LINKER_NOT_FOUND, "x86_64-apple-darwin");
+        assert!(!msg.contains("musl-tools"), "msg was: {}", msg);
+        assert!(msg.contains("Compilation failed"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_e0463_stdlib() {
+        let msg = parse_rustc_error(E0463_STDLIB, TARGET);
+        assert!(
+            msg.contains("runtara-workflow-stdlib --release"),
+            "msg was: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_rustc_error_e0463_other_crate() {
+        let msg = parse_rustc_error(E0463_OTHER_CRATE, TARGET);
+        assert!(msg.contains("serde"), "msg was: {}", msg);
+        assert!(msg.contains("runtara-workflow-stdlib"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_e0432() {
+        let msg = parse_rustc_error(E0432_UNRESOLVED_IMPORT, TARGET);
+        assert!(msg.contains("Unresolved import"), "msg was: {}", msg);
+        assert!(msg.contains("foo::bar"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_e0308() {
+        let msg = parse_rustc_error(E0308_MISMATCH, TARGET);
+        assert!(
+            msg.contains("Type mismatch in generated code"),
+            "msg was: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_rustc_error_e0382_borrow() {
+        let msg = parse_rustc_error(E0382_BORROW, TARGET);
+        assert!(msg.contains("Borrow checker error"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_unknown_code_falls_through_to_render() {
+        let msg = parse_rustc_error(UNKNOWN_CODE, TARGET);
+        assert!(msg.contains("Compilation failed:"), "msg was: {}", msg);
+        assert!(
+            msg.contains("attributes are not yet allowed"),
+            "msg was: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_rustc_error_non_json_stderr() {
+        let msg = parse_rustc_error(NON_JSON_STDERR, TARGET);
+        assert!(msg.contains("contact support"), "msg was: {}", msg);
+        assert!(msg.contains("rustc panicked"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_empty_stderr() {
+        let msg = parse_rustc_error("", TARGET);
+        assert!(msg.contains("contact support"), "msg was: {}", msg);
+    }
+
+    #[test]
+    fn parse_rustc_error_ignores_artifact_and_warning_lines() {
+        // An artifact message and a warning should both be ignored; the real
+        // error (E0308) should still be classified.
+        let stderr = format!(
+            "{}{}{}",
+            r#"{"$message_type":"artifact","artifact":"/tmp/foo","emit":"metadata"}
+"#,
+            r#"{"$message_type":"diagnostic","message":"unused variable: `x`","code":{"code":"unused_variables","explanation":null},"level":"warning","rendered":"warning: unused variable\n"}
+"#,
+            E0308_MISMATCH
+        );
+        let msg = parse_rustc_error(&stderr, TARGET);
+        assert!(
+            msg.contains("Type mismatch in generated code"),
+            "msg was: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_json_diagnostics_filters_non_errors() {
+        let stderr = r#"{"$message_type":"diagnostic","message":"warn","code":null,"level":"warning"}
+{"$message_type":"artifact","artifact":"/tmp/foo"}
+not json at all
+{"$message_type":"diagnostic","message":"err","code":null,"level":"error"}
+"#;
+        let diags = parse_json_diagnostics(stderr);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "err");
     }
 }
