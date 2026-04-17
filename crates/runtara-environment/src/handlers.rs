@@ -1006,7 +1006,7 @@ pub(crate) fn is_process_alive(pid: i32) -> bool {
 /// - registry lookup errors → assume fresh, since being conservative here
 ///   would cause us to silently drop the crash-detection write on a transient
 ///   DB blip
-pub(crate) async fn detect_stale_monitor(
+pub async fn detect_stale_monitor(
     registry: &ContainerRegistry,
     instance_id: &str,
     monitor_handle_id: &str,
