@@ -15,7 +15,6 @@ pub mod scenarios;
 pub mod schema_validator;
 pub mod session_queue;
 pub mod session_token;
-pub mod sync_execution;
 pub mod triggers;
 pub mod webhook_manager;
 pub mod webhook_verification;
