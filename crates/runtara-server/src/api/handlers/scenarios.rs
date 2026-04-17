@@ -36,6 +36,10 @@ use crate::api::dto::scenarios::{
 use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::api::services::scenarios::{ScenarioService, ServiceError};
 use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::{
+    ExecutionEngine, ExecutionError, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome,
+    TriggerSource,
+};
 use runtara_connections::ConnectionsFacade;
 
 use crate::types::MemoryTier;
@@ -1020,30 +1024,14 @@ pub async fn validate_mappings_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, trigger_stream, request), fields(scenario_id = %scenario_id))]
+#[instrument(skip(engine, request), fields(scenario_id = %scenario_id))]
 pub async fn execute_scenario_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(trigger_stream): State<
-        Option<Arc<crate::api::repositories::trigger_stream::TriggerStreamPublisher>>,
-    >,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(scenario_id): Path<String>,
     Query(query): Query<ExecuteScenarioQuery>,
     Json(request): Json<ExecuteScenarioRequest>,
 ) -> (StatusCode, Json<Value>) {
-    // Require trigger stream for execution
-    let stream = match trigger_stream {
-        Some(s) => s,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "message": "Valkey trigger stream not configured. Cannot queue execution.",
-                "data": serde_json::Value::Null
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
-
     // Parse and validate optional version query parameter
     let version = match query.version.as_deref().filter(|v| !v.is_empty()) {
         Some(v) => match v.parse::<i32>() {
@@ -1060,13 +1048,6 @@ pub async fn execute_scenario_handler(
         None => None,
     };
 
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service = crate::api::services::executions::ExecutionService::with_trigger_stream(
-        scenario_repo,
-        stream,
-    );
-
     // Validate inputs match canonical format: {"data": {...}, "variables": {...}}
     let validated_inputs = match validate_scenario_inputs(request.inputs) {
         Ok(inputs) => inputs,
@@ -1082,9 +1063,16 @@ pub async fn execute_scenario_handler(
 
     let debug = request.debug.unwrap_or(false);
 
-    // Delegate to service
-    match service
-        .queue_execution(&tenant_id, &scenario_id, version, validated_inputs, debug)
+    match engine
+        .queue(QueueRequest {
+            tenant_id: &tenant_id,
+            scenario_id: &scenario_id,
+            version,
+            inputs: validated_inputs,
+            debug,
+            correlation_id: None,
+            trigger_source: TriggerSource::HttpApi,
+        })
         .await
     {
         Ok(result) => {
@@ -1101,7 +1089,7 @@ pub async fn execute_scenario_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) | Err(ExecutionError::ScenarioNotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
@@ -1109,21 +1097,29 @@ pub async fn execute_scenario_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
                 "data": serde_json::Value::Null
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
+        }
+        Err(ExecutionError::NotConnected(msg)) => {
+            let error_response = json!({
+                "success": false,
+                "message": msg,
+                "data": serde_json::Value::Null
+            });
+            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
+        }
+        Err(e) => {
+            let error_response = json!({
+                "success": false,
+                "message": format!("{}", e),
+                "data": serde_json::Value::Null
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
     }
 }
@@ -1142,36 +1138,13 @@ pub async fn execute_scenario_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn get_execution_metrics_handler(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    // Require runtime client - runtara-environment is the source of truth
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "message": "Runtime client not configured. Cannot get execution without runtara-environment connection.",
-                "data": serde_json::Value::Null
-            });
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
-        }
-    };
-
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service =
-        crate::api::services::executions::ExecutionService::new(scenario_repo, runtime_client);
-
-    // Delegate to service
-    match service
-        .get_execution_results(&instance_id, &tenant_id)
-        .await
-    {
+    match engine.get_execution(&instance_id).await {
         Ok(instance) => {
             let response = ApiResponse::success(instance);
             (
@@ -1179,7 +1152,7 @@ pub async fn get_execution_metrics_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
@@ -1187,7 +1160,7 @@ pub async fn get_execution_metrics_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
@@ -1195,10 +1168,18 @@ pub async fn get_execution_metrics_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
+        Err(ExecutionError::NotConnected(msg)) => {
             let error_response = json!({
                 "success": false,
-                "message": format!("Database error: {}", msg),
+                "message": msg,
+                "data": serde_json::Value::Null
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        }
+        Err(e) => {
+            let error_response = json!({
+                "success": false,
+                "message": format!("Database error: {}", e),
                 "data": serde_json::Value::Null
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
@@ -1222,33 +1203,13 @@ pub async fn get_execution_metrics_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id, instance_id = %instance_id))]
+#[instrument(skip(engine), fields(scenario_id = %scenario_id, instance_id = %instance_id))]
 pub async fn get_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path((scenario_id, instance_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    // Require runtime client - runtara-environment is the source of truth
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "message": "Runtime client not configured. Cannot get instance without runtara-environment connection.",
-                "data": serde_json::Value::Null
-            });
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
-        }
-    };
-
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service =
-        crate::api::services::executions::ExecutionService::new(scenario_repo, runtime_client);
-
-    // Delegate to service
-    match service
+    match engine
         .get_execution_with_metadata(&scenario_id, &instance_id, &tenant_id)
         .await
     {
@@ -1275,7 +1236,7 @@ pub async fn get_instance_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
@@ -1283,7 +1244,7 @@ pub async fn get_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
@@ -1291,10 +1252,10 @@ pub async fn get_instance_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
+        Err(e) => {
             let error_response = json!({
                 "success": false,
-                "message": format!("Database error: {}", msg),
+                "message": format!("Database error: {}", e),
                 "data": serde_json::Value::Null
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
@@ -1317,35 +1278,14 @@ pub async fn get_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(scenario_id = %scenario_id))]
+#[instrument(skip(engine), fields(scenario_id = %scenario_id))]
 pub async fn list_instances_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(scenario_id): Path<String>,
     Query(query): Query<ListInstancesQuery>,
 ) -> (StatusCode, Json<Value>) {
-    // Require runtime client - runtara-environment is the source of truth
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "error": "Failed to list scenario instances",
-                "message": "Runtime client not configured. Cannot list executions without runtara-environment connection.",
-                "scenarioId": scenario_id
-            });
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
-        }
-    };
-
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service =
-        crate::api::services::executions::ExecutionService::new(scenario_repo, runtime_client);
-
-    // Delegate to service
-    match service
+    match engine
         .list_executions(&tenant_id, &scenario_id, query.page, query.size)
         .await
     {
@@ -1353,16 +1293,7 @@ pub async fn list_instances_handler(
             let response = ApiResponse::success(page_dto);
             (StatusCode::OK, Json(json!(response)))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Failed to list scenario instances",
-                "message": format!("Database error: {}", msg),
-                "scenarioId": scenario_id
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
@@ -1370,13 +1301,22 @@ pub async fn list_instances_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "message": msg,
                 "scenarioId": scenario_id
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
+        }
+        Err(e) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Failed to list scenario instances",
+                "message": format!("{}", e),
+                "scenarioId": scenario_id
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
     }
 }
@@ -1542,46 +1482,14 @@ pub async fn replay_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, running_executions, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(running_executions): State<Arc<dashmap::DashMap<Uuid, crate::types::CancellationHandle>>>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    // Runtime client is required for stop_instance
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": "Cannot stop instance without runtara-environment connection.",
-                "instanceId": instance_id
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
-
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service = crate::api::services::executions::ExecutionService::new(
-        scenario_repo,
-        runtime_client.clone(),
-    );
-
-    // Delegate to service
-    match service
-        .stop_instance(
-            &instance_id,
-            &tenant_id,
-            &running_executions,
-            Some(&runtime_client),
-        )
-        .await
-    {
-        Ok(crate::api::services::executions::StopInstanceResult::AlreadyStopped { status }) => {
+    match engine.stop(&instance_id).await {
+        Ok(StopOutcome::AlreadyStopped { status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
                     "Instance {} is already stopped (status: {})",
@@ -1591,10 +1499,7 @@ pub async fn stop_instance_handler(
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(crate::api::services::executions::StopInstanceResult::Stopped {
-            previous_status,
-            cancellation_flag_set: _,
-        }) => {
+        Ok(StopOutcome::Stopped { previous_status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
                     "Instance {} stopped successfully (was: {})",
@@ -1604,7 +1509,7 @@ pub async fn stop_instance_handler(
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": "Invalid instance ID",
@@ -1613,7 +1518,7 @@ pub async fn stop_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": "Instance not found",
@@ -1622,11 +1527,20 @@ pub async fn stop_instance_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
+        Err(ExecutionError::NotConnected(msg)) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Runtime client not configured",
+                "message": msg,
+                "instanceId": instance_id
+            });
+            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
+        }
+        Err(e) => {
             let error_response = json!({
                 "success": false,
                 "error": "Failed to stop instance",
-                "message": msg,
+                "message": format!("{}", e),
                 "instanceId": instance_id
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
@@ -1652,47 +1566,21 @@ pub async fn stop_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    // Runtime client is required for pause_instance
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": "Cannot pause instance without runtara-environment connection.",
-                "instanceId": instance_id
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
-
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service = crate::api::services::executions::ExecutionService::new(
-        scenario_repo,
-        runtime_client.clone(),
-    );
-
-    // Delegate to service
-    match service
-        .pause_instance(&instance_id, &tenant_id, Some(&runtime_client))
-        .await
-    {
-        Ok(crate::api::services::executions::PauseInstanceResult::AlreadyPaused) => {
+    match engine.pause(&instance_id).await {
+        Ok(PauseOutcome::AlreadyPaused) => {
             let response = ApiResponse::success_with_message(
                 format!("Instance {} is already paused", instance_id),
                 serde_json::Value::Null,
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(crate::api::services::executions::PauseInstanceResult::Paused { previous_status }) => {
+        Ok(PauseOutcome::Paused { previous_status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
                     "Instance {} paused successfully (was: {})",
@@ -1702,7 +1590,7 @@ pub async fn pause_instance_handler(
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(crate::api::services::executions::PauseInstanceResult::NotPausable { status }) => {
+        Ok(PauseOutcome::NotPausable { status }) => {
             let error_response = json!({
                 "success": false,
                 "error": "Instance not pausable",
@@ -1712,7 +1600,7 @@ pub async fn pause_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": "Invalid request",
@@ -1721,7 +1609,7 @@ pub async fn pause_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": "Instance not found",
@@ -1730,11 +1618,20 @@ pub async fn pause_instance_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
+        Err(ExecutionError::NotConnected(msg)) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Runtime client not configured",
+                "message": msg,
+                "instanceId": instance_id
+            });
+            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
+        }
+        Err(e) => {
             let error_response = json!({
                 "success": false,
                 "error": "Failed to pause instance",
-                "message": msg,
+                "message": format!("{}", e),
                 "instanceId": instance_id
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
@@ -1760,47 +1657,21 @@ pub async fn pause_instance_handler(
     ),
     tag = "scenario-controller"
 )]
-#[instrument(skip(pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
-    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    // Runtime client is required for resume_instance
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": "Cannot resume instance without runtara-environment connection.",
-                "instanceId": instance_id
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
-
-    // Create repositories and service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service = crate::api::services::executions::ExecutionService::new(
-        scenario_repo,
-        runtime_client.clone(),
-    );
-
-    // Delegate to service
-    match service
-        .resume_instance(&instance_id, &tenant_id, Some(&runtime_client))
-        .await
-    {
-        Ok(crate::api::services::executions::ResumeInstanceResult::AlreadyRunning) => {
+    match engine.resume(&instance_id).await {
+        Ok(ResumeOutcome::AlreadyRunning) => {
             let response = ApiResponse::success_with_message(
                 format!("Instance {} is already running", instance_id),
                 serde_json::Value::Null,
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(crate::api::services::executions::ResumeInstanceResult::Resumed { previous_status }) => {
+        Ok(ResumeOutcome::Resumed { previous_status }) => {
             let response = ApiResponse::success_with_message(
                 format!(
                     "Instance {} resumed successfully (was: {})",
@@ -1810,7 +1681,7 @@ pub async fn resume_instance_handler(
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Ok(crate::api::services::executions::ResumeInstanceResult::NotResumable { status }) => {
+        Ok(ResumeOutcome::NotResumable { status }) => {
             let error_response = json!({
                 "success": false,
                 "error": "Instance not resumable",
@@ -1820,7 +1691,7 @@ pub async fn resume_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": "Invalid request",
@@ -1829,7 +1700,7 @@ pub async fn resume_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": "Instance not found",
@@ -1838,11 +1709,20 @@ pub async fn resume_instance_handler(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(crate::api::services::executions::ServiceError::DatabaseError(msg)) => {
+        Err(ExecutionError::NotConnected(msg)) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Runtime client not configured",
+                "message": msg,
+                "instanceId": instance_id
+            });
+            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
+        }
+        Err(e) => {
             let error_response = json!({
                 "success": false,
                 "error": "Failed to resume instance",
-                "message": msg,
+                "message": format!("{}", e),
                 "instanceId": instance_id
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
