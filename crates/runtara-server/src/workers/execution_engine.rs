@@ -5,7 +5,6 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use dashmap::DashMap;
 use serde_json::Value;
@@ -17,7 +16,7 @@ use uuid::Uuid;
 use runtara_management_sdk::InstanceStatus;
 
 use crate::api::dto::trigger_event::TriggerEvent;
-use crate::metrics::MetricsService;
+use crate::api::repositories::scenarios::{CompilationStatus, ScenarioRepository};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::CancellationHandle;
 
@@ -111,6 +110,7 @@ impl std::error::Error for ExecutionError {}
 /// This engine does NOT compile - it only checks that compilation exists and executes.
 pub struct ExecutionEngine {
     pool: PgPool,
+    scenario_repo: Arc<ScenarioRepository>,
     runtime_client: Option<Arc<RuntimeClient>>,
     #[allow(dead_code)] // Reserved for future use tracking in-memory executions
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
@@ -122,11 +122,13 @@ impl ExecutionEngine {
     /// Create a new execution engine
     pub fn new(
         pool: PgPool,
+        scenario_repo: Arc<ScenarioRepository>,
         runtime_client: Option<Arc<RuntimeClient>>,
         running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     ) -> Self {
         Self {
             pool,
+            scenario_repo,
             runtime_client,
             running_executions,
             starting_scenarios: Arc::new(Mutex::new(HashSet::new())),
@@ -136,148 +138,6 @@ impl ExecutionEngine {
     /// Check if the runtime client is available
     pub fn has_runtime(&self) -> bool {
         self.runtime_client.is_some()
-    }
-
-    /// Execute a scenario based on a trigger event
-    ///
-    /// This handles:
-    /// 1. Checking if scenario is compiled
-    /// 2. Compiling if needed
-    /// 3. Running via Runtara Management SDK
-    #[instrument(skip(self, event, _cancel_flag), fields(instance_id = %event.instance_id, scenario_id = %event.scenario_id))]
-    pub async fn execute(
-        &self,
-        event: &TriggerEvent,
-        _cancel_flag: Option<Arc<AtomicBool>>,
-    ) -> Result<ExecutionResult, ExecutionError> {
-        let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
-            ExecutionError::NotConnected("Runtime client not configured".to_string())
-        })?;
-
-        let instance_id = Uuid::parse_str(&event.instance_id)
-            .map_err(|e| ExecutionError::DatabaseError(format!("Invalid instance ID: {}", e)))?;
-
-        // Resolve version if not specified
-        let version = match event.version {
-            Some(v) => v,
-            None => {
-                self.get_current_version(&event.tenant_id, &event.scenario_id)
-                    .await?
-            }
-        };
-
-        // Fetch execution timeout from executionGraph (if set)
-        let execution_timeout_secs = sqlx::query!(
-            r#"
-            SELECT definition
-            FROM scenario_definitions
-            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3 AND deleted_at IS NULL
-            "#,
-            &event.tenant_id,
-            &event.scenario_id,
-            version
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| {
-            r.definition
-                .get("executionTimeoutSeconds")
-                .and_then(|v| {
-                    // Handle both number and string formats
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                })
-                .map(|secs| secs as u32)
-        });
-
-        // Check if scenario is compiled (binary exists on disk)
-        let _binary_path = self
-            .ensure_compiled(
-                &event.tenant_id,
-                &event.scenario_id,
-                version,
-                event.track_events,
-            )
-            .await?;
-
-        // Note: Bundle checks removed - runtara-environment handles container execution
-
-        // Execute via runtime client
-        let exec_start = std::time::Instant::now();
-
-        // Inputs are already in canonical format {"data": {...}, "variables": {...}}
-        // from the API layer - inject _scenario_id for cache key isolation
-        let scenario_input = inject_scenario_id(event.inputs.clone(), &event.scenario_id);
-
-        // Get the registered image ID (UUID returned from runtara-environment)
-        let image_id = self
-            .get_registered_image_id(&event.tenant_id, &event.scenario_id, version)
-            .await?;
-
-        let result = runtime_client
-            .execute_sync(
-                &image_id,
-                &event.tenant_id,
-                &event.scenario_id,
-                Some(instance_id.to_string()),
-                Some(scenario_input),
-                execution_timeout_secs,
-                event.debug,
-            )
-            .await;
-
-        let duration_seconds = exec_start.elapsed().as_secs_f64();
-
-        // Record metrics and return result
-        let metrics_service = MetricsService::new(self.pool.clone());
-
-        match result {
-            Ok(output) => {
-                // Convert resource metrics from raw units to human-readable units
-                let max_memory_mb = output
-                    .memory_peak_bytes
-                    .map(|bytes| bytes as f64 / 1_048_576.0);
-                let cpu_usage_ms = output.cpu_usage_usec.map(|usec| usec as f64 / 1_000.0);
-
-                // Record execution metrics
-                let _ = metrics_service
-                    .record_execution_completion(
-                        &event.tenant_id,
-                        &event.scenario_id,
-                        version,
-                        output.success,
-                        duration_seconds,
-                        max_memory_mb,
-                    )
-                    .await;
-
-                Ok(ExecutionResult {
-                    success: output.success,
-                    output: output.output,
-                    error: output.error,
-                    duration_seconds,
-                    max_memory_mb,
-                    cpu_usage_ms,
-                })
-            }
-            Err(e) => {
-                // Record failed execution metrics
-                let _ = metrics_service
-                    .record_execution_completion(
-                        &event.tenant_id,
-                        &event.scenario_id,
-                        version,
-                        false,
-                        duration_seconds,
-                        None,
-                    )
-                    .await;
-
-                Err(ExecutionError::RuntimeError(e.to_string()))
-            }
-        }
     }
 
     /// Execute a scenario in fire-and-forget mode for distributed execution.
@@ -331,30 +191,15 @@ impl ExecutionEngine {
         };
 
         // Fetch execution timeout from executionGraph (if set)
-        let execution_timeout_secs = sqlx::query!(
-            r#"
-            SELECT definition
-            FROM scenario_definitions
-            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3 AND deleted_at IS NULL
-            "#,
-            &event.tenant_id,
-            &event.scenario_id,
-            version
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| {
-            r.definition
-                .get("executionTimeoutSeconds")
-                .and_then(|v| {
-                    v.as_i64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                })
-                .map(|secs| secs as u32)
-        })
-        .unwrap_or(3600); // Default 1 hour timeout
+        let execution_timeout_secs = self
+            .scenario_repo
+            .get_execution_timeout(&event.tenant_id, &event.scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
+            })?
+            .map(|secs| secs as u32)
+            .unwrap_or(3600); // Default 1 hour timeout
 
         // Ensure scenario is compiled
         let _binary_path = self
@@ -514,26 +359,18 @@ impl ExecutionEngine {
         tenant_id: &str,
         scenario_id: &str,
     ) -> Result<i32, ExecutionError> {
-        let result = sqlx::query!(
-            r#"
-            SELECT COALESCE(current_version, latest_version) as "version"
-            FROM scenarios
-            WHERE tenant_id = $1 AND scenario_id = $2 AND deleted_at IS NULL
-            "#,
-            tenant_id,
-            scenario_id
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get version: {}", e)))?;
+        let version = self
+            .scenario_repo
+            .get_current_or_latest_version(tenant_id, scenario_id)
+            .await
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get version: {}", e)))?;
 
-        match result {
-            Some(row) => row.version.ok_or_else(|| {
-                ExecutionError::ScenarioNotFound(format!(
-                    "Scenario '{}' has no versions",
-                    scenario_id
-                ))
-            }),
+        match version {
+            Some(v) if v > 0 => Ok(v),
+            Some(_) => Err(ExecutionError::ScenarioNotFound(format!(
+                "Scenario '{}' has no versions",
+                scenario_id
+            ))),
             None => Err(ExecutionError::ScenarioNotFound(format!(
                 "Scenario '{}' not found",
                 scenario_id
@@ -552,29 +389,18 @@ impl ExecutionEngine {
         scenario_id: &str,
         version: i32,
     ) -> Result<String, ExecutionError> {
-        let result = sqlx::query!(
-            r#"
-            SELECT registered_image_id
-            FROM scenario_compilations
-            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
-                AND compilation_status = 'success'
-            "#,
-            tenant_id,
-            scenario_id,
-            version
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
-        })?;
-
-        result.and_then(|r| r.registered_image_id).ok_or_else(|| {
-            ExecutionError::BinaryNotFound(format!(
-                "Scenario '{}' version {} not registered with runtara-environment. Recompile it.",
-                scenario_id, version
-            ))
-        })
+        self.scenario_repo
+            .get_registered_image_id(tenant_id, scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
+            })?
+            .ok_or_else(|| {
+                ExecutionError::BinaryNotFound(format!(
+                    "Scenario '{}' version {} not registered with runtara-environment. Recompile it.",
+                    scenario_id, version
+                ))
+            })
     }
 
     /// Check that scenario is compiled and registered with runtara-environment.
@@ -593,11 +419,20 @@ impl ExecutionEngine {
         _track_events: bool,
     ) -> Result<std::path::PathBuf, ExecutionError> {
         // First check if compilation is already successful
-        if let Some(binary_path) = self
-            .check_compilation_ready(tenant_id, scenario_id, version)
-            .await?
+        let status = self
+            .scenario_repo
+            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
+            })?;
+
+        if let CompilationStatus::Ready {
+            translated_path, ..
+        } = status
         {
-            return Ok(binary_path);
+            let binary = std::path::PathBuf::from(&translated_path).join("scenario");
+            return Ok(binary);
         }
 
         // Not compiled - queue compilation if not already pending, then return NotCompiled
@@ -679,67 +514,6 @@ impl ExecutionEngine {
             version,
             compilation_queued,
         })
-    }
-
-    /// Check if compilation is ready (successful and registered)
-    /// Returns the binary path if ready, None if not ready, or error with message if failed
-    async fn check_compilation_ready(
-        &self,
-        tenant_id: &str,
-        scenario_id: &str,
-        version: i32,
-    ) -> Result<Option<std::path::PathBuf>, ExecutionError> {
-        let compilation_record = sqlx::query!(
-            r#"
-            SELECT compilation_status, translated_path, registered_image_id, error_message
-            FROM scenario_compilations
-            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
-            "#,
-            tenant_id,
-            scenario_id,
-            version
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| {
-            ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
-        })?;
-
-        match compilation_record {
-            Some(record)
-                if record.compilation_status == "success"
-                    && record.registered_image_id.is_some() =>
-            {
-                let binary = std::path::PathBuf::from(&record.translated_path).join("scenario");
-                Ok(Some(binary))
-            }
-            Some(record) if record.compilation_status == "failed" => {
-                // Get the error message to log prominently
-                let error_msg = record
-                    .error_message
-                    .unwrap_or_else(|| "Unknown compilation error".to_string());
-                // Log at ERROR level so it's visible in logs
-                tracing::error!(
-                    tenant_id = %tenant_id,
-                    scenario_id = %scenario_id,
-                    version = version,
-                    compilation_error = %error_msg,
-                    "COMPILATION FAILED - deleting record for retry"
-                );
-                // Delete failed record so it can be retried
-                let _ = sqlx::query!(
-                    "DELETE FROM scenario_compilations WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3",
-                    tenant_id,
-                    scenario_id,
-                    version
-                )
-                .execute(&self.pool)
-                .await;
-                // Return None so caller will queue a retry
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
     }
 }
 

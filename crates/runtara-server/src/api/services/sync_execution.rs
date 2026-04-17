@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, instrument};
 
-use crate::api::repositories::scenarios::ScenarioRepository;
+use crate::api::repositories::scenarios::{CompilationStatus, ScenarioRepository};
 use crate::api::services::scenarios::ServiceError;
 use crate::metrics::MetricsService;
 use crate::runtime_client::RuntimeClient;
@@ -94,13 +94,11 @@ impl SyncExecutionService {
 
         // 3. Check that scenario is compiled (binary exists on disk)
         // If compilation is pending in the queue, wait for it to complete
-        let compilation = self
-            .wait_for_compilation(tenant_id, scenario_id, version)
+        self.wait_for_compilation(tenant_id, scenario_id, version)
             .await?;
 
         // Note: Bundle checks removed - runtara-environment handles container execution
         // The registered_image_id check in wait_for_compilation ensures remote execution is available
-        let _ = compilation; // Mark as used (translated_path not needed for remote execution)
 
         // 4. Get execution timeout (if set) from the executionGraph
         let execution_timeout = self
@@ -235,13 +233,18 @@ impl SyncExecutionService {
         tenant_id: &str,
         scenario_id: &str,
         version: i32,
-    ) -> Result<CompilationRecord, ServiceError> {
+    ) -> Result<(), ServiceError> {
         // First check if compilation is already successful
-        if let Some(record) = self
-            .check_compilation_ready(tenant_id, scenario_id, version)
-            .await?
-        {
-            return Ok(record);
+        let status = self
+            .scenario_repo
+            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to check compilation: {}", e))
+            })?;
+
+        if matches!(status, CompilationStatus::Ready { .. }) {
+            return Ok(());
         }
 
         // Check if compilation is pending in the queue - if so, wait for it
@@ -320,11 +323,15 @@ impl SyncExecutionService {
             }
 
             // Check again if compilation succeeded
-            if let Some(record) = self
-                .check_compilation_ready(tenant_id, scenario_id, version)
-                .await?
-            {
-                return Ok(record);
+            let status_after = self
+                .scenario_repo
+                .ensure_compilation_ready(tenant_id, scenario_id, version)
+                .await
+                .map_err(|e| {
+                    ServiceError::DatabaseError(format!("Failed to check compilation: {}", e))
+                })?;
+            if matches!(status_after, CompilationStatus::Ready { .. }) {
+                return Ok(());
             }
 
             // Compilation completed but still not ready - something went wrong
@@ -340,75 +347,6 @@ impl SyncExecutionService {
             scenario_id, version
         )))
     }
-
-    /// Check if compilation is ready (successful)
-    /// Returns the compilation record if ready, None if not ready
-    async fn check_compilation_ready(
-        &self,
-        tenant_id: &str,
-        scenario_id: &str,
-        version: i32,
-    ) -> Result<Option<CompilationRecord>, ServiceError> {
-        let compilation = sqlx::query!(
-            r#"
-            SELECT translated_path, compilation_status, registered_image_id, error_message
-            FROM scenario_compilations
-            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
-            "#,
-            tenant_id,
-            scenario_id,
-            version
-        )
-        .fetch_optional(self.scenario_repo.pool())
-        .await
-        .map_err(|e| ServiceError::DatabaseError(format!("Failed to check compilation: {}", e)))?;
-
-        match compilation {
-            Some(record)
-                if record.compilation_status == "success"
-                    && record.registered_image_id.is_some() =>
-            {
-                Ok(Some(CompilationRecord {
-                    translated_path: record.translated_path,
-                    compilation_status: record.compilation_status,
-                }))
-            }
-            Some(record) if record.compilation_status == "failed" => {
-                // Get the error message to log prominently
-                let error_msg = record
-                    .error_message
-                    .unwrap_or_else(|| "Unknown compilation error".to_string());
-                // Log at ERROR level so it's visible in logs
-                tracing::error!(
-                    tenant_id = %tenant_id,
-                    scenario_id = %scenario_id,
-                    version = version,
-                    compilation_error = %error_msg,
-                    "COMPILATION FAILED - deleting record for retry"
-                );
-                // Delete failed record so it can be retried
-                let _ = sqlx::query!(
-                    "DELETE FROM scenario_compilations WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3",
-                    tenant_id,
-                    scenario_id,
-                    version
-                )
-                .execute(self.scenario_repo.pool())
-                .await;
-                // Return None so caller will queue a retry
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
-    }
-}
-
-/// Internal compilation record structure
-struct CompilationRecord {
-    #[allow(dead_code)]
-    translated_path: String,
-    #[allow(dead_code)]
-    compilation_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,20 +506,5 @@ mod tests {
         assert_eq!(deserialized.execution_duration_seconds, 0.0);
         assert_eq!(deserialized.max_memory_mb, 0.0);
         assert_eq!(deserialized.total_duration_seconds, 0.0);
-    }
-
-    // =========================================================================
-    // CompilationRecord tests
-    // =========================================================================
-
-    #[test]
-    fn test_compilation_record_fields() {
-        let record = CompilationRecord {
-            translated_path: "/data/scenarios/abc/build".to_string(),
-            compilation_status: "success".to_string(),
-        };
-
-        assert_eq!(record.translated_path, "/data/scenarios/abc/build");
-        assert_eq!(record.compilation_status, "success");
     }
 }

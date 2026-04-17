@@ -13,6 +13,7 @@ use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::api::dto::trigger_event::TriggerEvent;
+use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
@@ -132,8 +133,10 @@ pub async fn run(
     );
 
     // Create execution engine (wrapped in Arc for sharing across spawned tasks)
+    let scenario_repo = Arc::new(ScenarioRepository::new(pool.clone()));
     let engine = Arc::new(ExecutionEngine::new(
         pool.clone(),
+        scenario_repo,
         runtime_client,
         Some(running_executions.clone()),
     ));
