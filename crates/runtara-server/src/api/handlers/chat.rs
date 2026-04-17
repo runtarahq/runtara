@@ -18,10 +18,11 @@ use tokio::time::sleep;
 use tracing::{debug, error};
 use utoipa::ToSchema;
 
-use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
-use crate::api::services::executions::ExecutionService;
 use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::{
+    ExecutionEngine, ExecutionError, QueueRequest, TriggerSource,
+};
 
 /// Request body for starting a chat session with an initial message
 #[derive(Debug, Deserialize, ToSchema)]
@@ -155,11 +156,13 @@ pub(crate) enum ChatEvent {
     ),
     tag = "Chat"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_handler(
     org_id: crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(scenario_id): Path<String>,
     Json(request): Json<ChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -178,6 +181,7 @@ pub async fn chat_handler(
         pool,
         trigger_stream,
         runtime_client,
+        engine,
         ChatStreamParams {
             scenario_id,
             data,
@@ -206,11 +210,13 @@ pub async fn chat_handler(
     ),
     tag = "Chat"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_start_handler(
     org_id: crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(scenario_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -231,6 +237,7 @@ pub async fn chat_start_handler(
         pool,
         trigger_stream,
         runtime_client,
+        engine,
         ChatStreamParams {
             scenario_id,
             data,
@@ -255,6 +262,7 @@ async fn start_chat_stream(
     pool: PgPool,
     trigger_stream: Option<Arc<TriggerStreamPublisher>>,
     runtime_client: Option<Arc<RuntimeClient>>,
+    engine: Arc<ExecutionEngine>,
     params: ChatStreamParams,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let runtime_client = runtime_client.ok_or_else(|| {
@@ -276,26 +284,28 @@ async fn start_chat_stream(
         "variables": params.variables,
     });
 
-    // Queue execution via the normal execution path
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool.clone()));
-    let service = ExecutionService::with_trigger_stream(scenario_repo, trigger_stream);
-    let result = service
-        .queue_execution(
-            &tenant_id,
-            &params.scenario_id,
-            params.version,
+    // Queue execution via the shared engine. `pool` and `trigger_stream`
+    // states are retained as configuration probes (presence validated above).
+    let _ = pool;
+    let _ = trigger_stream;
+    let result = engine
+        .queue(QueueRequest {
+            tenant_id: &tenant_id,
+            scenario_id: &params.scenario_id,
+            version: params.version,
             inputs,
-            false,
-        )
+            debug: false,
+            correlation_id: None,
+            trigger_source: TriggerSource::Chat,
+        })
         .await
         .map_err(|e| {
             let status = match &e {
-                crate::api::services::executions::ServiceError::NotFound(_) => {
+                ExecutionError::NotFound(_) | ExecutionError::ScenarioNotFound(_) => {
                     StatusCode::NOT_FOUND
                 }
-                crate::api::services::executions::ServiceError::ValidationError(_) => {
-                    StatusCode::BAD_REQUEST
-                }
+                ExecutionError::ValidationError(_)
+                | ExecutionError::WorkflowValidationError { .. } => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             (
