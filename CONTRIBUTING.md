@@ -59,8 +59,11 @@ Feature requests are welcome! Please:
 ### Prerequisites
 
 - Rust 1.75+ (Edition 2024 features used)
+- `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
 - PostgreSQL 14+
-- Protocol Buffers compiler (`protoc`)
+- Valkey (or Redis) if you plan to run `runtara-server`
+
+For the OCI runner path, you'll also need Linux with `crun` installed.
 
 ### Building
 
@@ -139,22 +142,7 @@ cargo clippy --all-targets -- -D warnings
 
 ## Project Structure
 
-```
-crates/
-├── runtara-core/          # Execution engine
-├── runtara-environment/   # OCI runner, image registry
-├── runtara-protocol/      # Protobuf protocol types
-├── runtara-sdk/           # Instance SDK
-├── runtara-management-sdk/# Management client
-├── runtara-sdk-macros/    # #[durable] macro
-├── runtara-workflows/     # Workflow compiler
-├── runtara-dsl/           # DSL types
-├── runtara-agents/        # Built-in agents
-├── runtara-agent-macro/   # #[agent] macro
-├── runtara-workflow-stdlib/# Workflow standard library
-├── runtara-test-harness/  # Agent testing utilities
-└── durable-example/       # SDK examples
-```
+See the top-level [README](README.md#workspace-crates) for the current list of workspace crates and their purposes. Each crate also has its own `README.md` describing how it's used on its own and within Runtara.
 
 ## License
 

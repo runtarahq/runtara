@@ -23,8 +23,8 @@ DATA_DIR="${DATA_DIR:-.data}"
 DATABASE_URL="${RUNTARA_DATABASE_URL:-postgres://localhost/runtara}"
 
 # Port configuration
-CORE_PORT="${RUNTARA_QUIC_PORT:-8001}"        # Core: instances connect here (SDK)
-ENV_PORT="${RUNTARA_ENV_QUIC_PORT:-8002}"     # Environment: Management SDK connects here
+CORE_PORT="${RUNTARA_CORE_PORT:-8001}"        # Core: instances connect here (SDK)
+ENV_PORT="${RUNTARA_ENV_PORT:-8002}"          # Environment: Management SDK connects here
 
 # PID file locations
 PID_DIR="${DATA_DIR}/pids"
@@ -119,7 +119,7 @@ start_server() {
     print_status "  Core port: ${CORE_PORT} (Instance SDK)"
 
     RUNTARA_DATABASE_URL="${DATABASE_URL}" \
-    RUNTARA_ENV_QUIC_PORT="${ENV_PORT}" \
+    RUNTARA_ENV_HTTP_PORT="${ENV_PORT}" \
     RUNTARA_CORE_ADDR="127.0.0.1:${CORE_PORT}" \
     DATA_DIR="${DATA_DIR}" \
     RUST_LOG="${RUST_LOG:-runtara_environment=info,runtara_core=info}" \
@@ -187,8 +187,8 @@ usage() {
     echo "Environment Variables:"
     echo "  RUNTARA_DATABASE_URL    PostgreSQL connection string (default: postgres://localhost/runtara)"
     echo "  DATA_DIR                Data directory (default: .data)"
-    echo "  RUNTARA_QUIC_PORT       Core instance QUIC port (default: 8001)"
-    echo "  RUNTARA_ENV_QUIC_PORT   Environment QUIC port (default: 8002)"
+    echo "  RUNTARA_CORE_PORT       Core instance HTTP port (default: 8001)"
+    echo "  RUNTARA_ENV_PORT        Environment HTTP port (default: 8002)"
     echo "  RUST_LOG                Log level (default: runtara_*=info)"
     echo ""
 }

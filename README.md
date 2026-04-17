@@ -226,12 +226,13 @@ Each higher layer embeds the layers below it. You never need to run them as sepa
 
 ### Prerequisites
 
-- Rust toolchain
-- `rustc`
-- PostgreSQL for `runtara-environment`
-- `crun` and Linux container support for the OCI runner path
+- Rust toolchain (stable, Edition 2024)
+- `wasm32-wasip2` target: `rustup target add wasm32-wasip2` (scenarios compile to WASM by default)
+- PostgreSQL — one database for `runtara-environment`/`runtara-core` state, and (if running `runtara-server`) a separate database for the object model
+- Valkey or Redis — required by `runtara-server` for checkpoint storage during scenario execution
+- `crun` and Linux container support if you enable the OCI runner
 
-For native compilation targets on Linux, you may also need the relevant Rust target and linker tools. The compiler already surfaces `rustup target add ...` guidance when a target is missing.
+If you're only using Layer 1 (`runtara-core` + `runtara-sdk`) or Layer 2 (`runtara-environment`), you do not need Valkey or the object-model database.
 
 ### Start The Full Runtime
 
@@ -253,7 +254,7 @@ For local development, you can also use:
 ./start.sh
 ```
 
-`start.sh` is a convenience wrapper around `runtara-environment`. Its script-level variable names still use older `QUIC` naming, but the authoritative runtime configuration is the HTTP-based environment documented below.
+`start.sh` is a convenience wrapper around `runtara-environment` (with embedded core). See `./start.sh help` for the supported environment variables.
 
 ### Run Core Only
 
@@ -406,6 +407,26 @@ The tables below reflect the current code paths in the workspace, not older tran
 | `RUNTARA_SKIP_CERT_VERIFICATION` | No | `false` | Forwarded to runners where applicable |
 | `RUNTARA_DB_POOL_SIZE` | No | `100` | Environment DB pool size |
 | `RUNTARA_DB_REQUEST_TIMEOUT_MS` | No | `30000` | Environment DB request timeout |
+
+### `runtara-server`
+
+The application-server layer embeds `runtara-environment` + `runtara-core` and adds scenario management, auth, connections, and channels. It reads all of the `runtara-environment` variables plus these:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OBJECT_MODEL_DATABASE_URL` | Yes | - | Separate PostgreSQL connection string for the user-defined object model. `DATABASE_URL` is accepted by some startup paths as a legacy alias, but set `OBJECT_MODEL_DATABASE_URL` to avoid surprises. |
+| `VALKEY_HOST` | Yes | - | Valkey/Redis host for checkpoint storage during scenario execution. Startup aborts if unset. |
+| `VALKEY_PORT` | No | `6379` | Valkey/Redis port |
+| `INTERNAL_PORT` | No | `7002` | Internal HTTP port used for service-to-service communication |
+| `CHECKPOINT_TTL_HOURS` | No | `48` | How long checkpoints are retained in Valkey |
+| `OBJECT_MODEL_MAX_CONNECTIONS` | No | `5` | Connection pool size for the object model DB |
+| `OBJECT_MODEL_SOFT_DELETE` | No | `true` | When `true`, object-model tables are created with a `deleted` column + partial index; set at DDL time. |
+| `ADAPTIVE_RATE_LIMITING` | No | `true` | Enable adaptive rate limiting on integration calls |
+| `AUTO_RETRY_ON_429` | No | `true` | Automatic durable-sleep retry on 429 responses |
+| `MAX_429_RETRIES` | No | `3` | Cap on automatic 429 retries |
+| `MAX_RETRY_DELAY_MS` | No | `60000` | Cap on auto-retry delay (ms) |
+
+The default public HTTP API port for `runtara-server` itself is `7001` (see `runtara-server/src/server.rs`).
 
 ### Instance-Side SDK Environment
 
