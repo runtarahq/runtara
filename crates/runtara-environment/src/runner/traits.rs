@@ -201,4 +201,19 @@ pub trait Runner: Send + Sync {
         let _ = handle;
         None
     }
+
+    /// Wait for the instance to exit, polling with the given interval.
+    ///
+    /// The default implementation polls [`Runner::is_running`] at `poll_interval`.
+    /// Runners that own a `Child` on the handle (e.g. WasmRunner) should override
+    /// this to use `child.wait()` so process exit is observed without a poll
+    /// budget and so all stdio is flushed before the monitor proceeds.
+    ///
+    /// Implementations must be cancel-safe: when the surrounding `select!` drops
+    /// this future on a timeout, no resources should leak.
+    async fn wait_for_exit(&self, handle: &RunnerHandle, poll_interval: Duration) {
+        while self.is_running(handle).await {
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
 }
