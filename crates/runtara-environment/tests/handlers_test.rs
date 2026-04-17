@@ -1,5 +1,3 @@
-#![allow(unexpected_cfgs)]
-#![cfg(feature = "quic_tests")]
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Tests for environment handlers module.
@@ -1266,6 +1264,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
         tenant_id: tenant_id.to_string(),
         started_at: Utc::now(),
         spawned_pid: None,
+        child: None,
     };
 
     // Register the mock instance in the runner
