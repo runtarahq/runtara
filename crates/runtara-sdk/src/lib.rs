@@ -110,7 +110,7 @@ pub use registry::{register_sdk, sdk, stop_heartbeat, try_sdk};
 // Cancellation/pause support - allows long-running operations to be interrupted
 pub use registry::{
     acknowledge_cancellation, acknowledge_pause, acknowledge_shutdown, is_cancelled,
-    trigger_cancellation, with_cancellation, with_cancellation_err,
+    reset_cancellation, trigger_cancellation, with_cancellation, with_cancellation_err,
 };
 
 // Re-export the #[durable] macro

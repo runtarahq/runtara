@@ -8,8 +8,11 @@
 //! 3. Operations complete normally when not cancelled
 //! 4. `trigger_cancellation()` sets the cancellation flag
 //!
-//! Note: Due to global state in the registry, some tests may need to be run
-//! in isolation. Use `cargo test -p runtara-sdk --test cancellation_test -- --test-threads=1`
+//! Note: the SDK cancellation flag is process-global, so tests that mutate
+//! it (via `trigger_cancellation` / `acknowledge_cancellation`) pollute
+//! subsequent tests running in the same process. Every test in this file
+//! that expects `!is_cancelled()` calls `reset_cancellation()` first, and
+//! tests that leave the flag set reset it before returning.
 //!
 //! Run with:
 //! ```bash
@@ -25,6 +28,7 @@ use std::time::{Duration, Instant};
 /// Test that with_cancellation completes normally when not cancelled.
 #[test]
 fn test_with_cancellation_no_registry_succeeds() {
+    runtara_sdk::reset_cancellation();
     // When not cancelled, with_cancellation should return Ok(value)
     let result = runtara_sdk::with_cancellation(42);
 
@@ -35,6 +39,7 @@ fn test_with_cancellation_no_registry_succeeds() {
 /// Test that with_cancellation handles operations that return Result.
 #[test]
 fn test_with_cancellation_result_operation() {
+    runtara_sdk::reset_cancellation();
     let result = runtara_sdk::with_cancellation(Ok::<i32, String>(100));
 
     assert!(result.is_ok());
@@ -44,18 +49,18 @@ fn test_with_cancellation_result_operation() {
 /// Test that with_cancellation handles operations that return Err.
 #[test]
 fn test_with_cancellation_error_operation() {
+    runtara_sdk::reset_cancellation();
     let result = runtara_sdk::with_cancellation(Err::<i32, String>("operation failed".into()));
 
     assert!(result.is_ok()); // with_cancellation succeeded (not cancelled)
     assert!(result.unwrap().is_err()); // inner operation failed
 }
 
-/// Test that is_cancelled returns false when no cancellation has been triggered.
+/// Test that is_cancelled returns false after an explicit reset.
 #[test]
 fn test_is_cancelled_no_registry() {
-    // Note: Due to global state, this may return true if another test triggered cancellation.
-    // We just verify it doesn't panic.
-    let _cancelled = runtara_sdk::is_cancelled();
+    runtara_sdk::reset_cancellation();
+    assert!(!runtara_sdk::is_cancelled());
 }
 
 // ============================================================================
@@ -65,6 +70,7 @@ fn test_is_cancelled_no_registry() {
 /// Test that a fast operation completes quickly.
 #[test]
 fn test_with_cancellation_fast_operation() {
+    runtara_sdk::reset_cancellation();
     let start = Instant::now();
 
     let result = runtara_sdk::with_cancellation("done");
@@ -81,6 +87,7 @@ fn test_with_cancellation_fast_operation() {
 /// Test with_cancellation_err variant with custom error.
 #[test]
 fn test_with_cancellation_err_variant() {
+    runtara_sdk::reset_cancellation();
     #[derive(Debug, PartialEq)]
     struct CustomError(String);
 
@@ -260,6 +267,9 @@ fn test_trigger_cancellation_no_registry() {
 
     // And is_cancelled should still work
     let _ = runtara_sdk::is_cancelled();
+
+    // Clean up the process-global flag so other tests aren't polluted.
+    runtara_sdk::reset_cancellation();
 }
 
 /// Test with_cancellation with a result value.
@@ -384,6 +394,9 @@ fn test_acknowledge_cancellation_triggers_token() {
 
     // After calling acknowledge_cancellation, is_cancelled should be true
     // The key behavior is that it doesn't panic and completes successfully
+
+    // Clean up the process-global flag so other tests aren't polluted.
+    runtara_sdk::reset_cancellation();
 }
 
 /// Test that acknowledge_cancellation is idempotent (safe to call multiple times).
@@ -396,6 +409,9 @@ fn test_acknowledge_cancellation_idempotent() {
 
     // Should still work after multiple calls
     let _ = runtara_sdk::is_cancelled();
+
+    // Clean up the process-global flag so other tests aren't polluted.
+    runtara_sdk::reset_cancellation();
 }
 
 /// Test the split-like parallel processing with cancellation.

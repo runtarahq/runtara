@@ -164,6 +164,18 @@ pub fn trigger_cancellation() {
     INSTANCE_CANCELLED.store(true, Ordering::SeqCst);
 }
 
+/// Reset the cancellation flag.
+///
+/// Intended only for tests that share process-global state: a test that
+/// exercises `trigger_cancellation()` or `acknowledge_cancellation()`
+/// should call this before/after to avoid polluting subsequent tests.
+/// In production, a cancelled instance is expected to exit rather than
+/// reset state, so there is no legitimate runtime use.
+#[doc(hidden)]
+pub fn reset_cancellation() {
+    INSTANCE_CANCELLED.store(false, Ordering::SeqCst);
+}
+
 /// Acknowledge cancellation to runtara-core.
 ///
 /// This should be called when the instance detects a cancel signal and is about
