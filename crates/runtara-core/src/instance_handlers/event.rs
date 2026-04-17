@@ -23,7 +23,11 @@ use crate::persistence::{CompleteInstanceParams, EventRecord};
 ///
 /// All events return `InstanceEventResponse` to acknowledge persistence.
 /// This ensures no events are lost due to race conditions when the process exits.
-#[instrument(skip(state, event), fields(instance_id = %event.instance_id, event_type = ?event.event_type()))]
+#[instrument(skip(state, event), fields(
+    instance_id = %event.instance_id,
+    checkpoint_id = ?event.checkpoint_id,
+    event_type = ?event.event_type(),
+))]
 pub async fn handle_instance_event(
     state: &InstanceHandlerState,
     event: InstanceEvent,

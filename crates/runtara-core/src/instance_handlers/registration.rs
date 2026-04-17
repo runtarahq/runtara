@@ -23,7 +23,11 @@ use crate::persistence::EventRecord;
 /// Returns an error response if:
 /// - `instance_id` or `tenant_id` is empty
 /// - A specified `checkpoint_id` doesn't exist
-#[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
+#[instrument(skip(state, request), fields(
+    instance_id = %request.instance_id,
+    tenant_id = %request.tenant_id,
+    checkpoint_id = ?request.checkpoint_id,
+))]
 pub async fn handle_register_instance(
     state: &InstanceHandlerState,
     request: RegisterInstanceRequest,

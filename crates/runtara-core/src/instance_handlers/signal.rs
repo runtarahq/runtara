@@ -18,7 +18,10 @@ use crate::persistence::CompleteInstanceParams;
 ///
 /// Note: The checkpoint response also includes pending signals for efficiency.
 /// This endpoint is for explicit polling when not checkpointing.
-#[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
+#[instrument(skip(state, request), fields(
+    instance_id = %request.instance_id,
+    checkpoint_id = ?request.checkpoint_id,
+))]
 pub async fn handle_poll_signals(
     state: &InstanceHandlerState,
     request: PollSignalsRequest,
@@ -80,7 +83,10 @@ pub async fn handle_poll_signals(
 ///
 /// Marks a signal as acknowledged by the instance.
 /// If acknowledging a cancel signal, also updates instance status to cancelled.
-#[instrument(skip(state, ack), fields(instance_id = %ack.instance_id))]
+#[instrument(skip(state, ack), fields(
+    instance_id = %ack.instance_id,
+    signal_type = ?ack.signal_type(),
+))]
 pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> Result<()> {
     debug!(
         signal_type = ?ack.signal_type,

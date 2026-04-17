@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 
@@ -204,6 +204,10 @@ pub struct RegisterImageResponse {
 }
 
 /// Handle image registration request.
+#[instrument(skip(state, request), fields(
+    tenant_id = %request.tenant_id,
+    name = %request.name,
+))]
 pub async fn handle_register_image(
     state: &EnvironmentHandlerState,
     request: RegisterImageRequest,
@@ -406,6 +410,11 @@ pub fn enrich_input_for_storage(
 }
 
 /// Handle start instance request.
+#[instrument(skip(state, request), fields(
+    tenant_id = %request.tenant_id,
+    image_id = %request.image_id,
+    instance_id = ?request.instance_id,
+))]
 pub async fn handle_start_instance(
     state: &EnvironmentHandlerState,
     request: StartInstanceRequest,
@@ -668,6 +677,10 @@ pub struct StopInstanceResponse {
 }
 
 /// Handle stop instance request.
+#[instrument(skip(state, request), fields(
+    instance_id = %request.instance_id,
+    reason = %request.reason,
+))]
 pub async fn handle_stop_instance(
     state: &EnvironmentHandlerState,
     request: StopInstanceRequest,
@@ -762,6 +775,7 @@ pub struct ResumeInstanceResponse {
 }
 
 /// Handle resume instance request.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id))]
 pub async fn handle_resume_instance(
     state: &EnvironmentHandlerState,
     request: ResumeInstanceRequest,
@@ -1302,6 +1316,11 @@ pub struct TestCapabilityResponse {
 ///
 /// This runs the test harness binary in an OCI container. The test request is stored
 /// in runtara-core and read via SDK. Results come from the runner's LaunchResult.
+#[instrument(skip(state, request), fields(
+    tenant_id = %request.tenant_id,
+    agent_id = %request.agent_id,
+    capability_id = %request.capability_id,
+))]
 pub async fn handle_test_capability(
     state: &EnvironmentHandlerState,
     request: TestCapabilityRequest,
@@ -1531,6 +1550,10 @@ pub struct GetCapabilityResponse {
 ///
 /// This returns detailed information about a specific capability including its input schema.
 /// It runs in-process (no OCI container needed) since it only returns metadata.
+#[instrument(skip(_state, request), fields(
+    agent_id = %request.agent_id,
+    capability_id = %request.capability_id,
+))]
 pub async fn handle_get_capability(
     _state: &EnvironmentHandlerState,
     request: GetCapabilityRequest,
