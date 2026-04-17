@@ -1527,12 +1527,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
     // The router is always available — it looks up connection + trigger from DB per request.
     let channel_routes =
-        if let (Some(rc), Some(ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
+        if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
             let channel_router = Arc::new(channels::session::ChannelRouter::new(
                 rc.clone(),
                 pool.clone(),
                 connections_facade.clone(),
-                ts.clone(),
+                execution_engine.clone(),
                 vc.clone(),
             ));
             println!("✓ Channel router initialized");
