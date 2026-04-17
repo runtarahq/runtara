@@ -1211,6 +1211,160 @@ mod tests {
         assert_eq!(instance.status, "pending"); // unchanged
     }
 
+    // -------------------------------------------------------------------
+    // Unified complete_instance coverage (SYN-395)
+    // -------------------------------------------------------------------
+
+    /// Unguarded completion against a missing row must raise
+    /// `InstanceNotFound` — callers rely on this to distinguish a truly
+    /// unknown instance from a race-lost guarded update.
+    #[tokio::test]
+    async fn test_complete_instance_unguarded_miss_returns_instance_not_found() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let err = persistence
+            .complete_instance(CompleteInstanceParams::new("never-registered", "completed"))
+            .await
+            .expect_err("must error when unguarded update finds nothing");
+
+        assert!(
+            matches!(&err, CoreError::InstanceNotFound { instance_id } if instance_id == "never-registered"),
+            "expected InstanceNotFound, got {err:?}"
+        );
+    }
+
+    /// Unguarded completion against a live instance returns `Ok(true)`.
+    #[tokio::test]
+    async fn test_complete_instance_unguarded_success_returns_true() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let applied = persistence
+            .complete_instance(CompleteInstanceParams::new(&instance_id, "completed"))
+            .await
+            .expect("unguarded success should not error");
+        assert!(applied, "unguarded update on existing row returns true");
+    }
+
+    /// Guarded completion against a missing row returns `Ok(false)`,
+    /// not `InstanceNotFound`. This is the "row was already cleaned up"
+    /// race outcome.
+    #[tokio::test]
+    async fn test_complete_instance_guarded_miss_returns_false() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let applied = persistence
+            .complete_instance(
+                CompleteInstanceParams::new("never-registered", "completed").if_running(),
+            )
+            .await
+            .expect("guarded miss must not error");
+        assert!(!applied);
+    }
+
+    /// Non-terminal status (`running`) must leave `finished_at` NULL —
+    /// the CASE clause only fires for terminal statuses.
+    #[tokio::test]
+    async fn test_complete_instance_non_terminal_preserves_finished_at() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        let applied = persistence
+            .complete_instance(CompleteInstanceParams::new(&instance_id, "running"))
+            .await
+            .expect("non-terminal transition should succeed");
+        assert!(applied);
+
+        let instance = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(instance.status, "running");
+        assert!(
+            instance.finished_at.is_none(),
+            "non-terminal status must not set finished_at"
+        );
+    }
+
+    /// `termination_reason` and `exit_code` use COALESCE semantics:
+    /// passing `None` leaves the existing values intact. The default
+    /// `op_get_instance` SELECT doesn't project these columns, so we
+    /// verify via a raw query.
+    #[tokio::test]
+    async fn test_complete_instance_termination_fields_coalesce() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&instance_id, "running", Some(Utc::now()))
+            .await
+            .unwrap();
+
+        // First write sets both termination fields.
+        persistence
+            .complete_instance(
+                CompleteInstanceParams::new(&instance_id, "failed")
+                    .with_termination("crashed", Some(137)),
+            )
+            .await
+            .expect("first completion should succeed");
+
+        async fn read_term_fields(
+            pool: &SqlitePool,
+            instance_id: &str,
+        ) -> (Option<String>, Option<i32>) {
+            sqlx::query_as::<_, (Option<String>, Option<i32>)>(
+                "SELECT termination_reason, exit_code FROM instances WHERE instance_id = ?",
+            )
+            .bind(instance_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+
+        let (reason, code) = read_term_fields(&persistence.pool, &instance_id).await;
+        assert_eq!(reason.as_deref(), Some("crashed"));
+        assert_eq!(code, Some(137));
+
+        // Second write without termination/exit fields must not clobber.
+        persistence
+            .complete_instance(CompleteInstanceParams::new(&instance_id, "failed"))
+            .await
+            .expect("second completion should succeed");
+
+        let (reason, code) = read_term_fields(&persistence.pool, &instance_id).await;
+        assert_eq!(
+            reason.as_deref(),
+            Some("crashed"),
+            "termination_reason must be preserved across subsequent writes"
+        );
+        assert_eq!(
+            code,
+            Some(137),
+            "exit_code must be preserved across subsequent writes"
+        );
+    }
+
     #[tokio::test]
     async fn test_update_instance_metrics() {
         let pool = test_pool().await;
