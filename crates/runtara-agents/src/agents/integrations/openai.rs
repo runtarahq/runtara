@@ -7,17 +7,17 @@ use crate::connections::RawConnection;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 
-use crate::http::{self, HttpMethod, ResponseType};
-
-use super::errors::{http_status_error, permanent_error};
+use super::errors::permanent_error;
+use super::integration_utils::ProxyHttpClient;
 pub use super::types::LlmUsage;
 
 // ============================================================================
 // Shared helpers
 // ============================================================================
 
+/// OpenAI uses the historical `OPENAI_MISSING_CONNECTION` code rather than
+/// the shared `*_NO_CONNECTION` taxonomy, preserved for wire compatibility.
 fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
     connection.as_ref().ok_or_else(|| {
         permanent_error(
@@ -28,15 +28,20 @@ fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnecti
     })
 }
 
-/// Build headers for OpenAI API calls via proxy.
-fn openai_headers(connection: &RawConnection) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers.insert("Content-Type".to_string(), "application/json".to_string());
-    headers
+/// Execute a POST request against OpenAI's JSON API via the shared proxy
+/// client and return the parsed JSON body.
+fn openai_post_json(
+    connection: &RawConnection,
+    path: &str,
+    body: Value,
+    timeout_ms: u64,
+) -> Result<Value, String> {
+    ProxyHttpClient::new(connection, "OPENAI")
+        .post(path.to_string())
+        .timeout_ms(timeout_ms)
+        .json_body(body)
+        .send_json()
+        .map_err(String::from)
 }
 
 // ============================================================================
@@ -190,40 +195,8 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
         request_body["stop"] = json!(stop);
     }
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/chat/completions".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 120000, // 2 minutes for LLM requests
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    // Parse response
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json =
+        openai_post_json(connection, "/v1/chat/completions", request_body, 120_000)?;
 
     let text = response_json["choices"][0]["message"]["content"]
         .as_str()
@@ -409,39 +382,8 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         request_body["size"] = json!("1024x1024");
     }
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/images/generations".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 180000, // 3 minutes for image generation
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json =
+        openai_post_json(connection, "/v1/images/generations", request_body, 180_000)?;
 
     let image_data = response_json["data"][0]["b64_json"]
         .as_str()
@@ -569,39 +511,8 @@ pub fn structured_output(input: StructuredOutputInput) -> Result<StructuredOutpu
         request_body["temperature"] = json!(temperature);
     }
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/chat/completions".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 120000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json =
+        openai_post_json(connection, "/v1/chat/completions", request_body, 120_000)?;
 
     let content = response_json["choices"][0]["message"]["content"]
         .as_str()
@@ -777,39 +688,8 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, St
         request_body["temperature"] = json!(temperature);
     }
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/chat/completions".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 120000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json =
+        openai_post_json(connection, "/v1/chat/completions", request_body, 120_000)?;
 
     let text = response_json["choices"][0]["message"]["content"]
         .as_str()
@@ -965,39 +845,12 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         ),
     });
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: format!("/v1/{}", endpoint),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 180000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = openai_post_json(
+        connection,
+        &format!("/v1/{}", endpoint),
+        request_body,
+        180_000,
+    )?;
 
     let image_data = response_json["data"][0]["b64_json"]
         .as_str()
@@ -1194,39 +1047,8 @@ pub fn openai_chat_completion(
         request_body["tool_choice"] = json!(tool_choice);
     }
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/chat/completions".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 120000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json =
+        openai_post_json(connection, "/v1/chat/completions", request_body, 120_000)?;
 
     let choices = response_json["choices"]
         .as_array()
@@ -1323,39 +1145,7 @@ pub fn openai_create_embedding(
         "input": input.input,
     });
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/embeddings".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 60000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = openai_post_json(connection, "/v1/embeddings", request_body, 60_000)?;
 
     let data = response_json["data"]
         .as_array()
@@ -1437,39 +1227,7 @@ pub fn openai_moderate_content(
         "model": input.model.unwrap_or_else(|| "text-moderation-latest".to_string()),
     });
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: "/v1/moderations".to_string(),
-        headers: openai_headers(connection),
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "OPENAI",
-            response.status_code,
-            &format!("OpenAI API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Expected JSON response from OpenAI",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = openai_post_json(connection, "/v1/moderations", request_body, 30_000)?;
 
     let results = response_json["results"]
         .as_array()
