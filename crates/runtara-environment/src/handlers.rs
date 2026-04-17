@@ -990,6 +990,37 @@ pub(crate) fn is_process_alive(pid: i32) -> bool {
     std::path::Path::new(&format!("/proc/{}", pid)).exists()
 }
 
+/// True if this monitor's handle no longer owns the container registry
+/// entry for the instance.
+///
+/// When an instance is resumed, a NEW monitor is spawned for the new process
+/// and the registry is rewritten with that monitor's `handle_id`. The OLD
+/// monitor (still polling the previous PID) must NOT touch instance state
+/// when it observes its own process exit, otherwise it would clobber the
+/// fresh execution.
+///
+/// Semantics (preserved from the inline check that previously lived in
+/// `spawn_container_monitor`):
+/// - registry has a different `container_id` than this monitor's handle → stale
+/// - registry has no entry (e.g. cleared by resume before relaunch) → stale
+/// - registry lookup errors → assume fresh, since being conservative here
+///   would cause us to silently drop the crash-detection write on a transient
+///   DB blip
+// NOTE: `dead_code` allow is removed in the follow-up commit that wires this
+// helper into `spawn_container_monitor`.
+#[allow(dead_code)]
+pub(crate) async fn detect_stale_monitor(
+    registry: &ContainerRegistry,
+    instance_id: &str,
+    monitor_handle_id: &str,
+) -> bool {
+    match registry.get(instance_id).await {
+        Ok(Some(current)) => current.container_id != monitor_handle_id,
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
 /// Spawn a background task that monitors the container and processes output when done.
 ///
 /// This function should be called after launching an instance to monitor its lifecycle
