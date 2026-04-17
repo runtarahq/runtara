@@ -1,6 +1,6 @@
 import * as ManagementAPI from '@/generated/RuntaraManagementApi.ts';
 import * as RuntimeAPI from '@/generated/RuntaraRuntimeApi.ts';
-import { config } from '@/shared/config/runtimeConfig';
+import { config, isOidcAuth } from '@/shared/config/runtimeConfig';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
 import { useMaintenanceStore } from '@/shared/stores/maintenanceStore.ts';
 
@@ -47,10 +47,16 @@ const maintenanceInterceptor = (error: any) => {
   return Promise.reject(error);
 };
 
-// Interceptor: redirect to login on 401 Unauthorized (expired/invalid token)
+// Interceptor: redirect to login on 401 Unauthorized (expired/invalid token).
+// Non-OIDC modes have no login to return to, so a 401 there is a genuine server
+// error — propagate it to the caller instead of triggering a redirect loop.
 let isRedirectingToLogin = false;
 const unauthorizedInterceptor = (error: any) => {
-  if (error?.response?.status === 401 && !isRedirectingToLogin) {
+  if (
+    isOidcAuth &&
+    error?.response?.status === 401 &&
+    !isRedirectingToLogin
+  ) {
     isRedirectingToLogin = true;
     useAuthStore.getState().clearOrgId();
     useAuthStore.getState().clearUserGroups();

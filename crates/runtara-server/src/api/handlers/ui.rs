@@ -23,6 +23,9 @@ pub struct UiState {
     /// Mount prefix (e.g. `/ui`), stripped from the request URI before looking
     /// up the asset. Lets multi-segment mounts like `/ui/foo` work correctly.
     mount: Arc<str>,
+    /// CSP header for HTML responses. Contains a SHA-256 hash of the inline
+    /// `window.__RUNTARA_CONFIG__` script so the browser lets it execute.
+    html_csp: Arc<str>,
 }
 
 /// Build a router that serves the embedded UI under `mount` (e.g. `/ui`).
@@ -33,9 +36,11 @@ pub struct UiState {
 /// slashes (`/ui` matches but `/ui/` 404s). Registering explicit routes at the
 /// outer level dodges the quirk.
 pub fn router(mount: &str, base_href: &str) -> Router {
+    let (index_html, inline_script_hash) = build_index_html(base_href);
     let state = UiState {
-        index_html: build_index_html(base_href),
+        index_html,
         mount: Arc::from(mount),
+        html_csp: Arc::from(build_html_csp(&inline_script_hash).as_str()),
     };
     let wild = format!("{mount}/{{*path}}");
     let with_slash = format!("{mount}/");
@@ -46,7 +51,13 @@ pub fn router(mount: &str, base_href: &str) -> Router {
         .with_state(state)
 }
 
-fn build_index_html(base_href: &str) -> Bytes {
+/// Returns the rewritten HTML and the base64-encoded SHA-256 of the inline
+/// `window.__RUNTARA_CONFIG__` script body. The hash goes into the
+/// `script-src` CSP directive so the browser allows the inline script to run.
+fn build_index_html(base_href: &str) -> (Bytes, String) {
+    use base64::Engine;
+    use sha2::Digest;
+
     let raw = UiAssets::get("index.html")
         .expect("frontend/dist/index.html missing — run `npm run build` in ./frontend");
     let html = std::str::from_utf8(&raw.data).expect("index.html is not valid utf-8");
@@ -68,17 +79,47 @@ fn build_index_html(base_href: &str) -> Bytes {
         step_one.contains(config_needle),
         "embed-ui: expected `{config_needle}` placeholder in index.html. Check frontend/index.html."
     );
-    let config_replacement = format!("window.__RUNTARA_CONFIG__={};", runtime_config_json());
-    let rewritten = step_one.replacen(config_needle, &config_replacement, 1);
+    let inline_script = format!("window.__RUNTARA_CONFIG__={};", runtime_config_json());
+    let rewritten = step_one.replacen(config_needle, &inline_script, 1);
 
-    Bytes::from(rewritten.into_bytes())
+    // CSP `script-src 'sha256-...'` matches the hash of the inline script body
+    // between the <script> tags (no surrounding whitespace, no tags). The
+    // content we splice in IS that body verbatim.
+    let digest = sha2::Sha256::digest(inline_script.as_bytes());
+    let hash_b64 = base64::engine::general_purpose::STANDARD.encode(digest);
+
+    (Bytes::from(rewritten.into_bytes()), hash_b64)
+}
+
+/// CSP for HTML responses. Parameterized by the base64 SHA-256 hash of the
+/// inline config script we just injected so the browser allows it to run.
+/// Operators tightening for production should front the server with a reverse
+/// proxy that overrides this header.
+fn build_html_csp(inline_script_sha256_b64: &str) -> String {
+    format!(
+        "default-src 'self'; \
+         script-src 'self' https://plausible.io 'sha256-{inline_script_sha256_b64}'; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: blob:; \
+         font-src 'self' data:; \
+         connect-src 'self' https: wss: http://localhost:* ws://localhost:*; \
+         manifest-src 'self'; \
+         worker-src 'self' blob:; \
+         frame-ancestors 'none'; \
+         object-src 'none'; \
+         base-uri 'self'"
+    )
 }
 
 /// Serialize the runtime config as a JSON object literal. Only keys with a
 /// non-empty env value are emitted, so absent values stay `undefined` in JS
 /// (the frontend then falls back to the build-time VITE_* default, if any).
+///
+/// `authMode` and `tenantId` are always emitted: the SPA needs them to decide
+/// whether to initiate an OIDC redirect and how to prefix tenant-scoped URLs.
 fn runtime_config_json() -> String {
     use std::fmt::Write;
+
     let pairs = [
         ("oidcAuthority", "RUNTARA_UI_OIDC_AUTHORITY"),
         ("oidcClientId", "RUNTARA_UI_OIDC_CLIENT_ID"),
@@ -95,6 +136,25 @@ fn runtime_config_json() -> String {
             entries.push((key.to_string(), val));
         }
     }
+
+    // Normalize the provider name to the three values the SPA branches on.
+    // Anything unrecognized degrades to "oidc" so the SPA behaves like before.
+    let auth_mode = match std::env::var("AUTH_PROVIDER")
+        .unwrap_or_else(|_| "oidc".to_string())
+        .as_str()
+    {
+        "local" => "local",
+        "trust_proxy" | "trust-proxy" => "trust_proxy",
+        _ => "oidc",
+    };
+    entries.push(("authMode".to_string(), auth_mode.to_string()));
+
+    if let Ok(tenant) = std::env::var("TENANT_ID")
+        && !tenant.trim().is_empty()
+    {
+        entries.push(("tenantId".to_string(), tenant));
+    }
+
     let mut out = String::from("{");
     for (i, (key, val)) in entries.iter().enumerate() {
         if i > 0 {
@@ -145,36 +205,18 @@ async fn serve(uri: Uri, State(state): State<UiState>) -> Response {
         .trim_start_matches('/');
 
     if after_mount.is_empty() || after_mount == "index.html" {
-        return html_response(state.index_html.clone());
+        return html_response(state.index_html.clone(), &state.html_csp);
     }
 
     if let Some(file) = UiAssets::get(after_mount) {
-        return asset_response(after_mount, file);
+        return asset_response(after_mount, file, &state.html_csp);
     }
 
     // SPA fallback: unknown paths hand back index.html so React Router can route.
-    html_response(state.index_html.clone())
+    html_response(state.index_html.clone(), &state.html_csp)
 }
 
-/// CSP that allows the SPA to actually run. The default middleware CSP is
-/// `default-src 'none'`, which would block all assets, inline styles, OIDC,
-/// and analytics. Operators tightening for production should front the server
-/// with a reverse proxy that overrides this header.
-const UI_CSP: &str = concat!(
-    "default-src 'self'; ",
-    "script-src 'self' https://plausible.io; ",
-    "style-src 'self' 'unsafe-inline'; ",
-    "img-src 'self' data: blob:; ",
-    "font-src 'self' data:; ",
-    "connect-src 'self' https: wss: http://localhost:* ws://localhost:*; ",
-    "manifest-src 'self'; ",
-    "worker-src 'self' blob:; ",
-    "frame-ancestors 'none'; ",
-    "object-src 'none'; ",
-    "base-uri 'self'",
-);
-
-fn html_response(body: Bytes) -> Response {
+fn html_response(body: Bytes, csp: &str) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -184,13 +226,13 @@ fn html_response(body: Bytes) -> Response {
         .header(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"))
         .header(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(UI_CSP),
+            HeaderValue::from_str(csp).expect("CSP header must be ASCII"),
         )
         .body(Body::from(body))
         .unwrap()
 }
 
-fn asset_response(path: &str, file: EmbeddedFile) -> Response {
+fn asset_response(path: &str, file: EmbeddedFile, csp: &str) -> Response {
     let mime = file
         .metadata
         .mimetype()
@@ -207,7 +249,7 @@ fn asset_response(path: &str, file: EmbeddedFile) -> Response {
         .header(header::CACHE_CONTROL, cache_control)
         .header(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(UI_CSP),
+            HeaderValue::from_str(csp).expect("CSP header must be ASCII"),
         )
         .body(Body::from(file.data.into_owned()))
         .unwrap()

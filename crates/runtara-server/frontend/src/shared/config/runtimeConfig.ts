@@ -6,6 +6,8 @@
 // rebuilding. When a key is missing (e.g. running via `vite dev` or in tests),
 // we fall back to the build-time `VITE_*` values.
 
+export type AuthMode = 'oidc' | 'local' | 'trust_proxy';
+
 type RuntimeConfig = {
   oidcAuthority?: string;
   oidcClientId?: string;
@@ -13,6 +15,11 @@ type RuntimeConfig = {
   apiBaseUrl?: string;
   plausibleDomain?: string;
   plausibleHost?: string;
+  /** Selected server-side auth provider. Defaults to "oidc" when unset. */
+  authMode?: AuthMode;
+  /** Configured tenant — injected when the server runs without an IdP that
+   * would otherwise supply `org_id` via JWT claims. */
+  tenantId?: string;
 };
 
 declare global {
@@ -33,7 +40,21 @@ const pick = (
   envVal: string | undefined
 ): string | undefined => clean(runtimeVal) ?? clean(envVal);
 
+const resolveAuthMode = (value: string | undefined): AuthMode => {
+  switch (value) {
+    case 'local':
+      return 'local';
+    case 'trust_proxy':
+    case 'trust-proxy':
+      return 'trust_proxy';
+    default:
+      return 'oidc';
+  }
+};
+
 export const config = {
+  authMode: resolveAuthMode(runtime.authMode),
+  tenantId: clean(runtime.tenantId),
   oidc: {
     authority: pick(runtime.oidcAuthority, import.meta.env.VITE_OIDC_AUTHORITY),
     clientId: pick(runtime.oidcClientId, import.meta.env.VITE_OIDC_CLIENT_ID),
@@ -52,3 +73,15 @@ export const config = {
     ),
   },
 };
+
+/** True when the server expects the SPA to perform OIDC auth itself. */
+export const isOidcAuth = config.authMode === 'oidc';
+
+// Diagnostic: make the resolved auth mode visible during boot so mismatches
+// between server-injected config and what the SPA observes are easy to spot.
+// Safe to leave in — logs at most once per page load.
+// eslint-disable-next-line no-console
+console.info(
+  `[runtara] authMode=${config.authMode} tenantId=${config.tenantId ?? '<unset>'}`,
+  window.__RUNTARA_CONFIG__
+);

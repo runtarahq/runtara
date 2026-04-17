@@ -43,7 +43,12 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+        // `index.html` is deliberately excluded from precaching: the Rust
+        // server rewrites it at request time to inject
+        // `window.__RUNTARA_CONFIG__` (including `authMode` / `tenantId`).
+        // A precached copy would pin the first-seen state and stop the SPA
+        // from ever seeing a changed auth mode after a server redeploy.
+        globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
         // Ensure new service worker takes control immediately
         skipWaiting: true,
         clientsClaim: true,

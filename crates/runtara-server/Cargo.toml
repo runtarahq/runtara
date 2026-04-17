@@ -86,6 +86,7 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # JWT authentication
 jsonwebtoken = "9"
+async-trait = "0.1"
 
 # Error handling
 thiserror = "1.0"
@@ -136,3 +137,8 @@ runtara-dsl = { path = "../runtara-dsl" }
 runtara-agents = { path = "../runtara-agents", default-features = false, features = ["integrations", "native"] }
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
 serde_json = "1.0"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["full", "test-util"] }
+rsa = { version = "0.9", features = ["sha2"] }

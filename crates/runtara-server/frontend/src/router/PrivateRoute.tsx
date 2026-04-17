@@ -1,6 +1,7 @@
 import React from 'react';
 import { useAuth } from 'react-oidc-context';
 import { Navigate } from 'react-router';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 
 interface PrivateRouteProps {
   children: React.ReactNode;
@@ -16,6 +17,12 @@ export function PrivateRoute(props: PrivateRouteProps) {
   const { children } = props;
 
   const auth = useAuth();
+
+  // Server handles (or skips) auth upstream in non-OIDC modes, so there's no
+  // login gate to enforce here.
+  if (!isOidcAuth) {
+    return children;
+  }
 
   if (auth.isLoading) {
     return <PageLoader />;

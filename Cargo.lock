@@ -3443,6 +3443,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
  "signature",
  "spki",
  "subtle",
@@ -3682,6 +3683,7 @@ version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum 0.8.8",
  "base64 0.22.1",
  "bytes",
@@ -3707,6 +3709,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
+ "rsa",
  "runtara-agents",
  "runtara-connections",
  "runtara-core",
@@ -3737,6 +3740,7 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

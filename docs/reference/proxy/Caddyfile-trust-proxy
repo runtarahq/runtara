@@ -1,0 +1,46 @@
+# Caddy reference config for RUNTARA AUTH_PROVIDER=trust_proxy.
+#
+# Uses the caddy-security (https://authcrunch.com) plugin to validate incoming
+# JWTs, then proxies to RUNTARA on 127.0.0.1 after stripping all client-supplied
+# auth headers. Fill in the CHANGE ME sections before deploying.
+
+{
+    # caddy-security global auth policy. CHANGE ME: point at your IdP.
+    security {
+        authentication portal runtara {
+            crypto key sign-verify from file /etc/caddy/jwt-verify.pem
+        }
+        authorization policy runtara_guard {
+            set auth url https://idp.example.com/oauth2/authorize  # CHANGE ME
+            allow roles authp/user authp/admin
+            validate bearer header
+            inject headers with claims
+        }
+    }
+}
+
+runtara.example.com {  # CHANGE ME
+    tls /etc/ssl/runtara/fullchain.pem /etc/ssl/runtara/privkey.pem
+
+    # Require a valid JWT on every route.
+    authorize with runtara_guard
+
+    # CRITICAL: strip client-supplied auth headers before setting our own.
+    # caddy-security injects X-Token-User-* from the validated JWT; map one of
+    # those onto X-Forwarded-User for RUNTARA.
+    request_header -Authorization
+    request_header -X-Forwarded-User
+    request_header -X-Forwarded-Email
+    request_header -X-Forwarded-Groups
+    request_header -X-User
+    request_header -X-User-Id
+
+    request_header X-Forwarded-User {http.auth.user.sub}
+    request_header X-Forwarded-Proto https
+
+    reverse_proxy 127.0.0.1:7001 {
+        transport http {
+            read_timeout 3600s
+        }
+    }
+}

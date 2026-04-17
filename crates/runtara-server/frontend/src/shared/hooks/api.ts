@@ -9,6 +9,7 @@ import {
 } from '@tanstack/react-query';
 import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
 
 // Shared interfaces
 interface PaginatedResponse<T = unknown> {
@@ -62,7 +63,7 @@ export function useCustomQuery<TData = unknown>({
   return useQuery<TData, Error, TData, QueryKey>({
     queryKey,
     queryFn: customQueryFn,
-    enabled: !!token && (enabled ?? true),
+    enabled: (!!token || !isOidcAuth) && (enabled ?? true),
     ...customOptions,
   });
 }
@@ -256,7 +257,7 @@ export function useTableQuery<T = unknown>({
   const { data, isFetching, refetch, isLoading } = useQuery({
     queryKey,
     queryFn: customQueryFn,
-    enabled: !!token && (enabled ?? true),
+    enabled: (!!token || !isOidcAuth) && (enabled ?? true),
     ...customOptions,
   });
 

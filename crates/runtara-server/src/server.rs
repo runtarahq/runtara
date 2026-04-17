@@ -560,39 +560,36 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("✓ Redis configuration validated");
 
-    // Initialize JWT authentication (separate audiences for API and MCP)
-    let (api_jwt_config, mcp_jwt_config) = auth::JwtConfig::from_env();
-    println!("✓ JWT config loaded (issuer: {})", api_jwt_config.issuer);
-    if let Some(ref aud) = api_jwt_config.audience {
-        println!("  API audience: {}", aud);
-    }
-    if let Some(ref aud) = mcp_jwt_config.audience {
-        println!("  MCP audience: {}", aud);
-    }
+    // Build the auth providers selected by AUTH_PROVIDER (default: oidc).
+    let auth_providers = auth::AuthProviders::from_env(tenant_id.clone()).await;
+    println!(
+        "✓ Auth provider: {} (API + MCP)",
+        auth_providers.kind.as_str()
+    );
 
-    let jwks_cache = auth::jwks::JwksCache::new(api_jwt_config.jwks_uri.clone()).await;
-    auth::jwks::JwksCache::spawn_refresh_task(jwks_cache.clone(), 3600);
-    println!("✓ JWKS cache initialized");
-
-    // OIDC discovery cache — proxies /.well-known/openid-configuration to issuer with 1h TTL
+    // Read the OIDC issuer for the OIDC discovery cache. In non-oidc modes we still
+    // expose the `.well-known/*` endpoints when an issuer is configured, so MCP clients
+    // that rely on upstream discovery keep working; if unset we fall back to the
+    // configured tenant's public base URL.
+    let oidc_issuer = std::env::var("OAUTH2_ISSUER").unwrap_or_else(|_| {
+        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost".to_string())
+    });
     let oidc_cache = Arc::new(api::handlers::oidc_discovery::OidcDiscoveryCache::new(
-        api_jwt_config.issuer.clone(),
+        oidc_issuer,
     ));
     println!("✓ OIDC discovery cache initialized");
 
     println!("✓ Database connected successfully");
 
-    // Construct auth states — API and MCP have separate audience validation
     let auth_state = auth::AuthState {
-        jwks_cache: jwks_cache.clone(),
-        jwt_config: api_jwt_config,
+        provider: auth_providers.api.clone(),
         pool: pool.clone(),
     };
     let mcp_auth_state = auth::AuthState {
-        jwks_cache,
-        jwt_config: mcp_jwt_config,
+        provider: auth_providers.mcp.clone(),
         pool: pool.clone(),
     };
+    let auth_kind = auth_providers.kind;
 
     // Construct connections crate config and facade.
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls
@@ -1692,6 +1689,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(7002);
     let internal_host = std::env::var("INTERNAL_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let internal_addr = format!("{}:{}", internal_host, internal_port);
+
+    // Safety: refuse to boot in a non-OIDC provider mode on a non-loopback public bind.
+    // Matches the valkey validation pattern above: print the error and exit with a
+    // non-zero status so container orchestrators and systemd surface a clean failure.
+    if let Err(msg) = crate::bind::enforce_loopback_for_unauthenticated(auth_kind, &host) {
+        eprintln!("❌ Configuration error: {msg}");
+        std::process::exit(1);
+    }
 
     // Start public API server
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
