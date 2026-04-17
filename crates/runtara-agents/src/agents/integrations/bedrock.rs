@@ -7,11 +7,9 @@ use crate::connections::RawConnection;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 
-use crate::http::{self, HttpMethod, ResponseType};
-
-use super::errors::{http_status_error, permanent_error};
+use super::errors::permanent_error;
+use super::integration_utils::ProxyHttpClient;
 
 pub use super::types::LlmUsage;
 
@@ -19,6 +17,9 @@ pub use super::types::LlmUsage;
 // Shared helpers
 // ============================================================================
 
+/// Bedrock uses the historical `BEDROCK_MISSING_CONNECTION` code rather
+/// than the shared `*_NO_CONNECTION` taxonomy, preserved for wire
+/// compatibility.
 fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
     connection.as_ref().ok_or_else(|| {
         permanent_error(
@@ -29,17 +30,10 @@ fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnecti
     })
 }
 
-/// Build headers for Bedrock API calls via proxy.
-/// Proxy handles SigV4 signing and credential injection.
-fn bedrock_headers(connection: &RawConnection, content_type: &str) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers.insert("Content-Type".to_string(), content_type.to_string());
-    headers.insert("Accept".to_string(), "application/json".to_string());
-    headers
+/// Create a proxy client with Bedrock's `Accept: application/json` header
+/// already attached. Proxy handles SigV4 signing and credential injection.
+fn bedrock_client<'a>(connection: &'a RawConnection) -> ProxyHttpClient<'a> {
+    ProxyHttpClient::new(connection, "BEDROCK").with_header("Accept", "application/json")
 }
 
 // ============================================================================
@@ -214,41 +208,12 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
     };
 
     // Proxy handles SigV4 signing and resolves the regional endpoint
-    let headers = bedrock_headers(connection, "application/json");
-    let relative_url = format!("/model/{}/invoke", model);
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: relative_url,
-        headers,
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 120000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "BEDROCK",
-            response.status_code as u16,
-            &format!("AWS Bedrock API error: {:?}", response.body),
-            json!({"status_code": response.status_code}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "BEDROCK_INVALID_RESPONSE",
-                "Expected JSON response from Bedrock",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = bedrock_client(connection)
+        .post(format!("/model/{}/invoke", model))
+        .timeout_ms(120_000)
+        .json_body(request_body)
+        .send_json()
+        .map_err(String::from)?;
 
     // Parse response based on model family
     let (text, prompt_tokens, completion_tokens, finish_reason) =
@@ -452,41 +417,12 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         "height": input.height.unwrap_or(1024),
     });
 
-    let headers = bedrock_headers(connection, "application/json");
-    let relative_url = format!("/model/{}/invoke", model);
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: relative_url,
-        headers,
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 180000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "BEDROCK",
-            response.status_code as u16,
-            &format!("AWS Bedrock API error: {:?}", response.body),
-            json!({"status_code": response.status_code}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "BEDROCK_INVALID_RESPONSE",
-                "Expected JSON response from Bedrock",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = bedrock_client(connection)
+        .post(format!("/model/{}/invoke", model))
+        .timeout_ms(180_000)
+        .json_body(request_body)
+        .send_json()
+        .map_err(String::from)?;
 
     let image_data = response_json["artifacts"][0]["base64"]
         .as_str()
@@ -773,41 +709,12 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, St
         request_body["temperature"] = json!(temp);
     }
 
-    let headers = bedrock_headers(connection, "application/json");
-    let relative_url = format!("/model/{}/invoke", model);
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: relative_url,
-        headers,
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 120000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "BEDROCK",
-            response.status_code as u16,
-            &format!("AWS Bedrock API error: {:?}", response.body),
-            json!({"status_code": response.status_code}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "BEDROCK_INVALID_RESPONSE",
-                "Expected JSON response from Bedrock",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = bedrock_client(connection)
+        .post(format!("/model/{}/invoke", model))
+        .timeout_ms(120_000)
+        .json_body(request_body)
+        .send_json()
+        .map_err(String::from)?;
 
     let text = response_json["content"][0]["text"]
         .as_str()
@@ -953,41 +860,12 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         "height": input.height.unwrap_or(1024),
     });
 
-    let headers = bedrock_headers(connection, "application/json");
-    let relative_url = format!("/model/{}/invoke", model);
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: relative_url,
-        headers,
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(request_body),
-        response_type: ResponseType::Json,
-        timeout_ms: 180000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "BEDROCK",
-            response.status_code as u16,
-            &format!("AWS Bedrock API error: {:?}", response.body),
-            json!({"status_code": response.status_code}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "BEDROCK_INVALID_RESPONSE",
-                "Expected JSON response from Bedrock",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = bedrock_client(connection)
+        .post(format!("/model/{}/invoke", model))
+        .timeout_ms(180_000)
+        .json_body(request_body)
+        .send_json()
+        .map_err(String::from)?;
 
     let image_data = response_json["artifacts"][0]["base64"]
         .as_str()
@@ -1083,33 +961,17 @@ pub fn bedrock_invoke_model(
     let content_type = input
         .content_type
         .unwrap_or_else(|| "application/json".to_string());
-    let headers = bedrock_headers(connection, &content_type);
-    let relative_url = format!("/model/{}/invoke", input.model_id);
 
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: relative_url,
-        headers,
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(input.body),
-        response_type: ResponseType::Json,
-        timeout_ms: 180000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "BEDROCK",
-            response.status_code as u16,
-            &format!("AWS Bedrock API error: {:?}", response.body),
-            json!({"status_code": response.status_code}),
-        ));
-    }
+    let response = bedrock_client(connection)
+        .post(format!("/model/{}/invoke", input.model_id))
+        .header("Content-Type", &content_type)
+        .timeout_ms(180_000)
+        .json_body(input.body)
+        .send_raw()
+        .map_err(String::from)?;
 
     let body = match response.body {
-        http::HttpResponseBody::Json(v) => v,
+        crate::http::HttpResponseBody::Json(v) => v,
         _ => {
             return Err(permanent_error(
                 "BEDROCK_INVALID_RESPONSE",
@@ -1160,40 +1022,11 @@ pub fn bedrock_list_models(
 ) -> Result<BedrockListModelsOutput, String> {
     let connection = require_connection(&input._connection)?;
 
-    let headers = bedrock_headers(connection, "application/json");
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Get,
-        url: "/foundation-models".to_string(),
-        headers,
-        query_parameters: HashMap::new(),
-        body: http::HttpBody(Value::Null),
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        return Err(http_status_error(
-            "BEDROCK",
-            response.status_code as u16,
-            &format!("AWS Bedrock API error: {:?}", response.body),
-            json!({"status_code": response.status_code}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => {
-            return Err(permanent_error(
-                "BEDROCK_INVALID_RESPONSE",
-                "Expected JSON response from Bedrock",
-                json!({}),
-            ));
-        }
-    };
+    let response_json = bedrock_client(connection)
+        .get("/foundation-models")
+        .timeout_ms(30_000)
+        .send_json()
+        .map_err(String::from)?;
 
     let model_summaries = response_json["modelSummaries"]
         .as_array()
