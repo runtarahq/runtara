@@ -1,18 +1,12 @@
 import * as ManagementAPI from '@/generated/RuntaraManagementApi.ts';
 import * as RuntimeAPI from '@/generated/RuntaraRuntimeApi.ts';
+import { config } from '@/shared/config/runtimeConfig';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
 import { useMaintenanceStore } from '@/shared/stores/maintenanceStore.ts';
 
-// Validate required environment variables at startup
-const API_BASE_URL = import.meta.env.VITE_RUNTARA_API_BASE_URL as
-  | string
-  | undefined;
-if (!API_BASE_URL) {
-  throw new Error(
-    'Missing required environment variable: VITE_RUNTARA_API_BASE_URL. ' +
-      'Check your .env file or deployment configuration.'
-  );
-}
+// Resolve the API base URL. When unset (typical for the embedded UI where the
+// API is same-origin), we use relative URLs and let the browser resolve them.
+const API_BASE_URL = config.apiBaseUrl;
 
 /**
  * Management API client - single shared instance

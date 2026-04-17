@@ -1,7 +1,7 @@
 import { ManagementAPIClient } from '@/shared/queries';
 import { useMaintenanceStore } from '@/shared/stores/maintenanceStore';
 import { useState } from 'react';
-import logoIcon from '@/assets/logo/logo-icon.png';
+import logoIcon from '@/assets/logo/runtara-logo-icon.svg';
 
 export function MaintenancePage() {
   const setMaintenanceMode = useMaintenanceStore((s) => s.setMaintenanceMode);
@@ -29,7 +29,7 @@ export function MaintenancePage() {
       <div className="relative z-10 w-full max-w-lg text-center">
         {/* Logo */}
         <div className="mb-10 flex justify-center">
-          <img src={logoIcon} alt="SyncMyOrders" className="h-12 w-12" />
+          <img src={logoIcon} alt="Runtara" className="h-12 w-12" />
         </div>
 
         {/* Card */}

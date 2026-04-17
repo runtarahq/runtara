@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
  * Scenario Lifecycle E2E Test
  *
  * API-driven test through the gateway exercising the full stack:
- * Gateway(:8080) JWT validation → routing → smo-runtime(:7001) → PostgreSQL → compilation → execution
+ * Gateway(:8080) JWT validation → routing → runtara-server(:7001) → PostgreSQL → compilation → execution
  *
  * Flow: create → add step → compile v2 → activate v2 → add second step →
  *       compile v3 → activate v3 → execute → verify → delete

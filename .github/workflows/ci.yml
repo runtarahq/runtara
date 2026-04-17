@@ -25,11 +25,24 @@ jobs:
           cache: true
           cache-workspaces: ". -> target"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Build frontend (embedded UI)
+        working-directory: crates/runtara-server/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features runtara-server/embed-ui -- -D warnings
 
   build:
     runs-on: ubuntu-latest
@@ -45,8 +58,21 @@ jobs:
           cache: true
           cache-workspaces: ". -> target"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/runtara-server/frontend/.node-version
+          cache: npm
+          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+
+      - name: Build frontend (embedded UI)
+        working-directory: crates/runtara-server/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --features runtara-server/embed-ui
 
       - name: Save build cache
         uses: actions/cache/save@v4

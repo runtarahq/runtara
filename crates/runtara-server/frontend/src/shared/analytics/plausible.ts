@@ -1,3 +1,5 @@
+import { config } from '@/shared/config/runtimeConfig';
+
 type PlausibleFn = ((event: string, options?: { props?: Record<string, unknown> }) => void) & {
   q?: unknown[];
 };
@@ -9,11 +11,10 @@ declare global {
 }
 
 export function initAnalytics(): void {
-  const domain = import.meta.env.VITE_RUNTARA_PLAUSIBLE_DOMAIN?.trim();
+  const domain = config.plausible.domain;
   if (!domain) return;
 
-  const host =
-    import.meta.env.VITE_RUNTARA_PLAUSIBLE_HOST?.trim() || 'https://plausible.io';
+  const host = config.plausible.host || 'https://plausible.io';
 
   // Queue early events until the script loads.
   if (!window.plausible) {

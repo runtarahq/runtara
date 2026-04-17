@@ -1,7 +1,7 @@
 # Brand assets
 
-These logo/icon PNGs were inherited from the SyncMyOrders source tree and
-still carry its branding. Replace with Runtara artwork before a public release.
+These legacy logo/icon PNGs still carry the prior project's branding.
+Replace with Runtara artwork before a public release.
 
 Files to replace:
 

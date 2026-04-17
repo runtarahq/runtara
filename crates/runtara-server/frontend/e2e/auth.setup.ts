@@ -17,7 +17,7 @@ const __dirnameLocal = path.dirname(__filename);
  * - TEST_APP_CLIENT_ID: Auth0 application client ID for testing
  * - TEST_APP_CLIENT_SECRET: Auth0 application client secret
  * - TEST_ORG_ID: Auth0 organization ID
- * - VITE_OIDC_AUTHORITY: Auth0 domain (e.g., "https://auth.syncmyorders.com")
+ * - VITE_OIDC_AUTHORITY: OIDC issuer URL (e.g., "https://your-tenant.auth0.com")
  * - VITE_OIDC_AUDIENCE: Auth0 API audience
  * - VITE_OIDC_CLIENT_ID: The app's own client ID (used for localStorage key)
  */

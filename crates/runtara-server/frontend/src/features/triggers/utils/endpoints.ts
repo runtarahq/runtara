@@ -1,12 +1,11 @@
+import { config } from '@/shared/config/runtimeConfig';
+
 export function getHttpTriggerUrl(
   triggerId: string,
   tenantId: string,
   eventType: string = 'http'
 ): string {
-  const baseUrl = (import.meta.env.VITE_RUNTARA_API_BASE_URL as string).replace(
-    /\/$/,
-    ''
-  );
+  const baseUrl = config.apiBaseUrl.replace(/\/$/, '');
   return `${baseUrl}/api/events/${tenantId}/${eventType}/${triggerId}/my-action`;
 }
 
@@ -21,9 +20,6 @@ export function getChannelWebhookUrl(
   connectionId: string,
   platform: string = 'telegram'
 ): string {
-  const baseUrl = (import.meta.env.VITE_RUNTARA_API_BASE_URL as string).replace(
-    /\/$/,
-    ''
-  );
+  const baseUrl = config.apiBaseUrl.replace(/\/$/, '');
   return `${baseUrl}/api/events/${tenantId}/webhook/${platform}/${connectionId}`;
 }

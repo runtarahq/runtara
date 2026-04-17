@@ -258,7 +258,7 @@ npm run test:coverage # Run tests with coverage report
 
    ```bash
    git clone <repository-url>
-   cd syncmyorders-frontend
+   cd runtara/crates/runtara-server/frontend
    ```
 
 2. **Install dependencies**

@@ -16,7 +16,7 @@ import {
   useSidebar,
 } from '@/shared/components/ui/sidebar.tsx';
 import { menu } from '@/shared/config';
-import Logo from '@/assets/logo/logo-icon.png';
+import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
 import { checkUserGroup } from '@/lib/utils.ts';
@@ -50,11 +50,11 @@ function HeaderMenu() {
     <SidebarMenuButton size="lg" asChild>
       <Link className="flex items-center gap-2" to="/">
         <div className="flex aspect-square size-8 items-center justify-center rounded-sm text-sidebar-primary-foreground">
-          <img src={Logo} alt="SyncMyOrders logo" />
+          <img src={Logo} alt="Runtara logo" />
         </div>
         <div className="grid flex-1 text-left leading-tight group-data-[collapsible=icon]:hidden">
           <span className="truncate text-lg font-semibold text-slate-900/90 dark:text-slate-100">
-            SyncMyOrders
+            Runtara
           </span>
           <span
             role="link"
@@ -81,7 +81,6 @@ function HeaderMenu() {
               }
             }}
           >
-            powered by <span className="font-bold text-amber-500">runtara</span>
           </span>
         </div>
       </Link>

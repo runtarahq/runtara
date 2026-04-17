@@ -57,7 +57,9 @@ bytes = "1"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 
 # Optional: embedded UI assets (`embed-ui` feature)
-rust-embed = { version = "8", features = ["debug-embed", "mime-guess"], optional = true }
+# Debug builds read from disk (no `debug-embed`): `npm run build` changes are picked up
+# on the next HTTP request without a Rust rebuild. Release builds embed.
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

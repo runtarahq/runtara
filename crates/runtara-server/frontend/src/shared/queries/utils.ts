@@ -1,3 +1,4 @@
+import { config } from '@/shared/config/runtimeConfig';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
 
 /**
@@ -17,10 +18,9 @@ export const createAuthHeaders = (token: string) => ({
  * Respects the VITE_STRIP_ORG_ID env var for local development.
  */
 export function getRuntimeBaseUrl(): string {
-  const base = import.meta.env.VITE_RUNTARA_API_BASE_URL as string;
-  if (!base) throw new Error('VITE_RUNTARA_API_BASE_URL is not configured');
+  const base = config.apiBaseUrl.replace(/\/$/, '');
   const stripOrgId = import.meta.env.VITE_STRIP_ORG_ID === 'true';
   const orgId = useAuthStore.getState().orgId;
   const orgSegment = orgId && !stripOrgId ? `/${orgId}` : '';
-  return `${base.replace(/\/$/, '')}/api/runtime${orgSegment}`;
+  return `${base}/api/runtime${orgSegment}`;
 }

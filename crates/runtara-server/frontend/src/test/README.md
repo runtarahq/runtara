@@ -1,6 +1,6 @@
-# Testing Guide for SyncMyOrders Frontend
+# Testing Guide for Runtara Frontend
 
-This guide provides information on how to write, run, and maintain tests for the SyncMyOrders frontend application.
+This guide provides information on how to write, run, and maintain tests for the Runtara frontend application.
 
 ## Running Tests
 

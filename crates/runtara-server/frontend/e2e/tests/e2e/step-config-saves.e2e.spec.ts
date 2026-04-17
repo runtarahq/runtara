@@ -15,7 +15,7 @@ import { fileURLToPath } from 'url';
  *
  * Uses runtime API directly (X-Org-Id header) for scenario CRUD.
  *
- * Requires: smo-runtime on :7001 with PostgreSQL
+ * Requires: runtara-server on :7001 with PostgreSQL
  */
 
 const __filename = fileURLToPath(import.meta.url);

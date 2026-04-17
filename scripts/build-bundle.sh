@@ -98,6 +98,31 @@ resolve_versions() {
     info "Target dir:      ${TARGET_DIR}"
 }
 
+# ─── Build frontend ──────────────────────────────────────────────────────────
+
+build_frontend() {
+    local frontend_dir="${ROOT_DIR}/crates/runtara-server/frontend"
+    local dist_index="${frontend_dir}/dist/index.html"
+
+    if [ "$SKIP_BUILD" = "1" ]; then
+        if [ ! -f "$dist_index" ]; then
+            echo "Error: --skip-build but ${dist_index} not found" >&2
+            echo "Run (cd ${frontend_dir} && npm ci && npm run build) first." >&2
+            exit 1
+        fi
+        info "Skipping frontend build (--skip-build), using existing ${dist_index}"
+        return
+    fi
+
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "Error: npm not found. Install Node.js to build the embedded UI." >&2
+        exit 1
+    fi
+
+    step "Building frontend (embedded UI)"
+    (cd "$frontend_dir" && npm ci --no-audit --no-fund && npm run build)
+}
+
 # ─── Build runtara-server ────────────────────────────────────────────────────
 
 build_server() {
@@ -110,8 +135,8 @@ build_server() {
         return
     fi
 
-    step "Building runtara-server (release)"
-    cargo build --release -p runtara-server
+    step "Building runtara-server (release, with embed-ui)"
+    cargo build --release -p runtara-server --features embed-ui
 }
 
 # ─── Build workflow stdlib ───────────────────────────────────────────────────
@@ -348,6 +373,7 @@ main() {
 
     detect_platform
     resolve_versions
+    build_frontend
     build_server
     build_stdlib
     download_wasmtime

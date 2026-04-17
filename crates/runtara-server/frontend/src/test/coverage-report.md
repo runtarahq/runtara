@@ -2,7 +2,7 @@
 
 ## Overview
 
-This report identifies test coverage gaps in the SyncMyOrders frontend application. Currently, the project has minimal test coverage with only one test file (`src/utils/string-utils.test.ts`) for basic string utility functions. This represents a significant gap in test coverage across the codebase.
+This report identifies test coverage gaps in the Runtara frontend application. Currently, the project has minimal test coverage with only one test file (`src/utils/string-utils.test.ts`) for basic string utility functions. This represents a significant gap in test coverage across the codebase.
 
 ## Test Coverage Gaps
 
@@ -179,6 +179,6 @@ This report identifies test coverage gaps in the SyncMyOrders frontend applicati
 
 ## Conclusion
 
-The SyncMyOrders frontend application has significant test coverage gaps across components, hooks, stores, and utilities. By implementing the recommended testing strategies, the team can improve code quality, reduce bugs, and make the codebase more maintainable.
+The Runtara frontend application has significant test coverage gaps across components, hooks, stores, and utilities. By implementing the recommended testing strategies, the team can improve code quality, reduce bugs, and make the codebase more maintainable.
 
 Starting with simple, high-impact tests for critical components and hooks will provide the most immediate value. Over time, expanding test coverage to include more complex scenarios and integration tests will build a robust testing foundation for the application.
