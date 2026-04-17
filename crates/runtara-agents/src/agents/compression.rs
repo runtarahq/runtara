@@ -874,8 +874,8 @@ mod tests {
         assert_eq!(err.code, "ARCHIVE_FILE_NOT_FOUND");
         assert!(err.message.contains("not found"));
         assert_eq!(
-            err.attributes.get("file_path"),
-            Some(&"nonexistent.txt".to_string())
+            err.attributes.get("file_path").and_then(|v| v.as_str()),
+            Some("nonexistent.txt")
         );
     }
 

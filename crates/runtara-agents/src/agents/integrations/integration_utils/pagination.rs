@@ -16,7 +16,7 @@
 
 use serde_json::Value;
 
-use super::error::IntegrationError;
+use crate::types::{self, AgentError};
 
 /// Describes how to locate items and the next-page cursor in a response body.
 #[derive(Debug, Clone)]
@@ -52,14 +52,14 @@ pub struct Page<T> {
 /// Extract items and the next-page cursor from a response body.
 ///
 /// `map_item` is applied to each raw JSON item (edge.node / result element /
-/// data element) and may itself return an `IntegrationError`.
+/// data element) and may itself return an `AgentError`.
 pub fn extract_page<T, F>(
     response: Value,
     cursor: &PageCursor,
     mut map_item: F,
-) -> Result<Page<T>, IntegrationError>
+) -> Result<Page<T>, AgentError>
 where
-    F: FnMut(&Value) -> Result<T, IntegrationError>,
+    F: FnMut(&Value) -> Result<T, AgentError>,
 {
     match cursor {
         PageCursor::GraphqlPageInfo { path } => extract_graphql_page(response, path, &mut map_item),
@@ -74,40 +74,35 @@ fn extract_graphql_page<T, F>(
     response: Value,
     path: &[&'static str],
     map_item: &mut F,
-) -> Result<Page<T>, IntegrationError>
+) -> Result<Page<T>, AgentError>
 where
-    F: FnMut(&Value) -> Result<T, IntegrationError>,
+    F: FnMut(&Value) -> Result<T, AgentError>,
 {
     let mut cursor_node: &Value = &response;
     for segment in path {
-        cursor_node =
-            cursor_node
-                .get(segment)
-                .ok_or_else(|| IntegrationError::Deserialization {
-                    prefix: "GRAPHQL",
-                    message: format!(
-                        "missing path segment '{}' while walking to connection",
-                        segment
-                    ),
-                })?;
+        cursor_node = cursor_node.get(segment).ok_or_else(|| {
+            types::http::deserialization(
+                "GRAPHQL",
+                format!(
+                    "missing path segment '{}' while walking to connection",
+                    segment
+                ),
+            )
+        })?;
     }
 
     let edges = cursor_node
         .get("edges")
         .and_then(|e| e.as_array())
-        .ok_or_else(|| IntegrationError::Deserialization {
-            prefix: "GRAPHQL",
-            message: "expected `edges` array on connection".to_string(),
+        .ok_or_else(|| {
+            types::http::deserialization("GRAPHQL", "expected `edges` array on connection")
         })?;
 
     let mut items = Vec::with_capacity(edges.len());
     for edge in edges {
         let node = edge
             .get("node")
-            .ok_or_else(|| IntegrationError::Deserialization {
-                prefix: "GRAPHQL",
-                message: "missing `node` on edge".to_string(),
-            })?;
+            .ok_or_else(|| types::http::deserialization("GRAPHQL", "missing `node` on edge"))?;
         items.push(map_item(node)?);
     }
 
@@ -128,20 +123,14 @@ where
     Ok(Page { items, next_cursor })
 }
 
-fn extract_paging_envelope<T, F>(
-    response: Value,
-    map_item: &mut F,
-) -> Result<Page<T>, IntegrationError>
+fn extract_paging_envelope<T, F>(response: Value, map_item: &mut F) -> Result<Page<T>, AgentError>
 where
-    F: FnMut(&Value) -> Result<T, IntegrationError>,
+    F: FnMut(&Value) -> Result<T, AgentError>,
 {
     let results = response
         .get("results")
         .and_then(|r| r.as_array())
-        .ok_or_else(|| IntegrationError::Deserialization {
-            prefix: "PAGING",
-            message: "expected `results` array".to_string(),
-        })?;
+        .ok_or_else(|| types::http::deserialization("PAGING", "expected `results` array"))?;
 
     let mut items = Vec::with_capacity(results.len());
     for v in results {
@@ -163,16 +152,15 @@ fn extract_has_more<T, F>(
     data_key: &str,
     id_key: &str,
     map_item: &mut F,
-) -> Result<Page<T>, IntegrationError>
+) -> Result<Page<T>, AgentError>
 where
-    F: FnMut(&Value) -> Result<T, IntegrationError>,
+    F: FnMut(&Value) -> Result<T, AgentError>,
 {
     let data = response
         .get(data_key)
         .and_then(|d| d.as_array())
-        .ok_or_else(|| IntegrationError::Deserialization {
-            prefix: "PAGING",
-            message: format!("expected `{}` array", data_key),
+        .ok_or_else(|| {
+            types::http::deserialization("PAGING", format!("expected `{}` array", data_key))
         })?;
 
     let mut items = Vec::with_capacity(data.len());
@@ -269,9 +257,7 @@ mod tests {
             |_| Ok(String::new()),
         )
         .unwrap_err();
-        let s = err.into_structured();
-        let v: Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["code"], "GRAPHQL_INVALID_RESPONSE");
+        assert_eq!(err.code, "GRAPHQL_INVALID_RESPONSE");
     }
 
     #[test]
@@ -350,14 +336,9 @@ mod tests {
     fn map_item_errors_propagate() {
         let resp = json!({"results": [{"id": "1"}]});
         let err = extract_page::<String, _>(resp, &PageCursor::PagingEnvelope, |_| {
-            Err(IntegrationError::Deserialization {
-                prefix: "TEST",
-                message: "bad".into(),
-            })
+            Err(types::http::deserialization("TEST", "bad"))
         })
         .unwrap_err();
-        let s = err.into_structured();
-        let v: Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["code"], "TEST_INVALID_RESPONSE");
+        assert_eq!(err.code, "TEST_INVALID_RESPONSE");
     }
 }

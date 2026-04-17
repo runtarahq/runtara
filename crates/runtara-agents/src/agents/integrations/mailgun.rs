@@ -3,11 +3,11 @@
 //! Send emails via the Mailgun REST API.
 
 use crate::connections::RawConnection;
+use crate::types::{AgentError, attrs};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use super::integration_utils::{IntegrationError, ProxyHttpClient, require_connection};
+use super::integration_utils::{ProxyHttpClient, require_connection};
 
 // ============================================================================
 // Send Email
@@ -97,19 +97,19 @@ pub struct SendEmailOutput {
     module_integration_ids = "mailgun",
     module_secure = true
 )]
-pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, String> {
+pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, AgentError> {
     let connection = require_connection("MAILGUN", &input._connection)?;
 
     // `domain` is a non-credential config param needed for path building
     // and the default sender address.
-    let domain =
-        connection.parameters["domain"]
-            .as_str()
-            .ok_or(IntegrationError::MissingField {
-                prefix: "MAILGUN",
-                field: "domain",
-                payload: json!({}),
-            })?;
+    let domain = connection.parameters["domain"].as_str().ok_or_else(|| {
+        AgentError::permanent(
+            "MAILGUN_MISSING_FIELD",
+            "MAILGUN connection parameters missing required field: domain",
+        )
+        .with_attr(attrs::INTEGRATION, "MAILGUN")
+        .with_attr(attrs::FIELD, "domain")
+    })?;
 
     let from = input.from.unwrap_or_else(|| format!("noreply@{}", domain));
 

@@ -9,12 +9,10 @@
 
 pub mod client;
 pub mod connection;
-pub mod error;
 pub mod pagination;
 pub mod url;
 
 pub use client::{DEFAULT_TIMEOUT_MS, ProxyHttpClient, ProxyRequest};
 pub use connection::require_connection;
-pub use error::{ErrorCategory, IntegrationError};
 pub use pagination::{Page, PageCursor, extract_page};
 pub use url::urlencoded;

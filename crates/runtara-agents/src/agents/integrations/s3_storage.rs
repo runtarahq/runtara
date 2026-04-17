@@ -9,11 +9,11 @@
 //! server-side by the HTTP proxy -- the agent only passes the connection_id.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::errors::permanent_error;
 use super::s3_client::S3Client;
 
 // ============================================================================
@@ -31,7 +31,7 @@ fn get_clients() -> &'static RwLock<HashMap<String, Arc<S3Client>>> {
     S3_CLIENTS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn get_or_create_s3_client(connection: &RawConnection) -> Result<Arc<S3Client>, String> {
+fn get_or_create_s3_client(connection: &RawConnection) -> Result<Arc<S3Client>, AgentError> {
     let cache_key = connection.connection_id.clone();
 
     // Check cache
@@ -60,13 +60,13 @@ fn get_or_create_s3_client(connection: &RawConnection) -> Result<Arc<S3Client>, 
     Ok(client)
 }
 
-fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
+fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, AgentError> {
     connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "S3_MISSING_CONNECTION",
             "No S3 connection configured. Add an s3_compatible connection to this step.",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })
 }
 
@@ -108,7 +108,7 @@ pub struct CreateBucketOutput {
     module_integration_ids = "s3_compatible",
     side_effects = true
 )]
-pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, String> {
+pub fn storage_create_bucket(input: CreateBucketInput) -> Result<CreateBucketOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -158,7 +158,7 @@ pub struct ListBucketsOutput {
     module_supports_connections = true,
     module_integration_ids = "s3_compatible"
 )]
-pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, String> {
+pub fn storage_list_buckets(input: ListBucketsInput) -> Result<ListBucketsOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -218,7 +218,7 @@ pub struct DeleteBucketOutput {
     module_integration_ids = "s3_compatible",
     side_effects = true
 )]
-pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, String> {
+pub fn storage_delete_bucket(input: DeleteBucketInput) -> Result<DeleteBucketOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -318,7 +318,7 @@ const MAX_UPLOAD_SIZE: usize = 50 * 1024 * 1024;
     module_integration_ids = "s3_compatible",
     side_effects = true
 )]
-pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, String> {
+pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -328,11 +328,8 @@ pub fn storage_upload_file(input: UploadFileInput) -> Result<UploadFileOutput, S
         base64::engine::general_purpose::STANDARD
             .decode(&input.content)
             .map_err(|e| {
-                permanent_error(
-                    "S3_INVALID_CONTENT",
-                    &format!("Invalid base64: {}", e),
-                    json!({}),
-                )
+                AgentError::permanent("S3_INVALID_CONTENT", format!("Invalid base64: {}", e))
+                    .with_attrs(json!({}))
             })?
     } else {
         input.content.into_bytes()
@@ -431,7 +428,7 @@ pub struct DownloadFileOutput {
     module_supports_connections = true,
     module_integration_ids = "s3_compatible"
 )]
-pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, String> {
+pub fn storage_download_file(input: DownloadFileInput) -> Result<DownloadFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -542,7 +539,7 @@ pub struct ListFilesOutput {
     module_supports_connections = true,
     module_integration_ids = "s3_compatible"
 )]
-pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, String> {
+pub fn storage_list_files(input: ListFilesInput) -> Result<ListFilesOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -629,7 +626,7 @@ pub struct GetFileInfoOutput {
     module_supports_connections = true,
     module_integration_ids = "s3_compatible"
 )]
-pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, String> {
+pub fn storage_get_file_info(input: GetFileInfoInput) -> Result<GetFileInfoOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -688,7 +685,7 @@ pub struct DeleteFileOutput {
     module_integration_ids = "s3_compatible",
     side_effects = true
 )]
-pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, String> {
+pub fn storage_delete_file(input: DeleteFileInput) -> Result<DeleteFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 
@@ -745,7 +742,7 @@ pub struct CopyFileOutput {
     module_integration_ids = "s3_compatible",
     side_effects = true
 )]
-pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, String> {
+pub fn storage_copy_file(input: CopyFileInput) -> Result<CopyFileOutput, AgentError> {
     let conn = require_connection(&input._connection)?;
     let client = get_or_create_s3_client(conn)?;
 

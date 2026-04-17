@@ -4,11 +4,11 @@
 //! Supports GPT-4, GPT-4o, DALL-E, and other OpenAI models.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::errors::permanent_error;
 use super::integration_utils::ProxyHttpClient;
 pub use super::types::LlmUsage;
 
@@ -18,13 +18,10 @@ pub use super::types::LlmUsage;
 
 /// OpenAI uses the historical `OPENAI_MISSING_CONNECTION` code rather than
 /// the shared `*_NO_CONNECTION` taxonomy, preserved for wire compatibility.
-fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
+fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, AgentError> {
     connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "OPENAI_MISSING_CONNECTION",
-            "OpenAI connection is required",
-            json!({}),
-        )
+        AgentError::permanent("OPENAI_MISSING_CONNECTION", "OpenAI connection is required")
+            .with_attrs(json!({}))
     })
 }
 
@@ -35,13 +32,12 @@ fn openai_post_json(
     path: &str,
     body: Value,
     timeout_ms: u64,
-) -> Result<Value, String> {
+) -> Result<Value, AgentError> {
     ProxyHttpClient::new(connection, "OPENAI")
         .post(path.to_string())
         .timeout_ms(timeout_ms)
         .json_body(body)
         .send_json()
-        .map_err(String::from)
 }
 
 // ============================================================================
@@ -150,7 +146,7 @@ pub struct TextCompletionOutput {
     module_integration_ids = "openai_api_key",
     module_secure = true
 )]
-pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, String> {
+pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     // Build messages array
@@ -201,11 +197,11 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
     let text = response_json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing content in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?
         .to_string();
 
@@ -351,7 +347,7 @@ pub struct ImageGenerationOutput {
     display_name = "Image Generation (OpenAI)",
     description = "Generate images using OpenAI DALL-E models"
 )]
-pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, String> {
+pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let model = input.model.unwrap_or_else(|| "dall-e-3".to_string());
@@ -388,11 +384,11 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
     let image_data = response_json["data"][0]["b64_json"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing b64_json in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?
         .to_string();
 
@@ -483,7 +479,9 @@ pub struct StructuredOutputOutput {
     display_name = "Structured Output (OpenAI)",
     description = "Generate structured JSON output using OpenAI models with schema validation"
 )]
-pub fn structured_output(input: StructuredOutputInput) -> Result<StructuredOutputOutput, String> {
+pub fn structured_output(
+    input: StructuredOutputInput,
+) -> Result<StructuredOutputOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     // Build messages array
@@ -517,19 +515,19 @@ pub fn structured_output(input: StructuredOutputInput) -> Result<StructuredOutpu
     let content = response_json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing content in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?;
 
     let output: Value = serde_json::from_str(content).map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "OPENAI_INVALID_RESPONSE",
-            &format!("Failed to parse structured output: {}", e),
-            json!({"content": content, "error": e.to_string()}),
+            format!("Failed to parse structured output: {}", e),
         )
+        .with_attrs(json!({"content": content, "error": e.to_string()}))
     })?;
 
     let model = response_json["model"]
@@ -636,16 +634,16 @@ pub struct VisionToTextOutput {
     display_name = "Vision to Text (OpenAI)",
     description = "Analyze images and generate text descriptions using OpenAI vision models"
 )]
-pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, String> {
+pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     // Ensure we have either image_data or image_url
     if input.image_data.is_none() && input.image_url.is_none() {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "OPENAI_INVALID_INPUT",
             "Either image_data or image_url is required",
-            json!({}),
-        ));
+        )
+        .with_attrs(json!({})));
     }
 
     // Build content array with text and image
@@ -694,11 +692,11 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, St
     let text = response_json["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing content in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?
         .to_string();
 
@@ -821,7 +819,7 @@ pub struct VisionToImageOutput {
     display_name = "Vision to Image (OpenAI)",
     description = "Edit and manipulate images using OpenAI DALL-E models"
 )]
-pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, String> {
+pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     // OpenAI image editing requires multipart/form-data
@@ -855,11 +853,11 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
     let image_data = response_json["data"][0]["b64_json"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing b64_json in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?
         .to_string();
 
@@ -995,7 +993,7 @@ pub struct OpenaiChatCompletionOutput {
 )]
 pub fn openai_chat_completion(
     input: OpenaiChatCompletionInput,
-) -> Result<OpenaiChatCompletionOutput, String> {
+) -> Result<OpenaiChatCompletionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let model = input.model.unwrap_or_else(|| "gpt-4".to_string());
@@ -1053,11 +1051,11 @@ pub fn openai_chat_completion(
     let choices = response_json["choices"]
         .as_array()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing choices in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?
         .clone();
 
@@ -1137,7 +1135,7 @@ pub struct OpenaiCreateEmbeddingOutput {
 )]
 pub fn openai_create_embedding(
     input: OpenaiCreateEmbeddingInput,
-) -> Result<OpenaiCreateEmbeddingOutput, String> {
+) -> Result<OpenaiCreateEmbeddingOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let request_body = json!({
@@ -1150,11 +1148,8 @@ pub fn openai_create_embedding(
     let data = response_json["data"]
         .as_array()
         .ok_or_else(|| {
-            permanent_error(
-                "OPENAI_INVALID_RESPONSE",
-                "Missing data in OpenAI response",
-                json!({"response": response_json}),
-            )
+            AgentError::permanent("OPENAI_INVALID_RESPONSE", "Missing data in OpenAI response")
+                .with_attrs(json!({"response": response_json}))
         })?
         .clone();
 
@@ -1219,7 +1214,7 @@ pub struct OpenaiModerateContentOutput {
 )]
 pub fn openai_moderate_content(
     input: OpenaiModerateContentInput,
-) -> Result<OpenaiModerateContentOutput, String> {
+) -> Result<OpenaiModerateContentOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let request_body = json!({
@@ -1232,11 +1227,11 @@ pub fn openai_moderate_content(
     let results = response_json["results"]
         .as_array()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "OPENAI_INVALID_RESPONSE",
                 "Missing results in OpenAI response",
-                json!({"response": response_json}),
             )
+            .with_attrs(json!({"response": response_json}))
         })?
         .clone();
 

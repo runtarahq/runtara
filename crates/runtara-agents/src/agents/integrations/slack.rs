@@ -4,51 +4,54 @@
 
 use crate::connections::RawConnection;
 use crate::http::{self, BodyType, HttpBody, HttpMethod, ResponseType};
+use crate::types::{self, AgentError, ErrorCategory, attrs};
 use base64::Engine;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use super::errors::{http_status_error, permanent_error};
-use super::integration_utils::{self as iu, ProxyHttpClient};
+use super::integration_utils::{ProxyHttpClient, require_connection};
 
 // ============================================================================
 // Shared helpers
 // ============================================================================
 
-/// Extract the connection reference, required for all Slack operations.
-fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
-    iu::require_connection("SLACK", connection).map_err(String::from)
-}
-
 /// Call a Slack Web API method (JSON POST) and return the parsed response.
 /// Handles Slack's "200 OK with `ok: false`" error pattern — the per-Slack-
 /// error-code mapping stays local to preserve the Slack-specific wire
 /// contract (e.g. `SLACK_CHANNEL_NOT_FOUND`).
-fn slack_api_call(method: &str, connection: &RawConnection, body: Value) -> Result<Value, String> {
+fn slack_api_call(
+    method: &str,
+    connection: &RawConnection,
+    body: Value,
+) -> Result<Value, AgentError> {
     let response_json = ProxyHttpClient::new(connection, "SLACK")
         .post(format!("/api/{}", method))
         .header("Content-Type", "application/json; charset=utf-8")
         .json_body(body)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     if response_json["ok"].as_bool() != Some(true) {
-        let error = response_json["error"].as_str().unwrap_or("unknown_error");
-        let msg = format!("Slack API error ({}): {}", method, error);
-        let attrs = json!({"error": error, "method": method, "response": response_json});
-
-        return Err(match error {
-            "ratelimited" => super::errors::transient_error("SLACK_RATE_LIMITED", &msg, attrs),
-            "channel_not_found" => permanent_error("SLACK_CHANNEL_NOT_FOUND", &msg, attrs),
-            "not_in_channel" => permanent_error("SLACK_NOT_IN_CHANNEL", &msg, attrs),
-            "is_archived" => permanent_error("SLACK_CHANNEL_ARCHIVED", &msg, attrs),
+        let slack_code = response_json["error"]
+            .as_str()
+            .unwrap_or("unknown_error")
+            .to_string();
+        let msg = format!("Slack API error ({}): {}", method, slack_code);
+        let (code_suffix, category) = match slack_code.as_str() {
+            "ratelimited" => ("RATE_LIMITED", ErrorCategory::Transient),
+            "channel_not_found" => ("CHANNEL_NOT_FOUND", ErrorCategory::Permanent),
+            "not_in_channel" => ("NOT_IN_CHANNEL", ErrorCategory::Permanent),
+            "is_archived" => ("CHANNEL_ARCHIVED", ErrorCategory::Permanent),
             "invalid_auth" | "account_inactive" | "token_revoked" => {
-                permanent_error("SLACK_AUTH_ERROR", &msg, attrs)
+                ("AUTH_ERROR", ErrorCategory::Permanent)
             }
-            _ => permanent_error("SLACK_API_ERROR", &msg, attrs),
-        });
+            _ => ("API_ERROR", ErrorCategory::Permanent),
+        };
+        return Err(types::http::domain("SLACK", code_suffix, category, msg)
+            .with_attr("error", slack_code)
+            .with_attr("method", method.to_string())
+            .with_attr_value("response", response_json));
     }
 
     Ok(response_json)
@@ -142,8 +145,8 @@ pub struct SendMessageOutput {
     module_integration_ids = "slack_bot",
     module_secure = true
 )]
-pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, String> {
-    let connection = require_connection(&input._connection)?;
+pub fn send_message(input: SendMessageInput) -> Result<SendMessageOutput, AgentError> {
+    let connection = require_connection("SLACK", &input._connection)?;
 
     let mut body = json!({
         "channel": input.channel,
@@ -265,18 +268,18 @@ pub struct UploadFileOutput {
     module_integration_ids = "slack_bot",
     module_secure = true
 )]
-pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, String> {
-    let connection = require_connection(&input._connection)?;
+pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, AgentError> {
+    let connection = require_connection("SLACK", &input._connection)?;
 
     // Decode base64 content
     let file_bytes = base64::engine::general_purpose::STANDARD
         .decode(&input.content)
         .map_err(|e| {
-            permanent_error(
+            AgentError::permanent(
                 "SLACK_INVALID_CONTENT",
-                &format!("Invalid base64 file content: {}", e),
-                json!({}),
+                format!("Invalid base64 file content: {}", e),
             )
+            .with_attr(attrs::INTEGRATION, "SLACK")
         })?;
 
     let file_length = file_bytes.len();
@@ -293,19 +296,18 @@ pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, String> {
     let url_resp = slack_api_call("files.getUploadURLExternal", connection, get_url_body)?;
 
     let upload_url = url_resp["upload_url"].as_str().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SLACK_MISSING_UPLOAD_URL",
             "Slack did not return an upload_url",
-            json!({"response": url_resp}),
         )
+        .with_attr(attrs::INTEGRATION, "SLACK")
+        .with_attr_value("response", url_resp.clone())
     })?;
 
     let file_id = url_resp["file_id"].as_str().ok_or_else(|| {
-        permanent_error(
-            "SLACK_MISSING_FILE_ID",
-            "Slack did not return a file_id",
-            json!({"response": url_resp}),
-        )
+        AgentError::permanent("SLACK_MISSING_FILE_ID", "Slack did not return a file_id")
+            .with_attr(attrs::INTEGRATION, "SLACK")
+            .with_attr_value("response", url_resp.clone())
     })?;
 
     // Step 2: Upload raw bytes to the presigned URL
@@ -329,15 +331,21 @@ pub fn upload_file(input: UploadFileInput) -> Result<UploadFileOutput, String> {
         ..Default::default()
     };
 
-    let upload_resp = http::http_request(upload_input)?;
+    let upload_resp = http::http_request(upload_input).map_err(|raw| {
+        // `http::http_request` returns a JSON-encoded AgentError as a String
+        // on failure; deserialize back to preserve `retry_after_ms`, category,
+        // and severity rather than flattening to a Network error.
+        serde_json::from_str::<AgentError>(&raw)
+            .unwrap_or_else(|_| types::http::network("SLACK_UPLOAD", raw))
+    })?;
 
     if !upload_resp.success {
         let body_str = format!("{:?}", upload_resp.body);
-        return Err(http_status_error(
+        return Err(types::http::classify_response(
             "SLACK_UPLOAD",
             upload_resp.status_code,
-            &format!("File upload to presigned URL failed: {}", body_str),
-            json!({"status_code": upload_resp.status_code, "body": body_str}),
+            body_str,
+            &upload_resp.headers,
         ));
     }
 

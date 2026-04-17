@@ -1,4 +1,5 @@
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 /// Shopify agent - Wrapper around HTTP agent for Shopify GraphQL Admin API
 /// This agent provides type-safe interfaces for common Shopify operations
@@ -8,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
-use super::errors::permanent_error;
 use super::integration_utils::{PageCursor, ProxyHttpClient, extract_page};
 
 // ============================================================================
@@ -820,7 +820,7 @@ fn execute_graphql_query(
     connection: &RawConnection,
     query: String,
     variables: Option<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, AgentError> {
     // api_version is a non-credential config param needed for path building
     let api_version = connection.parameters["api_version"]
         .as_str()
@@ -845,40 +845,42 @@ fn execute_graphql_query(
 
     // Check for GraphQL errors (preserved as Shopify-specific post-processing).
     if let Some(errors) = response_body.get("errors") {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_GRAPHQL_ERROR",
-            &format!("GraphQL error: {}", errors),
-            json!({"errors": errors}),
-        ));
+            format!("GraphQL error: {}", errors),
+        )
+        .with_attrs(json!({"errors": errors})));
     }
 
     Ok(response_body)
 }
 
 /// Checks for userErrors in a GraphQL mutation response and returns an error if present
-fn check_user_errors(response: &Value, mutation_name: &str) -> Result<(), String> {
+fn check_user_errors(response: &Value, mutation_name: &str) -> Result<(), AgentError> {
     if let Some(mutation_result) = response.get("data").and_then(|d| d.get(mutation_name))
         && let Some(user_errors) = mutation_result.get("userErrors")
         && let Some(errors_array) = user_errors.as_array()
         && !errors_array.is_empty()
     {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
-            &format!("{} failed with userErrors", mutation_name),
-            json!({"mutation": mutation_name, "userErrors": user_errors}),
-        ));
+            format!("{} failed with userErrors", mutation_name),
+        )
+        .with_attrs(json!({"mutation": mutation_name, "userErrors": user_errors})));
     }
     Ok(())
 }
 
 /// Extracts data from a GraphQL response at the specified path
-fn extract_graphql_data(response: Value, path: &[&str]) -> Result<Value, String> {
+fn extract_graphql_data(response: Value, path: &[&str]) -> Result<Value, AgentError> {
     let mut current = response;
     for segment in path {
-        current = current
-            .get(segment)
-            .cloned()
-            .ok_or_else(|| format!("Missing field '{}' in GraphQL response", segment))?;
+        current = current.get(segment).cloned().ok_or_else(|| {
+            AgentError::permanent(
+                "SHOPIFY_INVALID_RESPONSE",
+                format!("Missing field '{}' in GraphQL response", segment),
+            )
+        })?;
     }
     Ok(current)
 }
@@ -1015,13 +1017,13 @@ pub struct ProductImageInput {
     module_integration_ids = "shopify_access_token, shopify_client_credentials",
     module_secure = true
 )]
-pub fn set_product(input: SetProductInput) -> Result<Value, String> {
+pub fn set_product(input: SetProductInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     // Build variant object
     let mut variant = json!({});
@@ -1238,13 +1240,13 @@ pub struct UpdateProductInput {
     description = "Update an existing Shopify product",
     side_effects = true
 )]
-pub fn update_product(input: UpdateProductInput) -> Result<Value, String> {
+pub fn update_product(input: UpdateProductInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let mut product_input = json!({
@@ -1334,13 +1336,13 @@ pub struct DeleteProductInput {
     description = "Delete a Shopify product",
     side_effects = true
 )]
-pub fn delete_product(input: DeleteProductInput) -> Result<Value, String> {
+pub fn delete_product(input: DeleteProductInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "input": {
@@ -1418,13 +1420,13 @@ fn default_limit() -> i32 {
     display_name = "List Products",
     description = "List Shopify products with optional filters"
 )]
-pub fn list_products(input: ListProductsInput) -> Result<Value, String> {
+pub fn list_products(input: ListProductsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut query_parts = vec![];
 
@@ -1684,13 +1686,13 @@ pub struct QueryProductsInput {
     display_name = "Query Products",
     description = "Query Shopify products with advanced filtering. Supports filtering by tags (include/exclude), vendor, status, product type, dates, inventory levels, price range, collection, SKU, and more."
 )]
-pub fn query_products(input: QueryProductsInput) -> Result<Value, String> {
+pub fn query_products(input: QueryProductsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Build query string from structured filters
@@ -1905,13 +1907,13 @@ pub struct GetProductBySkuInput {
         permanent("SHOPIFY_NOT_FOUND", "No product found matching the given SKU", ["sku"])
     )
 )]
-pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<Value, String> {
+pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let exact_match = input.exact_match.unwrap_or(true);
@@ -1954,21 +1956,21 @@ pub fn get_product_by_sku(input: GetProductBySkuInput) -> Result<Value, String> 
                 }
             }
         }
-        Err(permanent_error(
+        Err(AgentError::permanent(
             "SHOPIFY_NOT_FOUND",
-            &format!("Product with SKU '{}' not found", input.sku),
-            json!({"sku": input.sku}),
-        ))
+            format!("Product with SKU '{}' not found", input.sku),
+        )
+        .with_attrs(json!({"sku": input.sku})))
     } else {
         // Legacy behavior: return first result
         if let Some(first_product) = products.as_array().and_then(|arr| arr.first()) {
             Ok(first_product.get("node").cloned().unwrap_or_default())
         } else {
-            Err(permanent_error(
+            Err(AgentError::permanent(
                 "SHOPIFY_NOT_FOUND",
-                &format!("Product with SKU '{}' not found", input.sku),
-                json!({"sku": input.sku}),
-            ))
+                format!("Product with SKU '{}' not found", input.sku),
+            )
+            .with_attrs(json!({"sku": input.sku})))
         }
     }
 }
@@ -2003,13 +2005,13 @@ pub struct SetProductTagsInput {
     description = "Set tags for a Shopify product",
     side_effects = true
 )]
-pub fn set_product_tags(input: SetProductTagsInput) -> Result<Value, String> {
+pub fn set_product_tags(input: SetProductTagsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "input": {
@@ -2055,13 +2057,13 @@ pub struct ReplaceProductImagesInput {
     description = "Replace all images for a Shopify product",
     side_effects = true
 )]
-pub fn replace_product_images(input: ReplaceProductImagesInput) -> Result<Value, String> {
+pub fn replace_product_images(input: ReplaceProductImagesInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     // Step 1: Get current product media
     let get_media_vars = json!({
@@ -2158,13 +2160,13 @@ pub struct GetProductOptionsInput {
     display_name = "Get Product Options",
     description = "Get product options for a Shopify product"
 )]
-pub fn get_product_options(input: GetProductOptionsInput) -> Result<Value, String> {
+pub fn get_product_options(input: GetProductOptionsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "productId": input.product_id
@@ -2225,13 +2227,13 @@ pub struct OptionValueUpdate {
     description = "Rename a Shopify product option",
     side_effects = true
 )]
-pub fn rename_product_option(input: RenameProductOptionInput) -> Result<Value, String> {
+pub fn rename_product_option(input: RenameProductOptionInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut option_input = json!({
         "id": input.option_id
@@ -2307,13 +2309,13 @@ pub struct MetafieldInput {
     description = "Set metafields for a Shopify product",
     side_effects = true
 )]
-pub fn set_product_metafields(input: SetProductMetafieldsInput) -> Result<Value, String> {
+pub fn set_product_metafields(input: SetProductMetafieldsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let metafield_inputs: Vec<Value> = input
         .metafields
@@ -2386,13 +2388,13 @@ fn default_metafields_limit() -> i32 {
     display_name = "Get Product Metafields",
     description = "Get metafields for a Shopify product"
 )]
-pub fn get_product_metafields(input: GetProductMetafieldsInput) -> Result<Value, String> {
+pub fn get_product_metafields(input: GetProductMetafieldsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut variables = json!({
         "id": input.product_id,
@@ -2454,13 +2456,13 @@ pub struct GetProductVariantBySkuInput {
         permanent("SHOPIFY_NOT_FOUND", "No variant found matching the given SKU", ["sku"])
     )
 )]
-pub fn get_product_variant_by_sku(input: GetProductVariantBySkuInput) -> Result<Value, String> {
+pub fn get_product_variant_by_sku(input: GetProductVariantBySkuInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let exact_match = input.exact_match.unwrap_or(true);
@@ -2497,21 +2499,21 @@ pub fn get_product_variant_by_sku(input: GetProductVariantBySkuInput) -> Result<
                 }
             }
         }
-        Err(permanent_error(
+        Err(AgentError::permanent(
             "SHOPIFY_NOT_FOUND",
-            &format!("Product variant with SKU '{}' not found", input.sku),
-            json!({"sku": input.sku}),
-        ))
+            format!("Product variant with SKU '{}' not found", input.sku),
+        )
+        .with_attrs(json!({"sku": input.sku})))
     } else {
         // Legacy behavior: return first result
         if let Some(first_variant) = variants.as_array().and_then(|arr| arr.first()) {
             Ok(first_variant.get("node").cloned().unwrap_or_default())
         } else {
-            Err(permanent_error(
+            Err(AgentError::permanent(
                 "SHOPIFY_NOT_FOUND",
-                &format!("Product variant with SKU '{}' not found", input.sku),
-                json!({"sku": input.sku}),
-            ))
+                format!("Product variant with SKU '{}' not found", input.sku),
+            )
+            .with_attrs(json!({"sku": input.sku})))
         }
     }
 }
@@ -2602,13 +2604,13 @@ pub struct CreateProductVariantInput {
     description = "Create a new Shopify product variant",
     side_effects = true
 )]
-pub fn create_product_variant(input: CreateProductVariantInput) -> Result<Value, String> {
+pub fn create_product_variant(input: CreateProductVariantInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut variant = json!({});
 
@@ -2758,13 +2760,13 @@ pub struct UpdateProductVariantInput {
     description = "Update a Shopify product variant",
     side_effects = true
 )]
-pub fn update_product_variant(input: UpdateProductVariantInput) -> Result<Value, String> {
+pub fn update_product_variant(input: UpdateProductVariantInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Build variant input for productVariantsBulkUpdate mutation
@@ -2826,11 +2828,11 @@ pub fn update_product_variant(input: UpdateProductVariantInput) -> Result<Value,
         .as_array()
         .and_then(|arr| arr.first().cloned())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_NO_VARIANT_RETURNED",
                 "No variant returned from update",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })
 }
 
@@ -2873,13 +2875,13 @@ pub struct UpdateProductVariantPriceInput {
 )]
 pub fn update_product_variant_price(
     input: UpdateProductVariantPriceInput,
-) -> Result<Value, String> {
+) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "productId": input.product_id,
@@ -2926,13 +2928,13 @@ pub struct DeleteProductVariantInput {
     description = "Delete a Shopify product variant",
     side_effects = true
 )]
-pub fn delete_product_variant(input: DeleteProductVariantInput) -> Result<Value, String> {
+pub fn delete_product_variant(input: DeleteProductVariantInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "id": input.variant_id
@@ -2981,13 +2983,13 @@ pub struct SetVariantMetafieldsInput {
     description = "Set metafields for a Shopify product variant",
     side_effects = true
 )]
-pub fn set_variant_metafields(input: SetVariantMetafieldsInput) -> Result<Value, String> {
+pub fn set_variant_metafields(input: SetVariantMetafieldsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let metafield_inputs: Vec<Value> = input
         .metafields
@@ -3048,13 +3050,13 @@ pub struct SetProductVariantCostInput {
     description = "Set the cost for a Shopify product variant",
     side_effects = true
 )]
-pub fn set_product_variant_cost(input: SetProductVariantCostInput) -> Result<Value, String> {
+pub fn set_product_variant_cost(input: SetProductVariantCostInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     // First, get the inventory item ID
     let get_item_vars = json!({
@@ -3074,11 +3076,11 @@ pub fn set_product_variant_cost(input: SetProductVariantCostInput) -> Result<Val
         .and_then(|i| i.get("id"))
         .and_then(|id| id.as_str())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_NOT_FOUND",
                 "Could not find inventory item ID for variant",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?;
 
     // Now update the cost
@@ -3130,13 +3132,15 @@ pub struct SetProductVariantWeightInput {
     description = "Set the weight for a Shopify product variant",
     side_effects = true
 )]
-pub fn set_product_variant_weight(input: SetProductVariantWeightInput) -> Result<Value, String> {
+pub fn set_product_variant_weight(
+    input: SetProductVariantWeightInput,
+) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     // First, get the inventory item ID
     let get_item_vars = json!({
@@ -3156,11 +3160,11 @@ pub fn set_product_variant_weight(input: SetProductVariantWeightInput) -> Result
         .and_then(|i| i.get("id"))
         .and_then(|id| id.as_str())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_NOT_FOUND",
                 "Could not find inventory item ID for variant",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?;
 
     // Now update the weight
@@ -3214,13 +3218,13 @@ pub struct GetInventoryItemIdByVariantIdInput {
 )]
 pub fn get_inventory_item_id_by_variant_id(
     input: GetInventoryItemIdByVariantIdInput,
-) -> Result<Value, String> {
+) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "id": input.variant_id
@@ -3272,13 +3276,13 @@ pub struct SetInventoryInput {
     description = "Set inventory levels for a Shopify product",
     side_effects = true
 )]
-pub fn set_inventory(input: SetInventoryInput) -> Result<Value, String> {
+pub fn set_inventory(input: SetInventoryInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "input": {
@@ -3338,13 +3342,13 @@ pub struct LocationQuantity {
     description = "Sync inventory levels for Shopify products",
     side_effects = true
 )]
-pub fn sync_inventory_levels(input: SyncInventoryLevelsInput) -> Result<Value, String> {
+pub fn sync_inventory_levels(input: SyncInventoryLevelsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut results = vec![];
 
@@ -3401,13 +3405,13 @@ pub struct GetOrderInput {
     display_name = "Get Order",
     description = "Get a Shopify order by ID"
 )]
-pub fn get_order(input: GetOrderInput) -> Result<Value, String> {
+pub fn get_order(input: GetOrderInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     // Convert numeric ID to Shopify GID if needed
     let order_gid = if input.order_id.starts_with("gid://") {
@@ -3455,13 +3459,13 @@ pub struct GetOrderListInput {
     display_name = "Get Order List",
     description = "List Shopify orders with optional filters"
 )]
-pub fn get_order_list(input: GetOrderListInput) -> Result<Value, String> {
+pub fn get_order_list(input: GetOrderListInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut variables = json!({
         "first": input.limit
@@ -3513,13 +3517,13 @@ pub struct CreateOrderNoteOrTagInput {
     description = "Add note or tags to a Shopify order",
     side_effects = true
 )]
-pub fn create_order_note_or_tag(input: CreateOrderNoteOrTagInput) -> Result<Value, String> {
+pub fn create_order_note_or_tag(input: CreateOrderNoteOrTagInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut order_input = json!({
         "id": input.order_id
@@ -3577,13 +3581,13 @@ pub struct CancelOrderInput {
     description = "Cancel a Shopify order",
     side_effects = true
 )]
-pub fn cancel_order(input: CancelOrderInput) -> Result<Value, String> {
+pub fn cancel_order(input: CancelOrderInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut variables = json!({
         "id": input.order_id
@@ -3622,13 +3626,13 @@ pub struct GetFulfillmentOrdersInput {
     display_name = "Get Fulfillment Orders",
     description = "Get fulfillment orders for a Shopify order"
 )]
-pub fn get_fulfillment_orders(input: GetFulfillmentOrdersInput) -> Result<Value, String> {
+pub fn get_fulfillment_orders(input: GetFulfillmentOrdersInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "id": input.order_id
@@ -3696,13 +3700,13 @@ pub struct FulfillOrderInput {
     description = "Create a fulfillment for a Shopify order",
     side_effects = true
 )]
-pub fn fulfill_order(input: FulfillOrderInput) -> Result<Value, String> {
+pub fn fulfill_order(input: FulfillOrderInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut tracking_info = json!({});
     if let Some(number) = input.tracking_number {
@@ -3810,21 +3814,21 @@ pub struct FulfillOrderLinesInput {
     description = "Create a fulfillment for specific line items with quantities. Supports partial fulfillments and multiple fulfillment orders in a single call.",
     side_effects = true
 )]
-pub fn fulfill_order_lines(input: FulfillOrderLinesInput) -> Result<Value, String> {
+pub fn fulfill_order_lines(input: FulfillOrderLinesInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     if input.line_items_by_fulfillment_order.is_empty() {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
             "line_items_by_fulfillment_order cannot be empty",
-            json!({}),
-        ));
+        )
+        .with_attrs(json!({})));
     }
 
     let mut tracking_info = json!({});
@@ -3977,21 +3981,20 @@ pub struct FulfillBySkuOutput {
     description = "Fulfill order line items by SKU. Automatically matches SKUs to fulfillment order line items and allocates quantities using FIFO.",
     side_effects = true
 )]
-pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
+pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     if input.items.is_empty() {
-        return Err(permanent_error(
-            "SHOPIFY_VALIDATION_ERROR",
-            "items cannot be empty",
-            json!({}),
-        ));
+        return Err(
+            AgentError::permanent("SHOPIFY_VALIDATION_ERROR", "items cannot be empty")
+                .with_attrs(json!({})),
+        );
     }
 
     // Format order ID as GID if needed
@@ -4016,19 +4019,19 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
         .and_then(|fo| fo.get("edges"))
         .and_then(|e| e.as_array())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get fulfillment orders",
-                json!({"order_id": order_gid}),
             )
+            .with_attrs(json!({"order_id": order_gid}))
         })?;
 
     if fulfillment_orders.is_empty() {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_NOT_FOUND",
             "No fulfillment orders found for this order",
-            json!({"order_id": order_gid}),
-        ));
+        )
+        .with_attrs(json!({"order_id": order_gid})));
     }
 
     // Step 2: Build a map of (fulfillment_order_id, line_item_id) -> (sku, remaining_qty, fo_line_item_id)
@@ -4037,11 +4040,8 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
 
     for fo_edge in fulfillment_orders {
         let fo_node = fo_edge.get("node").ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Missing fulfillment order node",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing fulfillment order node")
+                .with_attrs(json!({}))
         })?;
         let status = fo_node.get("status").and_then(|s| s.as_str()).unwrap_or("");
 
@@ -4054,11 +4054,8 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
             .get("id")
             .and_then(|id| id.as_str())
             .ok_or_else(|| {
-                permanent_error(
-                    "SHOPIFY_INVALID_RESPONSE",
-                    "Missing fulfillment order ID",
-                    json!({}),
-                )
+                AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing fulfillment order ID")
+                    .with_attrs(json!({}))
             })?;
 
         // Get location ID for filtering
@@ -4088,16 +4085,14 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
             .and_then(|li| li.get("edges"))
             .and_then(|e| e.as_array())
             .ok_or_else(|| {
-                permanent_error("SHOPIFY_INVALID_RESPONSE", "Missing line items", json!({}))
+                AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing line items")
+                    .with_attrs(json!({}))
             })?;
 
         for li_edge in line_items {
             let li_node = li_edge.get("node").ok_or_else(|| {
-                permanent_error(
-                    "SHOPIFY_INVALID_RESPONSE",
-                    "Missing line item node",
-                    json!({}),
-                )
+                AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing line item node")
+                    .with_attrs(json!({}))
             })?;
 
             let fo_line_item_id =
@@ -4105,11 +4100,11 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
                     .get("id")
                     .and_then(|id| id.as_str())
                     .ok_or_else(|| {
-                        permanent_error(
+                        AgentError::permanent(
                             "SHOPIFY_INVALID_RESPONSE",
                             "Missing fulfillment order line item ID",
-                            json!({}),
                         )
+                        .with_attrs(json!({}))
                     })?;
 
             let remaining_qty = li_node
@@ -4206,7 +4201,8 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
     };
 
     if fulfillments_by_fo.is_empty() {
-        return serde_json::to_value(result).map_err(|e| e.to_string());
+        return serde_json::to_value(result)
+            .map_err(|e| AgentError::permanent("SHOPIFY_SERIALIZATION_ERROR", e.to_string()));
     }
 
     // Build the fulfillment request
@@ -4238,7 +4234,8 @@ pub fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<Value, String> {
         }
     }
 
-    serde_json::to_value(result).map_err(|e| e.to_string())
+    serde_json::to_value(result)
+        .map_err(|e| AgentError::permanent("SHOPIFY_SERIALIZATION_ERROR", e.to_string()))
 }
 
 // ============================================================================
@@ -4308,13 +4305,13 @@ pub struct DraftOrderLineItemInput {
     description = "Create a Shopify draft order",
     side_effects = true
 )]
-pub fn create_draft_order(input: CreateDraftOrderInput) -> Result<Value, String> {
+pub fn create_draft_order(input: CreateDraftOrderInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut draft_input = json!({});
 
@@ -4387,13 +4384,13 @@ pub struct GetCustomerByEmailInput {
         permanent("SHOPIFY_NOT_FOUND", "No customer found matching the given email", ["email"])
     )
 )]
-pub fn get_customer_by_email(input: GetCustomerByEmailInput) -> Result<Value, String> {
+pub fn get_customer_by_email(input: GetCustomerByEmailInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "email": format!("email:{}", input.email)
@@ -4410,11 +4407,11 @@ pub fn get_customer_by_email(input: GetCustomerByEmailInput) -> Result<Value, St
     if let Some(first_customer) = customers.as_array().and_then(|arr| arr.first()) {
         Ok(first_customer.get("node").cloned().unwrap_or_default())
     } else {
-        Err(permanent_error(
+        Err(AgentError::permanent(
             "SHOPIFY_NOT_FOUND",
-            &format!("Customer with email '{}' not found", input.email),
-            json!({"email": input.email}),
-        ))
+            format!("Customer with email '{}' not found", input.email),
+        )
+        .with_attrs(json!({"email": input.email})))
     }
 }
 
@@ -4459,13 +4456,13 @@ pub struct CreateCollectionInput {
     description = "Create a Shopify collection",
     side_effects = true
 )]
-pub fn create_collection(input: CreateCollectionInput) -> Result<Value, String> {
+pub fn create_collection(input: CreateCollectionInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut collection_input = json!({
         "title": input.title
@@ -4520,13 +4517,15 @@ pub struct AddProductsToCollectionInput {
     description = "Add products to a Shopify collection",
     side_effects = true
 )]
-pub fn add_products_to_collection(input: AddProductsToCollectionInput) -> Result<Value, String> {
+pub fn add_products_to_collection(
+    input: AddProductsToCollectionInput,
+) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "id": input.collection_id,
@@ -4576,13 +4575,13 @@ pub struct RemoveProductsFromCollectionInput {
 )]
 pub fn remove_products_from_collection(
     input: RemoveProductsFromCollectionInput,
-) -> Result<Value, String> {
+) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let variables = json!({
         "id": input.collection_id,
@@ -4632,13 +4631,13 @@ pub struct GetLocationByNameInput {
         permanent("SHOPIFY_NOT_FOUND", "No location found matching the given name", ["location_name"])
     )
 )]
-pub fn get_location_by_name(input: GetLocationByNameInput) -> Result<Value, String> {
+pub fn get_location_by_name(input: GetLocationByNameInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let response = execute_graphql_query(connection, GET_LOCATIONS.to_string(), None)?;
 
@@ -4655,11 +4654,11 @@ pub fn get_location_by_name(input: GetLocationByNameInput) -> Result<Value, Stri
         }
     }
 
-    Err(permanent_error(
+    Err(AgentError::permanent(
         "SHOPIFY_NOT_FOUND",
-        &format!("Location '{}' not found", input.location_name),
-        json!({"location_name": input.location_name}),
-    ))
+        format!("Location '{}' not found", input.location_name),
+    )
+    .with_attrs(json!({"location_name": input.location_name})))
 }
 
 // ============================================================================
@@ -4700,13 +4699,13 @@ pub struct BulkProductInput {
     description = "Create multiple Shopify products",
     side_effects = true
 )]
-pub fn bulk_create_products(input: BulkCreateProductsInput) -> Result<Value, String> {
+pub fn bulk_create_products(input: BulkCreateProductsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut created_products = vec![];
     let mut errors = vec![];
@@ -4779,13 +4778,13 @@ pub struct BulkProductUpdateInput {
     description = "Update multiple Shopify products",
     side_effects = true
 )]
-pub fn bulk_update_products(input: BulkUpdateProductsInput) -> Result<Value, String> {
+pub fn bulk_update_products(input: BulkUpdateProductsInput) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut updated_products = vec![];
     let mut errors = vec![];
@@ -4852,13 +4851,15 @@ pub struct VariantPriceUpdateInput {
     description = "Update prices for multiple Shopify variants",
     side_effects = true
 )]
-pub fn bulk_update_variant_prices(input: BulkUpdateVariantPricesInput) -> Result<Value, String> {
+pub fn bulk_update_variant_prices(
+    input: BulkUpdateVariantPricesInput,
+) -> Result<Value, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let mut updated_variants = vec![];
     let mut errors = vec![];
@@ -5054,14 +5055,14 @@ pub struct CommerceGetProductsOutput {
 )]
 pub fn commerce_get_products(
     input: CommerceGetProductsInput,
-) -> Result<CommerceGetProductsOutput, String> {
+) -> Result<CommerceGetProductsOutput, AgentError> {
     let limit = input.limit.unwrap_or(50).min(250);
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let after_clause = match &input.cursor {
@@ -5125,8 +5126,7 @@ pub fn commerce_get_products(
             path: vec!["data", "products"],
         },
         |node| Ok(shopify_node_to_commerce_product(node)),
-    )
-    .map_err(String::from)?;
+    )?;
 
     Ok(CommerceGetProductsOutput {
         products: page.items,
@@ -5252,13 +5252,13 @@ pub struct CommerceGetProductInput {
     display_name = "Get Product (Shopify Commerce)",
     description = "Get a single product from Shopify using Commerce interface"
 )]
-pub fn commerce_get_product(input: CommerceGetProductInput) -> Result<CommerceProduct, String> {
+pub fn commerce_get_product(input: CommerceGetProductInput) -> Result<CommerceProduct, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Convert numeric ID to Shopify GID
@@ -5303,19 +5303,16 @@ pub fn commerce_get_product(input: CommerceGetProductInput) -> Result<CommercePr
         .get("data")
         .and_then(|d| d.get("product"))
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_NOT_FOUND",
-                "Product not found",
-                json!({"product_id": input.product_id}),
-            )
+            AgentError::permanent("SHOPIFY_NOT_FOUND", "Product not found")
+                .with_attrs(json!({"product_id": input.product_id}))
         })?;
 
     if product_data.is_null() {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_NOT_FOUND",
-            &format!("Product with ID {} not found", input.product_id),
-            json!({"product_id": input.product_id}),
-        ));
+            format!("Product with ID {} not found", input.product_id),
+        )
+        .with_attrs(json!({"product_id": input.product_id})));
     }
 
     Ok(shopify_node_to_commerce_product(product_data))
@@ -5349,23 +5346,23 @@ pub struct CommerceCreateProductInput {
 )]
 pub fn commerce_create_product(
     input: CommerceCreateProductInput,
-) -> Result<CommerceProduct, String> {
+) -> Result<CommerceProduct, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let product = &input.product;
 
     // Title is required for product creation
     let title = product.title.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
             "Title is required for product creation",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Build the productSet input for Shopify GraphQL
@@ -5446,11 +5443,11 @@ mutation productSet($synchronous: Boolean!, $productSet: ProductSetInput!) {
                     .map(|s| s.to_string())
             })
             .collect();
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
-            &format!("Failed to create product: {}", error_messages.join(", ")),
-            json!({"user_errors": errors}),
-        ));
+            format!("Failed to create product: {}", error_messages.join(", ")),
+        )
+        .with_attrs(json!({"user_errors": errors})));
     }
 
     // Extract created product
@@ -5459,11 +5456,8 @@ mutation productSet($synchronous: Boolean!, $productSet: ProductSetInput!) {
         .and_then(|d| d.get("productSet"))
         .and_then(|ps| ps.get("product"))
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to create product",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to create product")
+                .with_attrs(json!({}))
         })?;
 
     Ok(shopify_node_to_commerce_product(product_data))
@@ -5504,13 +5498,13 @@ pub struct CommerceUpdateProductInput {
 )]
 pub fn commerce_update_product(
     input: CommerceUpdateProductInput,
-) -> Result<CommerceProduct, String> {
+) -> Result<CommerceProduct, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
     let product = &input.product;
 
@@ -5599,11 +5593,11 @@ mutation productSet($synchronous: Boolean!, $productSet: ProductSetInput!) {
                     .map(|s| s.to_string())
             })
             .collect();
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
-            &format!("Failed to update product: {}", error_messages.join(", ")),
-            json!({"user_errors": errors}),
-        ));
+            format!("Failed to update product: {}", error_messages.join(", ")),
+        )
+        .with_attrs(json!({"user_errors": errors})));
     }
 
     // Extract updated product
@@ -5612,11 +5606,8 @@ mutation productSet($synchronous: Boolean!, $productSet: ProductSetInput!) {
         .and_then(|d| d.get("productSet"))
         .and_then(|ps| ps.get("product"))
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to update product",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to update product")
+                .with_attrs(json!({}))
         })?;
 
     Ok(shopify_node_to_commerce_product(product_data))
@@ -5667,13 +5658,13 @@ pub struct CommerceDeleteProductOutput {
 )]
 pub fn commerce_delete_product(
     input: CommerceDeleteProductInput,
-) -> Result<CommerceDeleteProductOutput, String> {
+) -> Result<CommerceDeleteProductOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Convert numeric ID to Shopify GID
@@ -5716,11 +5707,11 @@ mutation productDelete($input: ProductDeleteInput!) {
                     .map(|s| s.to_string())
             })
             .collect();
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
-            &format!("Failed to delete product: {}", error_messages.join(", ")),
-            json!({"user_errors": errors}),
-        ));
+            format!("Failed to delete product: {}", error_messages.join(", ")),
+        )
+        .with_attrs(json!({"user_errors": errors})));
     }
 
     // Extract deleted product ID
@@ -5730,11 +5721,8 @@ mutation productDelete($input: ProductDeleteInput!) {
         .and_then(|pd| pd.get("deletedProductId"))
         .and_then(|id| id.as_str())
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to delete product",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to delete product")
+                .with_attrs(json!({}))
         })?;
 
     // Extract numeric ID from GID
@@ -5791,22 +5779,22 @@ pub struct CommerceGetInventoryInput {
 )]
 pub fn commerce_get_inventory(
     input: CommerceGetInventoryInput,
-) -> Result<Vec<CommerceInventoryLevel>, String> {
+) -> Result<Vec<CommerceInventoryLevel>, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Need variant_id to get inventory item
     let variant_id = input.variant_id.ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_VALIDATION_ERROR",
             "variant_id is required to query inventory",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // First, get the inventory item ID from the variant
@@ -5821,11 +5809,11 @@ pub fn commerce_get_inventory(
         .and_then(|item| item.get("id"))
         .and_then(|id| id.as_str())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get inventory item ID from variant",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?
         .to_string();
 
@@ -5845,11 +5833,11 @@ pub fn commerce_get_inventory(
         .get("data")
         .and_then(|d| d.get("inventoryItem"))
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get inventory item from response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?;
 
     let product_id = inventory_item
@@ -5859,11 +5847,8 @@ pub fn commerce_get_inventory(
         .and_then(|id| id.as_str())
         .map(extract_shopify_id)
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to extract product ID",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to extract product ID")
+                .with_attrs(json!({}))
         })?;
 
     let edges = inventory_item
@@ -5871,32 +5856,28 @@ pub fn commerce_get_inventory(
         .and_then(|levels| levels.get("edges"))
         .and_then(|e| e.as_array())
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to get inventory levels",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to get inventory levels")
+                .with_attrs(json!({}))
         })?;
 
     let mut inventory_levels = Vec::new();
 
     for edge in edges {
         let node = edge.get("node").ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Missing node in edge",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing node in edge")
+                .with_attrs(json!({}))
         })?;
 
         let location = node.get("location").ok_or_else(|| {
-            permanent_error("SHOPIFY_INVALID_RESPONSE", "Missing location", json!({}))
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing location")
+                .with_attrs(json!({}))
         })?;
         let location_id_gid = location
             .get("id")
             .and_then(|id| id.as_str())
             .ok_or_else(|| {
-                permanent_error("SHOPIFY_INVALID_RESPONSE", "Missing location ID", json!({}))
+                AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing location ID")
+                    .with_attrs(json!({}))
             })?;
         let location_id_numeric = extract_shopify_id(location_id_gid);
         let location_name = location
@@ -5916,7 +5897,8 @@ pub fn commerce_get_inventory(
             .get("quantities")
             .and_then(|q| q.as_array())
             .ok_or_else(|| {
-                permanent_error("SHOPIFY_INVALID_RESPONSE", "Missing quantities", json!({}))
+                AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing quantities")
+                    .with_attrs(json!({}))
             })?;
 
         let mut available = 0i64;
@@ -6005,13 +5987,13 @@ fn default_adjustment_type() -> String {
 )]
 pub fn commerce_update_inventory(
     input: CommerceUpdateInventoryInput,
-) -> Result<CommerceInventoryLevel, String> {
+) -> Result<CommerceInventoryLevel, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // First, get the inventory item ID from the variant
@@ -6026,11 +6008,11 @@ pub fn commerce_update_inventory(
         .and_then(|item| item.get("id"))
         .and_then(|id| id.as_str())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get inventory item ID from variant",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?
         .to_string();
 
@@ -6040,11 +6022,8 @@ pub fn commerce_update_inventory(
         .and_then(|p| p.get("id"))
         .and_then(|id| id.as_str())
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to get product ID",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to get product ID")
+                .with_attrs(json!({}))
         })?;
     let product_id = extract_shopify_id(product_id_gid);
 
@@ -6073,11 +6052,11 @@ pub fn commerce_update_inventory(
 
     // Return the first matching inventory level
     get_result.into_iter().next().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_INVALID_RESPONSE",
             "Failed to retrieve updated inventory level",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })
 }
 
@@ -6151,13 +6130,13 @@ pub struct CommerceGetOrdersOutput {
 )]
 pub fn commerce_get_orders(
     input: CommerceGetOrdersInput,
-) -> Result<CommerceGetOrdersOutput, String> {
+) -> Result<CommerceGetOrdersOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let limit = input.limit.unwrap_or(50).min(250);
@@ -6211,22 +6190,19 @@ pub fn commerce_get_orders(
         .get("data")
         .and_then(|d| d.get("orders"))
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get orders from response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?;
 
     let edges = orders_data
         .get("edges")
         .and_then(|e| e.as_array())
         .ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Failed to get order edges",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Failed to get order edges")
+                .with_attrs(json!({}))
         })?;
 
     let mut orders = Vec::new();
@@ -6234,11 +6210,8 @@ pub fn commerce_get_orders(
 
     for edge in edges {
         let node = edge.get("node").ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Missing node in edge",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing node in edge")
+                .with_attrs(json!({}))
         })?;
 
         // Extract cursor for pagination
@@ -6290,13 +6263,13 @@ pub struct CommerceGetOrderInput {
     display_name = "Get Order (Shopify Commerce)",
     description = "Get a single order from Shopify using Commerce interface"
 )]
-pub fn commerce_get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, String> {
+pub fn commerce_get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Convert numeric ID to Shopify GID if needed
@@ -6318,11 +6291,11 @@ pub fn commerce_get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder,
         .get("data")
         .and_then(|d| d.get("order"))
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get order from response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?;
 
     // Convert to CommerceOrder
@@ -6333,9 +6306,9 @@ pub fn commerce_get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder,
 // Helper: Convert Shopify Order Node to CommerceOrder
 // ============================================================================
 
-fn shopify_order_node_to_commerce_order(node: &Value) -> Result<CommerceOrder, String> {
+fn shopify_order_node_to_commerce_order(node: &Value) -> Result<CommerceOrder, AgentError> {
     let id_gid = node.get("id").and_then(|id| id.as_str()).ok_or_else(|| {
-        permanent_error("SHOPIFY_INVALID_RESPONSE", "Missing order ID", json!({}))
+        AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing order ID").with_attrs(json!({}))
     })?;
     let id = extract_shopify_id(id_gid);
 
@@ -6539,13 +6512,13 @@ pub struct CommerceGetLocationsOutput {
 )]
 pub fn commerce_get_locations(
     input: CommerceGetLocationsInput,
-) -> Result<CommerceGetLocationsOutput, String> {
+) -> Result<CommerceGetLocationsOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "SHOPIFY_MISSING_CONNECTION",
             "Shopify connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Execute GraphQL query to get all locations
@@ -6558,22 +6531,19 @@ pub fn commerce_get_locations(
         .and_then(|l| l.get("edges"))
         .and_then(|e| e.as_array())
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "SHOPIFY_INVALID_RESPONSE",
                 "Failed to get locations from response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?;
 
     let mut locations = Vec::new();
 
     for edge in edges {
         let node = edge.get("node").ok_or_else(|| {
-            permanent_error(
-                "SHOPIFY_INVALID_RESPONSE",
-                "Missing node in edge",
-                json!({}),
-            )
+            AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing node in edge")
+                .with_attrs(json!({}))
         })?;
 
         // Convert Shopify location to CommerceLocation
@@ -6588,9 +6558,12 @@ pub fn commerce_get_locations(
 // Helper: Convert Shopify Location Node to CommerceLocation
 // ============================================================================
 
-fn shopify_location_node_to_commerce_location(node: &Value) -> Result<CommerceLocation, String> {
+fn shopify_location_node_to_commerce_location(
+    node: &Value,
+) -> Result<CommerceLocation, AgentError> {
     let id_gid = node.get("id").and_then(|id| id.as_str()).ok_or_else(|| {
-        permanent_error("SHOPIFY_INVALID_RESPONSE", "Missing location ID", json!({}))
+        AgentError::permanent("SHOPIFY_INVALID_RESPONSE", "Missing location ID")
+            .with_attrs(json!({}))
     })?;
     let id = extract_shopify_id(id_gid);
 

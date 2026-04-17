@@ -4,6 +4,7 @@
 //! refunds, charges, and balance via the Stripe REST API.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,41 +16,41 @@ use super::integration_utils::{ProxyHttpClient, require_connection};
 // Helpers
 // ============================================================================
 
-fn extract_connection(conn: &Option<RawConnection>) -> Result<&RawConnection, String> {
-    require_connection("STRIPE", conn).map_err(String::from)
+/// Stripe always sits at `/v1` and returns JSON. Constructing the client
+/// once via `with_base_path` removes the per-call `/v1` prefix duplication
+/// and the redundant `Content-Type` injection.
+fn stripe_client(connection: &RawConnection) -> ProxyHttpClient<'_> {
+    ProxyHttpClient::new(connection, "STRIPE")
+        .with_base_path("/v1")
+        .with_header("Accept", "application/json")
 }
 
 fn stripe_get(
     connection: &RawConnection,
     path: &str,
     query: HashMap<String, String>,
-) -> Result<Value, String> {
-    ProxyHttpClient::new(connection, "STRIPE")
-        .get(format!("/v1{}", path))
-        .header("Content-Type", "application/json")
+) -> Result<Value, AgentError> {
+    stripe_client(connection)
+        .get(path.to_string())
         .query(query)
         .send_json()
-        .map_err(String::from)
 }
 
 fn stripe_post(
     connection: &RawConnection,
     path: &str,
     form_parts: Vec<(String, String)>,
-) -> Result<Value, String> {
-    ProxyHttpClient::new(connection, "STRIPE")
-        .post(format!("/v1{}", path))
+) -> Result<Value, AgentError> {
+    stripe_client(connection)
+        .post(path.to_string())
         .form_body(&form_parts)
         .send_json()
-        .map_err(String::from)
 }
 
-fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, String> {
-    ProxyHttpClient::new(connection, "STRIPE")
-        .delete(format!("/v1{}", path))
-        .header("Content-Type", "application/json")
+fn stripe_delete(connection: &RawConnection, path: &str) -> Result<Value, AgentError> {
+    stripe_client(connection)
+        .delete(path.to_string())
         .send_json()
-        .map_err(String::from)
 }
 
 /// Build pagination query parameters.
@@ -135,8 +136,8 @@ pub struct ListCustomersOutput {
     module_integration_ids = "stripe_api_key",
     module_secure = true
 )]
-pub fn list_customers(input: ListCustomersInput) -> Result<ListCustomersOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_customers(input: ListCustomersInput) -> Result<ListCustomersOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     if let Some(email) = input.email
@@ -180,8 +181,8 @@ pub struct GetCustomerOutput {
     display_name = "Get Customer",
     description = "Retrieve a single customer by ID"
 )]
-pub fn get_customer(input: GetCustomerInput) -> Result<GetCustomerOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_customer(input: GetCustomerInput) -> Result<GetCustomerOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,
@@ -240,8 +241,8 @@ pub struct CreateCustomerOutput {
     description = "Create a new customer in Stripe",
     side_effects = true
 )]
-pub fn create_customer(input: CreateCustomerInput) -> Result<CreateCustomerOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_customer(input: CreateCustomerInput) -> Result<CreateCustomerOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = Vec::new();
     push_opt(&mut parts, "email", &input.email);
@@ -305,8 +306,8 @@ pub struct UpdateCustomerOutput {
     description = "Update an existing Stripe customer",
     side_effects = true
 )]
-pub fn update_customer(input: UpdateCustomerInput) -> Result<UpdateCustomerOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn update_customer(input: UpdateCustomerInput) -> Result<UpdateCustomerOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = Vec::new();
     push_opt(&mut parts, "email", &input.email);
@@ -370,8 +371,8 @@ pub struct ListProductsOutput {
     display_name = "List Products",
     description = "List products from your Stripe catalog"
 )]
-pub fn list_products(input: ListProductsInput) -> Result<ListProductsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_products(input: ListProductsInput) -> Result<ListProductsOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "active", &input.active);
@@ -411,8 +412,8 @@ pub struct GetProductOutput {
     display_name = "Get Product",
     description = "Retrieve a single product by ID"
 )]
-pub fn get_product(input: GetProductInput) -> Result<GetProductOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_product(input: GetProductInput) -> Result<GetProductOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,
@@ -471,8 +472,8 @@ pub struct CreateProductOutput {
     description = "Create a new product in Stripe",
     side_effects = true
 )]
-pub fn create_product(input: CreateProductInput) -> Result<CreateProductOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_product(input: CreateProductInput) -> Result<CreateProductOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = vec![("name".to_string(), input.name)];
     push_opt(&mut parts, "description", &input.description);
@@ -534,8 +535,8 @@ pub struct ListPricesOutput {
     display_name = "List Prices",
     description = "List prices with optional product filtering"
 )]
-pub fn list_prices(input: ListPricesInput) -> Result<ListPricesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_prices(input: ListPricesInput) -> Result<ListPricesOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "product", &input.product);
@@ -612,8 +613,8 @@ pub struct CreatePriceOutput {
     description = "Create a new price for a product",
     side_effects = true
 )]
-pub fn create_price(input: CreatePriceInput) -> Result<CreatePriceOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_price(input: CreatePriceInput) -> Result<CreatePriceOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = vec![
         ("product".to_string(), input.product),
@@ -711,8 +712,8 @@ pub struct CreatePaymentIntentOutput {
 )]
 pub fn create_payment_intent(
     input: CreatePaymentIntentInput,
-) -> Result<CreatePaymentIntentOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+) -> Result<CreatePaymentIntentOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = vec![
         ("amount".to_string(), input.amount.to_string()),
@@ -765,8 +766,10 @@ pub struct GetPaymentIntentOutput {
     display_name = "Get Payment Intent",
     description = "Retrieve a payment intent by ID"
 )]
-pub fn get_payment_intent(input: GetPaymentIntentInput) -> Result<GetPaymentIntentOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_payment_intent(
+    input: GetPaymentIntentInput,
+) -> Result<GetPaymentIntentOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,
@@ -826,8 +829,8 @@ pub struct ListPaymentIntentsOutput {
 )]
 pub fn list_payment_intents(
     input: ListPaymentIntentsInput,
-) -> Result<ListPaymentIntentsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+) -> Result<ListPaymentIntentsOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
@@ -896,8 +899,8 @@ pub struct CreateInvoiceOutput {
     description = "Create a new invoice for a customer",
     side_effects = true
 )]
-pub fn create_invoice(input: CreateInvoiceInput) -> Result<CreateInvoiceOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_invoice(input: CreateInvoiceInput) -> Result<CreateInvoiceOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = vec![("customer".to_string(), input.customer)];
     push_opt(&mut parts, "description", &input.description);
@@ -939,8 +942,8 @@ pub struct GetInvoiceOutput {
     display_name = "Get Invoice",
     description = "Retrieve an invoice by ID"
 )]
-pub fn get_invoice(input: GetInvoiceInput) -> Result<GetInvoiceOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_invoice(input: GetInvoiceInput) -> Result<GetInvoiceOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,
@@ -1000,8 +1003,8 @@ pub struct ListInvoicesOutput {
     display_name = "List Invoices",
     description = "List invoices with optional customer and status filtering"
 )]
-pub fn list_invoices(input: ListInvoicesInput) -> Result<ListInvoicesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_invoices(input: ListInvoicesInput) -> Result<ListInvoicesOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
@@ -1042,8 +1045,8 @@ pub struct FinalizeInvoiceOutput {
     description = "Finalize a draft invoice so it can be paid",
     side_effects = true
 )]
-pub fn finalize_invoice(input: FinalizeInvoiceInput) -> Result<FinalizeInvoiceOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn finalize_invoice(input: FinalizeInvoiceInput) -> Result<FinalizeInvoiceOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_post(
         connection,
@@ -1082,8 +1085,8 @@ pub struct SendInvoiceOutput {
     description = "Send a finalized invoice to the customer via email",
     side_effects = true
 )]
-pub fn send_invoice(input: SendInvoiceInput) -> Result<SendInvoiceOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn send_invoice(input: SendInvoiceInput) -> Result<SendInvoiceOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_post(
         connection,
@@ -1159,8 +1162,8 @@ pub struct CreateSubscriptionOutput {
 )]
 pub fn create_subscription(
     input: CreateSubscriptionInput,
-) -> Result<CreateSubscriptionOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+) -> Result<CreateSubscriptionOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = vec![
         ("customer".to_string(), input.customer),
@@ -1208,8 +1211,8 @@ pub struct GetSubscriptionOutput {
     display_name = "Get Subscription",
     description = "Retrieve a subscription by ID"
 )]
-pub fn get_subscription(input: GetSubscriptionInput) -> Result<GetSubscriptionOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_subscription(input: GetSubscriptionInput) -> Result<GetSubscriptionOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,
@@ -1276,8 +1279,8 @@ pub struct ListSubscriptionsOutput {
 )]
 pub fn list_subscriptions(
     input: ListSubscriptionsInput,
-) -> Result<ListSubscriptionsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+) -> Result<ListSubscriptionsOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
@@ -1331,8 +1334,8 @@ pub struct CancelSubscriptionOutput {
 )]
 pub fn cancel_subscription(
     input: CancelSubscriptionInput,
-) -> Result<CancelSubscriptionOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+) -> Result<CancelSubscriptionOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
 
     // If cancel_at_period_end is true, update the subscription instead of deleting
@@ -1407,8 +1410,8 @@ pub struct CreateRefundOutput {
     description = "Create a refund for a payment intent (full or partial)",
     side_effects = true
 )]
-pub fn create_refund(input: CreateRefundInput) -> Result<CreateRefundOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_refund(input: CreateRefundInput) -> Result<CreateRefundOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut parts = vec![("payment_intent".to_string(), input.payment_intent)];
     if let Some(amount) = input.amount {
@@ -1449,8 +1452,8 @@ pub struct GetRefundOutput {
     display_name = "Get Refund",
     description = "Retrieve a refund by ID"
 )]
-pub fn get_refund(input: GetRefundInput) -> Result<GetRefundOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_refund(input: GetRefundInput) -> Result<GetRefundOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,
@@ -1487,8 +1490,8 @@ pub struct GetBalanceOutput {
     display_name = "Get Balance",
     description = "Retrieve the current account balance"
 )]
-pub fn get_balance(input: GetBalanceInput) -> Result<GetBalanceOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_balance(input: GetBalanceInput) -> Result<GetBalanceOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(connection, "/balance", HashMap::new())?;
     Ok(GetBalanceOutput { balance: result })
@@ -1546,8 +1549,8 @@ pub struct ListChargesOutput {
     display_name = "List Charges",
     description = "List charges with optional customer and payment intent filtering"
 )]
-pub fn list_charges(input: ListChargesInput) -> Result<ListChargesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_charges(input: ListChargesInput) -> Result<ListChargesOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let mut query = pagination_params(input.limit, input.starting_after);
     push_opt_map(&mut query, "customer", &input.customer);
@@ -1588,8 +1591,8 @@ pub struct GetChargeOutput {
     display_name = "Get Charge",
     description = "Retrieve a charge by ID"
 )]
-pub fn get_charge(input: GetChargeInput) -> Result<GetChargeOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_charge(input: GetChargeInput) -> Result<GetChargeOutput, AgentError> {
+    let connection = require_connection("STRIPE", &input._connection)?;
     // connection_id is used via proxy headers
     let result = stripe_get(
         connection,

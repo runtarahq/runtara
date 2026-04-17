@@ -11,7 +11,7 @@
 //! The actual HTTP execution happens on the host side via host functions,
 //! while this module handles request preparation and response parsing.
 
-use crate::types::{http_error_with_headers, network_error};
+use crate::types::{self, attrs};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
@@ -502,13 +502,15 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     let response = match request.call_agent() {
         Ok(resp) => resp,
         Err(runtara_http::HttpError::Transport(e)) => {
-            let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
-                .with_attr("url", &input.url);
+            let err =
+                types::http::network("HTTP", format!("request to {} failed: {}", input.url, e))
+                    .with_attr(attrs::URL, input.url.as_str());
             return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
         }
         Err(e) => {
-            let err = network_error(format!("HTTP request to {} failed: {}", input.url, e))
-                .with_attr("url", &input.url);
+            let err =
+                types::http::network("HTTP", format!("request to {} failed: {}", input.url, e))
+                    .with_attr(attrs::URL, input.url.as_str());
             return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
         }
     };
@@ -522,8 +524,8 @@ pub fn http_request(input: HttpRequestInput) -> Result<HttpResponse, String> {
     // Handle non-2xx with fail_on_error
     if !success && input.fail_on_error {
         let body_text = String::from_utf8_lossy(&response.body).to_string();
-        let err = http_error_with_headers(status_code, &body_text, Some(&response_headers))
-            .with_attr("url", &input.url);
+        let err = types::http::classify_response("HTTP", status_code, body_text, &response_headers)
+            .with_attr(attrs::URL, input.url.as_str());
         return Err(serde_json::to_string(&err).unwrap_or_else(|_| err.to_string()));
     }
 

@@ -13,17 +13,16 @@
 //! or invoked as tools by an AI Agent step.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{bedrock, openai};
 
-use super::errors::permanent_error;
-
 /// Resolve the integration_id for a connection.
 /// In compiled scenario binaries, the connection stub has an empty integration_id.
-fn resolve_integration_id(connection: &RawConnection) -> Result<String, String> {
+fn resolve_integration_id(connection: &RawConnection) -> Result<String, AgentError> {
     let integration_id = &connection.integration_id;
     if !integration_id.is_empty() {
         return Ok(integration_id.clone());
@@ -36,30 +35,30 @@ fn resolve_integration_id(connection: &RawConnection) -> Result<String, String> 
 
     let client = runtara_http::HttpClient::new();
     let resp = client.request("GET", &url).call().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "AI_TOOLS_CONNECTION_FETCH_ERROR",
-            &format!("Failed to fetch connection: {}", e),
-            json!({"connection_id": connection.connection_id}),
+            format!("Failed to fetch connection: {}", e),
         )
+        .with_attrs(json!({"connection_id": connection.connection_id}))
     })?;
 
     let body: Value = resp.into_json().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "AI_TOOLS_CONNECTION_PARSE_ERROR",
-            &format!("Failed to parse connection response: {}", e),
-            json!({}),
+            format!("Failed to parse connection response: {}", e),
         )
+        .with_attrs(json!({}))
     })?;
 
     body["integration_id"]
         .as_str()
         .map(String::from)
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "AI_TOOLS_MISSING_INTEGRATION_ID",
                 "Connection has no integration_id",
-                json!({"connection_id": connection.connection_id}),
             )
+            .with_attrs(json!({"connection_id": connection.connection_id}))
         })
 }
 
@@ -204,13 +203,12 @@ pub struct AiTextCompletionOutput {
     module_integration_ids = "openai_api_key,aws_credentials",
     module_secure = true
 )]
-pub fn ai_text_completion(input: AiTextCompletionInput) -> Result<AiTextCompletionOutput, String> {
+pub fn ai_text_completion(
+    input: AiTextCompletionInput,
+) -> Result<AiTextCompletionOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "AI_TOOLS_MISSING_CONNECTION",
-            "LLM connection is required",
-            json!({}),
-        )
+        AgentError::permanent("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required")
+            .with_attrs(json!({}))
     })?;
 
     // If output_schema is provided, use structured output path
@@ -273,11 +271,11 @@ pub fn ai_text_completion(input: AiTextCompletionInput) -> Result<AiTextCompleti
                 structured_output: None,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_PROVIDER",
-            &format!("LLM provider not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("LLM provider not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -287,7 +285,7 @@ fn ai_text_completion_structured(
     connection: &RawConnection,
     input: &AiTextCompletionInput,
     schema: &Value,
-) -> Result<AiTextCompletionOutput, String> {
+) -> Result<AiTextCompletionOutput, AgentError> {
     let integration_id = resolve_integration_id(connection)?;
     match integration_id.as_str() {
         "openai_api_key" => {
@@ -336,11 +334,11 @@ fn ai_text_completion_structured(
                 structured_output: Some(output.output),
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_PROVIDER",
-            &format!("LLM provider not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("LLM provider not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -450,13 +448,10 @@ pub struct AiImageGenerationOutput {
 )]
 pub fn ai_image_generation(
     input: AiImageGenerationInput,
-) -> Result<AiImageGenerationOutput, String> {
+) -> Result<AiImageGenerationOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "AI_TOOLS_MISSING_CONNECTION",
-            "LLM connection is required",
-            json!({}),
-        )
+        AgentError::permanent("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required")
+            .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -503,11 +498,11 @@ pub fn ai_image_generation(
                 revised_prompt: output.revised_prompt,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_PROVIDER",
-            &format!("LLM provider not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("LLM provider not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -607,13 +602,10 @@ pub struct AiVisionToTextOutput {
     display_name = "Vision to Text",
     description = "Analyze images and generate text descriptions. Supports optional structured output via output_schema."
 )]
-pub fn ai_vision_to_text(input: AiVisionToTextInput) -> Result<AiVisionToTextOutput, String> {
+pub fn ai_vision_to_text(input: AiVisionToTextInput) -> Result<AiVisionToTextOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "AI_TOOLS_MISSING_CONNECTION",
-            "LLM connection is required",
-            json!({}),
-        )
+        AgentError::permanent("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required")
+            .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -664,11 +656,11 @@ pub fn ai_vision_to_text(input: AiVisionToTextInput) -> Result<AiVisionToTextOut
                 structured_output,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_PROVIDER",
-            &format!("LLM provider not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("LLM provider not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -774,13 +766,12 @@ pub struct AiVisionToImageOutput {
     display_name = "Vision to Image",
     description = "Edit and manipulate images using AI models"
 )]
-pub fn ai_vision_to_image(input: AiVisionToImageInput) -> Result<AiVisionToImageOutput, String> {
+pub fn ai_vision_to_image(
+    input: AiVisionToImageInput,
+) -> Result<AiVisionToImageOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "AI_TOOLS_MISSING_CONNECTION",
-            "LLM connection is required",
-            json!({}),
-        )
+        AgentError::permanent("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required")
+            .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -823,10 +814,10 @@ pub fn ai_vision_to_image(input: AiVisionToImageInput) -> Result<AiVisionToImage
                 model: output.model,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "AI_TOOLS_UNSUPPORTED_PROVIDER",
-            &format!("LLM provider not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("LLM provider not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }

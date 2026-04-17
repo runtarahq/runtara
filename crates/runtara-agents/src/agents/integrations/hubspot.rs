@@ -4,6 +4,7 @@
 //! via the HubSpot CRM API v3.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,44 +16,36 @@ use super::integration_utils::{ProxyHttpClient, require_connection};
 // Helpers
 // ============================================================================
 
-fn extract_connection(conn: &Option<RawConnection>) -> Result<&RawConnection, String> {
-    require_connection("HUBSPOT", conn).map_err(String::from)
-}
-
 fn hubspot_get(
     connection: &RawConnection,
     path: &str,
     query: HashMap<String, String>,
-) -> Result<Value, String> {
+) -> Result<Value, AgentError> {
     ProxyHttpClient::new(connection, "HUBSPOT")
         .get(path.to_string())
         .query(query)
         .send_json()
-        .map_err(String::from)
 }
 
-fn hubspot_post(connection: &RawConnection, path: &str, body: Value) -> Result<Value, String> {
+fn hubspot_post(connection: &RawConnection, path: &str, body: Value) -> Result<Value, AgentError> {
     ProxyHttpClient::new(connection, "HUBSPOT")
         .post(path.to_string())
         .json_body(body)
         .send_json()
-        .map_err(String::from)
 }
 
-fn hubspot_patch(connection: &RawConnection, path: &str, body: Value) -> Result<Value, String> {
+fn hubspot_patch(connection: &RawConnection, path: &str, body: Value) -> Result<Value, AgentError> {
     ProxyHttpClient::new(connection, "HUBSPOT")
         .patch(path.to_string())
         .json_body(body)
         .send_json()
-        .map_err(String::from)
 }
 
-fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), String> {
+fn hubspot_delete(connection: &RawConnection, path: &str) -> Result<(), AgentError> {
     ProxyHttpClient::new(connection, "HUBSPOT")
         .delete(path.to_string())
         .send_json()
         .map(|_| ())
-        .map_err(String::from)
 }
 
 /// Build properties query param from an optional comma-separated list.
@@ -126,8 +119,8 @@ pub struct ListContactsOutput {
     module_integration_ids = "hubspot_private_app,hubspot_access_token",
     module_secure = true
 )]
-pub fn list_contacts(input: ListContactsInput) -> Result<ListContactsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_contacts(input: ListContactsInput) -> Result<ListContactsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -189,8 +182,8 @@ pub struct GetContactOutput {
     display_name = "Get Contact",
     description = "Retrieve a single contact by ID or email"
 )]
-pub fn get_contact(input: GetContactInput) -> Result<GetContactOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_contact(input: GetContactInput) -> Result<GetContactOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -236,8 +229,8 @@ pub struct CreateContactOutput {
     description = "Create a new contact in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_contact(input: CreateContactInput) -> Result<CreateContactOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_contact(input: CreateContactInput) -> Result<CreateContactOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_post(
         connection,
@@ -282,8 +275,8 @@ pub struct UpdateContactOutput {
     description = "Update an existing contact's properties",
     side_effects = true
 )]
-pub fn update_contact(input: UpdateContactInput) -> Result<UpdateContactOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn update_contact(input: UpdateContactInput) -> Result<UpdateContactOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_patch(
         connection,
@@ -322,8 +315,8 @@ pub struct DeleteContactOutput {
     description = "Archive (soft-delete) a contact by ID",
     side_effects = true
 )]
-pub fn delete_contact(input: DeleteContactInput) -> Result<DeleteContactOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn delete_contact(input: DeleteContactInput) -> Result<DeleteContactOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     hubspot_delete(
         connection,
@@ -401,8 +394,8 @@ pub struct SearchContactsOutput {
     display_name = "Search Contacts",
     description = "Search contacts using filters, full-text query, or both"
 )]
-pub fn search_contacts(input: SearchContactsInput) -> Result<SearchContactsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn search_contacts(input: SearchContactsInput) -> Result<SearchContactsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut body = json!({});
     if let Some(fg) = input.filter_groups {
@@ -480,8 +473,8 @@ pub struct ListCompaniesOutput {
     display_name = "List Companies",
     description = "List companies from your HubSpot CRM"
 )]
-pub fn list_companies(input: ListCompaniesInput) -> Result<ListCompaniesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_companies(input: ListCompaniesInput) -> Result<ListCompaniesOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -536,8 +529,8 @@ pub struct GetCompanyOutput {
     display_name = "Get Company",
     description = "Retrieve a single company by ID"
 )]
-pub fn get_company(input: GetCompanyInput) -> Result<GetCompanyOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_company(input: GetCompanyInput) -> Result<GetCompanyOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -578,8 +571,8 @@ pub struct CreateCompanyOutput {
     description = "Create a new company in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_company(input: CreateCompanyInput) -> Result<CreateCompanyOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_company(input: CreateCompanyInput) -> Result<CreateCompanyOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_post(
         connection,
@@ -624,8 +617,8 @@ pub struct UpdateCompanyOutput {
     description = "Update an existing company's properties",
     side_effects = true
 )]
-pub fn update_company(input: UpdateCompanyInput) -> Result<UpdateCompanyOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn update_company(input: UpdateCompanyInput) -> Result<UpdateCompanyOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_patch(
         connection,
@@ -664,8 +657,8 @@ pub struct DeleteCompanyOutput {
     description = "Archive (soft-delete) a company by ID",
     side_effects = true
 )]
-pub fn delete_company(input: DeleteCompanyInput) -> Result<DeleteCompanyOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn delete_company(input: DeleteCompanyInput) -> Result<DeleteCompanyOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     hubspot_delete(
         connection,
@@ -737,8 +730,8 @@ pub struct SearchCompaniesOutput {
     display_name = "Search Companies",
     description = "Search companies using filters, full-text query, or both"
 )]
-pub fn search_companies(input: SearchCompaniesInput) -> Result<SearchCompaniesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn search_companies(input: SearchCompaniesInput) -> Result<SearchCompaniesOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut body = json!({});
     if let Some(fg) = input.filter_groups {
@@ -816,8 +809,8 @@ pub struct ListDealsOutput {
     display_name = "List Deals",
     description = "List deals from your HubSpot CRM"
 )]
-pub fn list_deals(input: ListDealsInput) -> Result<ListDealsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_deals(input: ListDealsInput) -> Result<ListDealsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -872,8 +865,8 @@ pub struct GetDealOutput {
     display_name = "Get Deal",
     description = "Retrieve a single deal by ID"
 )]
-pub fn get_deal(input: GetDealInput) -> Result<GetDealOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_deal(input: GetDealInput) -> Result<GetDealOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -914,8 +907,8 @@ pub struct CreateDealOutput {
     description = "Create a new deal in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_deal(input: CreateDealInput) -> Result<CreateDealOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_deal(input: CreateDealInput) -> Result<CreateDealOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_post(
         connection,
@@ -957,8 +950,8 @@ pub struct UpdateDealOutput {
     description = "Update a deal's properties — use dealstage property to move through pipeline stages",
     side_effects = true
 )]
-pub fn update_deal(input: UpdateDealInput) -> Result<UpdateDealOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn update_deal(input: UpdateDealInput) -> Result<UpdateDealOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_patch(
         connection,
@@ -994,8 +987,8 @@ pub struct DeleteDealOutput {
     description = "Archive (soft-delete) a deal by ID",
     side_effects = true
 )]
-pub fn delete_deal(input: DeleteDealInput) -> Result<DeleteDealOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn delete_deal(input: DeleteDealInput) -> Result<DeleteDealOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     hubspot_delete(
         connection,
@@ -1067,8 +1060,8 @@ pub struct SearchDealsOutput {
     display_name = "Search Deals",
     description = "Search deals using filters, full-text query, or both"
 )]
-pub fn search_deals(input: SearchDealsInput) -> Result<SearchDealsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn search_deals(input: SearchDealsInput) -> Result<SearchDealsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut body = json!({});
     if let Some(fg) = input.filter_groups {
@@ -1146,8 +1139,8 @@ pub struct ListQuotesOutput {
     display_name = "List Quotes",
     description = "List quotes from your HubSpot CRM"
 )]
-pub fn list_quotes(input: ListQuotesInput) -> Result<ListQuotesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_quotes(input: ListQuotesInput) -> Result<ListQuotesOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1202,8 +1195,8 @@ pub struct GetQuoteOutput {
     display_name = "Get Quote",
     description = "Retrieve a single quote by ID"
 )]
-pub fn get_quote(input: GetQuoteInput) -> Result<GetQuoteOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_quote(input: GetQuoteInput) -> Result<GetQuoteOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     add_properties(&mut query, &input.properties);
@@ -1244,8 +1237,8 @@ pub struct CreateQuoteOutput {
     description = "Create a new quote in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_quote(input: CreateQuoteInput) -> Result<CreateQuoteOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_quote(input: CreateQuoteInput) -> Result<CreateQuoteOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_post(
         connection,
@@ -1287,8 +1280,8 @@ pub struct UpdateQuoteOutput {
     description = "Update a quote's properties — use hs_status to change quote status",
     side_effects = true
 )]
-pub fn update_quote(input: UpdateQuoteInput) -> Result<UpdateQuoteOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn update_quote(input: UpdateQuoteInput) -> Result<UpdateQuoteOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_patch(
         connection,
@@ -1343,8 +1336,8 @@ pub struct ListLineItemsOutput {
     display_name = "List Line Items",
     description = "List line items from your HubSpot CRM"
 )]
-pub fn list_line_items(input: ListLineItemsInput) -> Result<ListLineItemsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_line_items(input: ListLineItemsInput) -> Result<ListLineItemsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1392,8 +1385,8 @@ pub struct CreateLineItemOutput {
     description = "Create a new line item in HubSpot CRM",
     side_effects = true
 )]
-pub fn create_line_item(input: CreateLineItemInput) -> Result<CreateLineItemOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn create_line_item(input: CreateLineItemInput) -> Result<CreateLineItemOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_post(
         connection,
@@ -1432,8 +1425,8 @@ pub struct DeleteLineItemOutput {
     description = "Archive (soft-delete) a line item by ID",
     side_effects = true
 )]
-pub fn delete_line_item(input: DeleteLineItemInput) -> Result<DeleteLineItemOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn delete_line_item(input: DeleteLineItemInput) -> Result<DeleteLineItemOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     hubspot_delete(
         connection,
@@ -1484,8 +1477,8 @@ pub struct ListOwnersOutput {
     display_name = "List Owners",
     description = "List owners (users) in your HubSpot account"
 )]
-pub fn list_owners(input: ListOwnersInput) -> Result<ListOwnersOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_owners(input: ListOwnersInput) -> Result<ListOwnersOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let mut query = HashMap::new();
     if let Some(limit) = input.limit {
@@ -1537,8 +1530,8 @@ pub struct GetOwnerOutput {
     display_name = "Get Owner",
     description = "Retrieve a single owner by ID"
 )]
-pub fn get_owner(input: GetOwnerInput) -> Result<GetOwnerOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_owner(input: GetOwnerInput) -> Result<GetOwnerOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_get(
         connection,
@@ -1587,8 +1580,8 @@ pub struct ListPipelinesOutput {
     display_name = "List Pipelines",
     description = "List pipelines and their stages for deals or tickets — useful for discovering stage IDs"
 )]
-pub fn list_pipelines(input: ListPipelinesInput) -> Result<ListPipelinesOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_pipelines(input: ListPipelinesInput) -> Result<ListPipelinesOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_get(
         connection,
@@ -1640,8 +1633,8 @@ pub struct GetPipelineOutput {
     display_name = "Get Pipeline",
     description = "Retrieve a specific pipeline with all its stages"
 )]
-pub fn get_pipeline(input: GetPipelineInput) -> Result<GetPipelineOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn get_pipeline(input: GetPipelineInput) -> Result<GetPipelineOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let result = hubspot_get(
         connection,
@@ -1705,8 +1698,8 @@ pub struct CreateAssociationOutput {
 )]
 pub fn create_association(
     input: CreateAssociationInput,
-) -> Result<CreateAssociationOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+) -> Result<CreateAssociationOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
 
     // v4 associations API: PUT /crm/v4/objects/{fromObjectType}/{fromObjectId}/associations/{toObjectType}/{toObjectId}
@@ -1724,8 +1717,7 @@ pub fn create_association(
     let result = ProxyHttpClient::new(connection, "HUBSPOT")
         .put(path)
         .json_body(body)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     Ok(CreateAssociationOutput { result })
 }
@@ -1772,8 +1764,10 @@ pub struct ListAssociationsOutput {
     display_name = "List Associations",
     description = "List all associations from one object to another type (e.g. all companies for a contact)"
 )]
-pub fn list_associations(input: ListAssociationsInput) -> Result<ListAssociationsOutput, String> {
-    let connection = extract_connection(&input._connection)?;
+pub fn list_associations(
+    input: ListAssociationsInput,
+) -> Result<ListAssociationsOutput, AgentError> {
+    let connection = require_connection("HUBSPOT", &input._connection)?;
     // Proxy handles OAuth2 token refresh via connection_id
     let path = format!(
         "/crm/v4/objects/{}/{}/associations/{}",

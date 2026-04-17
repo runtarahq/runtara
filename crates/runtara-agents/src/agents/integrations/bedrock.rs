@@ -4,11 +4,11 @@
 //! Requires AWS credentials configured in the connection.
 
 use crate::connections::RawConnection;
+use crate::types::{AgentError, attrs};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::errors::permanent_error;
 use super::integration_utils::ProxyHttpClient;
 
 pub use super::types::LlmUsage;
@@ -20,13 +20,13 @@ pub use super::types::LlmUsage;
 /// Bedrock uses the historical `BEDROCK_MISSING_CONNECTION` code rather
 /// than the shared `*_NO_CONNECTION` taxonomy, preserved for wire
 /// compatibility.
-fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, String> {
+fn require_connection(connection: &Option<RawConnection>) -> Result<&RawConnection, AgentError> {
     connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "BEDROCK_MISSING_CONNECTION",
             "Bedrock connection is required",
-            json!({}),
         )
+        .with_attr(attrs::INTEGRATION, "BEDROCK")
     })
 }
 
@@ -137,7 +137,7 @@ pub struct TextCompletionOutput {
     module_integration_ids = "aws_credentials",
     module_secure = true
 )]
-pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, String> {
+pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let model = input
@@ -200,11 +200,11 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
             "textGenerationConfig": text_config
         })
     } else {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "BEDROCK_UNSUPPORTED_MODEL",
-            &format!("Unsupported Bedrock model: {}", model),
-            json!({"model": model}),
-        ));
+            format!("Unsupported Bedrock model: {}", model),
+        )
+        .with_attrs(json!({"model": model})));
     };
 
     // Proxy handles SigV4 signing and resolves the regional endpoint
@@ -212,8 +212,7 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
         .post(format!("/model/{}/invoke", model))
         .timeout_ms(120_000)
         .json_body(request_body)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     // Parse response based on model family
     let (text, prompt_tokens, completion_tokens, finish_reason) =
@@ -221,11 +220,11 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
             let text = response_json["content"][0]["text"]
                 .as_str()
                 .ok_or_else(|| {
-                    permanent_error(
+                    AgentError::permanent(
                         "BEDROCK_INVALID_RESPONSE",
                         "Missing text in Bedrock response",
-                        json!({}),
                     )
+                    .with_attrs(json!({}))
                 })?
                 .to_string();
 
@@ -243,11 +242,11 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
             let text = response_json["results"][0]["outputText"]
                 .as_str()
                 .ok_or_else(|| {
-                    permanent_error(
+                    AgentError::permanent(
                         "BEDROCK_INVALID_RESPONSE",
                         "Missing outputText in Bedrock response",
-                        json!({}),
                     )
+                    .with_attrs(json!({}))
                 })?
                 .to_string();
 
@@ -262,11 +261,11 @@ pub fn text_completion(input: TextCompletionInput) -> Result<TextCompletionOutpu
 
             (text, prompt_tokens, completion_tokens, finish_reason)
         } else {
-            return Err(permanent_error(
+            return Err(AgentError::permanent(
                 "BEDROCK_UNSUPPORTED_MODEL",
-                &format!("Unsupported Bedrock model: {}", model),
-                json!({"model": model}),
-            ));
+                format!("Unsupported Bedrock model: {}", model),
+            )
+            .with_attrs(json!({"model": model})));
         };
 
     Ok(TextCompletionOutput {
@@ -388,7 +387,7 @@ pub struct ImageGenerationOutput {
     display_name = "Image Generation (Bedrock)",
     description = "Generate images using AWS Bedrock models (Stable Diffusion)"
 )]
-pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, String> {
+pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let model = input
@@ -421,17 +420,16 @@ pub fn image_generation(input: ImageGenerationInput) -> Result<ImageGenerationOu
         .post(format!("/model/{}/invoke", model))
         .timeout_ms(180_000)
         .json_body(request_body)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     let image_data = response_json["artifacts"][0]["base64"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing base64 image in Bedrock response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?
         .to_string();
 
@@ -514,16 +512,18 @@ pub struct StructuredOutputOutput {
     display_name = "Structured Output (Bedrock)",
     description = "Generate structured JSON output using AWS Bedrock models with prompt engineering"
 )]
-pub fn structured_output(input: StructuredOutputInput) -> Result<StructuredOutputOutput, String> {
+pub fn structured_output(
+    input: StructuredOutputInput,
+) -> Result<StructuredOutputOutput, AgentError> {
     // For Bedrock, we'll use prompt engineering to get structured output
     // since native structured output support is limited
 
     let schema_str = serde_json::to_string_pretty(&input.json_schema).map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "BEDROCK_INVALID_INPUT",
-            &format!("Failed to serialize schema: {}", e),
-            json!({}),
+            format!("Failed to serialize schema: {}", e),
         )
+        .with_attrs(json!({}))
     })?;
 
     let enhanced_prompt = format!(
@@ -544,11 +544,11 @@ pub fn structured_output(input: StructuredOutputInput) -> Result<StructuredOutpu
 
     // Parse the JSON response
     let output: Value = serde_json::from_str(&text_completion.text).map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "BEDROCK_INVALID_RESPONSE",
-            &format!("Failed to parse structured output as JSON: {}", e),
-            json!({"response": text_completion.text}),
+            format!("Failed to parse structured output as JSON: {}", e),
         )
+        .with_attrs(json!({"response": text_completion.text}))
     })?;
 
     Ok(StructuredOutputOutput {
@@ -641,7 +641,7 @@ pub struct VisionToTextOutput {
     display_name = "Vision to Text (Bedrock)",
     description = "Analyze images and generate text descriptions using AWS Bedrock Claude models"
 )]
-pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, String> {
+pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let model = input
@@ -650,20 +650,20 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, St
 
     // Only Claude 3 models support vision in Bedrock
     if !model.starts_with("anthropic.claude-3") && !model.starts_with("anthropic.claude-3-5") {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "BEDROCK_UNSUPPORTED_MODEL",
             "Vision capabilities require Claude 3 or Claude 3.5 models",
-            json!({"model": model}),
-        ));
+        )
+        .with_attrs(json!({"model": model})));
     }
 
     // Ensure we have image data
     if input.image_data.is_none() && input.image_url.is_none() {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "BEDROCK_MISSING_INPUT",
             "Either image_data or image_url is required",
-            json!({}),
-        ));
+        )
+        .with_attrs(json!({})));
     }
 
     // Build content blocks
@@ -681,11 +681,11 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, St
         }));
     } else if let Some(_image_url) = input.image_url {
         // Bedrock doesn't support URLs directly, would need to fetch and encode
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "BEDROCK_UNSUPPORTED_INPUT",
             "Bedrock vision requires base64-encoded image_data, not URLs",
-            json!({}),
-        ));
+        )
+        .with_attrs(json!({})));
     }
 
     // Add text prompt
@@ -713,17 +713,16 @@ pub fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutput, St
         .post(format!("/model/{}/invoke", model))
         .timeout_ms(120_000)
         .json_body(request_body)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     let text = response_json["content"][0]["text"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing text in Bedrock response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?
         .to_string();
 
@@ -839,7 +838,7 @@ pub struct VisionToImageOutput {
     display_name = "Vision to Image (Bedrock)",
     description = "Edit and manipulate images using AWS Bedrock Stable Diffusion models"
 )]
-pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, String> {
+pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let model = input
@@ -864,17 +863,16 @@ pub fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageOutput,
         .post(format!("/model/{}/invoke", model))
         .timeout_ms(180_000)
         .json_body(request_body)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     let image_data = response_json["artifacts"][0]["base64"]
         .as_str()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing base64 image in Bedrock response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?
         .to_string();
 
@@ -955,7 +953,7 @@ pub struct BedrockInvokeModelOutput {
 )]
 pub fn bedrock_invoke_model(
     input: BedrockInvokeModelInput,
-) -> Result<BedrockInvokeModelOutput, String> {
+) -> Result<BedrockInvokeModelOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let content_type = input
@@ -967,17 +965,16 @@ pub fn bedrock_invoke_model(
         .header("Content-Type", &content_type)
         .timeout_ms(180_000)
         .json_body(input.body)
-        .send_raw()
-        .map_err(String::from)?;
+        .send_raw()?;
 
     let body = match response.body {
         crate::http::HttpResponseBody::Json(v) => v,
         _ => {
-            return Err(permanent_error(
+            return Err(AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Expected JSON response from Bedrock",
-                json!({}),
-            ));
+            )
+            .with_attrs(json!({})));
         }
     };
 
@@ -1019,23 +1016,22 @@ pub struct BedrockListModelsOutput {
 )]
 pub fn bedrock_list_models(
     input: BedrockListModelsInput,
-) -> Result<BedrockListModelsOutput, String> {
+) -> Result<BedrockListModelsOutput, AgentError> {
     let connection = require_connection(&input._connection)?;
 
     let response_json = bedrock_client(connection)
         .get("/foundation-models")
         .timeout_ms(30_000)
-        .send_json()
-        .map_err(String::from)?;
+        .send_json()?;
 
     let model_summaries = response_json["modelSummaries"]
         .as_array()
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "BEDROCK_INVALID_RESPONSE",
                 "Missing modelSummaries in Bedrock response",
-                json!({}),
             )
+            .with_attrs(json!({}))
         })?
         .clone();
 

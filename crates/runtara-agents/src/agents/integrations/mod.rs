@@ -7,7 +7,6 @@ pub mod ai_tools;
 pub mod bedrock;
 pub mod commerce;
 pub mod connection_types;
-pub mod errors;
 pub mod hubspot;
 pub mod integration_utils;
 pub mod mailgun;

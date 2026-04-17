@@ -10,14 +10,13 @@
 //! The tenant ID is read from `RUNTARA_TENANT_ID` env var.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use runtara_dsl::{ConditionExpression, MappingValue};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-
-use super::errors::permanent_error;
 
 // ============================================================================
 // HTTP Client Helpers
@@ -35,7 +34,7 @@ fn tenant_id() -> String {
 }
 
 /// Make a POST request to the internal API and parse the JSON response.
-fn http_post(path: &str, body: Value) -> Result<Value, String> {
+fn http_post(path: &str, body: Value) -> Result<Value, AgentError> {
     let url = format!("{}{}", base_url(), path);
     let tid = tenant_id();
     let client = runtara_http::HttpClient::new();
@@ -47,24 +46,24 @@ fn http_post(path: &str, body: Value) -> Result<Value, String> {
         .body_json(&body)
         .call()
         .map_err(|e| {
-            permanent_error(
+            AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
-                &format!("Object model API request failed: {}", e),
-                json!({"url": url}),
+                format!("Object model API request failed: {}", e),
             )
+            .with_attrs(json!({"url": url}))
         })?;
 
     resp.into_json::<Value>().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
-            &format!("Failed to parse object model API response: {}", e),
-            json!({}),
+            format!("Failed to parse object model API response: {}", e),
         )
+        .with_attrs(json!({}))
     })
 }
 
 /// Make a PUT request to the internal API and parse the JSON response.
-fn http_put(path: &str, body: Value) -> Result<Value, String> {
+fn http_put(path: &str, body: Value) -> Result<Value, AgentError> {
     let url = format!("{}{}", base_url(), path);
     let tid = tenant_id();
     let client = runtara_http::HttpClient::new();
@@ -76,24 +75,24 @@ fn http_put(path: &str, body: Value) -> Result<Value, String> {
         .body_json(&body)
         .call()
         .map_err(|e| {
-            permanent_error(
+            AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
-                &format!("Object model API request failed: {}", e),
-                json!({"url": url}),
+                format!("Object model API request failed: {}", e),
             )
+            .with_attrs(json!({"url": url}))
         })?;
 
     resp.into_json::<Value>().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
-            &format!("Failed to parse object model API response: {}", e),
-            json!({}),
+            format!("Failed to parse object model API response: {}", e),
         )
+        .with_attrs(json!({}))
     })
 }
 
 /// Make a GET request to the internal API and parse the JSON response.
-fn http_get(path: &str) -> Result<Value, String> {
+fn http_get(path: &str) -> Result<Value, AgentError> {
     let url = format!("{}{}", base_url(), path);
     let tid = tenant_id();
     let client = runtara_http::HttpClient::new();
@@ -103,19 +102,19 @@ fn http_get(path: &str) -> Result<Value, String> {
         .header("X-Org-Id", &tid)
         .call()
         .map_err(|e| {
-            permanent_error(
+            AgentError::permanent(
                 "OBJECT_MODEL_HTTP_ERROR",
-                &format!("Object model API request failed: {}", e),
-                json!({"url": url}),
+                format!("Object model API request failed: {}", e),
             )
+            .with_attrs(json!({"url": url}))
         })?;
 
     resp.into_json::<Value>().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "OBJECT_MODEL_PARSE_ERROR",
-            &format!("Failed to parse object model API response: {}", e),
-            json!({}),
+            format!("Failed to parse object model API response: {}", e),
         )
+        .with_attrs(json!({}))
     })
 }
 
@@ -469,7 +468,7 @@ pub struct UpdateInstanceOutput {
     module_integration_ids = "postgres",
     side_effects = true
 )]
-pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutput, String> {
+pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutput, AgentError> {
     let resp = http_post(
         "/instances",
         json!({
@@ -494,7 +493,7 @@ pub fn create_instance(input: CreateInstanceInput) -> Result<CreateInstanceOutpu
     module_integration_ids = "postgres",
     side_effects = false
 )]
-pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutput, String> {
+pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutput, AgentError> {
     // Build request body — use condition if provided, otherwise use simple filters
     let condition_json = input.condition.as_ref().map(condition_expr_to_json);
 
@@ -530,7 +529,7 @@ pub fn query_instances(input: QueryInstancesInput) -> Result<QueryInstancesOutpu
 )]
 pub fn check_instance_exists(
     input: CheckInstanceExistsInput,
-) -> Result<CheckInstanceExistsOutput, String> {
+) -> Result<CheckInstanceExistsOutput, AgentError> {
     let resp = http_post(
         "/instances/exists",
         json!({
@@ -557,7 +556,7 @@ pub fn check_instance_exists(
 )]
 pub fn create_if_not_exists(
     input: CreateIfNotExistsInput,
-) -> Result<CreateIfNotExistsOutput, String> {
+) -> Result<CreateIfNotExistsOutput, AgentError> {
     let resp = http_post(
         "/instances/create-if-not-exists",
         json!({
@@ -585,7 +584,7 @@ pub fn create_if_not_exists(
     module_integration_ids = "postgres",
     side_effects = true
 )]
-pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutput, String> {
+pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutput, AgentError> {
     let properties = Value::Object(input.data.into_iter().collect());
 
     let resp = http_put(
@@ -659,7 +658,7 @@ const MEMORY_SCHEMA_NAME: &str = "_ai_conversation_memory";
 const MEMORY_TABLE_NAME: &str = "_ai_conversation_memory";
 
 /// Ensure the conversation memory schema exists, creating it if needed.
-fn ensure_memory_schema() -> Result<(), String> {
+fn ensure_memory_schema() -> Result<(), AgentError> {
     // Check if schema already exists
     let resp = http_get(&format!("/schemas/{}", MEMORY_SCHEMA_NAME))?;
 
@@ -774,7 +773,7 @@ pub struct LoadMemoryOutput {
     side_effects = false,
     tags = "memory:read"
 )]
-pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, String> {
+pub fn load_memory(input: LoadMemoryInput) -> Result<LoadMemoryOutput, AgentError> {
     ensure_memory_schema()?;
 
     let mut filters = HashMap::new();
@@ -888,7 +887,7 @@ pub struct SaveMemoryOutput {
     side_effects = true,
     tags = "memory:write"
 )]
-pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, String> {
+pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, AgentError> {
     ensure_memory_schema()?;
 
     let message_count = input.messages.len() as i64;
@@ -933,14 +932,14 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, String> {
             )?;
 
             if !update_resp["success"].as_bool().unwrap_or(false) {
-                return Err(permanent_error(
+                return Err(AgentError::permanent(
                     "OBJECT_MODEL_MEMORY_UPDATE_ERROR",
-                    &format!(
+                    format!(
                         "Failed to update memory: {}",
                         update_resp["error"].as_str().unwrap_or("unknown error")
                     ),
-                    json!({}),
-                ));
+                )
+                .with_attrs(json!({})));
             }
         } else {
             // Create new conversation
@@ -957,25 +956,25 @@ pub fn save_memory(input: SaveMemoryInput) -> Result<SaveMemoryOutput, String> {
             )?;
 
             if !create_resp["success"].as_bool().unwrap_or(false) {
-                return Err(permanent_error(
+                return Err(AgentError::permanent(
                     "OBJECT_MODEL_MEMORY_CREATE_ERROR",
-                    &format!(
+                    format!(
                         "Failed to create memory: {}",
                         create_resp["error"].as_str().unwrap_or("unknown error")
                     ),
-                    json!({}),
-                ));
+                )
+                .with_attrs(json!({})));
             }
         }
     } else {
-        return Err(permanent_error(
+        return Err(AgentError::permanent(
             "OBJECT_MODEL_MEMORY_QUERY_ERROR",
-            &format!(
+            format!(
                 "Failed to query existing memory: {}",
                 query_resp["error"].as_str().unwrap_or("unknown error")
             ),
-            json!({}),
-        ));
+        )
+        .with_attrs(json!({})));
     }
 
     Ok(SaveMemoryOutput {

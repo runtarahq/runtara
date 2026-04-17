@@ -1786,8 +1786,8 @@ mod tests {
         assert_eq!(err.code, "TRANSFORM_INVALID_INPUT");
         assert!(err.message.contains("Expected array"));
         assert_eq!(
-            err.attributes.get("received_type"),
-            Some(&"object".to_string())
+            err.attributes.get("received_type").and_then(|v| v.as_str()),
+            Some("object")
         );
     }
 

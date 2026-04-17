@@ -3,21 +3,27 @@
 //! Shared helpers for working with `_connection` capability input fields.
 
 use crate::connections::RawConnection;
+use crate::types::{AgentError, attrs};
 
-use super::error::IntegrationError;
-
-/// Return a reference to the connection if present, otherwise an
-/// `IntegrationError::NoConnection { prefix }`.
+/// Return a reference to the connection if present, otherwise a permanent
+/// `{PREFIX}_NO_CONNECTION` `AgentError`.
 ///
 /// Replaces per-integration `extract_connection` / `require_connection`
-/// helpers.
+/// helpers that every integration file used to hand-roll.
 pub fn require_connection<'a>(
     prefix: &'static str,
     connection: &'a Option<RawConnection>,
-) -> Result<&'a RawConnection, IntegrationError> {
-    connection
-        .as_ref()
-        .ok_or(IntegrationError::NoConnection { prefix })
+) -> Result<&'a RawConnection, AgentError> {
+    connection.as_ref().ok_or_else(|| {
+        AgentError::permanent(
+            format!("{}_NO_CONNECTION", prefix),
+            format!(
+                "{} capability invoked without a connection — add one in the step configuration",
+                prefix
+            ),
+        )
+        .with_attr(attrs::INTEGRATION, prefix.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -46,8 +52,10 @@ mod tests {
     fn returns_no_connection_error_when_absent() {
         let c: Option<RawConnection> = None;
         let err = require_connection("STRIPE", &c).unwrap_err();
-        let s = err.into_structured();
+        assert_eq!(err.code, "STRIPE_NO_CONNECTION");
+        let s: String = err.into();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["code"], "STRIPE_NO_CONNECTION");
+        assert_eq!(v["category"], "permanent");
     }
 }

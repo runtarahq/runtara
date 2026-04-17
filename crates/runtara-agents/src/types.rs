@@ -4,7 +4,7 @@
 
 use base64::{Engine as _, engine::general_purpose};
 use runtara_agent_macro::CapabilityOutput;
-use runtara_dsl::{ErrorCategory, ErrorSeverity};
+pub use runtara_dsl::{ErrorCategory, ErrorSeverity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -182,9 +182,11 @@ pub struct AgentError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
 
-    /// Additional context attributes
+    /// Additional context attributes. Values may be any JSON type so HTTP
+    /// errors can echo rich payloads (GraphQL `errors[]`, response bodies,
+    /// nested diagnostics) without stringifying.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub attributes: HashMap<String, String>,
+    pub attributes: HashMap<String, Value>,
 }
 
 impl AgentError {
@@ -231,9 +233,34 @@ impl AgentError {
         self
     }
 
-    /// Add a context attribute.
+    /// Add a string-valued context attribute. Wraps the value as
+    /// `Value::String` for wire-format continuity with the pre-widening
+    /// format. Use [`with_attr_value`](Self::with_attr_value) when the
+    /// attribute needs a richer shape (number, array, object, etc.).
     pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes
+            .insert(key.into(), Value::String(value.into()));
+        self
+    }
+
+    /// Add a context attribute with an arbitrary JSON value. Use this when
+    /// echoing structured payloads (GraphQL `errors[]`, HubSpot `paging`,
+    /// nested diagnostics) that would lose fidelity if stringified.
+    pub fn with_attr_value(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.attributes.insert(key.into(), value.into());
+        self
+    }
+
+    /// Merge a `serde_json::Value::Object` into `attributes`. Non-object
+    /// values are ignored. Used to migrate callers that built attribute
+    /// maps as `json!({...})` literals without rewriting each key/value
+    /// into a `.with_attr` chain.
+    pub fn with_attrs(mut self, attributes: Value) -> Self {
+        if let Some(obj) = attributes.as_object() {
+            for (k, v) in obj {
+                self.attributes.insert(k.clone(), v.clone());
+            }
+        }
         self
     }
 
@@ -258,8 +285,8 @@ impl From<AgentError> for String {
     fn from(err: AgentError) -> Self {
         // Log structured error details before converting to string
         // Extract common attributes for OTEL filtering
-        let status_code = err.attributes.get("status_code").map(|s| s.as_str());
-        let url = err.attributes.get("url").map(|s| s.as_str());
+        let status_code = err.attributes.get("status_code").and_then(|v| v.as_str());
+        let url = err.attributes.get("url").and_then(|v| v.as_str());
 
         tracing::error!(
             error.code = %err.code,
@@ -392,9 +419,12 @@ pub fn http_error_with_headers(
         retry_after_ms,
         attributes: {
             let mut attrs = HashMap::new();
-            attrs.insert("status_code".to_string(), status.to_string());
+            // Keep status_code and retry_after_ms as string-typed Values for
+            // wire-format continuity with the pre-widening format. New
+            // attribute keys are free to use richer Value shapes.
+            attrs.insert("status_code".to_string(), status.to_string().into());
             if let Some(ms) = retry_after_ms {
-                attrs.insert("retry_after_ms".to_string(), ms.to_string());
+                attrs.insert("retry_after_ms".to_string(), ms.to_string().into());
             }
             attrs
         },
@@ -409,6 +439,228 @@ pub fn network_error(message: impl Into<String>) -> AgentError {
 /// Create an AgentError from a timeout.
 pub fn timeout_error(message: impl Into<String>) -> AgentError {
     AgentError::transient("TIMEOUT", message).with_severity(ErrorSeverity::Warning)
+}
+
+/// Well-known attribute keys used by the platform. Centralized so every
+/// producer spells them the same way and every consumer (UI, observability,
+/// retry loop) can look them up by constant rather than string literal.
+pub mod attrs {
+    /// HTTP response status code.
+    pub const STATUS_CODE: &str = "status_code";
+    /// Echoed HTTP response body (may be truncated for very large payloads).
+    pub const BODY: &str = "body";
+    /// Request URL.
+    pub const URL: &str = "url";
+    /// Request path (relative to the integration base URL).
+    pub const PATH: &str = "path";
+    /// HTTP method.
+    pub const METHOD: &str = "method";
+    /// Integration prefix (e.g. `"SHOPIFY"`, `"STRIPE"`).
+    pub const INTEGRATION: &str = "integration";
+    /// Retry-after hint duplicated into attributes for legacy consumers.
+    /// Prefer the typed [`AgentError::retry_after_ms`] field — which is
+    /// what the `#[durable]` retry loop actually reads.
+    pub const RETRY_AFTER_MS: &str = "retry_after_ms";
+    /// Nested validation details (typically an object or array).
+    pub const DETAILS: &str = "details";
+    /// Payload echo for validation errors originating from capability
+    /// inputs.
+    pub const PAYLOAD: &str = "payload";
+    /// Name of the missing / invalid field.
+    pub const FIELD: &str = "field";
+}
+
+/// Integration-namespaced HTTP error constructors.
+///
+/// These produce [`AgentError`] values with codes of the form
+/// `{PREFIX}_{KIND}` (e.g. `SHOPIFY_UNAUTHORIZED`) so integrations can
+/// distinguish their failure modes from each other while sharing the
+/// same classification logic. Prefer these over the generic
+/// [`http_error`] helper when the caller knows which integration the
+/// failure came from.
+///
+/// Every constructor populates [`attrs::STATUS_CODE`] (where applicable)
+/// and [`attrs::BODY`] consistently. Rate-limited errors additionally
+/// set the typed [`AgentError::retry_after_ms`] field so the
+/// `#[durable]` retry loop can honor server-specified delays.
+pub mod http {
+    use super::{
+        AgentError, ErrorCategory, ErrorSeverity, Value, attrs, classify_http_status,
+        parse_retry_after_header,
+    };
+    use std::collections::HashMap;
+
+    fn make_code(prefix: &str, kind: &str) -> String {
+        format!("{}_{}", prefix, kind)
+    }
+
+    fn default_message(prefix: &str, status: u16, body: &str) -> String {
+        if body.is_empty() {
+            format!("{} request failed with status {}", prefix, status)
+        } else {
+            format!("{} {} error: {}", prefix, status, body)
+        }
+    }
+
+    /// Build an [`AgentError`] from any non-success HTTP response.
+    ///
+    /// Dispatches to the variant-specific constructors below based on
+    /// `status`. On 429 the `headers` map is consulted for
+    /// `Retry-After` / `Retry-After-Ms`, which feeds the typed
+    /// [`AgentError::retry_after_ms`] field.
+    pub fn classify_response(
+        prefix: &str,
+        status: u16,
+        body: impl Into<String>,
+        headers: &HashMap<String, String>,
+    ) -> AgentError {
+        let body = body.into();
+        match status {
+            401 => unauthorized(prefix, body),
+            403 => forbidden(prefix, body),
+            404 => not_found(prefix, body),
+            429 => rate_limited(prefix, parse_retry_after_header(headers), body),
+            408 | 500..=599 => upstream(prefix, status, body),
+            _ => other(prefix, status, body),
+        }
+    }
+
+    /// HTTP 401 Unauthorized — permanent, typically requires credential refresh.
+    pub fn unauthorized(prefix: &str, body: impl Into<String>) -> AgentError {
+        let body = body.into();
+        let message = default_message(prefix, 401, &body);
+        AgentError::permanent(make_code(prefix, "UNAUTHORIZED"), message)
+            .with_attr(attrs::STATUS_CODE, "401")
+            .with_attr(attrs::BODY, body)
+            .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// HTTP 403 Forbidden — permanent, typically a scope / permission issue.
+    pub fn forbidden(prefix: &str, body: impl Into<String>) -> AgentError {
+        let body = body.into();
+        let message = default_message(prefix, 403, &body);
+        AgentError::permanent(make_code(prefix, "FORBIDDEN"), message)
+            .with_attr(attrs::STATUS_CODE, "403")
+            .with_attr(attrs::BODY, body)
+            .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// HTTP 404 Not Found — permanent.
+    pub fn not_found(prefix: &str, body: impl Into<String>) -> AgentError {
+        let body = body.into();
+        let message = default_message(prefix, 404, &body);
+        AgentError::permanent(make_code(prefix, "NOT_FOUND"), message)
+            .with_attr(attrs::STATUS_CODE, "404")
+            .with_attr(attrs::BODY, body)
+            .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// HTTP 429 Too Many Requests — transient. Sets the typed
+    /// [`AgentError::retry_after_ms`] field so the durable retry loop
+    /// honors server-specified delays; also duplicates the value into
+    /// [`attrs::RETRY_AFTER_MS`] for legacy consumers.
+    pub fn rate_limited(
+        prefix: &str,
+        retry_after_ms: Option<u64>,
+        body: impl Into<String>,
+    ) -> AgentError {
+        let body = body.into();
+        let message = default_message(prefix, 429, &body);
+        let mut err = AgentError::transient(make_code(prefix, "RATE_LIMITED"), message)
+            .with_attr(attrs::STATUS_CODE, "429")
+            .with_attr(attrs::BODY, body)
+            .with_attr(attrs::INTEGRATION, prefix.to_string());
+        if let Some(ms) = retry_after_ms {
+            err = err
+                .with_retry_after(ms)
+                .with_attr(attrs::RETRY_AFTER_MS, ms.to_string());
+        }
+        err
+    }
+
+    /// HTTP 408 / 5xx — transient upstream failure.
+    pub fn upstream(prefix: &str, status: u16, body: impl Into<String>) -> AgentError {
+        let body = body.into();
+        let message = default_message(prefix, status, &body);
+        AgentError::transient(make_code(prefix, "UPSTREAM_ERROR"), message)
+            .with_severity(ErrorSeverity::Warning)
+            .with_attr(attrs::STATUS_CODE, status.to_string())
+            .with_attr(attrs::BODY, body)
+            .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// Any other non-success status (unusual 4xx codes, 3xx treated as
+    /// errors by the caller, etc.). Classified by
+    /// [`classify_http_status`].
+    pub fn other(prefix: &str, status: u16, body: impl Into<String>) -> AgentError {
+        let body = body.into();
+        let message = default_message(prefix, status, &body);
+        let category = classify_http_status(status);
+        let (code_suffix, severity) = match category {
+            ErrorCategory::Transient => ("UPSTREAM_ERROR", ErrorSeverity::Warning),
+            ErrorCategory::Permanent => ("CLIENT_ERROR", ErrorSeverity::Error),
+        };
+        let err = if category == ErrorCategory::Transient {
+            AgentError::transient(make_code(prefix, code_suffix), message)
+        } else {
+            AgentError::permanent(make_code(prefix, code_suffix), message)
+        };
+        err.with_severity(severity)
+            .with_attr(attrs::STATUS_CODE, status.to_string())
+            .with_attr(attrs::BODY, body)
+            .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// Transport / DNS / connection failure — no HTTP status was received.
+    pub fn network(prefix: &str, message: impl Into<String>) -> AgentError {
+        AgentError::transient(
+            make_code(prefix, "NETWORK_ERROR"),
+            format!("{} network failure: {}", prefix, message.into()),
+        )
+        .with_severity(ErrorSeverity::Warning)
+        .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// Response was received but could not be parsed as expected.
+    pub fn deserialization(prefix: &str, message: impl Into<String>) -> AgentError {
+        AgentError::permanent(
+            make_code(prefix, "INVALID_RESPONSE"),
+            format!("{} invalid response: {}", prefix, message.into()),
+        )
+        .with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// Integration-specific domain error that doesn't map to an HTTP
+    /// status (e.g. GraphQL `errors[]`, `userErrors[]`, vendor error
+    /// body codes). Attach structured context via
+    /// [`AgentError::with_attr_value`] on the returned value.
+    pub fn domain(
+        prefix: &str,
+        code_suffix: &str,
+        category: ErrorCategory,
+        message: impl Into<String>,
+    ) -> AgentError {
+        let code = make_code(prefix, code_suffix);
+        let err = match category {
+            ErrorCategory::Transient => AgentError::transient(code, message),
+            _ => AgentError::permanent(code, message),
+        };
+        err.with_attr(attrs::INTEGRATION, prefix.to_string())
+    }
+
+    /// Ensure a string value fits in an attribute without bloating the
+    /// error. Used by response-body echo: long bodies get truncated
+    /// with an ellipsis so downstream log pipelines aren't swamped.
+    pub fn truncate_body(body: String, max: usize) -> Value {
+        if body.len() <= max {
+            Value::String(body)
+        } else {
+            let mut trimmed = body;
+            trimmed.truncate(max);
+            trimmed.push_str("…[truncated]");
+            Value::String(trimmed)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -492,8 +744,8 @@ mod tests {
         assert_eq!(err.severity, ErrorSeverity::Warning); // Warning = expected business outcome
         assert!(!err.should_retry());
         assert_eq!(
-            err.attributes.get("order_amount"),
-            Some(&"5000".to_string())
+            err.attributes.get("order_amount").and_then(|v| v.as_str()),
+            Some("5000")
         );
     }
 
@@ -504,10 +756,13 @@ mod tests {
             .with_attr("method", "GET");
 
         assert_eq!(
-            err.attributes.get("url"),
-            Some(&"https://example.com".to_string())
+            err.attributes.get("url").and_then(|v| v.as_str()),
+            Some("https://example.com")
         );
-        assert_eq!(err.attributes.get("method"), Some(&"GET".to_string()));
+        assert_eq!(
+            err.attributes.get("method").and_then(|v| v.as_str()),
+            Some("GET")
+        );
     }
 
     #[test]
@@ -535,7 +790,10 @@ mod tests {
         assert_eq!(err.code, "HTTP_NOT_FOUND");
         assert_eq!(err.category, ErrorCategory::Permanent);
         assert_eq!(err.severity, ErrorSeverity::Error);
-        assert_eq!(err.attributes.get("status_code"), Some(&"404".to_string()));
+        assert_eq!(
+            err.attributes.get("status_code").and_then(|v| v.as_str()),
+            Some("404")
+        );
     }
 
     #[test]
@@ -600,12 +858,130 @@ mod tests {
         assert_eq!(parsed.code, err.code);
         assert_eq!(parsed.message, err.message);
         assert_eq!(parsed.category, err.category);
-        assert_eq!(parsed.attributes.get("key"), Some(&"value".to_string()));
+        assert_eq!(
+            parsed.attributes.get("key").and_then(|v| v.as_str()),
+            Some("value")
+        );
     }
 
     #[test]
     fn test_agent_error_display() {
         let err = AgentError::permanent("NOT_FOUND", "Resource not found");
         assert_eq!(format!("{}", err), "[NOT_FOUND] Resource not found");
+    }
+
+    // ========================================================================
+    // Namespaced http::* helper tests
+    // ========================================================================
+
+    #[test]
+    fn http_unauthorized_uses_prefix_and_carries_body() {
+        let err = http::unauthorized("SHOPIFY", "Invalid token".to_string());
+        assert_eq!(err.code, "SHOPIFY_UNAUTHORIZED");
+        assert_eq!(err.category, ErrorCategory::Permanent);
+        assert_eq!(
+            err.attributes
+                .get(attrs::STATUS_CODE)
+                .and_then(|v| v.as_str()),
+            Some("401")
+        );
+        assert_eq!(
+            err.attributes.get(attrs::BODY).and_then(|v| v.as_str()),
+            Some("Invalid token")
+        );
+        assert_eq!(
+            err.attributes
+                .get(attrs::INTEGRATION)
+                .and_then(|v| v.as_str()),
+            Some("SHOPIFY")
+        );
+    }
+
+    #[test]
+    fn http_rate_limited_populates_typed_retry_after_ms_field() {
+        // Critical: the #[durable] retry loop reads top-level `retryAfterMs`
+        // (camelCase) from the serialized error JSON. This test locks in
+        // that wire-format contract — regressing it silently drops server
+        // rate-limit hints.
+        let err = http::rate_limited("STRIPE", Some(1500), "Too many requests".to_string());
+        assert_eq!(err.code, "STRIPE_RATE_LIMITED");
+        assert_eq!(err.category, ErrorCategory::Transient);
+        assert_eq!(err.retry_after_ms, Some(1500));
+
+        let json = serde_json::to_string(&err).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["retryAfterMs"], 1500);
+        assert_eq!(parsed["category"], "transient");
+        assert_eq!(parsed["code"], "STRIPE_RATE_LIMITED");
+    }
+
+    #[test]
+    fn http_rate_limited_without_retry_after_omits_typed_field() {
+        let err = http::rate_limited("STRIPE", None, "".to_string());
+        assert_eq!(err.retry_after_ms, None);
+        let json = serde_json::to_string(&err).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("retryAfterMs").is_none());
+    }
+
+    #[test]
+    fn http_classify_response_dispatches_by_status() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("retry-after-ms".to_string(), "2500".to_string());
+
+        let err = http::classify_response("HUBSPOT", 429, "rate limit".to_string(), &headers);
+        assert_eq!(err.code, "HUBSPOT_RATE_LIMITED");
+        assert_eq!(err.retry_after_ms, Some(2500));
+
+        let err = http::classify_response("HUBSPOT", 404, "".to_string(), &headers);
+        assert_eq!(err.code, "HUBSPOT_NOT_FOUND");
+
+        let err = http::classify_response("HUBSPOT", 503, "down".to_string(), &headers);
+        assert_eq!(err.code, "HUBSPOT_UPSTREAM_ERROR");
+        assert_eq!(err.category, ErrorCategory::Transient);
+    }
+
+    #[test]
+    fn http_domain_supports_non_http_classification() {
+        // Shopify GraphQL errors arrive on a 200 response body — `domain`
+        // handles that case while still producing a consistent AgentError.
+        let err = http::domain(
+            "SHOPIFY",
+            "GRAPHQL_ERROR",
+            ErrorCategory::Permanent,
+            "Field 'foo' not found",
+        )
+        .with_attr_value(
+            attrs::DETAILS,
+            serde_json::json!([{"message": "Field 'foo' not found"}]),
+        );
+        assert_eq!(err.code, "SHOPIFY_GRAPHQL_ERROR");
+        assert_eq!(err.category, ErrorCategory::Permanent);
+        assert!(err.attributes.contains_key(attrs::DETAILS));
+    }
+
+    #[test]
+    fn http_network_is_transient() {
+        let err = http::network("HUBSPOT", "DNS failure");
+        assert_eq!(err.code, "HUBSPOT_NETWORK_ERROR");
+        assert_eq!(err.category, ErrorCategory::Transient);
+        assert!(err.should_retry());
+    }
+
+    #[test]
+    fn http_deserialization_is_permanent() {
+        let err = http::deserialization("OPENAI", "expected field 'choices'");
+        assert_eq!(err.code, "OPENAI_INVALID_RESPONSE");
+        assert_eq!(err.category, ErrorCategory::Permanent);
+    }
+
+    #[test]
+    fn attrs_constants_match_expected_wire_keys() {
+        // Downstream consumers (UI, observability) read these keys by
+        // string. Lock them in so renames are intentional.
+        assert_eq!(attrs::STATUS_CODE, "status_code");
+        assert_eq!(attrs::BODY, "body");
+        assert_eq!(attrs::RETRY_AFTER_MS, "retry_after_ms");
+        assert_eq!(attrs::INTEGRATION, "integration");
     }
 }

@@ -27,15 +27,13 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+use super::url::urlencoded;
 use crate::connections::RawConnection;
 use crate::http::{
     self, BodyType, HttpBody, HttpMethod, HttpRequestInput, HttpResponse, HttpResponseBody,
     ResponseType,
 };
-use crate::types::parse_retry_after_header;
-
-use super::error::IntegrationError;
-use super::url::urlencoded;
+use crate::types::{self, AgentError};
 
 /// Default timeout applied to every proxy request unless overridden.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -47,6 +45,7 @@ pub struct ProxyHttpClient<'a> {
     integration_prefix: &'static str,
     default_timeout_ms: u64,
     extra_headers: Vec<(String, String)>,
+    base_path: &'static str,
 }
 
 impl<'a> ProxyHttpClient<'a> {
@@ -59,6 +58,7 @@ impl<'a> ProxyHttpClient<'a> {
             integration_prefix,
             default_timeout_ms: DEFAULT_TIMEOUT_MS,
             extra_headers: Vec::new(),
+            base_path: "",
         }
     }
 
@@ -73,6 +73,21 @@ impl<'a> ProxyHttpClient<'a> {
     /// from this client (e.g. `"Accept"`).
     pub fn with_header(mut self, k: &str, v: &str) -> Self {
         self.extra_headers.push((k.to_string(), v.to_string()));
+        self
+    }
+
+    /// Set a base path that will be prepended to every request's path.
+    ///
+    /// Useful for integrations with a mandatory version prefix (e.g.
+    /// Stripe's `/v1`). Configured once at client construction so
+    /// per-call paths stay short:
+    ///
+    /// ```ignore
+    /// let client = ProxyHttpClient::new(conn, "STRIPE").with_base_path("/v1");
+    /// client.get("/customers").send_json()?; // → GET /v1/customers
+    /// ```
+    pub fn with_base_path(mut self, base: &'static str) -> Self {
+        self.base_path = base;
         self
     }
 
@@ -196,22 +211,22 @@ impl<'c> ProxyRequest<'c> {
     }
 
     /// Send the request and parse the response as JSON.
-    pub fn send_json(self) -> Result<Value, IntegrationError> {
+    pub fn send_json(self) -> Result<Value, AgentError> {
         let prefix = self.client.integration_prefix;
         let response = self.send_raw()?;
         match response.body {
             HttpResponseBody::Json(v) => Ok(v),
             HttpResponseBody::Text(t) if t.is_empty() => Ok(Value::Null),
-            _ => Err(IntegrationError::Deserialization {
+            _ => Err(types::http::deserialization(
                 prefix,
-                message: "expected JSON response".to_string(),
-            }),
+                "expected JSON response",
+            )),
         }
     }
 
     /// Send the request, returning the raw `HttpResponse` without JSON
-    /// parsing. Still maps non-2xx into `IntegrationError`.
-    pub fn send_raw(self) -> Result<HttpResponse, IntegrationError> {
+    /// parsing. Still maps non-2xx into `AgentError`.
+    pub fn send_raw(self) -> Result<HttpResponse, AgentError> {
         let prefix = self.client.integration_prefix;
         let input = self.into_http_input();
 
@@ -220,12 +235,9 @@ impl<'c> ProxyRequest<'c> {
             Err(e) => {
                 // `http::http_request` already returns a JSON-as-string
                 // structured error (via `types::http_error_with_headers`).
-                // For a shared integration layer we prefer to re-wrap it
-                // under the integration's prefix — but we cannot afford
-                // to silently drop the existing `retry_after_ms` embedded
-                // by the http agent. Translate by parsing the JSON and
-                // remapping the code prefix; fall back to Network on
-                // parse failure.
+                // Re-wrap under the integration prefix while preserving
+                // `retry_after_ms` — otherwise server rate-limit hints
+                // get silently dropped by the retry loop.
                 return Err(translate_http_agent_error(prefix, &e));
             }
         };
@@ -278,9 +290,15 @@ impl<'c> ProxyRequest<'c> {
             }
         };
 
+        let url = if self.client.base_path.is_empty() {
+            self.path
+        } else {
+            format!("{}{}", self.client.base_path, self.path)
+        };
+
         HttpRequestInput {
             method: self.method,
-            url: self.path,
+            url,
             headers,
             query_parameters: self.query,
             body,
@@ -292,70 +310,9 @@ impl<'c> ProxyRequest<'c> {
     }
 }
 
-fn classify_response(prefix: &'static str, response: &HttpResponse) -> IntegrationError {
+fn classify_response(prefix: &'static str, response: &HttpResponse) -> AgentError {
     let body = describe_body(&response.body);
-    let status = response.status_code;
-
-    match status {
-        401 => IntegrationError::Unauthorized {
-            prefix,
-            status,
-            body,
-        },
-        403 => IntegrationError::Forbidden {
-            prefix,
-            status,
-            body,
-        },
-        404 => IntegrationError::NotFound {
-            prefix,
-            status,
-            body,
-        },
-        429 => {
-            let retry_after_ms = parse_retry_after_header(&response.headers);
-            IntegrationError::RateLimited {
-                prefix,
-                status,
-                body,
-                retry_after_ms,
-            }
-        }
-        408 | 500..=599 => IntegrationError::Upstream {
-            prefix,
-            status,
-            body,
-        },
-        // Generic 4xx falls through as Unauthorized? No — keep "Upstream" for
-        // unknown 5xx; for unknown 4xx map to NotFound-style permanent by
-        // using the `http_status_error` path via Validation wouldn't be
-        // right either. The cleanest option here is to preserve the
-        // historical wire format (a generic CLIENT_ERROR code), which the
-        // errors module produces for any unmapped status.
-        _ => IntegrationError::Unknown {
-            prefix,
-            code: format!("{}_{}", prefix, status_suffix(status)),
-            message: format!("{} API error: {}", prefix, body),
-            category: if super::super::errors::is_transient_status(status) {
-                super::error::ErrorCategory::Transient
-            } else {
-                super::error::ErrorCategory::Permanent
-            },
-            attributes: serde_json::json!({ "status_code": status, "body": body }),
-        },
-    }
-}
-
-fn status_suffix(status: u16) -> &'static str {
-    match status {
-        401 => "UNAUTHORIZED",
-        403 => "FORBIDDEN",
-        404 => "NOT_FOUND",
-        408 => "TIMEOUT",
-        429 => "RATE_LIMITED",
-        500..=599 => "SERVER_ERROR",
-        _ => "CLIENT_ERROR",
-    }
+    types::http::classify_response(prefix, response.status_code, body, &response.headers)
 }
 
 fn describe_body(body: &HttpResponseBody) -> String {
@@ -366,10 +323,9 @@ fn describe_body(body: &HttpResponseBody) -> String {
 }
 
 /// `http::http_request` already returns a JSON-encoded structured error.
-/// Translate it into an `IntegrationError` under our prefix while keeping
+/// Translate it into an `AgentError` under our prefix while keeping
 /// `retry_after_ms` (if present) intact.
-fn translate_http_agent_error(prefix: &'static str, raw: &str) -> IntegrationError {
-    // Parse the embedded JSON.
+fn translate_http_agent_error(prefix: &'static str, raw: &str) -> AgentError {
     if let Ok(v) = serde_json::from_str::<Value>(raw) {
         let status = v
             .get("attributes")
@@ -390,59 +346,31 @@ fn translate_http_agent_error(prefix: &'static str, raw: &str) -> IntegrationErr
             .unwrap_or_default();
 
         if let Some(status) = status {
+            // Preserve retry_after_ms from the nested error: prefer the
+            // top-level typed field, then attributes["retry_after_ms"]
+            // (string or number).
+            let retry_after_ms = v.get("retryAfterMs").and_then(|x| x.as_u64()).or_else(|| {
+                v.get("attributes")
+                    .and_then(|a| a.get("retry_after_ms"))
+                    .and_then(|x| {
+                        x.as_u64()
+                            .or_else(|| x.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    })
+            });
+
             return match status {
-                401 => IntegrationError::Unauthorized {
-                    prefix,
-                    status,
-                    body,
-                },
-                403 => IntegrationError::Forbidden {
-                    prefix,
-                    status,
-                    body,
-                },
-                404 => IntegrationError::NotFound {
-                    prefix,
-                    status,
-                    body,
-                },
-                429 => {
-                    let retry_after_ms = v
-                        .get("attributes")
-                        .and_then(|a| a.get("retry_after_ms"))
-                        .and_then(|x| {
-                            x.as_u64()
-                                .or_else(|| x.as_str().and_then(|s| s.parse::<u64>().ok()))
-                        });
-                    IntegrationError::RateLimited {
-                        prefix,
-                        status,
-                        body,
-                        retry_after_ms,
-                    }
-                }
-                408 | 500..=599 => IntegrationError::Upstream {
-                    prefix,
-                    status,
-                    body,
-                },
-                _ => IntegrationError::Network {
-                    prefix,
-                    message: v
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or(raw)
-                        .to_string(),
-                },
+                401 => types::http::unauthorized(prefix, body),
+                403 => types::http::forbidden(prefix, body),
+                404 => types::http::not_found(prefix, body),
+                429 => types::http::rate_limited(prefix, retry_after_ms, body),
+                408 | 500..=599 => types::http::upstream(prefix, status, body),
+                _ => types::http::other(prefix, status, body),
             };
         }
     }
 
     // Fallback: treat as a network-level failure.
-    IntegrationError::Network {
-        prefix,
-        message: raw.to_string(),
-    }
+    types::http::network(prefix, raw.to_string())
 }
 
 #[cfg(test)]
@@ -480,6 +408,26 @@ mod tests {
     }
 
     #[test]
+    fn base_path_is_prepended_to_request_path() {
+        let c = conn();
+        let client = ProxyHttpClient::new(&c, "STRIPE").with_base_path("/v1");
+        let input = client.get("/customers").into_http_input();
+        assert_eq!(input.url, "/v1/customers");
+    }
+
+    #[test]
+    fn base_path_empty_by_default_preserves_path_verbatim() {
+        let c = conn();
+        let client = ProxyHttpClient::new(&c, "HUBSPOT");
+        let input = client.get("/crm/v3/objects/contacts").into_http_input();
+        assert_eq!(input.url, "/crm/v3/objects/contacts");
+    }
+
+    fn err_to_json(err: AgentError) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&String::from(err)).unwrap()
+    }
+
+    #[test]
     fn classify_response_401_unauthorized() {
         let resp = HttpResponse {
             status_code: 401,
@@ -487,8 +435,7 @@ mod tests {
             body: HttpResponseBody::Text("nope".into()),
             success: false,
         };
-        let err = classify_response("HUBSPOT", &resp);
-        let v: serde_json::Value = serde_json::from_str(&err.into_structured()).unwrap();
+        let v = err_to_json(classify_response("HUBSPOT", &resp));
         assert_eq!(v["code"], "HUBSPOT_UNAUTHORIZED");
         assert_eq!(v["category"], "permanent");
     }
@@ -503,10 +450,12 @@ mod tests {
             body: HttpResponseBody::Text("slow down".into()),
             success: false,
         };
-        let err = classify_response("OPENAI", &resp);
-        let v: serde_json::Value = serde_json::from_str(&err.into_structured()).unwrap();
+        let v = err_to_json(classify_response("OPENAI", &resp));
         assert_eq!(v["code"], "OPENAI_RATE_LIMITED");
-        assert_eq!(v["attributes"]["retry_after_ms"], 2000);
+        // retryAfterMs is at top level for the durable retry loop.
+        assert_eq!(v["retryAfterMs"], 2000);
+        // Also mirrored in attributes for legacy consumers.
+        assert_eq!(v["attributes"]["retry_after_ms"], "2000");
     }
 
     #[test]
@@ -520,9 +469,8 @@ mod tests {
             body: HttpResponseBody::Text("".into()),
             success: false,
         };
-        let err = classify_response("STRIPE", &resp);
-        let v: serde_json::Value = serde_json::from_str(&err.into_structured()).unwrap();
-        assert_eq!(v["attributes"]["retry_after_ms"], 750);
+        let v = err_to_json(classify_response("STRIPE", &resp));
+        assert_eq!(v["retryAfterMs"], 750);
     }
 
     #[test]
@@ -533,9 +481,8 @@ mod tests {
             body: HttpResponseBody::Text("down".into()),
             success: false,
         };
-        let err = classify_response("BEDROCK", &resp);
-        let v: serde_json::Value = serde_json::from_str(&err.into_structured()).unwrap();
-        assert_eq!(v["code"], "BEDROCK_SERVER_ERROR");
+        let v = err_to_json(classify_response("BEDROCK", &resp));
+        assert_eq!(v["code"], "BEDROCK_UPSTREAM_ERROR");
         assert_eq!(v["category"], "transient");
     }
 
@@ -548,18 +495,17 @@ mod tests {
             "message": "HTTP 429 error: slow",
             "category": "transient",
             "severity": "warning",
+            "retryAfterMs": 1500,
             "attributes": {"status_code": "429", "retry_after_ms": "1500"}
         }"#;
-        let err = translate_http_agent_error("OPENAI", raw);
-        let v: serde_json::Value = serde_json::from_str(&err.into_structured()).unwrap();
+        let v = err_to_json(translate_http_agent_error("OPENAI", raw));
         assert_eq!(v["code"], "OPENAI_RATE_LIMITED");
-        assert_eq!(v["attributes"]["retry_after_ms"], 1500);
+        assert_eq!(v["retryAfterMs"], 1500);
     }
 
     #[test]
     fn translate_http_agent_error_falls_back_to_network_on_unparseable() {
-        let err = translate_http_agent_error("MAILGUN", "not json");
-        let v: serde_json::Value = serde_json::from_str(&err.into_structured()).unwrap();
+        let v = err_to_json(translate_http_agent_error("MAILGUN", "not json"));
         assert_eq!(v["code"], "MAILGUN_NETWORK_ERROR");
         assert_eq!(v["category"], "transient");
     }

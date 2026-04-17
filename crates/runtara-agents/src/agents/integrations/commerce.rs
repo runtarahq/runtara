@@ -5,19 +5,18 @@
 //! based on the connection's integration type.
 
 use crate::connections::RawConnection;
+use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::shopify;
 
-use super::errors::permanent_error;
-
 /// Resolve the integration_id for a connection.
 ///
 /// In compiled scenario binaries, the connection stub has an empty integration_id.
 /// This helper fetches the real integration_id from the connection service.
-fn resolve_integration_id(connection: &RawConnection) -> Result<String, String> {
+fn resolve_integration_id(connection: &RawConnection) -> Result<String, AgentError> {
     let integration_id = &connection.integration_id;
     if !integration_id.is_empty() {
         return Ok(integration_id.clone());
@@ -31,30 +30,30 @@ fn resolve_integration_id(connection: &RawConnection) -> Result<String, String> 
 
     let client = runtara_http::HttpClient::new();
     let resp = client.request("GET", &url).call().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_CONNECTION_FETCH_ERROR",
-            &format!("Failed to fetch connection: {}", e),
-            json!({"connection_id": connection.connection_id}),
+            format!("Failed to fetch connection: {}", e),
         )
+        .with_attrs(json!({"connection_id": connection.connection_id}))
     })?;
 
     let body: Value = resp.into_json().map_err(|e| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_CONNECTION_PARSE_ERROR",
-            &format!("Failed to parse connection response: {}", e),
-            json!({}),
+            format!("Failed to parse connection response: {}", e),
         )
+        .with_attrs(json!({}))
     })?;
 
     body["integration_id"]
         .as_str()
         .map(String::from)
         .ok_or_else(|| {
-            permanent_error(
+            AgentError::permanent(
                 "COMMERCE_MISSING_INTEGRATION_ID",
                 "Connection has no integration_id",
-                json!({"connection_id": connection.connection_id}),
             )
+            .with_attrs(json!({"connection_id": connection.connection_id}))
         })
 }
 
@@ -294,14 +293,16 @@ pub struct CommerceGetProductsOutput {
     module_integration_ids = "shopify_access_token, shopify_client_credentials",
     module_secure = true
 )]
-pub fn get_products(input: CommerceGetProductsInput) -> Result<CommerceGetProductsOutput, String> {
+pub fn get_products(
+    input: CommerceGetProductsInput,
+) -> Result<CommerceGetProductsOutput, AgentError> {
     // Get connection details to determine platform
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     // Dispatch to platform-specific agent based on integration_id
@@ -338,11 +339,11 @@ pub fn get_products(input: CommerceGetProductsInput) -> Result<CommerceGetProduc
                 next_cursor: shopify_output.next_cursor,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -375,13 +376,13 @@ pub struct CommerceGetLocationsOutput {
 )]
 pub fn get_locations(
     input: CommerceGetLocationsInput,
-) -> Result<CommerceGetLocationsOutput, String> {
+) -> Result<CommerceGetLocationsOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -410,11 +411,11 @@ pub fn get_locations(
                     .collect(),
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -442,13 +443,13 @@ pub struct CommerceGetProductInput {
     display_name = "Get Product",
     description = "Get a single product by ID from a commerce platform"
 )]
-pub fn get_product(input: CommerceGetProductInput) -> Result<CommerceProduct, String> {
+pub fn get_product(input: CommerceGetProductInput) -> Result<CommerceProduct, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -475,11 +476,11 @@ pub fn get_product(input: CommerceGetProductInput) -> Result<CommerceProduct, St
                 additional_fields: shopify_product.additional_fields,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -507,13 +508,13 @@ pub struct CommerceCreateProductInput {
     description = "Create a new product on a commerce platform",
     side_effects = true
 )]
-pub fn create_product(input: CommerceCreateProductInput) -> Result<CommerceProduct, String> {
+pub fn create_product(input: CommerceCreateProductInput) -> Result<CommerceProduct, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -551,11 +552,11 @@ pub fn create_product(input: CommerceCreateProductInput) -> Result<CommerceProdu
                 additional_fields: shopify_product.additional_fields,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -587,13 +588,13 @@ pub struct CommerceUpdateProductInput {
     description = "Update an existing product on a commerce platform",
     side_effects = true
 )]
-pub fn update_product(input: CommerceUpdateProductInput) -> Result<CommerceProduct, String> {
+pub fn update_product(input: CommerceUpdateProductInput) -> Result<CommerceProduct, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -632,11 +633,11 @@ pub fn update_product(input: CommerceUpdateProductInput) -> Result<CommerceProdu
                 additional_fields: shopify_product.additional_fields,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -683,13 +684,13 @@ pub struct CommerceDeleteProductOutput {
 )]
 pub fn delete_product(
     input: CommerceDeleteProductInput,
-) -> Result<CommerceDeleteProductOutput, String> {
+) -> Result<CommerceDeleteProductOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -706,11 +707,11 @@ pub fn delete_product(
                 deleted_product_id: shopify_output.deleted_product_id,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -757,13 +758,13 @@ pub struct CommerceGetInventoryInput {
 )]
 pub fn get_inventory(
     input: CommerceGetInventoryInput,
-) -> Result<Vec<CommerceInventoryLevel>, String> {
+) -> Result<Vec<CommerceInventoryLevel>, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -792,11 +793,11 @@ pub fn get_inventory(
                 })
                 .collect())
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -854,13 +855,13 @@ fn default_adjustment_type() -> String {
 )]
 pub fn update_inventory(
     input: CommerceUpdateInventoryInput,
-) -> Result<CommerceInventoryLevel, String> {
+) -> Result<CommerceInventoryLevel, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -887,11 +888,11 @@ pub fn update_inventory(
                 on_hand: shopify_inventory_level.on_hand,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -962,13 +963,13 @@ pub struct CommerceGetOrdersOutput {
     display_name = "Get Orders",
     description = "Get orders from a commerce platform with optional filtering and pagination"
 )]
-pub fn get_orders(input: CommerceGetOrdersInput) -> Result<CommerceGetOrdersOutput, String> {
+pub fn get_orders(input: CommerceGetOrdersInput) -> Result<CommerceGetOrdersOutput, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -1014,11 +1015,11 @@ pub fn get_orders(input: CommerceGetOrdersInput) -> Result<CommerceGetOrdersOutp
                 next_cursor: shopify_output.next_cursor,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
 
@@ -1046,13 +1047,13 @@ pub struct CommerceGetOrderInput {
     display_name = "Get Order",
     description = "Get a single order by ID from a commerce platform"
 )]
-pub fn get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, String> {
+pub fn get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, AgentError> {
     let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
+        AgentError::permanent(
             "COMMERCE_MISSING_CONNECTION",
             "Commerce connection is required",
-            json!({}),
         )
+        .with_attrs(json!({}))
     })?;
 
     let integration_id = resolve_integration_id(connection)?;
@@ -1088,10 +1089,10 @@ pub fn get_order(input: CommerceGetOrderInput) -> Result<CommerceOrder, String> 
                 additional_fields: shopify_order.additional_fields,
             })
         }
-        _ => Err(permanent_error(
+        _ => Err(AgentError::permanent(
             "COMMERCE_UNSUPPORTED_PLATFORM",
-            &format!("Platform not supported: {}", connection.integration_id),
-            json!({"integration_id": connection.integration_id}),
-        )),
+            format!("Platform not supported: {}", connection.integration_id),
+        )
+        .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
