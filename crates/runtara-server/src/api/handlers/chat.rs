@@ -18,11 +18,10 @@ use tokio::time::sleep;
 use tracing::{debug, error};
 use utoipa::ToSchema;
 
+use crate::api::handlers::common::execution_error_response;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::runtime_client::RuntimeClient;
-use crate::workers::execution_engine::{
-    ExecutionEngine, ExecutionError, QueueRequest, TriggerSource,
-};
+use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 
 /// Request body for starting a chat session with an initial message
 #[derive(Debug, Deserialize, ToSchema)]
@@ -299,20 +298,7 @@ async fn start_chat_stream(
             trigger_source: TriggerSource::Chat,
         })
         .await
-        .map_err(|e| {
-            let status = match &e {
-                ExecutionError::NotFound(_) | ExecutionError::ScenarioNotFound(_) => {
-                    StatusCode::NOT_FOUND
-                }
-                ExecutionError::ValidationError(_)
-                | ExecutionError::WorkflowValidationError { .. } => StatusCode::BAD_REQUEST,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(json!({"success": false, "message": format!("{:?}", e)})),
-            )
-        })?;
+        .map_err(|e| execution_error_response(&e))?;
 
     let instance_id = result.instance_id.to_string();
 

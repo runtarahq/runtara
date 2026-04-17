@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::api::dto::executions::{
     ExecutionFilters, ListAllExecutionsQuery, ListAllExecutionsResponse,
 };
+use crate::api::handlers::common::execution_error_response;
 use crate::workers::execution_engine::ExecutionEngine;
 
 /// List all executions across all scenarios with filtering, sorting, and pagination
@@ -61,19 +62,7 @@ pub async fn list_all_executions_handler(
         }
         Err(e) => {
             tracing::error!("Failed to list executions: {:?}", e);
-            let status = match &e {
-                crate::workers::execution_engine::ExecutionError::NotConnected(_) => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to list executions: {:?}", e)
-                })),
-            )
+            execution_error_response(&e)
         }
     }
 }

@@ -16,7 +16,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::workers::execution_engine::{ExecutionEngine, ExecutionError, SyncRequest};
+use crate::api::handlers::common::execution_error_response;
+use crate::workers::execution_engine::{ExecutionEngine, SyncRequest};
 
 // ============================================================================
 // HTTP Handlers
@@ -101,56 +102,9 @@ pub async fn capture_http_event_sync(
             }
             (StatusCode::OK, Json(body))
         }
-        Err(ExecutionError::NotFound(msg)) => {
-            tracing::debug!("Event not found: {msg}");
-            let error_response = json!({
-                "success": false,
-                "error": "Not found",
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::ScenarioNotFound(msg)) => {
-            tracing::debug!("Scenario not found: {msg}");
-            let error_response = json!({
-                "success": false,
-                "error": "Not found",
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": msg,
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::DatabaseError(_)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Database error",
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
-        Err(ExecutionError::CompilationTimeout(_)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Compilation timeout",
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
-        Err(ExecutionError::NotConnected(_)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "success": false,
-                "error": "Runtime client not configured. Set RUNTARA_SERVER_URL environment variable."
-            })),
-        ),
-        Err(_) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Internal error",
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        Err(e) => {
+            tracing::debug!("Sync execution failed: {e}");
+            execution_error_response(&e)
         }
     }
 }

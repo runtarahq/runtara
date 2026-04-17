@@ -7,6 +7,7 @@ pub mod agent_testing;
 pub mod analytics;
 pub mod api_keys;
 pub mod chat;
+pub mod common;
 pub mod csv_import_export;
 pub mod events;
 pub mod executions;

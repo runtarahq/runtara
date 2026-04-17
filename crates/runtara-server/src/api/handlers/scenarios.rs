@@ -33,12 +33,12 @@ use crate::api::dto::scenarios::{
     ScenarioInstanceDto, ScenarioVersionInfoDto, StepTypeInfo, UpdateTrackEventsRequest,
     VersionSchemasResponse, WorkflowValidationErrorResponse, validate_scenario_inputs,
 };
+use crate::api::handlers::common::{execution_error_response, execution_error_response_with};
 use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::api::services::scenarios::{ScenarioService, ServiceError};
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
-    ExecutionEngine, ExecutionError, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome,
-    TriggerSource,
+    ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
 };
 use runtara_connections::ConnectionsFacade;
 
@@ -1089,38 +1089,7 @@ pub async fn execute_scenario_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(ExecutionError::NotFound(msg)) | Err(ExecutionError::ScenarioNotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::NotConnected(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "message": format!("{}", e),
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response(&e),
     }
 }
 
@@ -1152,38 +1121,7 @@ pub async fn get_execution_metrics_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::NotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::NotConnected(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "message": format!("Database error: {}", e),
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response(&e),
     }
 }
 
@@ -1236,30 +1174,7 @@ pub async fn get_instance_handler(
                 Json(serde_json::to_value(response).unwrap()),
             )
         }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::NotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "message": format!("Database error: {}", e),
-                "data": serde_json::Value::Null
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response(&e),
     }
 }
 
@@ -1293,31 +1208,7 @@ pub async fn list_instances_handler(
             let response = ApiResponse::success(page_dto);
             (StatusCode::OK, Json(json!(response)))
         }
-        Err(ExecutionError::NotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "scenarioId": scenario_id
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "message": msg,
-                "scenarioId": scenario_id
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Failed to list scenario instances",
-                "message": format!("{}", e),
-                "scenarioId": scenario_id
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response_with(&e, json!({ "scenarioId": scenario_id })),
     }
 }
 
@@ -1509,42 +1400,7 @@ pub async fn stop_instance_handler(
             );
             (StatusCode::OK, Json(json!(response)))
         }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Invalid instance ID",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::NotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Instance not found",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::NotConnected(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Failed to stop instance",
-                "message": format!("{}", e),
-                "instanceId": instance_id
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response_with(&e, json!({ "instanceId": instance_id })),
     }
 }
 
@@ -1600,42 +1456,7 @@ pub async fn pause_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Invalid request",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::NotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Instance not found",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::NotConnected(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Failed to pause instance",
-                "message": format!("{}", e),
-                "instanceId": instance_id
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response_with(&e, json!({ "instanceId": instance_id })),
     }
 }
 
@@ -1691,42 +1512,7 @@ pub async fn resume_instance_handler(
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(ExecutionError::ValidationError(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Invalid request",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::BAD_REQUEST, Json(error_response))
-        }
-        Err(ExecutionError::NotFound(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Instance not found",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::NOT_FOUND, Json(error_response))
-        }
-        Err(ExecutionError::NotConnected(msg)) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": msg,
-                "instanceId": instance_id
-            });
-            (StatusCode::SERVICE_UNAVAILABLE, Json(error_response))
-        }
-        Err(e) => {
-            let error_response = json!({
-                "success": false,
-                "error": "Failed to resume instance",
-                "message": format!("{}", e),
-                "instanceId": instance_id
-            });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
-        }
+        Err(e) => execution_error_response_with(&e, json!({ "instanceId": instance_id })),
     }
 }
 
