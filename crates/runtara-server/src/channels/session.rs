@@ -12,12 +12,10 @@ use uuid::Uuid;
 
 use crate::api::dto::triggers::TriggerType;
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, parse_debug_event};
-use crate::api::repositories::scenarios::ScenarioRepository;
-use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::triggers::TriggerRepository;
-use crate::api::services::executions::ExecutionService;
 use crate::api::services::{session_queue, session_token};
 use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
 use runtara_connections::ConnectionsFacade;
 
 use super::channel::{Channel, TelegramChannel};
@@ -80,7 +78,7 @@ pub struct ChannelRouter {
     client: Arc<RuntimeClient>,
     pool: PgPool,
     connections: Arc<ConnectionsFacade>,
-    trigger_stream: Arc<TriggerStreamPublisher>,
+    engine: Arc<ExecutionEngine>,
     valkey: ConnectionManager,
     http_client: reqwest::Client,
     /// Shared service URL map for Teams (conversation_id → serviceUrl).
@@ -92,7 +90,7 @@ impl ChannelRouter {
         client: Arc<RuntimeClient>,
         pool: PgPool,
         connections: Arc<ConnectionsFacade>,
-        trigger_stream: Arc<TriggerStreamPublisher>,
+        engine: Arc<ExecutionEngine>,
         valkey: ConnectionManager,
     ) -> Self {
         Self {
@@ -100,7 +98,7 @@ impl ChannelRouter {
             client,
             pool,
             connections,
-            trigger_stream,
+            engine,
             valkey,
             http_client: reqwest::Client::new(),
             teams_service_urls: Arc::new(DashMap::new()),
@@ -324,8 +322,7 @@ impl ChannelRouter {
         self.sessions.insert(key.clone(), tx);
 
         let client = self.client.clone();
-        let pool = self.pool.clone();
-        let trigger_stream = self.trigger_stream.clone();
+        let engine = self.engine.clone();
         let valkey = self.valkey.clone();
         let sessions = self.sessions.clone();
         let conv_id = conv_id.to_string();
@@ -344,8 +341,7 @@ impl ChannelRouter {
                 initial_message,
                 rx,
                 client,
-                pool,
-                trigger_stream,
+                engine,
                 valkey,
                 &tenant_id,
                 &scenario_id,
@@ -375,8 +371,7 @@ async fn session_loop(
     initial_message: InboundMessage,
     mut user_rx: mpsc::Receiver<InboundMessage>,
     client: Arc<RuntimeClient>,
-    pool: PgPool,
-    trigger_stream: Arc<TriggerStreamPublisher>,
+    engine: Arc<ExecutionEngine>,
     mut valkey: ConnectionManager,
     org_id: &str,
     scenario_id: &str,
@@ -410,11 +405,16 @@ async fn session_loop(
         "variables": {},
     });
 
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool.clone()));
-    let service =
-        ExecutionService::with_trigger_stream(scenario_repo.clone(), trigger_stream.clone());
-    let result = service
-        .queue_execution(org_id, scenario_id, None, inputs, false)
+    let result = engine
+        .queue(QueueRequest {
+            tenant_id: org_id,
+            scenario_id,
+            version: None,
+            inputs,
+            debug: false,
+            correlation_id: None,
+            trigger_source: TriggerSource::Webhook,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("Failed to queue execution: {:?}", e))?;
 
@@ -635,10 +635,15 @@ async fn session_loop(
                                 },
                                 "variables": {},
                             });
-                            let service = ExecutionService::with_trigger_stream(
-                                scenario_repo.clone(), trigger_stream.clone(),
-                            );
-                            match service.queue_execution(org_id, scenario_id, None, inputs, false).await {
+                            match engine.queue(QueueRequest {
+                                tenant_id: org_id,
+                                scenario_id,
+                                version: None,
+                                inputs,
+                                debug: false,
+                                correlation_id: None,
+                                trigger_source: TriggerSource::Webhook,
+                            }).await {
                                 Ok(result) => {
                                     instance_id = result.instance_id.to_string();
                                     let _ = session_queue::set_session_meta(

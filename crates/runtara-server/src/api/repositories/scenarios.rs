@@ -1738,4 +1738,90 @@ impl ScenarioRepository {
 
         Ok(result)
     }
+
+    /// Check the compilation readiness state for a scenario version.
+    ///
+    /// This consolidates the logic that both the async `ExecutionEngine` and the
+    /// synchronous execution path used to duplicate. Behaviour:
+    /// - If the compilation row is `success` AND has a registered image id, returns
+    ///   `CompilationStatus::Ready { translated_path, registered_image_id }`.
+    /// - If the row is `failed`, logs the stored error message at `error`, deletes
+    ///   the stale record so the next request can retry, and returns
+    ///   `CompilationStatus::Failed { error }`.
+    /// - Otherwise (no row, `pending`, or `success` without a registered image)
+    ///   returns `CompilationStatus::NotReady`.
+    pub async fn ensure_compilation_ready(
+        &self,
+        tenant_id: &str,
+        scenario_id: &str,
+        version: i32,
+    ) -> Result<CompilationStatus, sqlx::Error> {
+        let compilation_record = sqlx::query!(
+            r#"
+            SELECT compilation_status, translated_path, registered_image_id, error_message
+            FROM scenario_compilations
+            WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
+            "#,
+            tenant_id,
+            scenario_id,
+            version
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match compilation_record {
+            Some(record)
+                if record.compilation_status == "success"
+                    && record.registered_image_id.is_some() =>
+            {
+                Ok(CompilationStatus::Ready {
+                    translated_path: record.translated_path,
+                    registered_image_id: record.registered_image_id.unwrap_or_default(),
+                })
+            }
+            Some(record) if record.compilation_status == "failed" => {
+                let error_msg = record
+                    .error_message
+                    .unwrap_or_else(|| "Unknown compilation error".to_string());
+                // Log at ERROR level so it's visible in logs
+                tracing::error!(
+                    tenant_id = %tenant_id,
+                    scenario_id = %scenario_id,
+                    version = version,
+                    compilation_error = %error_msg,
+                    "COMPILATION FAILED - deleting record for retry"
+                );
+                // Delete failed record so it can be retried
+                let _ = sqlx::query!(
+                    "DELETE FROM scenario_compilations WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3",
+                    tenant_id,
+                    scenario_id,
+                    version
+                )
+                .execute(&self.pool)
+                .await;
+                Ok(CompilationStatus::Failed { error: error_msg })
+            }
+            _ => Ok(CompilationStatus::NotReady),
+        }
+    }
+}
+
+/// Compilation readiness status returned by
+/// [`ScenarioRepository::ensure_compilation_ready`].
+#[derive(Debug, Clone)]
+pub enum CompilationStatus {
+    /// Compilation succeeded and is registered with runtara-environment.
+    Ready {
+        /// Filesystem path of the translated scenario build directory.
+        translated_path: String,
+        /// Image id registered in runtara-environment.
+        registered_image_id: String,
+    },
+    /// Previous compilation attempt recorded a failure. The stale record has
+    /// been deleted so the caller may queue a retry.
+    Failed { error: String },
+    /// No successful compilation is available yet (no record, pending, or
+    /// partially recorded).
+    NotReady,
 }

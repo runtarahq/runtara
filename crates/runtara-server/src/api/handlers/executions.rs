@@ -5,15 +5,12 @@ use axum::{
     http::StatusCode,
 };
 use serde_json::Value;
-use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::api::dto::executions::{
     ExecutionFilters, ListAllExecutionsQuery, ListAllExecutionsResponse,
 };
-use crate::api::repositories::scenarios::ScenarioRepository;
-use crate::api::services::executions::ExecutionService;
-use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::ExecutionEngine;
 
 /// List all executions across all scenarios with filtering, sorting, and pagination
 #[utoipa::path(
@@ -30,24 +27,9 @@ use crate::runtime_client::RuntimeClient;
 )]
 pub async fn list_all_executions_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Query(query): Query<ListAllExecutionsQuery>,
 ) -> (StatusCode, Json<Value>) {
-    // RuntimeClient is required for listing executions (data is in runtara-environment)
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Runtara environment not configured. Execution listing requires runtara-environment connection."
-                })),
-            );
-        }
-    };
-
     // Parse and validate query parameters
     let filters = match parse_filters(&query) {
         Ok(f) => f,
@@ -62,12 +44,8 @@ pub async fn list_all_executions_handler(
         }
     };
 
-    // Create service with runtime client for proxying to Runtara
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service = ExecutionService::new(scenario_repo, runtime_client);
-
-    // Call service (proxies to runtara-environment)
-    match service
+    // Delegate to the shared execution engine
+    match engine
         .list_all_executions(&tenant_id, query.page, query.size, filters)
         .await
     {
@@ -83,8 +61,14 @@ pub async fn list_all_executions_handler(
         }
         Err(e) => {
             tracing::error!("Failed to list executions: {:?}", e);
+            let status = match &e {
+                crate::workers::execution_engine::ExecutionError::NotConnected(_) => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(serde_json::json!({
                     "success": false,
                     "error": format!("Failed to list executions: {:?}", e)

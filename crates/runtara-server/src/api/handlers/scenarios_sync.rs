@@ -16,10 +16,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::api::repositories::scenarios::ScenarioRepository;
-use crate::api::services::scenarios::ServiceError;
-use crate::api::services::sync_execution::SyncExecutionService;
-use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::{ExecutionEngine, ExecutionError, SyncRequest};
 
 // ============================================================================
 // HTTP Handlers
@@ -57,52 +54,54 @@ use crate::runtime_client::RuntimeClient;
     ),
     tag = "Event Capture"
 )]
-#[instrument(skip(pool, runtime_client, body), fields(scenario_id = %scenario_id))]
+#[instrument(skip(engine, body), fields(scenario_id = %scenario_id))]
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_http_event_sync(
     Path(scenario_id): Path<String>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    State(pool): State<sqlx::PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     body: Bytes,
 ) -> (StatusCode, Json<Value>) {
     // Events are webhook endpoints — tenant is implicit (single-tenant runtime)
     let tenant_id = crate::config::tenant_id().to_string();
 
-    // Check if runtime client is available
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "success": false,
-                    "error": "Runtime client not configured. Set RUNTARA_SERVER_URL environment variable."
-                })),
-            );
-        }
-    };
-
     // Build inputs from HTTP request data
     let inputs = build_inputs_from_http_request(&method, &uri, &headers, &body);
 
-    // Create service
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool));
-    let service = SyncExecutionService::new(scenario_repo, runtime_client);
-
-    // Execute synchronously (always use latest version)
-    match service
-        .execute_sync(&tenant_id, &scenario_id, None, inputs)
+    // Execute synchronously via the shared engine
+    match engine
+        .run_sync(SyncRequest {
+            tenant_id: &tenant_id,
+            scenario_id: &scenario_id,
+            version: None,
+            inputs,
+        })
         .await
     {
         Ok(result) => {
             // Return the result directly (success or failure both use 200 OK)
             // The client should check the "success" field in the response
-            (StatusCode::OK, Json(json!(result)))
+            let metrics = json!({
+                "executionDurationSeconds": result.metrics.execution_duration_seconds,
+                "maxMemoryMb": result.metrics.max_memory_mb,
+                "totalDurationSeconds": result.metrics.total_duration_seconds,
+            });
+            let mut body = json!({
+                "success": result.success,
+                "outputs": result.outputs,
+                "metrics": metrics,
+            });
+            if let Some(ref err) = result.error {
+                body["error"] = json!(err);
+            }
+            if let Some(ref stderr) = result.stderr {
+                body["stderr"] = json!(stderr);
+            }
+            (StatusCode::OK, Json(body))
         }
-        Err(ServiceError::NotFound(msg)) => {
+        Err(ExecutionError::NotFound(msg)) => {
             tracing::debug!("Event not found: {msg}");
             let error_response = json!({
                 "success": false,
@@ -110,27 +109,42 @@ pub async fn capture_http_event_sync(
             });
             (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(ServiceError::DatabaseError(_)) => {
+        Err(ExecutionError::ScenarioNotFound(msg)) => {
+            tracing::debug!("Scenario not found: {msg}");
             let error_response = json!({
                 "success": false,
-                "error": "Database error",
+                "error": "Not found",
             });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+            (StatusCode::NOT_FOUND, Json(error_response))
         }
-        Err(ServiceError::ValidationError(msg)) => {
+        Err(ExecutionError::ValidationError(msg)) => {
             let error_response = json!({
                 "success": false,
                 "error": msg,
             });
             (StatusCode::BAD_REQUEST, Json(error_response))
         }
-        Err(ServiceError::ExecutionError(_)) => {
+        Err(ExecutionError::DatabaseError(_)) => {
             let error_response = json!({
                 "success": false,
-                "error": "Execution error",
+                "error": "Database error",
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
+        Err(ExecutionError::CompilationTimeout(_)) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Compilation timeout",
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        }
+        Err(ExecutionError::NotConnected(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "error": "Runtime client not configured. Set RUNTARA_SERVER_URL environment variable."
+            })),
+        ),
         Err(_) => {
             let error_response = json!({
                 "success": false,

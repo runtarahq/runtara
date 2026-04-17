@@ -20,11 +20,12 @@ use tracing::{debug, error, info};
 use uuid::Uuid;
 
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, make_event, parse_debug_event};
-use crate::api::repositories::scenarios::ScenarioRepository;
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
-use crate::api::services::executions::ExecutionService;
 use crate::api::services::{session_queue, session_token};
 use crate::runtime_client::RuntimeClient;
+use crate::workers::execution_engine::{
+    ExecutionEngine, ExecutionError, QueueRequest, TriggerSource,
+};
 
 /// Request body for creating a session.
 #[derive(Debug, Deserialize)]
@@ -56,12 +57,14 @@ pub struct SubmitEventRequest {
 /// Create a new session, start execution, and return an SSE stream.
 ///
 /// POST /api/runtime/scenarios/{id}/sessions
+#[allow(clippy::too_many_arguments)]
 pub async fn create_session(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(scenario_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -127,20 +130,25 @@ pub async fn create_session(
         "variables": request.variables,
     });
 
-    // Queue execution
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool.clone()));
-    let service = ExecutionService::with_trigger_stream(scenario_repo, trigger_stream.clone());
-    let result = service
-        .queue_execution(&tenant_id, &scenario_id, request.version, inputs, false)
+    // Queue execution via the shared engine
+    let result = engine
+        .queue(QueueRequest {
+            tenant_id: &tenant_id,
+            scenario_id: &scenario_id,
+            version: request.version,
+            inputs,
+            debug: false,
+            correlation_id: None,
+            trigger_source: TriggerSource::Session,
+        })
         .await
         .map_err(|e| {
             let status = match &e {
-                crate::api::services::executions::ServiceError::NotFound(_) => {
+                ExecutionError::NotFound(_) | ExecutionError::ScenarioNotFound(_) => {
                     StatusCode::NOT_FOUND
                 }
-                crate::api::services::executions::ServiceError::ValidationError(_) => {
-                    StatusCode::BAD_REQUEST
-                }
+                ExecutionError::ValidationError(_)
+                | ExecutionError::WorkflowValidationError { .. } => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             (
@@ -164,12 +172,15 @@ pub async fn create_session(
         error!(error = %e, "Failed to store session metadata in Valkey");
     }
 
-    // Build SSE stream with session_created preamble + queue-drain bridge
+    // Build SSE stream with session_created preamble + queue-drain bridge.
+    // `pool` and `trigger_stream` states are retained as configuration probes
+    // (presence validated above); queue operations go through `engine`.
+    let _ = pool;
+    let _ = trigger_stream;
     let stream = build_session_event_stream(SessionStreamParams {
         client: runtime_client,
         valkey,
-        pool: pool.clone(),
-        trigger_stream,
+        engine,
         instance_id,
         scenario_id,
         tenant_id,
@@ -232,12 +243,14 @@ pub async fn submit_event(
 /// SSE event stream for an existing session (reconnect).
 ///
 /// GET /api/runtime/sessions/{sessionId}/events
+#[allow(clippy::too_many_arguments)]
 pub async fn session_event_stream(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
+    State(engine): State<Arc<ExecutionEngine>>,
     Path(session_id): Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let runtime_client = runtime_client.ok_or_else(|| {
@@ -282,11 +295,14 @@ pub async fn session_event_stream(
     // Generate token for the response
     let token = session_token::sign(&tenant_id, &meta.scenario_id, &session_id).unwrap_or_default();
 
+    // `pool` / `trigger_stream` are kept as configuration probes (presence
+    // validated above); queue operations go through the shared engine.
+    let _ = pool;
+    let _ = trigger_stream;
     let stream = build_session_event_stream(SessionStreamParams {
         client: runtime_client,
         valkey,
-        pool,
-        trigger_stream,
+        engine,
         instance_id: meta.instance_id,
         scenario_id: meta.scenario_id,
         tenant_id,
@@ -500,8 +516,7 @@ async fn find_pending_signal_id(client: &Arc<RuntimeClient>, instance_id: &str) 
 struct SessionStreamParams {
     client: Arc<RuntimeClient>,
     valkey: ConnectionManager,
-    pool: PgPool,
-    trigger_stream: Arc<TriggerStreamPublisher>,
+    engine: Arc<ExecutionEngine>,
     instance_id: String,
     scenario_id: String,
     tenant_id: String,
@@ -514,8 +529,7 @@ struct SessionStreamParams {
 /// The message is NOT passed as input data — it stays in the queue and will be
 /// delivered as a signal when the instance hits WaitForSignal.
 async fn start_new_instance(
-    pool: &PgPool,
-    trigger_stream: &Arc<TriggerStreamPublisher>,
+    engine: &Arc<ExecutionEngine>,
     valkey: &mut ConnectionManager,
     tenant_id: &str,
     scenario_id: &str,
@@ -526,10 +540,16 @@ async fn start_new_instance(
         "variables": {},
     });
 
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool.clone()));
-    let service = ExecutionService::with_trigger_stream(scenario_repo, trigger_stream.clone());
-    match service
-        .queue_execution(tenant_id, scenario_id, None, inputs, false)
+    match engine
+        .queue(QueueRequest {
+            tenant_id,
+            scenario_id,
+            version: None,
+            inputs,
+            debug: false,
+            correlation_id: None,
+            trigger_source: TriggerSource::Session,
+        })
         .await
     {
         Ok(result) => {
@@ -571,8 +591,7 @@ fn build_session_event_stream(
         let SessionStreamParams {
             client,
             mut valkey,
-            pool,
-            trigger_stream,
+            engine,
             instance_id: initial_instance_id,
             scenario_id,
             tenant_id: org_id,
@@ -794,8 +813,7 @@ fn build_session_event_stream(
                             // Message waiting — start a new instance (message stays in queue
                             // for the queue-drain bridge to deliver on WaitForSignal)
                             match start_new_instance(
-                                &pool,
-                                &trigger_stream,
+                                &engine,
                                 &mut valkey,
                                 &org_id,
                                 &scenario_id,

@@ -338,6 +338,8 @@ struct AppState {
     agent_execution: api::services::agent_execution::AgentExecutionService,
     /// Connections facade for unified connection operations
     connections: Arc<runtara_connections::ConnectionsFacade>,
+    /// Unified execution engine — single orchestrator for all execution paths
+    engine: Arc<workers::execution_engine::ExecutionEngine>,
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -404,6 +406,13 @@ impl axum::extract::FromRef<AppState> for api::services::agent_execution::AgentE
 impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFacade> {
     fn from_ref(state: &AppState) -> Arc<runtara_connections::ConnectionsFacade> {
         state.connections.clone()
+    }
+}
+
+// Implement FromRef to allow extracting the unified execution engine from AppState
+impl axum::extract::FromRef<AppState> for Arc<workers::execution_engine::ExecutionEngine> {
+    fn from_ref(state: &AppState) -> Arc<workers::execution_engine::ExecutionEngine> {
+        state.engine.clone()
     }
 }
 
@@ -921,6 +930,21 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Build the unified execution engine shared by handlers and workers.
+    // Handlers use it directly via AppState / FromRef; the trigger worker
+    // constructs its own instance (no trigger_stream) for the detached path.
+    let scenario_repo_for_engine = Arc::new(api::repositories::scenarios::ScenarioRepository::new(
+        pool.clone(),
+    ));
+    let execution_engine = Arc::new(workers::execution_engine::ExecutionEngine::new(
+        pool.clone(),
+        scenario_repo_for_engine,
+        runtime_client.clone(),
+        trigger_stream.clone(),
+        Some(running_executions.clone()),
+    ));
+    println!("✓ Execution engine initialized");
+
     // CORS — configured via CORS_ALLOWED_ORIGINS env var.
     // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
     let cors = middleware::cors::build_cors_layer();
@@ -1240,6 +1264,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 connections_facade.clone(),
             ),
             connections: connections_facade.clone(),
+            engine: execution_engine.clone(),
         })
         // Apply JWT authentication middleware to all tenant-scoped routes
         .route_layer(from_fn_with_state(
@@ -1496,17 +1521,18 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
                 connections_facade.clone(),
             ),
             connections: connections_facade.clone(),
+            engine: execution_engine.clone(),
         });
 
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
     // The router is always available — it looks up connection + trigger from DB per request.
     let channel_routes =
-        if let (Some(rc), Some(ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
+        if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
             let channel_router = Arc::new(channels::session::ChannelRouter::new(
                 rc.clone(),
                 pool.clone(),
                 connections_facade.clone(),
-                ts.clone(),
+                execution_engine.clone(),
                 vc.clone(),
             ));
             println!("✓ Channel router initialized");
