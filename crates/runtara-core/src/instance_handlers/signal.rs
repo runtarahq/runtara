@@ -9,6 +9,7 @@ use super::state::InstanceHandlerState;
 use super::types::{
     CustomSignal, PollSignalsRequest, PollSignalsResponse, Signal, SignalAck, SignalType,
 };
+use crate::persistence::CompleteInstanceParams;
 
 /// Handle signal polling request.
 ///
@@ -100,14 +101,7 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 // Update instance status to cancelled with finished_at
                 state
                     .persistence
-                    .complete_instance_extended(
-                        &ack.instance_id,
-                        "cancelled",
-                        None, // output
-                        None, // error
-                        None, // stderr
-                        None, // checkpoint_id
-                    )
+                    .complete_instance(CompleteInstanceParams::new(&ack.instance_id, "cancelled"))
                     .await?;
                 info!("Instance cancelled");
             }
@@ -129,15 +123,9 @@ pub async fn handle_signal_ack(state: &InstanceHandlerState, ack: SignalAck) -> 
                 // recovery treats it as a normal suspension.
                 state
                     .persistence
-                    .complete_instance_with_termination(
-                        &ack.instance_id,
-                        "suspended",
-                        Some("shutdown_requested"),
-                        None, // exit_code
-                        None, // output
-                        None, // error
-                        None, // stderr
-                        None, // checkpoint_id (preserved by persistence impl)
+                    .complete_instance(
+                        CompleteInstanceParams::new(&ack.instance_id, "suspended")
+                            .with_termination("shutdown_requested", None),
                     )
                     .await?;
                 info!("Instance suspended for shutdown");

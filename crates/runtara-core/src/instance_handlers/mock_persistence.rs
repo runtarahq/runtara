@@ -14,8 +14,9 @@ use chrono::{DateTime, Utc};
 
 use crate::error::CoreError;
 use crate::persistence::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    CheckpointRecord, CompleteInstanceGuard, CompleteInstanceParams, CustomSignalRecord,
+    EventRecord, InstanceRecord, ListEventsFilter, ListStepSummariesFilter, Persistence,
+    SignalRecord, StepSummaryRecord,
 };
 
 /// Mock persistence for handler unit tests.
@@ -210,104 +211,45 @@ impl Persistence for MockPersistence {
 
     async fn complete_instance(
         &self,
-        instance_id: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-    ) -> std::result::Result<(), CoreError> {
-        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.status = if error.is_some() {
-                "failed".to_string()
-            } else {
-                "completed".to_string()
+        params: CompleteInstanceParams<'_>,
+    ) -> std::result::Result<bool, CoreError> {
+        let mut instances = self.instances.lock().unwrap();
+        let Some(inst) = instances.get_mut(params.instance_id) else {
+            return match params.guard {
+                // Matches the SQL backends: unguarded miss is a hard error,
+                // guarded miss is just a skipped Ok(false).
+                CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
+                    instance_id: params.instance_id.to_string(),
+                }),
+                CompleteInstanceGuard::OnlyRunning => Ok(false),
             };
-            inst.output = output.map(|o| o.to_vec());
-            inst.error = error.map(|e| e.to_string());
+        };
+        if matches!(params.guard, CompleteInstanceGuard::OnlyRunning) && inst.status != "running" {
+            return Ok(false);
+        }
+        inst.status = params.status.to_string();
+        // output/error are overwritten unconditionally (matches SQL
+        // `SET output = $N`, not `COALESCE`).
+        inst.output = params.output.map(|o| o.to_vec());
+        inst.error = params.error.map(|e| e.to_string());
+        // stderr/checkpoint/termination_reason/exit_code use COALESCE
+        // semantics — only overwrite when the caller provided a value.
+        if let Some(cp) = params.checkpoint_id {
+            inst.checkpoint_id = Some(cp.to_string());
+        }
+        if let Some(reason) = params.termination_reason {
+            inst.termination_reason = Some(reason.to_string());
+        }
+        if let Some(code) = params.exit_code {
+            inst.exit_code = Some(code);
+        }
+        if matches!(
+            params.status,
+            "completed" | "failed" | "cancelled" | "suspended"
+        ) {
             inst.finished_at = Some(Utc::now());
         }
-        Ok(())
-    }
-
-    async fn complete_instance_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        _stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> std::result::Result<bool, CoreError> {
-        let mut instances = self.instances.lock().unwrap();
-        if let Some(inst) = instances.get_mut(instance_id)
-            && inst.status == "running"
-        {
-            inst.status = status.to_string();
-            inst.output = output.map(|o| o.to_vec());
-            inst.error = error.map(|e| e.to_string());
-            inst.checkpoint_id = checkpoint_id.map(|s| s.to_string());
-            if status == "completed"
-                || status == "failed"
-                || status == "cancelled"
-                || status == "suspended"
-            {
-                inst.finished_at = Some(Utc::now());
-            }
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    async fn complete_instance_with_termination(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        _stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> std::result::Result<(), CoreError> {
-        if let Some(inst) = self.instances.lock().unwrap().get_mut(instance_id) {
-            inst.status = status.to_string();
-            inst.termination_reason = termination_reason.map(|s| s.to_string());
-            inst.exit_code = exit_code;
-            inst.output = output.map(|o| o.to_vec());
-            inst.error = error.map(|e| e.to_string());
-            inst.checkpoint_id = checkpoint_id.map(|s| s.to_string());
-            if status == "completed" || status == "failed" || status == "cancelled" {
-                inst.finished_at = Some(Utc::now());
-            }
-        }
-        Ok(())
-    }
-
-    async fn complete_instance_with_termination_if_running(
-        &self,
-        instance_id: &str,
-        status: &str,
-        termination_reason: Option<&str>,
-        exit_code: Option<i32>,
-        output: Option<&[u8]>,
-        error: Option<&str>,
-        _stderr: Option<&str>,
-        checkpoint_id: Option<&str>,
-    ) -> std::result::Result<bool, CoreError> {
-        let mut instances = self.instances.lock().unwrap();
-        if let Some(inst) = instances.get_mut(instance_id)
-            && inst.status == "running"
-        {
-            inst.status = status.to_string();
-            inst.termination_reason = termination_reason.map(|s| s.to_string());
-            inst.exit_code = exit_code;
-            inst.output = output.map(|o| o.to_vec());
-            inst.error = error.map(|e| e.to_string());
-            inst.checkpoint_id = checkpoint_id.map(|s| s.to_string());
-            if status == "completed" || status == "failed" || status == "cancelled" {
-                inst.finished_at = Some(Utc::now());
-            }
-            return Ok(true);
-        }
-        Ok(false)
+        Ok(true)
     }
 
     async fn save_checkpoint(

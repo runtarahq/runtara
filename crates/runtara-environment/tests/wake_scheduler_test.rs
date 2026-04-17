@@ -5,7 +5,7 @@
 mod common;
 
 use chrono::Utc;
-use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
 use runtara_environment::db::{self, Instance};
 use runtara_environment::wake_scheduler::WakeSchedulerConfig;
 use sqlx::PgPool;
@@ -121,8 +121,21 @@ async fn update_test_instance_result(
     stderr: Option<&str>,
 ) {
     let persistence = PostgresPersistence::new(pool.clone());
+    let mut params = CompleteInstanceParams::new(instance_id, status);
+    if let Some(o) = output {
+        params = params.with_output(o);
+    }
+    if let Some(e) = error {
+        params = params.with_error(e);
+    }
+    if let Some(s) = stderr {
+        params = params.with_stderr(s);
+    }
+    if let Some(cp) = checkpoint_id {
+        params = params.with_checkpoint(cp);
+    }
     persistence
-        .complete_instance_extended(instance_id, status, output, error, stderr, checkpoint_id)
+        .complete_instance(params)
         .await
         .expect("Failed to update instance result");
 }

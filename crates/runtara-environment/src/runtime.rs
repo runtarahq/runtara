@@ -77,7 +77,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use runtara_core::persistence::Persistence;
+use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 use runtara_core::runtime::CoreRuntime;
 use sqlx::PgPool;
 use tokio::sync::Notify;
@@ -646,15 +646,11 @@ impl EnvironmentRuntime {
             if let Err(e) = self
                 .state
                 .persistence
-                .complete_instance_with_termination_if_running(
-                    &info.instance_id,
-                    "suspended",
-                    Some("shutdown_requested"),
-                    None, // exit_code
-                    None, // output
-                    Some("Force-stopped after grace period expired during shutdown"),
-                    None, // stderr
-                    None, // checkpoint_id
+                .complete_instance(
+                    CompleteInstanceParams::new(&info.instance_id, "suspended")
+                        .if_running()
+                        .with_termination("shutdown_requested", None)
+                        .with_error("Force-stopped after grace period expired during shutdown"),
                 )
                 .await
             {
@@ -879,15 +875,11 @@ async fn recover_orphaned_containers(pool: &PgPool, persistence: &dyn Persistenc
 
                     // Mark as crashed in Core
                     if let Err(e) = persistence
-                        .complete_instance_with_termination_if_running(
-                            instance_id,
-                            "failed",
-                            Some("crashed"),
-                            None,
-                            None,
-                            Some("Process terminated during Environment restart"),
-                            None,
-                            None,
+                        .complete_instance(
+                            CompleteInstanceParams::new(instance_id, "failed")
+                                .if_running()
+                                .with_termination("crashed", None)
+                                .with_error("Process terminated during Environment restart"),
                         )
                         .await
                     {

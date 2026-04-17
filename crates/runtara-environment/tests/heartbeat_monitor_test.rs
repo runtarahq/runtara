@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use runtara_core::error::CoreError;
 use runtara_core::persistence::{
-    CheckpointRecord, CustomSignalRecord, EventRecord, InstanceRecord, ListEventsFilter,
-    ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
+    CheckpointRecord, CompleteInstanceParams, CustomSignalRecord, EventRecord, InstanceRecord,
+    ListEventsFilter, ListStepSummariesFilter, Persistence, SignalRecord, StepSummaryRecord,
 };
 use runtara_environment::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use runtara_environment::runner::{
@@ -295,18 +295,16 @@ impl Persistence for MockPersistence {
 
     async fn complete_instance(
         &self,
-        instance_id: &str,
-        output: Option<&[u8]>,
-        error_message: Option<&str>,
-    ) -> Result<(), CoreError> {
+        params: CompleteInstanceParams<'_>,
+    ) -> Result<bool, CoreError> {
         self.completed_instances.lock().unwrap().push((
-            instance_id.to_string(),
-            output.map(|o| o.to_vec()),
-            error_message.map(|e| e.to_string()),
+            params.instance_id.to_string(),
+            params.output.map(|o| o.to_vec()),
+            params.error.map(|e| e.to_string()),
         ));
         // Remove from instances
-        self.instances.lock().unwrap().remove(instance_id);
-        Ok(())
+        self.instances.lock().unwrap().remove(params.instance_id);
+        Ok(true)
     }
 
     async fn save_checkpoint(
