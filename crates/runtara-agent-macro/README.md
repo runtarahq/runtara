@@ -4,222 +4,46 @@
 [![Documentation](https://docs.rs/runtara-agent-macro/badge.svg)](https://docs.rs/runtara-agent-macro)
 [![License](https://img.shields.io/crates/l/runtara-agent-macro.svg)](LICENSE)
 
-Procedural macros for defining custom agents in [Runtara](https://runtara.com) workflows. Use `#[agent]` and `#[capability]` to create reusable workflow components.
+Procedural macros for declaring runtara agent capabilities, input/output schemas, connection types, and step metadata.
 
-## Overview
+## What it is
 
-This crate provides macros to define agents and their capabilities:
+A `proc-macro` crate that exposes one attribute macro and four derives: `#[capability]` marks a function as an agent capability (emitting a `CapabilityMeta` static plus a JSON-coercing executor wrapper), `#[derive(CapabilityInput)]` and `#[derive(CapabilityOutput)]` lift struct fields into `InputTypeMeta` / `OutputTypeMeta`, `#[derive(ConnectionParams)]` describes a connection type with auth type, category, and OAuth config, and `#[derive(StepMeta)]` registers DSL step types with `schemars`-derived schemas. The emitted metadata types all live in `runtara-dsl::agent_meta` (not here, to sidestep proc-macro crate limits), and on non-WASM targets each static is also submitted to `inventory` for runtime discovery. In practice every consumer inside the workspace is `runtara-agents`.
 
-- **`#[agent]`**: Define an agent module with metadata
-- **`#[capability]`**: Define individual capabilities (operations) within an agent
+## Using it standalone
 
-Agents are automatically registered at compile time and can be used in workflow definitions.
-
-## Installation
-
-Add to your `Cargo.toml`:
+The macros generate paths like `runtara_dsl::agent_meta::CapabilityMeta` and `inventory::submit!`, so any direct consumer must also depend on `runtara-dsl` and `inventory`:
 
 ```toml
 [dependencies]
-runtara-agent-macro = "1.0"
-runtara-dsl = "1.0"  # For type definitions
+runtara-agent-macro = "1.8"
+runtara-dsl         = "1.8"
+inventory           = "0.3"
+serde               = { version = "1", features = ["derive"] }
+serde_json          = "1"
 ```
-
-## Usage
-
-### Basic Agent Definition
 
 ```rust
-use runtara_agent_macro::agent;
-use serde::{Serialize, Deserialize};
+use runtara_agent_macro::{capability, CapabilityInput};
 
-#[derive(Serialize, Deserialize)]
-pub struct GreetInput {
-    pub name: String,
-}
+#[derive(CapabilityInput, serde::Deserialize)]
+pub struct AddInput { pub a: i64, pub b: i64 }
 
-#[derive(Serialize, Deserialize)]
-pub struct GreetOutput {
-    pub message: String,
-}
-
-#[agent(id = "greeter", category = "demo")]
-pub mod greeter {
-    use super::*;
-
-    #[capability(id = "greet", description = "Generate a greeting message")]
-    pub async fn greet(input: GreetInput) -> Result<GreetOutput, Box<dyn std::error::Error>> {
-        Ok(GreetOutput {
-            message: format!("Hello, {}!", input.name),
-        })
-    }
-}
+#[capability(module = "math", id = "add", description = "Sum two ints")]
+pub fn add(i: AddInput) -> Result<i64, String> { Ok(i.a + i.b) }
 ```
 
-### Agent with Multiple Capabilities
+Most downstream code should just depend on `runtara-agents`, which already pulls these macros in as a transitive dependency.
 
-```rust
-use runtara_agent_macro::agent;
-use serde::{Serialize, Deserialize};
+## Inside Runtara
 
-#[derive(Serialize, Deserialize)]
-pub struct CreateOrderInput {
-    pub product_id: String,
-    pub quantity: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct CreateOrderOutput {
-    pub order_id: String,
-    pub total: f64,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct GetOrderInput {
-    pub order_id: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct GetOrderOutput {
-    pub order_id: String,
-    pub status: String,
-    pub items: Vec<String>,
-}
-
-#[agent(id = "my-erp", category = "integration", description = "ERP system integration")]
-pub mod my_erp {
-    use super::*;
-
-    #[capability(id = "create-order", description = "Create a new order in the ERP system")]
-    pub async fn create_order(input: CreateOrderInput) -> Result<CreateOrderOutput, Box<dyn std::error::Error>> {
-        // Your ERP integration logic
-        let order_id = format!("ORD-{}", uuid::Uuid::new_v4());
-        let total = calculate_total(&input.product_id, input.quantity).await?;
-
-        Ok(CreateOrderOutput { order_id, total })
-    }
-
-    #[capability(id = "get-order", description = "Retrieve order details from the ERP system")]
-    pub async fn get_order(input: GetOrderInput) -> Result<GetOrderOutput, Box<dyn std::error::Error>> {
-        // Fetch order from ERP
-        let order = fetch_order_from_erp(&input.order_id).await?;
-
-        Ok(GetOrderOutput {
-            order_id: order.id,
-            status: order.status,
-            items: order.items,
-        })
-    }
-}
-```
-
-### Using Connection Configuration
-
-Agents can receive connection configuration for external services:
-
-```rust
-use runtara_agent_macro::agent;
-use serde::{Serialize, Deserialize};
-
-#[derive(Serialize, Deserialize)]
-pub struct FetchDataInput {
-    pub endpoint: String,
-    #[serde(default)]
-    pub connection: Option<serde_json::Value>,  // Connection config injected by runtime
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct FetchDataOutput {
-    pub data: serde_json::Value,
-}
-
-#[agent(id = "custom-api", category = "integration")]
-pub mod custom_api {
-    use super::*;
-
-    #[capability(id = "fetch", description = "Fetch data from API")]
-    pub async fn fetch(input: FetchDataInput) -> Result<FetchDataOutput, Box<dyn std::error::Error>> {
-        let client = reqwest::Client::new();
-        let mut request = client.get(&input.endpoint);
-
-        // Apply connection configuration (API key, Bearer token, etc.)
-        if let Some(conn) = &input.connection {
-            if let Some(api_key) = conn.get("api_key").and_then(|v| v.as_str()) {
-                request = request.header("X-API-Key", api_key);
-            }
-            if let Some(bearer) = conn.get("bearer_token").and_then(|v| v.as_str()) {
-                request = request.header("Authorization", format!("Bearer {}", bearer));
-            }
-        }
-
-        let response = request.send().await?;
-        let data = response.json().await?;
-
-        Ok(FetchDataOutput { data })
-    }
-}
-```
-
-### Agent Attributes
-
-#### `#[agent]` Attributes
-
-| Attribute | Required | Description |
-|-----------|----------|-------------|
-| `id` | Yes | Unique identifier for the agent |
-| `category` | Yes | Agent category (e.g., "integration", "transform", "io") |
-| `description` | No | Human-readable description |
-
-#### `#[capability]` Attributes
-
-| Attribute | Required | Description |
-|-----------|----------|-------------|
-| `id` | Yes | Unique identifier for the capability |
-| `description` | Yes | Human-readable description |
-
-### Input/Output Requirements
-
-For capabilities to work with the workflow system:
-
-1. **Input types** must implement `Serialize + Deserialize`
-2. **Output types** must implement `Serialize + Deserialize`
-3. **Functions** must be `async` and return `Result<Output, Error>`
-
-### Generated Code
-
-The macros generate:
-
-1. **Agent metadata**: Registered with the global agent registry
-2. **Capability metadata**: Including input/output schemas
-3. **Invocation wrapper**: For calling capabilities from workflow runtime
-
-## Using Agents in Workflows
-
-Once defined, agents can be used in JSON workflow definitions:
-
-```json
-{
-  "steps": {
-    "create": {
-      "stepType": "Agent",
-      "id": "create",
-      "agentId": "my-erp",
-      "capabilityId": "create-order",
-      "inputMapping": {
-        "product_id": { "valueType": "reference", "value": "data.product" },
-        "quantity": { "valueType": "immediate", "value": 5 }
-      }
-    }
-  }
-}
-```
-
-## Related Crates
-
-- [`runtara-dsl`](https://crates.io/crates/runtara-dsl) - DSL type definitions
-- [`runtara-agents`](https://crates.io/crates/runtara-agents) - Built-in agent implementations
-- [`runtara-workflows`](https://crates.io/crates/runtara-workflows) - Compile workflows with custom agents
+- Primary consumer: `runtara-agents` — every built-in agent module (`http`, `sftp`, `xlsx`, `csv`, `crypto`, `datetime`, `transform`, `text`, `file`, `compression`, `xml`, `utils`) is written with `#[capability]` plus the input/output derives.
+- `runtara-agents/src/agents/extractors/*` uses `#[derive(ConnectionParams)]` for the built-in connection types (`http_bearer`, `http_api_key`, `sftp`).
+- Generated metadata targets types in `runtara-dsl::agent_meta` and is indexed via `inventory::submit!`, gated on `not(target_family = "wasm")`.
+- Deps: `syn` 2 (full/parsing/extra-traits), `quote`, `proc-macro2`, `darling` 0.20.
+- The `#[capability]` executor wrapper normalizes errors into JSON envelopes (`code` / `message` / `category` / `severity`) so the `#[durable]` layer can make retry decisions.
+- Runs in: proc-macro at compile time.
 
 ## License
 
-This project is licensed under [AGPL-3.0-or-later](LICENSE).
+AGPL-3.0-or-later.

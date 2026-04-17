@@ -1,188 +1,51 @@
 # runtara-core
 
+Durable execution engine for Runtara: checkpoints, signals, durable sleep, and instance events backed by PostgreSQL or SQLite.
+
+[![crates.io](https://img.shields.io/crates/v/runtara-core.svg)](https://crates.io/crates/runtara-core)
+[![docs.rs](https://docs.rs/runtara-core/badge.svg)](https://docs.rs/runtara-core)
 [![License](https://img.shields.io/crates/l/runtara-core.svg)](LICENSE)
 
-Durable execution engine for [Runtara](https://runtara.com). Manages checkpoints, signals, and instance events with persistence to PostgreSQL or SQLite.
+## What it is
 
-## Overview
+`runtara-core` is the host-side execution engine that workflow instances talk to in order to persist state and progress durably. The `persistence` module defines the `Persistence` trait (with `PostgresPersistence` and `SqlitePersistence` impls) covering instances, checkpoints, events, and signals. The `instance_handlers` and `server` modules expose the instance protocol over HTTP (register, checkpoint, sleep, events, signal poll/ack), and `runtime::CoreRuntime` bundles it into an embeddable service. The `migrations` module ships SQL migrations so embedders can set up the schema, and `compensation` provides saga-style rollback primitives.
 
-This crate is the heart of the Runtara platform, providing:
+## Using it standalone
 
-- **Checkpoint Persistence**: Save and restore workflow state for crash recovery
-- **Signal Delivery**: Cancel, pause, and resume signals to running instances
-- **Durable Sleep**: Store wake timestamps for long-running sleeps
-- **Instance Events**: Track heartbeats, completion, failure, and suspension
-- **HTTP Transport**: Communication with workflow instances
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         External Clients                                 │
-│                    (runtara-management-sdk, CLI)                         │
-└─────────────────────────────────────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      runtara-environment                                 │
-│            (Image Registry, Instance Lifecycle, Wake Queue)              │
-│                           Port 8002                                      │
-└─────────────────────────────────────────────────────────────────────────┘
-          │                                              │
-          │ Shared Persistence                           │ Spawns
-          ▼                                              ▼
-┌───────────────────────┐                    ┌─────────────────────────────┐
-│    runtara-core       │◄───────────────────│     Workflow Instances      │
-│    (This Crate)       │  Instance Protocol │   (using runtara-sdk)       │
-│  Checkpoints/Signals  │                    │                             │
-│  Port 8001            │                    └─────────────────────────────┘
-└───────────────────────┘
-          │
-          ▼
-┌───────────────────────┐
-│  PostgreSQL / SQLite  │
-│  (Durable Storage)    │
-└───────────────────────┘
+```toml
+[dependencies]
+runtara-core = "1.8"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1", features = ["full"] }
 ```
 
-## Running the Server
+```rust
+use std::sync::Arc;
+use runtara_core::config::Config;
+use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_core::runtime::CoreRuntime;
+use sqlx::postgres::PgPoolOptions;
 
-```bash
-# Set required environment variables
-export RUNTARA_DATABASE_URL=postgres://user:pass@localhost/runtara
-
-# Run the server
-cargo run -p runtara-core
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let config = Config::from_env()?;
+    let pool = PgPoolOptions::new().connect(&config.database_url).await?;
+    runtara_core::migrations::run_postgres(&pool).await?;
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool));
+    CoreRuntime::new(config, persistence).run().await
+}
 ```
 
-## Instance Protocol (Port 8001)
+Requires a reachable PostgreSQL or SQLite database via `RUNTARA_DATABASE_URL`. Disable the default `server` feature if you only need the persistence/migrations library surface.
 
-Workflow instances connect via HTTP using `runtara-sdk`. The protocol supports:
+## Inside Runtara
 
-| Operation | Description |
-|-----------|-------------|
-| `RegisterInstance` | Self-register on startup, optionally resume from checkpoint |
-| `Checkpoint` | Save state (or return existing if checkpoint_id exists) + signal delivery |
-| `GetCheckpoint` | Read-only checkpoint lookup |
-| `Sleep` | Durable sleep - stores wake time in database |
-| `InstanceEvent` | Fire-and-forget events (heartbeat, completed, failed, suspended) |
-| `GetInstanceStatus` | Query instance status |
-| `PollSignals` | Poll for pending cancel/pause/resume signals |
-| `SignalAck` | Acknowledge receipt of a signal |
-
-### Checkpoint Semantics
-
-The `Checkpoint` operation is the primary durability mechanism:
-
-1. **First call with checkpoint_id**: Saves state, returns empty `existing_state`
-2. **Subsequent calls with same checkpoint_id**: Returns existing state (for resume)
-3. **Signal delivery**: Returns pending signals in response for efficient poll-free detection
-
-### Durable Sleep
-
-The `Sleep` operation stores a `sleep_until` timestamp in the instances table.
-Environment's wake scheduler polls for sleeping instances and relaunches them
-when their wake time arrives.
-
-## Instance Status State Machine
-
-```
-                    ┌─────────┐
-                    │ PENDING │
-                    └────┬────┘
-                         │ register
-                         ▼
-                    ┌─────────┐
-         ┌──────────│ RUNNING │──────────┐
-         │          └────┬────┘          │
-         │               │               │
-    pause│          sleep│          cancel
-         │               │               │
-         ▼               ▼               ▼
-    ┌──────────┐   ┌──────────┐   ┌───────────┐
-    │SUSPENDED │   │SUSPENDED │   │ CANCELLED │
-    └────┬─────┘   └────┬─────┘   └───────────┘
-         │               │
-    resume│          wake│
-         │               │
-         └───────┬───────┘
-                 │
-                 ▼
-            ┌─────────┐
-            │ RUNNING │──────────┬──────────┐
-            └─────────┘          │          │
-                            complete      fail
-                                 │          │
-                                 ▼          ▼
-                           ┌───────────┐ ┌────────┐
-                           │ COMPLETED │ │ FAILED │
-                           └───────────┘ └────────┘
-```
-
-| Status | Description |
-|--------|-------------|
-| `PENDING` | Instance created but not yet registered |
-| `RUNNING` | Instance is actively executing |
-| `SUSPENDED` | Instance paused (by signal) or sleeping (durable sleep) |
-| `COMPLETED` | Instance finished successfully |
-| `FAILED` | Instance failed with error |
-| `CANCELLED` | Instance was cancelled via signal |
-
-## Configuration
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RUNTARA_DATABASE_URL` | Yes | - | PostgreSQL or SQLite connection string |
-| `RUNTARA_HTTP_PORT` | No | `8001` | Instance HTTP server port |
-| `RUNTARA_MAX_CONCURRENT_INSTANCES` | No | `32` | Maximum concurrent instances. Enforced at `register_instance`; fresh registrations past the cap receive `429 Too Many Requests` with `Retry-After: 30`. Resumes of existing instances are not counted against the cap. Set to `0` to disable the check. |
-| `RUNTARA_SHUTDOWN_GRACE_MS` | No | `60000` | On SIGTERM/SIGINT, how long to wait for running instances to reach a checkpoint and suspend. Stragglers are force-stopped and persisted as `status=suspended, termination_reason=shutdown_requested`, then resumed after restart. |
-| `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` | No | `5000` | On SIGTERM/SIGINT, how long to wait for intake workers (trigger/compilation/cron/cleanup) to finish their current unit of work before being aborted. |
-
-## Database
-
-Core uses SQLx with support for both PostgreSQL and SQLite:
-
-- PostgreSQL: Recommended for production
-- SQLite: Suitable for development and testing
-
-Migrations are in `migrations/postgresql/` and `migrations/sqlite/`.
-
-### Running Migrations
-
-Migrations run automatically on server startup. For manual migration:
-
-```bash
-# PostgreSQL
-sqlx migrate run --source crates/runtara-core/migrations/postgresql
-
-# SQLite
-sqlx migrate run --source crates/runtara-core/migrations/sqlite
-```
-
-## Features
-
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `server` | Yes | Full server mode with HTTP transport |
-
-Without the `server` feature, only the persistence layer is available (used by `runtara-environment` for shared database access).
-
-## Testing
-
-```bash
-# Run unit tests
-cargo test -p runtara-core
-
-# Run with database (integration tests)
-TEST_DATABASE_URL=postgres://... cargo test -p runtara-core
-```
-
-## Related Crates
-
-- [`runtara-sdk`](https://crates.io/crates/runtara-sdk) - Client SDK for workflow instances
-- [`runtara-environment`](../runtara-environment) - Instance lifecycle and OCI container management
-- [`runtara-protocol`](https://crates.io/crates/runtara-protocol) - Wire protocol definitions
+- Consumed by `runtara-server` (binary that links core with `server` feature) and `runtara-environment` (shares the `Persistence` trait directly, not over HTTP).
+- `runtara-sdk` uses it via the optional `embedded` feature for in-process tests that skip the HTTP hop.
+- Depends on `sqlx` (Postgres + SQLite), `tokio`, and `axum` for the instance HTTP server on port 8001.
+- Primary integration point is the `Persistence` trait — environment and SDK both program against it.
+- Runs in: native host (Tokio + sqlx). Ships as both a library and an optional binary (`[[bin]] runtara-core`, gated on the `server` feature).
 
 ## License
 
-This project is licensed under [AGPL-3.0-or-later](LICENSE).
+AGPL-3.0-or-later.

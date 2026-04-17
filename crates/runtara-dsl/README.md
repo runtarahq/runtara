@@ -2,221 +2,41 @@
 
 [![Crates.io](https://img.shields.io/crates/v/runtara-dsl.svg)](https://crates.io/crates/runtara-dsl)
 [![Documentation](https://docs.rs/runtara-dsl/badge.svg)](https://docs.rs/runtara-dsl)
-[![License](https://img.shields.io/crates/l/runtara-dsl.svg)](LICENSE)
 
-Domain-specific language types and metadata definitions for [Runtara](https://runtara.com) workflows and agents.
+Single source of truth for Runtara's scenario DSL types — the Rust structs that define workflows, steps, and value mappings.
 
-## Overview
+## What it is
 
-This crate provides the core type definitions used across the Runtara platform:
+A typed representation of a scenario execution graph: `Scenario`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (pinned to `DSL_VERSION`, currently `3.0.0`), and step metadata is collected via `inventory` so the schema stays in sync with the step structs themselves. The public entry points are `parse_scenario`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
 
-- **Scenario Types**: Workflow definitions with steps, execution plans, and mappings
-- **Agent Metadata**: Agent and capability definitions with input/output schemas
-- **Value Mappings**: Reference and immediate value types for data flow
-- **JSON Schema**: Automatic schema generation via schemars
+## Using it standalone
 
-## Installation
-
-Add to your `Cargo.toml`:
+Add it to a crate that needs to read, validate, or emit scenario JSON:
 
 ```toml
 [dependencies]
-runtara-dsl = "1.0"
+runtara-dsl = "1.8"
+serde_json = "1"
 ```
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| `default` | Core types only |
-| `utoipa` | Enable OpenAPI schema generation via utoipa |
-
-Enable OpenAPI support:
-
-```toml
-[dependencies]
-runtara-dsl = { version = "1.0", features = ["utoipa"] }
-```
-
-## Usage
-
-### Defining a Scenario
 
 ```rust
-use runtara_dsl::{Scenario, Step, StepType, InputMapping, ValueMapping};
-use std::collections::HashMap;
+use runtara_dsl::{parse_scenario, MemoryTier};
 
-let scenario = Scenario {
-    name: "Order Processing".to_string(),
-    description: Some("Process incoming orders".to_string()),
-    steps: {
-        let mut steps = HashMap::new();
-        steps.insert("validate".to_string(), Step {
-            step_type: StepType::Agent,
-            id: "validate".to_string(),
-            agent_id: Some("http".to_string()),
-            capability_id: Some("request".to_string()),
-            input_mapping: {
-                let mut mapping = HashMap::new();
-                mapping.insert("url".to_string(), InputMapping {
-                    value_type: ValueMapping::Immediate,
-                    value: serde_json::json!("https://api.example.com/validate"),
-                });
-                mapping
-            },
-            ..Default::default()
-        });
-        steps
-    },
-    entry_point: "validate".to_string(),
-    execution_plan: vec![],
-    ..Default::default()
-};
-
-// Serialize to JSON
-let json = serde_json::to_string_pretty(&scenario)?;
+let json = serde_json::from_str(r#"{"executionGraph":{"entryPoint":"start","steps":{},"executionPlan":[],"variables":{},"inputSchema":{},"outputSchema":{}}}"#)?;
+let scenario = parse_scenario(&json)?;
+assert_eq!(scenario.memory_tier.unwrap_or(MemoryTier::XL).total_memory_bytes(), 256 * 1024 * 1024);
 ```
 
-### Working with Agent Metadata
+Enable the `utoipa` feature if you need `ToSchema` derives for OpenAPI generation.
 
-```rust
-use runtara_dsl::{AgentMetadata, CapabilityMetadata, FieldSchema};
+## Inside Runtara
 
-let agent = AgentMetadata {
-    id: "http".to_string(),
-    name: "HTTP Agent".to_string(),
-    description: "Make HTTP requests".to_string(),
-    category: "integration".to_string(),
-    capabilities: vec![
-        CapabilityMetadata {
-            id: "request".to_string(),
-            name: "HTTP Request".to_string(),
-            description: "Send an HTTP request".to_string(),
-            inputs: vec![
-                FieldSchema {
-                    name: "url".to_string(),
-                    field_type: "string".to_string(),
-                    required: true,
-                    description: Some("The URL to request".to_string()),
-                    ..Default::default()
-                },
-                FieldSchema {
-                    name: "method".to_string(),
-                    field_type: "string".to_string(),
-                    required: false,
-                    default: Some(serde_json::json!("GET")),
-                    ..Default::default()
-                },
-            ],
-            outputs: vec![
-                FieldSchema {
-                    name: "body".to_string(),
-                    field_type: "string".to_string(),
-                    required: true,
-                    ..Default::default()
-                },
-            ],
-        },
-    ],
-};
-```
-
-### Value Mappings
-
-Reference data from previous steps or provide immediate values:
-
-```rust
-use runtara_dsl::{InputMapping, ValueMapping};
-
-// Immediate value - hardcoded
-let immediate = InputMapping {
-    value_type: ValueMapping::Immediate,
-    value: serde_json::json!("https://api.example.com"),
-};
-
-// Reference value - from workflow data or previous step
-let reference = InputMapping {
-    value_type: ValueMapping::Reference,
-    value: serde_json::json!("steps.fetch.outputs.body"),
-};
-
-// Reference to input data
-let input_ref = InputMapping {
-    value_type: ValueMapping::Reference,
-    value: serde_json::json!("data.order_id"),
-};
-```
-
-### JSON Schema Generation
-
-Generate JSON schemas for validation:
-
-```rust
-use runtara_dsl::Scenario;
-use schemars::schema_for;
-
-let schema = schema_for!(Scenario);
-let schema_json = serde_json::to_string_pretty(&schema)?;
-println!("{}", schema_json);
-```
-
-### Execution Plans
-
-Define step execution order:
-
-```rust
-use runtara_dsl::{Scenario, ExecutionPlanEntry};
-
-let scenario = Scenario {
-    entry_point: "fetch".to_string(),
-    execution_plan: vec![
-        ExecutionPlanEntry {
-            from_step: "fetch".to_string(),
-            to_step: "transform".to_string(),
-            condition: None,
-        },
-        ExecutionPlanEntry {
-            from_step: "transform".to_string(),
-            to_step: "save".to_string(),
-            condition: None,
-        },
-        ExecutionPlanEntry {
-            from_step: "save".to_string(),
-            to_step: "finish".to_string(),
-            condition: None,
-        },
-    ],
-    ..Default::default()
-};
-```
-
-## Type Reference
-
-### Core Types
-
-| Type | Description |
-|------|-------------|
-| `Scenario` | Complete workflow definition |
-| `Step` | Individual workflow step |
-| `StepType` | Agent, Finish, StartScenario, etc. |
-| `InputMapping` | Value mapping for step inputs |
-| `ValueMapping` | Immediate or Reference value type |
-| `ExecutionPlanEntry` | Step transition definition |
-
-### Agent Types
-
-| Type | Description |
-|------|-------------|
-| `AgentMetadata` | Agent definition with capabilities |
-| `CapabilityMetadata` | Single capability definition |
-| `FieldSchema` | Input/output field definition |
-
-## Related Crates
-
-- [`runtara-agents`](https://crates.io/crates/runtara-agents) - Built-in agent implementations
-- [`runtara-agent-macro`](https://crates.io/crates/runtara-agent-macro) - Define custom agents
-- [`runtara-workflows`](https://crates.io/crates/runtara-workflows) - Compile scenarios to binaries
+- Consumed by `runtara-workflows` (compiler/executor), `runtara-agents` (capability metadata), and `runtara-server` (REST validation + OpenAPI surface).
+- Also pulled in by `runtara-core`, `runtara-connections`, `runtara-workflow-stdlib`, `runtara-text-parser`, `runtara-environment`, and `runtara-test-harness` — nearly every runtime crate touches these types.
+- Depends only on `serde`, `serde_json`, `schemars`, and `inventory`; `utoipa` is optional.
+- Step struct definitions register themselves via `inventory` in `step_registration.rs`, so `get_step_types()` and generated schema never drift from the actual enum variants.
+- Runs everywhere the rest of Runtara runs — native host, WASI agents, and build scripts (the schema JSON in `specs/dsl/v3.0.0/schema.json` is regenerated from these types).
 
 ## License
 
-This project is licensed under [AGPL-3.0-or-later](LICENSE).
+AGPL-3.0-or-later.

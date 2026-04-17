@@ -4,191 +4,40 @@
 [![Documentation](https://docs.rs/runtara-workflow-stdlib/badge.svg)](https://docs.rs/runtara-workflow-stdlib)
 [![License](https://img.shields.io/crates/l/runtara-workflow-stdlib.svg)](LICENSE)
 
-Standard library for [Runtara](https://runtara.com) compiled workflow binaries. Combines the SDK runtime with built-in agents for complete workflow execution.
+The single crate that every generated runtara workflow binary links against.
 
-## Overview
+## What it is
 
-This crate is automatically linked into workflows compiled by `runtara-workflows`. It provides:
+`runtara-workflow-stdlib` is a thin umbrella crate that bundles everything a compiled workflow binary needs at runtime: agents (`runtara-agents`), the durable execution SDK (`runtara-sdk`), AI helpers (`runtara-ai`), plus a few pieces of glue that only make sense for generated code — condition helpers, switch-step output processing, Jinja-style template rendering, child scenario input validation, a capability dispatch table, and a connection-fetching client. Its public shape is a `prelude` module that re-exports the types codegen emits (`RuntaraSdk`, `durable`, `register_sdk`, `fetch_connection`, `validate_child_inputs`, etc.) and top-level re-exports of `runtara_agents`, `runtara_ai`, `runtara_sdk`, `serde`, `serde_json`, and `tracing`. Feature flags (`native`, `wasi`, `wasm-js`, `telemetry`) pick the target: workflows compile to WASI components in production, native for tests.
 
-- **Runtime Support**: Re-exports `runtara-sdk` for checkpointing and signals
-- **Built-in Agents**: Re-exports `runtara-agents` for HTTP, SFTP, CSV, XML, etc.
-- **Connection Fetching**: HTTP client for runtime credential retrieval
-- **Async Runtime**: Tokio runtime for async operations
+## Using it standalone
 
-## Installation
-
-This crate is typically not used directly. Instead, it's linked into compiled workflows by `runtara-workflows`.
-
-For custom stdlib development:
+Not really intended for hand-written code — the API surface is shaped by what `runtara-workflows` codegen emits. If you want to experiment, pick a target and pull the prelude in:
 
 ```toml
 [dependencies]
-runtara-workflow-stdlib = "1.0"
+runtara-workflow-stdlib = { version = "1.8", default-features = false, features = ["wasi"] }
 ```
-
-## What's Included
-
-### Re-exported Crates
-
-| Module | Source | Description |
-|--------|--------|-------------|
-| `sdk` | `runtara-sdk` | Checkpointing, signals, durability |
-| `agents` | `runtara-agents` | HTTP, SFTP, CSV, XML, Transform agents |
-| `serde` | `serde` | Serialization framework |
-| `serde_json` | `serde_json` | JSON serialization |
-
-### Runtime Features
-
-- **Stderr Redirection**: Captures stderr for OCI container logs
-- **Connection Service**: Fetches credentials at runtime from product APIs
-- **Tokio Runtime**: Full async runtime with all features
-
-## Creating a Custom Stdlib
-
-Products can extend the standard library with custom agents:
-
-### 1. Create Your Stdlib Crate
 
 ```rust
-// my-product-stdlib/src/lib.rs
+use runtara_workflow_stdlib::prelude::*;
 
-// Re-export everything from the base stdlib
-pub use runtara_workflow_stdlib::*;
-
-// Add your custom agents
-pub mod my_agents {
-    use runtara_agent_macro::agent;
-    use serde::{Serialize, Deserialize};
-
-    #[derive(Serialize, Deserialize)]
-    pub struct MyInput {
-        pub value: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    pub struct MyOutput {
-        pub result: String,
-    }
-
-    #[agent(id = "my-custom-agent", category = "custom")]
-    pub mod my_custom_agent {
-        use super::*;
-
-        #[capability(id = "process", description = "Custom processing")]
-        pub async fn process(input: MyInput) -> Result<MyOutput, Box<dyn std::error::Error>> {
-            Ok(MyOutput {
-                result: format!("Processed: {}", input.value),
-            })
-        }
-    }
-}
+let sdk = RuntaraSdk::new(/* transport */)?;
+register_sdk(sdk);
+durable("step-1", || Ok(serde_json::json!({"ok": true})))?;
 ```
 
-### 2. Configure Cargo.toml
+For real workflows, author DSL and let `runtara-workflows` generate the Rust.
 
-```toml
-[package]
-name = "my-product-stdlib"
-version = "1.0.0"
+## Inside Runtara
 
-[lib]
-crate-type = ["rlib"]
-
-[dependencies]
-runtara-workflow-stdlib = "1.0"
-runtara-agent-macro = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-```
-
-### 3. Compile to .rlib
-
-```bash
-cargo build --release
-# Output: target/release/libmy_product_stdlib.rlib
-```
-
-### 4. Configure Workflow Compilation
-
-```bash
-export RUNTARA_NATIVE_LIBRARY_DIR=/path/to/native_cache
-export RUNTARA_STDLIB_NAME=my_product_stdlib
-```
-
-### 5. Use Custom Agents in Workflows
-
-```json
-{
-  "steps": {
-    "custom": {
-      "stepType": "Agent",
-      "id": "custom",
-      "agentId": "my-custom-agent",
-      "capabilityId": "process",
-      "inputMapping": {
-        "value": { "valueType": "reference", "value": "data.input" }
-      }
-    }
-  }
-}
-```
-
-## Connection Service Integration
-
-Compiled workflows fetch credentials at runtime:
-
-```rust
-use runtara_workflow_stdlib::fetch_connection;
-
-// Fetch connection configuration from product's connection service
-let connection = fetch_connection(
-    "https://my-product.com/api/connections",
-    "tenant-123",
-    "my-sftp-connection",
-).await?;
-
-// Use connection config with agents
-let sftp_config = connection.get("sftp").unwrap();
-```
-
-## Usage in Generated Code
-
-The workflow compiler generates code that uses stdlib exports:
-
-```rust
-// Generated workflow code (simplified)
-use runtara_workflow_stdlib::{
-    sdk::{RuntaraSdk, CheckpointResult},
-    agents::{http, transform},
-    serde_json,
-};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut sdk = RuntaraSdk::from_env()?;
-    sdk.connect().await?;
-    sdk.register(None).await?;
-
-    // Step: fetch
-    let result = sdk.checkpoint("fetch", &[]).await?;
-    if result.existing_state().is_none() {
-        let output = http::request(http::RequestInput {
-            url: "https://api.example.com".to_string(),
-            ..Default::default()
-        }).await?;
-        // Save checkpoint with output...
-    }
-
-    sdk.completed(&output_bytes).await?;
-    Ok(())
-}
-```
-
-## Related Crates
-
-- [`runtara-sdk`](https://crates.io/crates/runtara-sdk) - Core SDK (re-exported)
-- [`runtara-agents`](https://crates.io/crates/runtara-agents) - Built-in agents (re-exported)
-- [`runtara-workflows`](https://crates.io/crates/runtara-workflows) - Compiles scenarios using this stdlib
+- Consumed by `runtara-workflows` codegen — every generated workflow `main.rs` starts with `use runtara_workflow_stdlib::prelude::*;` (the crate name is overridable via `RUNTARA_STDLIB_NAME`).
+- Linked into `runtara-test-harness` (embedded test runner) and `runtara-server` (workflow compilation at the edge).
+- Core deps: `runtara-agents` (integration library), `runtara-sdk` (durable execution protocol), `runtara-ai` (AI Agent steps); optional OpenTelemetry stack behind the `telemetry` feature.
+- `connections::fetch_connection` calls the connection service over HTTP using `runtara-http`, keyed by `tenant_id`/`connection_id` with optional rate-limit state passthrough.
+- Runs primarily as a WASI guest (`wasm32-wasip2`) inside the runtara environment; the `native` feature exists for local testing and for agents with C deps (xlsx, sftp, compression).
+- `dispatch` module is designed for static capability tables so product stdlibs can override agent dispatch without dynamic registration.
 
 ## License
 
-This project is licensed under [AGPL-3.0-or-later](LICENSE).
+AGPL-3.0-or-later.
