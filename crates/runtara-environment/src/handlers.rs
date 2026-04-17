@@ -1006,9 +1006,6 @@ pub(crate) fn is_process_alive(pid: i32) -> bool {
 /// - registry lookup errors → assume fresh, since being conservative here
 ///   would cause us to silently drop the crash-detection write on a transient
 ///   DB blip
-// NOTE: `dead_code` allow is removed in the follow-up commit that wires this
-// helper into `spawn_container_monitor`.
-#[allow(dead_code)]
 pub(crate) async fn detect_stale_monitor(
     registry: &ContainerRegistry,
     instance_id: &str,
@@ -1027,15 +1024,35 @@ pub(crate) async fn detect_stale_monitor(
 /// and process output when the container finishes. The timeout is enforced here - if the
 /// container runs longer than the specified timeout, it will be killed.
 ///
-/// ## PID-based Monitoring
+/// ## Structure
 ///
-/// When a PID is provided, we use `/proc/<pid>` to detect process termination.
-/// This is more reliable than querying crun state. When the process terminates:
+/// The body is a `tokio::select!` over two futures:
+/// - `runner.wait_for_exit(...)` — runner-specific exit detection (Child::wait
+///   for WASM, /proc/<pid> for OCI, or polling for the default impl).
+/// - `tokio::time::sleep_until(...)` — the timeout deadline.
 ///
-/// - If Core already has a terminal status (completed/failed/cancelled/suspended) → normal exit
-/// - If Core still shows "running" → process crashed without sending SDK event
+/// Each runner's `wait_for_exit` impl is cancel-safe, so dropping it when the
+/// timeout branch fires is sound.
 ///
-/// Falls back to `runner.is_running()` if no PID is available.
+/// ## Exit branch
+///
+/// When the process exits, we:
+/// 1. Collect metrics and stderr (`runner.collect_result`).
+/// 2. Persist them best-effort.
+/// 3. Check whether this monitor still owns the instance (`detect_stale_monitor`)
+///    — a resumed instance gets a new monitor, and the old one must not write
+///    crash state for the previous PID.
+/// 4. If we're still the owning monitor, mirror Core's view: if the SDK already
+///    wrote a terminal status we leave it alone, otherwise we mark the instance
+///    failed/crashed (or suspended/shutdown_requested if draining).
+/// 5. Clean up the container registry entry.
+///
+/// ## Timeout branch
+///
+/// We stop the runner, mark the instance failed with `termination_reason="timeout"`,
+/// and clean up the registry. Metrics/stderr are deliberately NOT collected here
+/// — the previous implementation did not collect them on timeout either, and
+/// doing so now would race with `runner.stop`.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_container_monitor(
     pool: PgPool,
@@ -1051,80 +1068,18 @@ pub fn spawn_container_monitor(
     let instance_id = handle.instance_id.clone();
 
     tokio::spawn(async move {
-        // Brief initial delay to let the process start
+        // Brief initial delay to let the process start before we begin watching it.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Poll to check if container is still running
         let poll_interval = Duration::from_millis(50);
-        let start = std::time::Instant::now();
+        let container_registry = ContainerRegistry::new(pool.clone());
+        let sleep_until = tokio::time::Instant::now() + timeout;
 
-        // Note: pid comes from child.id() at spawn time, so it's reliable.
-        // If pid is None (shouldn't happen normally), fall back to runner.is_running().
+        let wait_fut = runner.wait_for_exit(&handle, poll_interval);
+        tokio::pin!(wait_fut);
 
-        loop {
-            // Check timeout first
-            if start.elapsed() > timeout {
-                warn!(
-                    instance_id = %instance_id,
-                    timeout_secs = %timeout.as_secs(),
-                    "Execution timed out, killing container"
-                );
-                let _ = runner.stop(&handle).await;
-
-                // Update instance status to failed with termination_reason = "timeout"
-                if let Err(e) = persistence
-                    .complete_instance_with_termination_if_running(
-                        &instance_id,
-                        "failed",
-                        Some("timeout"),             // termination_reason
-                        None,                        // exit_code
-                        None,                        // output
-                        Some("Execution timed out"), // error
-                        None,                        // stderr
-                        None,                        // checkpoint_id
-                    )
-                    .await
-                {
-                    warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "Failed to update instance status after timeout"
-                    );
-                }
-
-                // Clean up container registry
-                let container_registry = ContainerRegistry::new(pool.clone());
-                let _ = container_registry.cleanup(&instance_id).await;
-
-                return;
-            }
-
-            // Check if process is still running.
-            // Prefer child.wait() over PID polling — it blocks until the process
-            // fully exits (including all I/O cleanup), ensuring SDK HTTP calls
-            // have been processed before we check status.
-            let is_alive = if let Some(ref child_arc) = handle.child {
-                let mut child_guard = child_arc.lock().await;
-                if let Some(ref mut child) = *child_guard {
-                    match child.try_wait() {
-                        Ok(Some(_exit_status)) => {
-                            // Process exited — take ownership to drop it
-                            *child_guard = None;
-                            false
-                        }
-                        Ok(None) => true, // Still running
-                        Err(_) => false,  // Error checking — treat as exited
-                    }
-                } else {
-                    false // Already consumed
-                }
-            } else if let Some(p) = pid {
-                is_process_alive(p)
-            } else {
-                runner.is_running(&handle).await
-            };
-
-            if !is_alive {
+        tokio::select! {
+            _ = &mut wait_fut => {
                 info!(
                     instance_id = %instance_id,
                     pid = ?pid,
@@ -1182,21 +1137,12 @@ pub fn spawn_container_monitor(
                 // Guard: check that this monitor is still the active one for this instance.
                 // When an instance is resumed, a NEW monitor is spawned for the new process.
                 // The OLD monitor (for the previous PID) may still be running and must not
-                // interfere with the new execution.
-                let container_registry = ContainerRegistry::new(pool.clone());
-                let is_stale_monitor = match container_registry.get(&instance_id).await {
-                    Ok(Some(current)) => {
-                        // If the registered container has a different handle_id,
-                        // this monitor is stale (instance was resumed with a new process)
-                        current.container_id != handle.handle_id
-                    }
-                    Ok(None) => {
-                        // Registry entry was cleaned up (resume clears it before launching
-                        // new process) — this monitor is stale
-                        true
-                    }
-                    Err(_) => false,
-                };
+                // interfere with the new execution. The check intentionally happens AFTER
+                // metrics/stderr writes so a stale monitor doesn't drop diagnostic data
+                // for the previous process.
+                let is_stale_monitor =
+                    detect_stale_monitor(&container_registry, &instance_id, &handle.handle_id)
+                        .await;
 
                 if is_stale_monitor {
                     info!(
@@ -1285,14 +1231,40 @@ pub fn spawn_container_monitor(
                 }
 
                 // Clean up container registry
-                let container_registry = ContainerRegistry::new(pool.clone());
                 let _ = container_registry.cleanup(&instance_id).await;
-
-                break;
             }
+            _ = tokio::time::sleep_until(sleep_until) => {
+                warn!(
+                    instance_id = %instance_id,
+                    timeout_secs = %timeout.as_secs(),
+                    "Execution timed out, killing container"
+                );
+                let _ = runner.stop(&handle).await;
 
-            // Sleep before next check
-            tokio::time::sleep(poll_interval).await;
+                // Update instance status to failed with termination_reason = "timeout"
+                if let Err(e) = persistence
+                    .complete_instance_with_termination_if_running(
+                        &instance_id,
+                        "failed",
+                        Some("timeout"),             // termination_reason
+                        None,                        // exit_code
+                        None,                        // output
+                        Some("Execution timed out"), // error
+                        None,                        // stderr
+                        None,                        // checkpoint_id
+                    )
+                    .await
+                {
+                    warn!(
+                        instance_id = %instance_id,
+                        error = %e,
+                        "Failed to update instance status after timeout"
+                    );
+                }
+
+                // Clean up container registry
+                let _ = container_registry.cleanup(&instance_id).await;
+            }
         }
     });
 }
