@@ -301,6 +301,115 @@ pub struct WakeEntry {
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+/// Whether a `complete_instance` call should apply unconditionally or only
+/// when the target row is still in the `running` state.
+///
+/// The `OnlyRunning` guard exists to prevent races between two independent
+/// writers (typically: the SDK reporting a terminal status, and the
+/// container monitor observing a process exit) from clobbering one another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompleteInstanceGuard {
+    /// No guard — the update applies regardless of the current status.
+    /// A missing row is reported as [`CoreError::InstanceNotFound`].
+    #[default]
+    Any,
+    /// Apply the update only if the current status is `running`. A miss
+    /// (row exists but has a different status) is reported as `Ok(false)`
+    /// rather than an error.
+    OnlyRunning,
+}
+
+/// Parameters for [`Persistence::complete_instance`], transitioning an
+/// instance to a terminal or quasi-terminal state.
+///
+/// All optional fields use COALESCE semantics on the persistence side —
+/// `None` leaves the existing column value unchanged. The required fields
+/// `instance_id` and `status` borrow from the caller; most call sites
+/// already hold `&str` locals and can pass them directly.
+///
+/// Build with [`CompleteInstanceParams::new`] and the chained `with_*`
+/// setters.
+#[derive(Debug, Clone, Default)]
+pub struct CompleteInstanceParams<'a> {
+    /// Instance being completed.
+    pub instance_id: &'a str,
+    /// Target status. One of `completed`, `failed`, `cancelled`,
+    /// `suspended`, or `running` (for mid-execution transitions that
+    /// carry metadata but don't finalize the instance).
+    pub status: &'a str,
+    /// Whether to guard against races by requiring the current status
+    /// to be `running`. See [`CompleteInstanceGuard`].
+    pub guard: CompleteInstanceGuard,
+    /// Output blob from successful completion.
+    pub output: Option<&'a [u8]>,
+    /// Error message from failure.
+    pub error: Option<&'a str>,
+    /// Container stderr captured at termination time.
+    pub stderr: Option<&'a str>,
+    /// Checkpoint identifier to associate with this state.
+    pub checkpoint_id: Option<&'a str>,
+    /// How/why the instance reached this terminal state (timeout, crash,
+    /// shutdown_requested, heartbeat_timeout, oom, etc.).
+    pub termination_reason: Option<&'a str>,
+    /// Process exit code if available.
+    pub exit_code: Option<i32>,
+}
+
+impl<'a> CompleteInstanceParams<'a> {
+    /// Start a minimal completion request targeting `status`.
+    pub fn new(instance_id: &'a str, status: &'a str) -> Self {
+        Self {
+            instance_id,
+            status,
+            ..Default::default()
+        }
+    }
+
+    /// Guard the update against races: only apply when the current status
+    /// is `running`.
+    #[must_use]
+    pub fn if_running(mut self) -> Self {
+        self.guard = CompleteInstanceGuard::OnlyRunning;
+        self
+    }
+
+    /// Attach an output blob.
+    #[must_use]
+    pub fn with_output(mut self, output: &'a [u8]) -> Self {
+        self.output = Some(output);
+        self
+    }
+
+    /// Attach an error message.
+    #[must_use]
+    pub fn with_error(mut self, error: &'a str) -> Self {
+        self.error = Some(error);
+        self
+    }
+
+    /// Attach captured stderr.
+    #[must_use]
+    pub fn with_stderr(mut self, stderr: &'a str) -> Self {
+        self.stderr = Some(stderr);
+        self
+    }
+
+    /// Associate a checkpoint with this state transition.
+    #[must_use]
+    pub fn with_checkpoint(mut self, checkpoint_id: &'a str) -> Self {
+        self.checkpoint_id = Some(checkpoint_id);
+        self
+    }
+
+    /// Record the termination reason and optional exit code.
+    #[must_use]
+    pub fn with_termination(mut self, reason: &'a str, exit_code: Option<i32>) -> Self {
+        self.termination_reason = Some(reason);
+        self.exit_code = exit_code;
+        self
+    }
+}
+
 /// Persistence interface used by core handlers.
 #[allow(missing_docs)]
 #[async_trait]
