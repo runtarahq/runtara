@@ -3,13 +3,11 @@
 //! Send emails via the Mailgun REST API.
 
 use crate::connections::RawConnection;
-use crate::http::{self, BodyType, HttpBody, HttpMethod, ResponseType};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::HashMap;
+use serde_json::json;
 
-use super::errors::{http_status_error, permanent_error};
+use super::integration_utils::{IntegrationError, ProxyHttpClient, require_connection};
 
 // ============================================================================
 // Send Email
@@ -100,28 +98,22 @@ pub struct SendEmailOutput {
     module_secure = true
 )]
 pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, String> {
-    let connection = input._connection.as_ref().ok_or_else(|| {
-        permanent_error(
-            "MAILGUN_NO_CONNECTION",
-            "Connection is required for Mailgun operations",
-            json!({}),
-        )
-    })?;
+    let connection = require_connection("MAILGUN", &input._connection)?;
 
-    let params = &connection.parameters;
-
-    // domain is a non-credential config param needed for path building and default sender
-    let domain = params["domain"].as_str().ok_or_else(|| {
-        permanent_error(
-            "MAILGUN_MISSING_DOMAIN",
-            "Missing domain in connection",
-            json!({}),
-        )
-    })?;
+    // `domain` is a non-credential config param needed for path building
+    // and the default sender address.
+    let domain =
+        connection.parameters["domain"]
+            .as_str()
+            .ok_or(IntegrationError::MissingField {
+                prefix: "MAILGUN",
+                field: "domain",
+                payload: json!({}),
+            })?;
 
     let from = input.from.unwrap_or_else(|| format!("noreply@{}", domain));
 
-    // Build form-urlencoded body manually.
+    // Build form-urlencoded body.
     let mut form_parts: Vec<(String, String)> = vec![
         ("from".into(), from),
         ("to".into(), input.to),
@@ -149,52 +141,11 @@ pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, String> {
         }
     }
 
-    // Encode as application/x-www-form-urlencoded.
-    let form_body: String = form_parts
-        .iter()
-        .map(|(k, v)| format!("{}={}", urlencoded(k), urlencoded(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    // Proxy handles Basic auth and region-based base URL resolution
-    let mut headers = HashMap::new();
-    headers.insert(
-        "X-Runtara-Connection-Id".to_string(),
-        connection.connection_id.clone(),
-    );
-    headers.insert(
-        "Content-Type".to_string(),
-        "application/x-www-form-urlencoded".to_string(),
-    );
-
-    let http_input = http::HttpRequestInput {
-        method: HttpMethod::Post,
-        url: format!("/v3/{}/messages", domain),
-        headers,
-        query_parameters: HashMap::new(),
-        body: HttpBody(Value::String(form_body)),
-        body_type: BodyType::Text,
-        response_type: ResponseType::Json,
-        timeout_ms: 30000,
-        ..Default::default()
-    };
-
-    let response = http::http_request(http_input)?;
-
-    if !response.success {
-        let body_str = format!("{:?}", response.body);
-        return Err(http_status_error(
-            "MAILGUN",
-            response.status_code,
-            &format!("Mailgun API error: {}", body_str),
-            json!({"status_code": response.status_code, "body": body_str}),
-        ));
-    }
-
-    let response_json = match response.body {
-        http::HttpResponseBody::Json(v) => v,
-        _ => json!({}),
-    };
+    let client = ProxyHttpClient::new(connection, "MAILGUN");
+    let response_json = client
+        .post(format!("/v3/{}/messages", domain))
+        .form_body(&form_parts)
+        .send_json()?;
 
     Ok(SendEmailOutput {
         id: response_json["id"].as_str().unwrap_or("").to_string(),
@@ -203,22 +154,4 @@ pub fn send_email(input: SendEmailInput) -> Result<SendEmailOutput, String> {
             .unwrap_or("Queued")
             .to_string(),
     })
-}
-
-/// Simple URL encoding for form data.
-fn urlencoded(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            b' ' => result.push('+'),
-            _ => {
-                result.push('%');
-                result.push_str(&format!("{:02X}", b));
-            }
-        }
-    }
-    result
 }
