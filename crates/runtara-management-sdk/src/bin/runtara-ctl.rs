@@ -21,10 +21,13 @@
 //!   cancel <instance_id>
 //!   pause <instance_id>
 //!   resume <instance_id>
+//!   list-agents
+//!   get-capability <agent_id> <capability_id>
+//!   test-capability --agent <id> --capability <id> --tenant <id> --input <json> [--connection <json>]
 
 use runtara_management_sdk::{
     ListImagesOptions, ListInstancesOptions, ManagementSdk, RegisterImageOptions, SdkConfig,
-    StartInstanceOptions, StopInstanceOptions,
+    StartInstanceOptions, StopInstanceOptions, TestCapabilityOptions,
 };
 use std::fs;
 use std::process::ExitCode;
@@ -50,6 +53,10 @@ COMMANDS:
     cancel <instance_id>            Cancel an instance
     pause <instance_id>             Pause an instance
     resume <instance_id>            Resume a paused instance
+    list-agents                     List available agents and capability counts
+    get-capability <agent_id> <capability_id>
+                                    Show a capability's input schema
+    test-capability                 Invoke a capability against the environment
 
 REGISTER OPTIONS:
     --binary <path>                 Path to binary file (required)
@@ -71,6 +78,17 @@ LIST OPTIONS:
 WAIT OPTIONS:
     --poll <ms>                     Poll interval in ms (default: 500)
 
+TEST-CAPABILITY OPTIONS:
+    --agent <id>                    Agent ID (required)
+    --capability <id>               Capability ID (required)
+    --tenant <id>                   Tenant ID (required)
+    --input <json>                  Capability input JSON (required)
+    --connection <json>             Optional connection object as JSON (must match the
+                                    integration's shape, e.g. '{{"integration_id":"bearer",
+                                    "parameters":{{"base_url":"...","token":"..."}}}}').
+                                    The /api/v1/agents/test endpoint expects the credentials
+                                    inline; ID-based lookup is not available on this CLI yet.
+
 ENVIRONMENT:
     RUNTARA_ENVIRONMENT_ADDR        Environment address (default: 127.0.0.1:8002)
     RUNTARA_SKIP_CERT_VERIFICATION  Skip TLS verification (default: false)
@@ -87,6 +105,16 @@ EXAMPLES:
 
     # Wait for completion and get output
     runtara-ctl wait inst_456
+
+    # Discover agents
+    runtara-ctl list-agents
+
+    # Inspect a capability's input schema
+    runtara-ctl get-capability http http-request
+
+    # Test a capability
+    runtara-ctl test-capability --agent http --capability http-request \
+        --tenant acme --input '{{"url": "https://example.com", "method": "GET"}}'
 "#
     );
 }
@@ -141,6 +169,18 @@ enum Command {
     },
     Resume {
         instance_id: String,
+    },
+    ListAgents,
+    GetCapability {
+        agent_id: String,
+        capability_id: String,
+    },
+    TestCapability {
+        agent_id: String,
+        capability_id: String,
+        tenant_id: String,
+        input: String,
+        connection: Option<String>,
     },
 }
 
@@ -359,6 +399,64 @@ fn parse_args_from_vec(args: &[String]) -> Result<Command, String> {
         "resume" => {
             let instance_id = args.get(2).ok_or("Instance ID required")?.clone();
             Ok(Command::Resume { instance_id })
+        }
+        "list-agents" => {
+            if args.len() > 2 {
+                return Err(format!("Unknown argument: {}", args[2]));
+            }
+            Ok(Command::ListAgents)
+        }
+        "get-capability" => {
+            let agent_id = args.get(2).ok_or("Agent ID required")?.clone();
+            let capability_id = args.get(3).ok_or("Capability ID required")?.clone();
+            Ok(Command::GetCapability {
+                agent_id,
+                capability_id,
+            })
+        }
+        "test-capability" => {
+            let mut agent_id: Option<String> = None;
+            let mut capability_id: Option<String> = None;
+            let mut tenant_id: Option<String> = None;
+            let mut input: Option<String> = None;
+            let mut connection: Option<String> = None;
+
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--agent" => {
+                        i += 1;
+                        agent_id = Some(args.get(i).ok_or("--agent requires an ID")?.clone());
+                    }
+                    "--capability" => {
+                        i += 1;
+                        capability_id =
+                            Some(args.get(i).ok_or("--capability requires an ID")?.clone());
+                    }
+                    "--tenant" => {
+                        i += 1;
+                        tenant_id = Some(args.get(i).ok_or("--tenant requires an ID")?.clone());
+                    }
+                    "--input" => {
+                        i += 1;
+                        input = Some(args.get(i).ok_or("--input requires JSON")?.clone());
+                    }
+                    "--connection" => {
+                        i += 1;
+                        connection = Some(args.get(i).ok_or("--connection requires JSON")?.clone());
+                    }
+                    arg => return Err(format!("Unknown argument: {}", arg)),
+                }
+                i += 1;
+            }
+
+            Ok(Command::TestCapability {
+                agent_id: agent_id.ok_or("--agent is required")?,
+                capability_id: capability_id.ok_or("--capability is required")?,
+                tenant_id: tenant_id.ok_or("--tenant is required")?,
+                input: input.ok_or("--input is required")?,
+                connection,
+            })
         }
         cmd => Err(format!("Unknown command: {}", cmd)),
     }
@@ -587,6 +685,120 @@ async fn execute_command(sdk: &ManagementSdk, cmd: Command) -> Result<(), String
                 .await
                 .map_err(|e| e.to_string())?;
             println!("Resumed: {}", instance_id);
+        }
+
+        Command::ListAgents => {
+            let agents = sdk.list_agents().await.map_err(|e| e.to_string())?;
+            if agents.is_empty() {
+                println!("No agents available");
+            } else {
+                println!("Found {} agent(s):", agents.len());
+                for agent in agents {
+                    println!();
+                    println!("  {} ({})", agent.id, agent.name);
+                    if !agent.description.is_empty() {
+                        println!("    description: {}", agent.description);
+                    }
+                    println!("    capabilities: {}", agent.capabilities.len());
+                    println!("    has_side_effects: {}", agent.has_side_effects);
+                    println!("    supports_connections: {}", agent.supports_connections);
+                    if !agent.integration_ids.is_empty() {
+                        println!("    integrations: {}", agent.integration_ids.join(", "));
+                    }
+                    for cap in &agent.capabilities {
+                        println!("      - {} ({})", cap.id, cap.name);
+                    }
+                }
+            }
+        }
+
+        Command::GetCapability {
+            agent_id,
+            capability_id,
+        } => {
+            let fields = sdk
+                .get_capability(&agent_id, &capability_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            match fields {
+                None => {
+                    return Err(format!(
+                        "Capability not found: {}/{}",
+                        agent_id, capability_id
+                    ));
+                }
+                Some(fields) => {
+                    println!("Capability: {}/{}", agent_id, capability_id);
+                    if fields.is_empty() {
+                        println!("  (no input fields)");
+                    } else {
+                        println!("  Input fields ({}):", fields.len());
+                        for field in fields {
+                            let required = if field.required {
+                                "required"
+                            } else {
+                                "optional"
+                            };
+                            println!();
+                            println!("    {} : {} ({})", field.name, field.field_type, required);
+                            if let Some(display_name) = field.display_name {
+                                println!("      display_name: {}", display_name);
+                            }
+                            if let Some(description) = field.description {
+                                println!("      description: {}", description);
+                            }
+                            if let Some(default) = field.default_value {
+                                println!("      default: {}", default);
+                            }
+                            if let Some(example) = field.example {
+                                println!("      example: {}", example);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Command::TestCapability {
+            agent_id,
+            capability_id,
+            tenant_id,
+            input,
+            connection,
+        } => {
+            let input_value: serde_json::Value =
+                serde_json::from_str(&input).map_err(|e| format!("Invalid input JSON: {}", e))?;
+
+            let mut options =
+                TestCapabilityOptions::new(&tenant_id, &agent_id, &capability_id, input_value);
+
+            if let Some(conn) = connection {
+                let conn_value: serde_json::Value = serde_json::from_str(&conn)
+                    .map_err(|e| format!("Invalid --connection JSON: {}", e))?;
+                options = options.with_connection(conn_value);
+            }
+
+            let result = sdk
+                .test_capability(options)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("Capability: {}/{}", agent_id, capability_id);
+            println!("Success: {}", result.success);
+            println!("Execution time: {} ms", result.execution_time_ms);
+            if let Some(output) = result.output {
+                let pretty =
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| output.to_string());
+                println!("Output:");
+                println!("{}", pretty);
+            }
+            if let Some(err) = result.error {
+                println!("Error: {}", err);
+            }
+
+            if !result.success {
+                return Err("Capability test failed".to_string());
+            }
         }
     }
 
