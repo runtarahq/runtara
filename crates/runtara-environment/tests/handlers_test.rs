@@ -5,7 +5,7 @@
 mod common;
 
 use chrono::Utc;
-use runtara_core::persistence::{Persistence, PostgresPersistence};
+use runtara_core::persistence::{CompleteInstanceParams, Persistence, PostgresPersistence};
 use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
 use runtara_environment::db;
 use runtara_environment::handlers::{
@@ -1493,7 +1493,9 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
     // Simulate Core marking instance as "completed" BEFORE timeout fires
     tokio::time::sleep(Duration::from_millis(50)).await;
     persistence
-        .complete_instance(&instance_id, Some(b"success"), None)
+        .complete_instance(
+            CompleteInstanceParams::new(&instance_id, "completed").with_output(b"success"),
+        )
         .await
         .expect("Failed to complete instance");
 
