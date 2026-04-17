@@ -138,6 +138,7 @@ pub async fn run(
         pool.clone(),
         scenario_repo,
         runtime_client,
+        None, // trigger_stream not needed for the trigger worker
         Some(running_executions.clone()),
     ));
 

@@ -1,26 +1,46 @@
 //! Execution Engine
 //!
-//! Core execution logic extracted from native_worker for reuse by trigger workers.
-//! Handles scenario compilation and execution via the Runtara Management SDK.
+//! Single source of truth for scenario execution. Responsible for:
+//! - Queuing async executions onto the Valkey trigger stream.
+//! - Running synchronous executions end-to-end via the Runtime client.
+//! - Proxying execution status / list / stop / pause / resume calls through
+//!   the Runtara Management SDK.
+//!
+//! Sync and async entrypoints are thin wrappers around this engine — see
+//! `ExecutionEngine::queue`, `ExecutionEngine::run_sync`, and the various
+//! status / lifecycle helpers.
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use axum::http::StatusCode;
 use dashmap::DashMap;
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use runtara_management_sdk::InstanceStatus;
+use runtara_management_sdk::{InstanceStatus, ListInstancesOptions, ListInstancesOrder};
 
+use crate::api::dto::executions::ExecutionFilters;
+use crate::api::dto::scenarios::{
+    PageScenarioInstanceHistoryDto, ScenarioInstanceDto, ValidationErrorDto,
+};
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::repositories::scenarios::{CompilationStatus, ScenarioRepository};
+use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
+use crate::api::services::input_validation::{is_empty_schema, validate_inputs};
+use crate::metrics::MetricsService;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::CancellationHandle;
+use crate::workers::runtara_dto::{
+    ExecutionWithMetadata, enrich_pending_input, execution_status_to_runtara, runtara_info_to_dto,
+    runtara_info_to_execution_with_metadata, runtara_instance_to_dto_with_info,
+};
 
-/// Result of scenario execution
+/// Result of scenario execution (native path; currently unused by the server).
 #[derive(Debug)]
 pub struct ExecutionResult {
     pub success: bool,
@@ -33,23 +53,175 @@ pub struct ExecutionResult {
     pub cpu_usage_ms: Option<f64>,
 }
 
-/// Errors that can occur during execution
+/// Unified error surface for the execution engine.
+///
+/// This is a superset of the previous `ExecutionError` (engine), the
+/// `ServiceError` in `api/services/executions.rs`, and the `ServiceError`
+/// from `api/services/scenarios.rs` that was reused by the sync path.
 #[derive(Debug)]
+#[allow(dead_code)] // A few variants are reserved for handler migrations.
 pub enum ExecutionError {
+    ValidationError(String),
+    WorkflowValidationError {
+        message: String,
+        errors: Vec<ValidationErrorDto>,
+    },
+    NotFound(String),
     ScenarioNotFound(String),
-    CompilationFailed(String),
     BinaryNotFound(String),
+    CompilationFailed(String),
+    CompilationTimeout(String),
+    NotCompiled {
+        scenario_id: String,
+        version: i32,
+        compilation_queued: bool,
+    },
     BundlePreparationFailed(String),
     RuntimeError(String),
     DatabaseError(String),
     NotConnected(String),
-    /// Scenario is not compiled yet - should retry later
-    NotCompiled {
-        scenario_id: String,
-        version: i32,
-        /// Whether compilation was queued as a result of this check
-        compilation_queued: bool,
-    },
+}
+
+impl std::fmt::Display for ExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutionError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
+            ExecutionError::WorkflowValidationError { message, .. } => {
+                write!(f, "Workflow validation failed: {}", message)
+            }
+            ExecutionError::NotFound(msg) => write!(f, "Not found: {}", msg),
+            ExecutionError::ScenarioNotFound(msg) => write!(f, "Scenario not found: {}", msg),
+            ExecutionError::BinaryNotFound(msg) => write!(f, "Binary not found: {}", msg),
+            ExecutionError::CompilationFailed(msg) => write!(f, "Compilation failed: {}", msg),
+            ExecutionError::CompilationTimeout(msg) => write!(f, "Compilation timeout: {}", msg),
+            ExecutionError::NotCompiled {
+                scenario_id,
+                version,
+                compilation_queued,
+            } => {
+                write!(
+                    f,
+                    "Scenario '{}' version {} not compiled (compilation queued: {})",
+                    scenario_id, version, compilation_queued
+                )
+            }
+            ExecutionError::BundlePreparationFailed(msg) => {
+                write!(f, "Bundle preparation failed: {}", msg)
+            }
+            ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
+            ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ExecutionError {}
+
+impl ExecutionError {
+    /// Default HTTP status mapping for this error.
+    ///
+    /// Handlers are free to override this when they want a more specific
+    /// status (e.g. `503 SERVICE_UNAVAILABLE` for `NotConnected`). Unless a
+    /// handler opts out, this is the recommended mapping.
+    pub fn http_status(&self) -> StatusCode {
+        match self {
+            ExecutionError::ValidationError(_) => StatusCode::BAD_REQUEST,
+            ExecutionError::WorkflowValidationError { .. } => StatusCode::BAD_REQUEST,
+            ExecutionError::NotFound(_) => StatusCode::NOT_FOUND,
+            ExecutionError::ScenarioNotFound(_) => StatusCode::NOT_FOUND,
+            ExecutionError::BinaryNotFound(_) => StatusCode::NOT_FOUND,
+            ExecutionError::CompilationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ExecutionError::CompilationTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            ExecutionError::NotCompiled { .. } => StatusCode::CONFLICT,
+            ExecutionError::BundlePreparationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
+/// Trigger source classification used to dispatch to the matching
+/// `TriggerEvent::*` factory.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Future trigger sources carried for parity with existing factories.
+pub enum TriggerSource {
+    HttpApi,
+    Session,
+    Chat,
+    Webhook,
+    Cron,
+}
+
+/// Request to queue an async scenario execution onto the trigger stream.
+pub struct QueueRequest<'a> {
+    pub tenant_id: &'a str,
+    pub scenario_id: &'a str,
+    pub version: Option<i32>,
+    pub inputs: Value,
+    pub debug: bool,
+    pub correlation_id: Option<String>,
+    pub trigger_source: TriggerSource,
+}
+
+/// Result of queuing an execution.
+#[derive(Debug)]
+pub struct QueuedExecution {
+    pub instance_id: Uuid,
+    pub status: String,
+}
+
+/// Request for synchronous execution via `ExecutionEngine::run_sync`.
+pub struct SyncRequest<'a> {
+    pub tenant_id: &'a str,
+    pub scenario_id: &'a str,
+    pub version: Option<i32>,
+    pub inputs: Value,
+}
+
+/// Metrics reported for a synchronous execution.
+#[derive(Debug, Clone)]
+pub struct SyncExecutionMetrics {
+    pub execution_duration_seconds: f64,
+    pub max_memory_mb: f64,
+    pub total_duration_seconds: f64,
+}
+
+/// Result of `ExecutionEngine::run_sync` — the full synchronous execution
+/// output. Handlers adapt this into their own wire types.
+#[derive(Debug, Clone)]
+pub struct SyncExecution {
+    pub success: bool,
+    pub outputs: Value,
+    pub error: Option<String>,
+    pub stderr: Option<String>,
+    pub metrics: SyncExecutionMetrics,
+}
+
+/// Result of `ExecutionEngine::stop`.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum StopOutcome {
+    AlreadyStopped { status: String },
+    Stopped { previous_status: String },
+}
+
+/// Result of `ExecutionEngine::pause`.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum PauseOutcome {
+    Paused { previous_status: String },
+    AlreadyPaused,
+    NotPausable { status: String },
+}
+
+/// Result of `ExecutionEngine::resume`.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum ResumeOutcome {
+    Resumed { previous_status: String },
+    AlreadyRunning,
+    NotResumable { status: String },
 }
 
 /// Inject `_scenario_id` into the inputs' variables to ensure cache key isolation.
@@ -75,80 +247,320 @@ fn inject_scenario_id(inputs: Value, scenario_id: &str) -> Value {
     inputs
 }
 
-impl std::fmt::Display for ExecutionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExecutionError::ScenarioNotFound(msg) => write!(f, "Scenario not found: {}", msg),
-            ExecutionError::CompilationFailed(msg) => write!(f, "Compilation failed: {}", msg),
-            ExecutionError::BinaryNotFound(msg) => write!(f, "Binary not found: {}", msg),
-            ExecutionError::BundlePreparationFailed(msg) => {
-                write!(f, "Bundle preparation failed: {}", msg)
-            }
-            ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
-            ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
-            ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
-            ExecutionError::NotCompiled {
-                scenario_id,
-                version,
-                compilation_queued,
-            } => {
-                write!(
-                    f,
-                    "Scenario '{}' version {} not compiled (compilation queued: {})",
-                    scenario_id, version, compilation_queued
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ExecutionError {}
-
-/// Execution engine for running scenarios
-///
-/// Handles execution via RuntimeClient. Scenarios MUST be pre-compiled via the compile API.
-/// This engine does NOT compile - it only checks that compilation exists and executes.
+/// Execution engine — the single orchestrator for scenario execution.
 pub struct ExecutionEngine {
     pool: PgPool,
     scenario_repo: Arc<ScenarioRepository>,
     runtime_client: Option<Arc<RuntimeClient>>,
-    #[allow(dead_code)] // Reserved for future use tracking in-memory executions
+    trigger_stream: Option<Arc<TriggerStreamPublisher>>,
+    #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
-    /// Track scenarios that are currently starting (to prevent single_instance race conditions)
+    /// Tracks scenarios currently starting (prevents single_instance races).
     starting_scenarios: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, scenario_id)
 }
 
 impl ExecutionEngine {
-    /// Create a new execution engine
+    /// Create a new execution engine.
     pub fn new(
         pool: PgPool,
         scenario_repo: Arc<ScenarioRepository>,
         runtime_client: Option<Arc<RuntimeClient>>,
+        trigger_stream: Option<Arc<TriggerStreamPublisher>>,
         running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     ) -> Self {
         Self {
             pool,
             scenario_repo,
             runtime_client,
+            trigger_stream,
             running_executions,
             starting_scenarios: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    /// Check if the runtime client is available
+    /// Check if the runtime client is available.
+    #[allow(dead_code)]
     pub fn has_runtime(&self) -> bool {
         self.runtime_client.is_some()
     }
 
+    // =========================================================================
+    // Async queuing
+    // =========================================================================
+
+    /// Queue a scenario execution onto the Valkey trigger stream.
+    ///
+    /// Validates the scenario exists, validates inputs against the scenario's
+    /// input schema (if non-empty), then publishes a `TriggerEvent` for the
+    /// trigger worker to pick up.
+    pub async fn queue(&self, req: QueueRequest<'_>) -> Result<QueuedExecution, ExecutionError> {
+        // 1. Resolve version
+        let version = self
+            .resolve_version(req.tenant_id, req.scenario_id, req.version)
+            .await?;
+
+        // 2. Get scenario for input schema
+        let scenario = self
+            .scenario_repo
+            .get_by_id(req.tenant_id, req.scenario_id, Some(version))
+            .await
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get scenario: {}", e)))?
+            .ok_or_else(|| {
+                ExecutionError::NotFound(format!(
+                    "Scenario '{}' version {} not found",
+                    req.scenario_id, version
+                ))
+            })?;
+
+        // 3. Validate inputs.data against input schema
+        if !is_empty_schema(&scenario.input_schema) {
+            let data_to_validate = req
+                .inputs
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            validate_inputs(&data_to_validate, &scenario.input_schema).map_err(|e| {
+                ExecutionError::ValidationError(format!("Input validation failed: {}", e))
+            })?;
+        }
+
+        // 4. Get track_events (already have it from scenario)
+        let track_events = scenario.track_events;
+
+        // 5. Require trigger stream
+        let trigger_stream = self.trigger_stream.as_ref().ok_or_else(|| {
+            ExecutionError::NotConnected(
+                "Valkey trigger stream not configured. Cannot queue execution.".to_string(),
+            )
+        })?;
+
+        // 6. Generate instance ID
+        let instance_id = Uuid::new_v4();
+
+        // 7. Build TriggerEvent appropriate to the source.
+        //
+        // Only HttpApi-flavoured events are produced today — sessions, chat,
+        // webhooks, and cron-originated requests that go through the engine
+        // share the `http_api` factory. Specialised factories
+        // (`http_event`, `cron`) remain available for callers that already
+        // have structured trigger metadata; see `TriggerEvent::*`.
+        let event = match req.trigger_source {
+            TriggerSource::HttpApi
+            | TriggerSource::Session
+            | TriggerSource::Chat
+            | TriggerSource::Webhook
+            | TriggerSource::Cron => TriggerEvent::http_api(
+                instance_id.to_string(),
+                req.tenant_id.to_string(),
+                req.scenario_id.to_string(),
+                Some(version),
+                req.inputs,
+                track_events,
+                req.correlation_id,
+                req.debug,
+            ),
+        };
+
+        // 8. Publish to stream
+        trigger_stream
+            .publish(req.tenant_id, &event)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to publish to trigger stream: {}", e))
+            })?;
+
+        info!(
+            instance_id = %instance_id,
+            scenario_id = %req.scenario_id,
+            version = version,
+            "Published execution to trigger stream"
+        );
+
+        Ok(QueuedExecution {
+            instance_id,
+            status: "queued".to_string(),
+        })
+    }
+
+    // =========================================================================
+    // Synchronous execution (http-sync path)
+    // =========================================================================
+
+    /// Run a scenario synchronously, returning the full execution output.
+    ///
+    /// Blocks on compilation via `compilation_worker::wait_for_compilation`
+    /// (max 5 minutes). Then starts an instance and waits for completion
+    /// via `RuntimeClient::execute_sync`. Records metrics (including
+    /// failures) before returning.
+    #[instrument(skip(self, req), fields(tenant_id = %req.tenant_id, scenario_id = %req.scenario_id))]
+    pub async fn run_sync(&self, req: SyncRequest<'_>) -> Result<SyncExecution, ExecutionError> {
+        let total_start = Instant::now();
+        let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
+            ExecutionError::NotConnected("Runtime client not configured".to_string())
+        })?;
+
+        // 1. Resolve + 2. validate + cache scenario for track_events / schema
+        let version = self
+            .resolve_version(req.tenant_id, req.scenario_id, req.version)
+            .await?;
+        let scenario = self
+            .scenario_repo
+            .get_by_id(req.tenant_id, req.scenario_id, Some(version))
+            .await
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get scenario: {}", e)))?
+            .ok_or_else(|| {
+                ExecutionError::NotFound(format!(
+                    "Scenario '{}' version {} not found",
+                    req.scenario_id, version
+                ))
+            })?;
+
+        if !is_empty_schema(&scenario.input_schema) {
+            let data_to_validate = req
+                .inputs
+                .get("data")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            validate_inputs(&data_to_validate, &scenario.input_schema).map_err(|e| {
+                ExecutionError::ValidationError(format!("Input validation failed: {}", e))
+            })?;
+        }
+
+        // 3. Block on compilation readiness (delegated to compilation worker)
+        self.wait_for_compilation_blocking(req.tenant_id, req.scenario_id, version)
+            .await?;
+
+        // 4. Execution timeout
+        let execution_timeout = self
+            .scenario_repo
+            .get_execution_timeout(req.tenant_id, req.scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
+            })?;
+
+        // 5. Image ID
+        let image_id = self
+            .scenario_repo
+            .get_registered_image_id(req.tenant_id, req.scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
+            })?
+            .ok_or_else(|| {
+                ExecutionError::NotFound(format!(
+                    "Scenario '{}' version {} not registered with runtara-environment. Recompile it.",
+                    req.scenario_id, version
+                ))
+            })?;
+
+        // 6. Execute via runtime client (no debug for sync executions)
+        let execution_result = runtime_client
+            .execute_sync(
+                &image_id,
+                req.tenant_id,
+                req.scenario_id,
+                None, // auto-generate instance id
+                Some(req.inputs),
+                execution_timeout.map(|s| s as u32),
+                false,
+            )
+            .await;
+
+        let total_duration = total_start.elapsed().as_secs_f64();
+
+        // 7. Metrics + result shaping
+        let metrics_service = MetricsService::new(self.scenario_repo.pool().clone());
+
+        match execution_result {
+            Ok(result) => {
+                let execution_duration_secs = result
+                    .duration_ms
+                    .map(|ms| ms as f64 / 1000.0)
+                    .unwrap_or(0.0);
+
+                let _ = metrics_service
+                    .record_execution_completion(
+                        req.tenant_id,
+                        req.scenario_id,
+                        version,
+                        result.success,
+                        execution_duration_secs,
+                        None,
+                    )
+                    .await;
+
+                info!(
+                    tenant_id = req.tenant_id,
+                    scenario_id = req.scenario_id,
+                    version = version,
+                    execution_duration_seconds = execution_duration_secs,
+                    total_duration_seconds = total_duration,
+                    "Synchronous execution completed"
+                );
+
+                Ok(SyncExecution {
+                    success: result.success,
+                    outputs: result.output.unwrap_or(Value::Null),
+                    error: result.error,
+                    stderr: result.stderr,
+                    metrics: SyncExecutionMetrics {
+                        execution_duration_seconds: execution_duration_secs,
+                        max_memory_mb: 0.0, // Not available via SDK
+                        total_duration_seconds: total_duration,
+                    },
+                })
+            }
+            Err(e) => {
+                let error_message = e.to_string();
+
+                let _ = metrics_service
+                    .record_execution_completion(
+                        req.tenant_id,
+                        req.scenario_id,
+                        version,
+                        false,
+                        total_duration,
+                        None,
+                    )
+                    .await;
+
+                info!(
+                    tenant_id = req.tenant_id,
+                    scenario_id = req.scenario_id,
+                    version = version,
+                    error = error_message.as_str(),
+                    total_duration_seconds = total_duration,
+                    "Synchronous execution failed"
+                );
+
+                Ok(SyncExecution {
+                    success: false,
+                    outputs: Value::Null,
+                    error: Some(error_message),
+                    stderr: None,
+                    metrics: SyncExecutionMetrics {
+                        execution_duration_seconds: 0.0,
+                        max_memory_mb: 0.0,
+                        total_duration_seconds: total_duration,
+                    },
+                })
+            }
+        }
+    }
+
+    // =========================================================================
+    // Async detached execution (trigger worker path)
+    // =========================================================================
+
     /// Execute a scenario in fire-and-forget mode for distributed execution.
     ///
-    /// This method:
     /// 1. Ensures the scenario is compiled
     /// 2. Starts an instance via the Management SDK (non-blocking)
     /// 3. Returns immediately without waiting for completion
     ///
     /// The instance will run on the runtara-environment server.
-    /// Use get_instance_status() to poll for completion.
+    /// Use `get_instance_status` to poll for completion.
     #[instrument(skip(self, event), fields(instance_id = %event.instance_id, scenario_id = %event.scenario_id))]
     pub async fn execute_detached(&self, event: &TriggerEvent) -> Result<String, ExecutionError> {
         // Mark scenario as starting (for single_instance race condition prevention)
@@ -167,7 +579,7 @@ impl ExecutionEngine {
         let key = scenario_key.clone();
         tokio::spawn(async move {
             // Wait for DB record creation (execution typically takes 100-500ms to register)
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            tokio::time::sleep(Duration::from_millis(1000)).await;
             let mut starting = starting_scenarios.lock().await;
             starting.remove(&key);
         });
@@ -185,7 +597,7 @@ impl ExecutionEngine {
         let version = match event.version {
             Some(v) => v,
             None => {
-                self.get_current_version(&event.tenant_id, &event.scenario_id)
+                self.resolve_version(&event.tenant_id, &event.scenario_id, None)
                     .await?
             }
         };
@@ -201,17 +613,9 @@ impl ExecutionEngine {
             .map(|secs| secs as u32)
             .unwrap_or(3600); // Default 1 hour timeout
 
-        // Ensure scenario is compiled
-        let _binary_path = self
-            .ensure_compiled(
-                &event.tenant_id,
-                &event.scenario_id,
-                version,
-                event.track_events,
-            )
+        // Ensure scenario is compiled (non-blocking: returns NotCompiled for retry)
+        self.ensure_compiled(&event.tenant_id, &event.scenario_id, version)
             .await?;
-
-        // Note: Bundle checks removed - runtara-environment handles container execution
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
         // from the API layer - inject _scenario_id for cache key isolation
@@ -264,7 +668,7 @@ impl ExecutionEngine {
                     return Err(ExecutionError::NotCompiled {
                         scenario_id: event.scenario_id.clone(),
                         version,
-                        compilation_queued: false, // Will be queued by caller on retry
+                        compilation_queued: false,
                     });
                 }
                 return Err(ExecutionError::RuntimeError(error_str));
@@ -281,10 +685,14 @@ impl ExecutionEngine {
         Ok(started_id)
     }
 
-    /// Check if a trigger has single_instance mode enabled
+    // =========================================================================
+    // Trigger + single_instance helpers
+    // =========================================================================
+
+    /// Check if a trigger has `single_instance` mode enabled.
     ///
-    /// Returns Some(true) if single_instance is enabled, Some(false) if disabled,
-    /// or None if the trigger doesn't exist.
+    /// Returns `Some(true)` if enabled, `Some(false)` if disabled, or `None`
+    /// if the trigger doesn't exist.
     pub async fn get_trigger_single_instance(
         &self,
         trigger_id: &str,
@@ -304,22 +712,19 @@ impl ExecutionEngine {
         Ok(result.map(|r| r.single_instance))
     }
 
-    /// Check if there's a running instance of a scenario
+    /// Check if there's a running instance of a scenario.
     ///
-    /// Returns true if at least one running instance exists for the scenario.
-    /// Used for single_instance trigger enforcement.
+    /// Returns `true` if at least one running instance exists for the scenario.
+    /// Used for `single_instance` trigger enforcement.
     ///
     /// Checks both:
-    /// 1. In-memory starting_scenarios set (for instances being launched)
+    /// 1. In-memory `starting_scenarios` set (for instances being launched)
     /// 2. Runtara Management SDK for running instances
     pub async fn has_running_instance(
         &self,
         tenant_id: &str,
         scenario_id: &str,
     ) -> Result<bool, ExecutionError> {
-        // First check in-memory set for scenarios currently being started
-        // This prevents race conditions where multiple triggers are processed
-        // before any database record is created
         {
             let starting = self.starting_scenarios.lock().await;
             if starting.contains(&(tenant_id.to_string(), scenario_id.to_string())) {
@@ -327,7 +732,6 @@ impl ExecutionEngine {
             }
         }
 
-        // Check runtara for running instances
         let runtime_client = match self.runtime_client.as_ref() {
             Some(client) => client,
             None => {
@@ -336,11 +740,9 @@ impl ExecutionEngine {
             }
         };
 
-        // Query runtara for running instances of this scenario
-        // Image names follow the pattern "{scenario_id}:{version}", so we filter by prefix
         let result = runtime_client
             .list_instances_with_options(
-                runtara_management_sdk::ListInstancesOptions::new()
+                ListInstancesOptions::new()
                     .with_image_name_prefix(format!("{}:", scenario_id))
                     .with_status(InstanceStatus::Running)
                     .with_limit(1),
@@ -353,36 +755,589 @@ impl ExecutionEngine {
         Ok(!result.instances.is_empty())
     }
 
-    /// Get the current version of a scenario
-    async fn get_current_version(
+    // =========================================================================
+    // Execution read API (proxy to Runtara)
+    // =========================================================================
+
+    /// Get execution results by instance ID (proxies to runtara-environment).
+    pub async fn get_execution(
+        &self,
+        instance_id: &str,
+    ) -> Result<ScenarioInstanceDto, ExecutionError> {
+        let client = self.require_runtime_client()?;
+
+        let info = client.get_instance_info(instance_id).await.map_err(|e| {
+            if e.to_string().contains("not found") {
+                ExecutionError::NotFound(format!("Instance '{}' not found", instance_id))
+            } else {
+                ExecutionError::DatabaseError(format!("Failed to get instance from Runtara: {}", e))
+            }
+        })?;
+
+        Ok(runtara_info_to_dto(info))
+    }
+
+    /// Get an execution enriched with scenario metadata.
+    pub async fn get_execution_with_metadata(
+        &self,
+        scenario_id: &str,
+        instance_id: &str,
+        tenant_id: &str,
+    ) -> Result<ExecutionWithMetadata, ExecutionError> {
+        let _ = Uuid::parse_str(instance_id).map_err(|_| {
+            ExecutionError::ValidationError(
+                "Invalid instance ID format. Instance ID must be a valid UUID".to_string(),
+            )
+        })?;
+
+        let client = self.require_runtime_client()?;
+
+        let info = client.get_instance_info(instance_id).await.map_err(|e| {
+            let error_str = e.to_string();
+            warn!(
+                instance_id = %instance_id,
+                scenario_id = %scenario_id,
+                error = %error_str,
+                "Failed to get instance info from Runtara"
+            );
+            if error_str.contains("not found") || error_str.contains("InstanceNotFound") {
+                ExecutionError::NotFound(format!(
+                    "Instance '{}' not found for scenario '{}'",
+                    instance_id, scenario_id
+                ))
+            } else {
+                ExecutionError::DatabaseError(format!("Failed to get instance from Runtara: {}", e))
+            }
+        })?;
+
+        // Verify the instance belongs to the expected scenario by checking image_name
+        let expected_prefix = format!("{}:", scenario_id);
+        debug!(
+            instance_id = %instance_id,
+            image_name = %info.image_name,
+            image_id = %info.image_id,
+            expected_prefix = %expected_prefix,
+            "Checking instance scenario match"
+        );
+        if !info.image_name.starts_with(&expected_prefix) {
+            warn!(
+                instance_id = %instance_id,
+                image_name = %info.image_name,
+                expected_prefix = %expected_prefix,
+                "Instance image_name does not match expected scenario prefix"
+            );
+            return Err(ExecutionError::NotFound(format!(
+                "Instance '{}' not found for scenario '{}'",
+                instance_id, scenario_id
+            )));
+        }
+
+        let scenario = self
+            .scenario_repo
+            .get_by_id(tenant_id, scenario_id, None)
+            .await
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get scenario: {}", e)))?;
+
+        let (scenario_name, scenario_description) = match scenario {
+            Some(s) => (Some(s.name), Some(s.description)),
+            None => (None, None),
+        };
+
+        let mut result =
+            runtara_info_to_execution_with_metadata(info, scenario_name, scenario_description);
+        enrich_pending_input(std::slice::from_mut(&mut result.instance), client).await;
+
+        Ok(result)
+    }
+
+    /// List executions for a specific scenario (with pagination).
+    pub async fn list_executions(
         &self,
         tenant_id: &str,
         scenario_id: &str,
-    ) -> Result<i32, ExecutionError> {
-        let version = self
-            .scenario_repo
-            .get_current_or_latest_version(tenant_id, scenario_id)
-            .await
-            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get version: {}", e)))?;
+        page: Option<i32>,
+        size: Option<i32>,
+    ) -> Result<PageScenarioInstanceHistoryDto, ExecutionError> {
+        let page = page.unwrap_or(0).max(0);
+        let size = size.unwrap_or(10).clamp(1, 100);
 
-        match version {
-            Some(v) if v > 0 => Ok(v),
-            Some(_) => Err(ExecutionError::ScenarioNotFound(format!(
-                "Scenario '{}' has no versions",
-                scenario_id
-            ))),
-            None => Err(ExecutionError::ScenarioNotFound(format!(
-                "Scenario '{}' not found",
-                scenario_id
-            ))),
+        let client = self.require_runtime_client()?;
+
+        // Image names follow pattern: {scenario_id}:{version}
+        let image_name_prefix = format!("{}:", scenario_id);
+
+        let options = ListInstancesOptions::new()
+            .with_tenant_id(tenant_id)
+            .with_image_name_prefix(&image_name_prefix)
+            .with_limit(size as u32)
+            .with_offset((page * size) as u32);
+
+        debug!(
+            tenant_id = %tenant_id,
+            scenario_id = %scenario_id,
+            image_name_prefix = %image_name_prefix,
+            page = page,
+            size = size,
+            "Listing executions from Runtara"
+        );
+
+        let result = client
+            .list_instances_with_options(options)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to query Runtara: {}", e))
+            })?;
+
+        // Fetch the scenario name directly (we already know the scenario id)
+        let scenario_name = match self
+            .scenario_repo
+            .get_scenario_names_bulk(tenant_id, &[scenario_id.to_string()])
+            .await
+        {
+            Ok(names) => names
+                .get(scenario_id)
+                .map(|(name, _)| name.clone())
+                .filter(|n| !n.is_empty()),
+            Err(e) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    scenario_id = %scenario_id,
+                    error = %e,
+                    "Failed to fetch scenario name"
+                );
+                None
+            }
+        };
+
+        // Collect unique image IDs to look up version info
+        let image_ids: Vec<String> = result
+            .instances
+            .iter()
+            .map(|inst| inst.image_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let version_info: std::collections::HashMap<String, i32> = if !image_ids.is_empty() {
+            match self
+                .scenario_repo
+                .get_scenario_info_by_image_ids(tenant_id, &image_ids)
+                .await
+            {
+                Ok(info) => info.into_iter().map(|(k, (_, ver, _))| (k, ver)).collect(),
+                Err(e) => {
+                    warn!(
+                        tenant_id = %tenant_id,
+                        scenario_id = %scenario_id,
+                        error = %e,
+                        "Failed to fetch version info for executions list"
+                    );
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        let mut instances: Vec<ScenarioInstanceDto> = result
+            .instances
+            .into_iter()
+            .map(|inst| {
+                let version = version_info.get(&inst.image_id).copied().unwrap_or(0);
+                runtara_instance_to_dto_with_info(
+                    inst,
+                    scenario_id.to_string(),
+                    version,
+                    scenario_name.clone(),
+                )
+            })
+            .collect();
+
+        enrich_pending_input(&mut instances, client).await;
+
+        let total_elements = result.total_count as i64;
+        let total_pages = if total_elements == 0 {
+            0
+        } else {
+            ((total_elements as f64) / (size as f64)).ceil() as i32
+        };
+        let number_of_elements = instances.len() as i32;
+
+        Ok(PageScenarioInstanceHistoryDto {
+            content: instances,
+            total_pages,
+            total_elements,
+            size,
+            number: page,
+            first: page == 0,
+            last: page >= total_pages.max(1) - 1,
+            number_of_elements,
+        })
+    }
+
+    /// List all executions across all scenarios with filtering, sorting, and pagination.
+    pub async fn list_all_executions(
+        &self,
+        tenant_id: &str,
+        page: Option<i32>,
+        size: Option<i32>,
+        filters: ExecutionFilters,
+    ) -> Result<PageScenarioInstanceHistoryDto, ExecutionError> {
+        let page = page.unwrap_or(0).max(0);
+        let size = size.unwrap_or(20).clamp(1, 100);
+
+        let client = self.require_runtime_client()?;
+
+        let mut options = ListInstancesOptions::new()
+            .with_tenant_id(tenant_id)
+            .with_limit(size as u32)
+            .with_offset((page * size) as u32);
+
+        if let Some(ref scenario_id) = filters.scenario_id {
+            let image_name_prefix = format!("{}:", scenario_id);
+            options = options.with_image_name_prefix(&image_name_prefix);
+        }
+
+        if let Some(ref statuses) = filters.statuses
+            && let Some(first_status) = statuses.first()
+            && let Some(runtara_status) = execution_status_to_runtara(first_status)
+        {
+            options = options.with_status(runtara_status);
+        }
+
+        if let Some(created_from) = filters.created_from {
+            options = options.with_created_after(created_from);
+        }
+        if let Some(created_to) = filters.created_to {
+            options = options.with_created_before(created_to);
+        }
+        if let Some(completed_from) = filters.completed_from {
+            options = options.with_finished_after(completed_from);
+        }
+        if let Some(completed_to) = filters.completed_to {
+            options = options.with_finished_before(completed_to);
+        }
+
+        let order = match (filters.sort_by.as_str(), filters.sort_order.as_str()) {
+            ("created_at", "ASC") => ListInstancesOrder::CreatedAtAsc,
+            ("created_at", "DESC") => ListInstancesOrder::CreatedAtDesc,
+            ("completed_at", "ASC") => ListInstancesOrder::FinishedAtAsc,
+            ("completed_at", "DESC") => ListInstancesOrder::FinishedAtDesc,
+            (_, "ASC") => ListInstancesOrder::FinishedAtAsc,
+            _ => ListInstancesOrder::FinishedAtDesc,
+        };
+        options = options.with_order_by(order);
+
+        debug!(
+            tenant_id = %tenant_id,
+            page = page,
+            size = size,
+            scenario_id_filter = ?filters.scenario_id,
+            status_filter = ?filters.statuses,
+            created_from = ?filters.created_from,
+            created_to = ?filters.created_to,
+            completed_from = ?filters.completed_from,
+            completed_to = ?filters.completed_to,
+            "Listing all executions from Runtara"
+        );
+
+        let result = client
+            .list_instances_with_options(options)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to query Runtara: {}", e))
+            })?;
+
+        let image_ids: Vec<String> = result
+            .instances
+            .iter()
+            .map(|inst| inst.image_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let scenario_info: std::collections::HashMap<String, (String, i32, String)> =
+            if !image_ids.is_empty() {
+                match self
+                    .scenario_repo
+                    .get_scenario_info_by_image_ids(tenant_id, &image_ids)
+                    .await
+                {
+                    Ok(info) => info,
+                    Err(e) => {
+                        warn!(
+                            tenant_id = %tenant_id,
+                            error = %e,
+                            "Failed to fetch scenario info for executions list"
+                        );
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+        let scenario_ids_needing_names: Vec<String> = scenario_info
+            .values()
+            .filter(|(_, _, name)| name.is_empty())
+            .map(|(sid, _, _)| sid.clone())
+            .filter(|sid| !sid.is_empty())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let scenario_names: std::collections::HashMap<String, String> =
+            if !scenario_ids_needing_names.is_empty() {
+                match self
+                    .scenario_repo
+                    .get_scenario_names_bulk(tenant_id, &scenario_ids_needing_names)
+                    .await
+                {
+                    Ok(names) => names
+                        .into_iter()
+                        .filter(|(_, (name, _))| !name.is_empty())
+                        .map(|(sid, (name, _))| (sid, name))
+                        .collect(),
+                    Err(e) => {
+                        warn!(
+                            tenant_id = %tenant_id,
+                            error = %e,
+                            "Failed to fetch scenario names"
+                        );
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
+        let mut instances: Vec<ScenarioInstanceDto> = result
+            .instances
+            .into_iter()
+            .map(|inst| {
+                let (scenario_id, version, scenario_name) = scenario_info
+                    .get(&inst.image_id)
+                    .map(|(sid, ver, name)| {
+                        let final_name = if name.is_empty() {
+                            scenario_names.get(sid).cloned()
+                        } else {
+                            Some(name.clone())
+                        };
+                        (sid.clone(), *ver, final_name)
+                    })
+                    .unwrap_or_else(|| (String::new(), 0, None));
+
+                runtara_instance_to_dto_with_info(inst, scenario_id, version, scenario_name)
+            })
+            .collect();
+
+        enrich_pending_input(&mut instances, client).await;
+
+        let total_elements = result.total_count as i64;
+        let total_pages = if total_elements == 0 {
+            0
+        } else {
+            ((total_elements as f64) / (size as f64)).ceil() as i32
+        };
+        let number_of_elements = instances.len() as i32;
+
+        Ok(PageScenarioInstanceHistoryDto {
+            content: instances,
+            total_pages,
+            total_elements,
+            size,
+            number: page,
+            first: page == 0,
+            last: page >= total_pages.max(1) - 1,
+            number_of_elements,
+        })
+    }
+
+    // =========================================================================
+    // Lifecycle control (stop / pause / resume)
+    // =========================================================================
+
+    /// Stop a running instance.
+    pub async fn stop(&self, instance_id: &str) -> Result<StopOutcome, ExecutionError> {
+        let _ = Uuid::parse_str(instance_id).map_err(|_| {
+            ExecutionError::ValidationError(
+                "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
+            )
+        })?;
+
+        let client = self.require_runtime_client()?;
+
+        let runtara_status = client
+            .get_instance_status(instance_id)
+            .await
+            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
+
+        let status_str = format!("{:?}", runtara_status).to_lowercase();
+
+        if matches!(
+            runtara_status,
+            crate::runtime_client::InstanceStatus::Completed
+                | crate::runtime_client::InstanceStatus::Failed
+                | crate::runtime_client::InstanceStatus::Cancelled
+        ) {
+            return Ok(StopOutcome::AlreadyStopped { status: status_str });
+        }
+
+        client.cancel_instance(instance_id).await.map_err(|e| {
+            ExecutionError::DatabaseError(format!("Failed to cancel instance: {}", e))
+        })?;
+
+        if matches!(
+            runtara_status,
+            crate::runtime_client::InstanceStatus::Suspended
+        ) && let Err(e) = client.resume_instance(instance_id).await
+        {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "Failed to resume suspended instance for cancellation"
+            );
+        }
+
+        info!(
+            instance_id = %instance_id,
+            previous_status = %status_str,
+            "Cancelled instance via runtara-environment"
+        );
+
+        Ok(StopOutcome::Stopped {
+            previous_status: status_str,
+        })
+    }
+
+    /// Pause a running workflow instance.
+    pub async fn pause(&self, instance_id: &str) -> Result<PauseOutcome, ExecutionError> {
+        let _ = Uuid::parse_str(instance_id).map_err(|_| {
+            ExecutionError::ValidationError(
+                "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
+            )
+        })?;
+
+        let client = self.require_runtime_client()?;
+
+        let runtara_status = client
+            .get_instance_status(instance_id)
+            .await
+            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
+
+        let status_str = format!("{:?}", runtara_status).to_lowercase();
+
+        match status_str.as_str() {
+            "suspended" => Ok(PauseOutcome::AlreadyPaused),
+            "running" => {
+                client.pause_instance(instance_id).await.map_err(|e| {
+                    ExecutionError::DatabaseError(format!("Failed to send pause signal: {}", e))
+                })?;
+
+                info!(
+                    instance_id = %instance_id,
+                    "Sent pause signal to instance"
+                );
+
+                Ok(PauseOutcome::Paused {
+                    previous_status: status_str,
+                })
+            }
+            _ => Ok(PauseOutcome::NotPausable { status: status_str }),
         }
     }
 
-    /// Get the registered image ID for a compiled scenario
-    ///
-    /// Returns the UUID image_id that was assigned by runtara-environment
-    /// during image registration. This is the ID that must be used for
-    /// start_instance calls.
+    /// Resume a paused/suspended workflow instance.
+    pub async fn resume(&self, instance_id: &str) -> Result<ResumeOutcome, ExecutionError> {
+        let _ = Uuid::parse_str(instance_id).map_err(|_| {
+            ExecutionError::ValidationError(
+                "Invalid instance ID. Instance ID must be a valid UUID".to_string(),
+            )
+        })?;
+
+        let client = self.require_runtime_client()?;
+
+        let runtara_status = client
+            .get_instance_status(instance_id)
+            .await
+            .map_err(|e| ExecutionError::NotFound(format!("Instance not found: {}", e)))?;
+
+        let status_str = format!("{:?}", runtara_status).to_lowercase();
+
+        match status_str.as_str() {
+            "running" => Ok(ResumeOutcome::AlreadyRunning),
+            "suspended" | "failed" | "cancelled" => {
+                client.resume_instance(instance_id).await.map_err(|e| {
+                    ExecutionError::DatabaseError(format!("Failed to send resume signal: {}", e))
+                })?;
+
+                info!(
+                    instance_id = %instance_id,
+                    previous_status = %status_str,
+                    "Sent resume signal to instance"
+                );
+
+                Ok(ResumeOutcome::Resumed {
+                    previous_status: status_str,
+                })
+            }
+            _ => Ok(ResumeOutcome::NotResumable { status: status_str }),
+        }
+    }
+
+    // =========================================================================
+    // Internal helpers
+    // =========================================================================
+
+    fn require_runtime_client(&self) -> Result<&Arc<RuntimeClient>, ExecutionError> {
+        self.runtime_client.as_ref().ok_or_else(|| {
+            ExecutionError::NotConnected(
+                "Runtime client not configured. Cannot reach runtara-environment.".to_string(),
+            )
+        })
+    }
+
+    /// Resolve an explicit or current/latest version for a scenario.
+    async fn resolve_version(
+        &self,
+        tenant_id: &str,
+        scenario_id: &str,
+        version: Option<i32>,
+    ) -> Result<i32, ExecutionError> {
+        match version {
+            Some(v) if v > 0 => Ok(v),
+            Some(_) => Err(ExecutionError::NotFound(format!(
+                "Scenario '{}' has no versions",
+                scenario_id
+            ))),
+            None => {
+                let resolved = self
+                    .scenario_repo
+                    .get_current_or_latest_version(tenant_id, scenario_id)
+                    .await
+                    .map_err(|e| {
+                        ExecutionError::DatabaseError(format!(
+                            "Failed to get current version: {}",
+                            e
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        ExecutionError::NotFound(format!("Scenario '{}' not found", scenario_id))
+                    })?;
+
+                if resolved == 0 {
+                    return Err(ExecutionError::NotFound(format!(
+                        "Scenario '{}' has no versions",
+                        scenario_id
+                    )));
+                }
+
+                Ok(resolved)
+            }
+        }
+    }
+
+    /// Get the registered image ID for a compiled scenario.
     async fn get_registered_image_id(
         &self,
         tenant_id: &str,
@@ -403,22 +1358,14 @@ impl ExecutionEngine {
             })
     }
 
-    /// Check that scenario is compiled and registered with runtara-environment.
-    ///
-    /// This is a non-blocking check. If the scenario is not compiled:
-    /// - Queues compilation if not already pending
-    /// - Returns `NotCompiled` error immediately (caller should retry later)
-    ///
-    /// This allows the trigger worker to NACK the event and retry after a delay,
-    /// rather than blocking for up to 5 minutes.
+    /// Ensure the scenario is compiled (non-blocking: queues compilation if
+    /// needed and returns `NotCompiled` for the caller to retry).
     async fn ensure_compiled(
         &self,
         tenant_id: &str,
         scenario_id: &str,
         version: i32,
-        _track_events: bool,
-    ) -> Result<std::path::PathBuf, ExecutionError> {
-        // First check if compilation is already successful
+    ) -> Result<(), ExecutionError> {
         let status = self
             .scenario_repo
             .ensure_compilation_ready(tenant_id, scenario_id, version)
@@ -427,21 +1374,15 @@ impl ExecutionEngine {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
 
-        if let CompilationStatus::Ready {
-            translated_path, ..
-        } = status
-        {
-            let binary = std::path::PathBuf::from(&translated_path).join("scenario");
-            return Ok(binary);
+        if matches!(status, CompilationStatus::Ready { .. }) {
+            return Ok(());
         }
 
-        // Not compiled - queue compilation if not already pending, then return NotCompiled
-        // The caller (trigger worker) will NACK and retry later
+        // Not compiled - queue compilation if not already pending
         let compilation_queued =
             if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
                 let redis_url = valkey_config.connection_url();
 
-                // Check if compilation is already pending
                 let is_pending = crate::workers::compilation_worker::is_compilation_pending(
                     &redis_url,
                     tenant_id,
@@ -460,7 +1401,6 @@ impl ExecutionEngine {
                     );
                     false
                 } else {
-                    // Not compiled and not pending - queue it now
                     info!(
                         tenant_id = %tenant_id,
                         scenario_id = %scenario_id,
@@ -508,12 +1448,126 @@ impl ExecutionEngine {
                 false
             };
 
-        // Return NotCompiled error - caller should retry later
         Err(ExecutionError::NotCompiled {
             scenario_id: scenario_id.to_string(),
             version,
             compilation_queued,
         })
+    }
+
+    /// Block until compilation completes (used by the synchronous execution
+    /// path). Delegates the actual wait to
+    /// `compilation_worker::wait_for_compilation`.
+    async fn wait_for_compilation_blocking(
+        &self,
+        tenant_id: &str,
+        scenario_id: &str,
+        version: i32,
+    ) -> Result<(), ExecutionError> {
+        let status = self
+            .scenario_repo
+            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
+            })?;
+        if matches!(status, CompilationStatus::Ready { .. }) {
+            return Ok(());
+        }
+
+        let valkey_config = match crate::valkey::ValkeyConfig::from_env() {
+            Some(v) => v,
+            None => {
+                return Err(ExecutionError::NotFound(format!(
+                    "Scenario '{}' version {} not compiled and Valkey is not configured for auto-compilation.",
+                    scenario_id, version
+                )));
+            }
+        };
+        let redis_url = valkey_config.connection_url();
+
+        let is_pending = crate::workers::compilation_worker::is_compilation_pending(
+            &redis_url,
+            tenant_id,
+            scenario_id,
+            version,
+        )
+        .await
+        .unwrap_or(false);
+
+        if is_pending {
+            info!(
+                tenant_id = %tenant_id,
+                scenario_id = %scenario_id,
+                version = version,
+                "Compilation pending, waiting for it to complete..."
+            );
+        } else {
+            info!(
+                tenant_id = %tenant_id,
+                scenario_id = %scenario_id,
+                version = version,
+                "Scenario not compiled, queueing compilation..."
+            );
+            match crate::workers::compilation_worker::enqueue_compilation(
+                &redis_url,
+                tenant_id,
+                scenario_id,
+                version,
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!(
+                        tenant_id = %tenant_id,
+                        scenario_id = %scenario_id,
+                        version = version,
+                        "Compilation queued, waiting for it to complete..."
+                    );
+                }
+                Err(e) => {
+                    return Err(ExecutionError::CompilationFailed(format!(
+                        "Failed to queue compilation for scenario '{}' version {}: {}",
+                        scenario_id, version, e
+                    )));
+                }
+            }
+        }
+
+        // Delegate the actual blocking wait
+        let timeout = Duration::from_secs(300);
+        let completed = crate::workers::compilation_worker::wait_for_compilation(
+            &redis_url,
+            tenant_id,
+            scenario_id,
+            version,
+            timeout,
+        )
+        .await
+        .unwrap_or(false);
+
+        if !completed {
+            return Err(ExecutionError::CompilationTimeout(format!(
+                "Compilation for scenario '{}' version {} timed out after 5 minutes.",
+                scenario_id, version
+            )));
+        }
+
+        let status_after = self
+            .scenario_repo
+            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
+            })?;
+        if matches!(status_after, CompilationStatus::Ready { .. }) {
+            Ok(())
+        } else {
+            Err(ExecutionError::CompilationFailed(format!(
+                "Compilation for scenario '{}' version {} completed but binary not found.",
+                scenario_id, version
+            )))
+        }
     }
 }
 
@@ -549,6 +1603,40 @@ mod tests {
     fn test_execution_error_display_compilation_failed() {
         let error = ExecutionError::CompilationFailed("syntax error".to_string());
         assert_eq!(format!("{}", error), "Compilation failed: syntax error");
+    }
+
+    #[test]
+    fn test_execution_error_http_status_validation() {
+        assert_eq!(
+            ExecutionError::ValidationError("bad".to_string()).http_status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_execution_error_http_status_not_compiled() {
+        let err = ExecutionError::NotCompiled {
+            scenario_id: "s".into(),
+            version: 1,
+            compilation_queued: false,
+        };
+        assert_eq!(err.http_status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn test_execution_error_http_status_compilation_timeout() {
+        assert_eq!(
+            ExecutionError::CompilationTimeout("slow".to_string()).http_status(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn test_execution_error_http_status_not_connected() {
+        assert_eq!(
+            ExecutionError::NotConnected("no conn".to_string()).http_status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     // =========================================================================
