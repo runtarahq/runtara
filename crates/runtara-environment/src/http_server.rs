@@ -459,8 +459,82 @@ fn instance_status_to_string(status: &str) -> &str {
     }
 }
 
-fn error_response(code: &str, message: &str, status: StatusCode) -> impl IntoResponse {
-    (status, Json(json!({ "error": message, "code": code })))
+fn error_response(code: &str, message: &str, status: StatusCode) -> (StatusCode, Json<Value>) {
+    build_error_response(code, message, status, ErrorDetail::default())
+}
+
+/// Emit an error response derived from an error value. Accepts anything
+/// that converts into `crate::error::Error` (so callers can pass sqlx,
+/// io, or core errors directly). Preserves the legacy `{error, code}`
+/// shape and additively attaches structured fields (`category`,
+/// `severity`, `retry_hint`, `retry_after_ms`, `attributes`) when the
+/// underlying error carries them (e.g. `CoreError` → `StructuredError`).
+/// Existing clients that read only `error` / `code` keep working
+/// unchanged; new fields are purely additive.
+fn error_response_from<E: Into<crate::error::Error>>(
+    code: &str,
+    err: E,
+    status: StatusCode,
+) -> (StatusCode, Json<Value>) {
+    let err: crate::error::Error = err.into();
+    let detail = detail_from_error(&err);
+    build_error_response(code, &err.to_string(), status, detail)
+}
+
+fn build_error_response(
+    code: &str,
+    message: &str,
+    status: StatusCode,
+    detail: ErrorDetail,
+) -> (StatusCode, Json<Value>) {
+    let mut body = serde_json::Map::new();
+    body.insert("error".into(), json!(message));
+    body.insert("code".into(), json!(code));
+    if let Some(v) = detail.category {
+        body.insert("category".into(), json!(v));
+    }
+    if let Some(v) = detail.severity {
+        body.insert("severity".into(), json!(v));
+    }
+    if let Some(v) = detail.retry_hint {
+        body.insert("retry_hint".into(), json!(v));
+    }
+    if let Some(v) = detail.retry_after_ms {
+        body.insert("retry_after_ms".into(), json!(v));
+    }
+    if let Some(v) = detail.attributes {
+        body.insert("attributes".into(), v);
+    }
+    (status, Json(Value::Object(body)))
+}
+
+#[derive(Default)]
+struct ErrorDetail {
+    category: Option<&'static str>,
+    severity: Option<&'static str>,
+    retry_hint: Option<&'static str>,
+    retry_after_ms: Option<u64>,
+    attributes: Option<Value>,
+}
+
+fn detail_from_error(err: &crate::error::Error) -> ErrorDetail {
+    use runtara_core::error::StructuredError;
+    if let crate::error::Error::Core(core) = err {
+        let s: StructuredError = core.clone().into();
+        ErrorDetail {
+            category: Some(s.category.as_str()),
+            severity: Some(s.severity.as_str()),
+            retry_hint: Some(s.retry_hint.as_str()),
+            retry_after_ms: s.retry_hint.retry_after_ms(),
+            attributes: if s.attributes.is_empty() {
+                None
+            } else {
+                serde_json::to_value(&s.attributes).ok()
+            },
+        }
+    } else {
+        ErrorDetail::default()
+    }
 }
 
 // ============================================================================
@@ -480,12 +554,8 @@ async fn handle_health_check(
         .into_response(),
         Err(e) => {
             error!("Health check error: {}", e);
-            error_response(
-                "HEALTH_CHECK_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("HEALTH_CHECK_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -548,12 +618,8 @@ async fn handle_register_image(
         }
         Err(e) => {
             error!("Register image error: {}", e);
-            error_response(
-                "REGISTER_IMAGE_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("REGISTER_IMAGE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -805,12 +871,8 @@ async fn handle_list_images(
         }
         Err(e) => {
             error!("List images error: {}", e);
-            error_response(
-                "LIST_IMAGES_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("LIST_IMAGES_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -857,12 +919,8 @@ async fn handle_get_image(
         Ok(None) => Json(json!({ "found": false })).into_response(),
         Err(e) => {
             error!("Get image error: {}", e);
-            error_response(
-                "GET_IMAGE_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("GET_IMAGE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -901,9 +959,9 @@ async fn handle_delete_image(
             }
 
             if let Err(e) = image_registry.delete(&image_id).await {
-                return error_response(
+                return error_response_from(
                     "DELETE_IMAGE_ERROR",
-                    &e.to_string(),
+                    e,
                     StatusCode::INTERNAL_SERVER_ERROR,
                 )
                 .into_response();
@@ -925,12 +983,8 @@ async fn handle_delete_image(
             .into_response(),
         Err(e) => {
             error!("Delete image error: {}", e);
-            error_response(
-                "DELETE_IMAGE_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("DELETE_IMAGE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -979,12 +1033,8 @@ async fn handle_start_instance(
         }
         Err(e) => {
             error!("Start instance error: {}", e);
-            error_response(
-                "START_INSTANCE_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("START_INSTANCE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -1009,12 +1059,8 @@ async fn handle_stop_instance(
         .into_response(),
         Err(e) => {
             error!("Stop instance error: {}", e);
-            error_response(
-                "STOP_INSTANCE_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("STOP_INSTANCE_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -1034,9 +1080,9 @@ async fn handle_resume_instance(
         .into_response(),
         Err(e) => {
             error!("Resume instance error: {}", e);
-            error_response(
+            error_response_from(
                 "RESUME_INSTANCE_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response()
@@ -1108,9 +1154,9 @@ async fn handle_get_instance_status(
         .into_response(),
         Err(e) => {
             error!("Get instance status error: {}", e);
-            error_response(
+            error_response_from(
                 "GET_INSTANCE_STATUS_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response()
@@ -1163,9 +1209,9 @@ async fn handle_list_instances(
         Ok(v) => v,
         Err(e) => {
             error!("List instances error: {}", e);
-            return error_response(
+            return error_response_from(
                 "LIST_INSTANCES_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response();
@@ -1221,12 +1267,8 @@ async fn handle_send_signal(
                 .into_response();
         }
         Err(e) => {
-            return error_response(
-                "SEND_SIGNAL_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
+            return error_response_from("SEND_SIGNAL_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response();
         }
     };
 
@@ -1274,12 +1316,8 @@ async fn handle_send_signal(
         Ok(()) => Json(json!({ "success": true })).into_response(),
         Err(e) => {
             error!("Send signal error: {}", e);
-            error_response(
-                "SEND_SIGNAL_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("SEND_SIGNAL_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -1304,9 +1342,9 @@ async fn handle_send_custom_signal(
                 .into_response();
         }
         Err(e) => {
-            return error_response(
+            return error_response_from(
                 "SEND_CUSTOM_SIGNAL_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response();
@@ -1338,9 +1376,9 @@ async fn handle_send_custom_signal(
         Ok(()) => Json(json!({ "success": true })).into_response(),
         Err(e) => {
             error!("Send custom signal error: {}", e);
-            error_response(
+            error_response_from(
                 "SEND_CUSTOM_SIGNAL_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response()
@@ -1379,9 +1417,9 @@ async fn handle_list_checkpoints(
         Ok(v) => v,
         Err(e) => {
             error!("List checkpoints error: {}", e);
-            return error_response(
+            return error_response_from(
                 "LIST_CHECKPOINTS_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response();
@@ -1451,12 +1489,8 @@ async fn handle_get_checkpoint(
         .into_response(),
         Err(e) => {
             error!("Get checkpoint error: {}", e);
-            error_response(
-                "GET_CHECKPOINT_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("GET_CHECKPOINT_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -1504,12 +1538,8 @@ async fn handle_list_events(
         Ok(v) => v,
         Err(e) => {
             error!("List events error: {}", e);
-            return error_response(
-                "LIST_EVENTS_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response();
+            return error_response_from("LIST_EVENTS_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response();
         }
     };
 
@@ -1592,9 +1622,9 @@ async fn handle_list_step_summaries(
         Ok(v) => v,
         Err(e) => {
             error!("List step summaries error: {}", e);
-            return error_response(
+            return error_response_from(
                 "LIST_STEP_SUMMARIES_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response();
@@ -1679,9 +1709,9 @@ async fn handle_get_scope_ancestors(
         Ok(v) => v,
         Err(e) => {
             error!("Get scope ancestors error: {}", e);
-            return error_response(
+            return error_response_from(
                 "GET_SCOPE_ANCESTORS_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response();
@@ -1797,9 +1827,9 @@ async fn handle_get_tenant_metrics(
         Ok(v) => v,
         Err(e) => {
             error!("Get tenant metrics error: {}", e);
-            return error_response(
+            return error_response_from(
                 "GET_TENANT_METRICS_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response();
@@ -1884,9 +1914,9 @@ async fn handle_test_capability(
         }
         Err(e) => {
             error!("Test capability error: {}", e);
-            error_response(
+            error_response_from(
                 "TEST_CAPABILITY_ERROR",
-                &e.to_string(),
+                e,
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
             .into_response()
@@ -1914,12 +1944,8 @@ async fn handle_list_agents(
         }
         Err(e) => {
             error!("List agents error: {}", e);
-            error_response(
-                "LIST_AGENTS_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("LIST_AGENTS_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -1954,12 +1980,8 @@ async fn handle_get_capability(
         }
         Err(e) => {
             error!("Get capability error: {}", e);
-            error_response(
-                "GET_CAPABILITY_ERROR",
-                &e.to_string(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .into_response()
+            error_response_from("GET_CAPABILITY_ERROR", e, StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response()
         }
     }
 }
@@ -2071,4 +2093,79 @@ pub async fn run_http_server(
 
     info!("Environment HTTP server stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtara_core::error::CoreError;
+
+    fn body_of(resp: (StatusCode, Json<Value>)) -> Value {
+        resp.1.0
+    }
+
+    #[test]
+    fn error_response_preserves_legacy_shape() {
+        let body = body_of(error_response(
+            "HEALTH_CHECK_ERROR",
+            "database down",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+        assert_eq!(body["error"], "database down");
+        assert_eq!(body["code"], "HEALTH_CHECK_ERROR");
+        assert!(
+            body.get("category").is_none(),
+            "no structured fields without detail"
+        );
+        assert!(body.get("severity").is_none());
+    }
+
+    #[test]
+    fn error_response_from_attaches_structured_fields_for_core_errors() {
+        let err = crate::error::Error::from(CoreError::InstanceNotFound {
+            instance_id: "inst-42".to_string(),
+        });
+        let body = body_of(error_response_from(
+            "GET_INSTANCE_STATUS_ERROR",
+            err,
+            StatusCode::NOT_FOUND,
+        ));
+        // Legacy fields preserved verbatim
+        assert_eq!(body["code"], "GET_INSTANCE_STATUS_ERROR");
+        assert!(body["error"].as_str().unwrap().contains("inst-42"));
+        // New additive fields
+        assert_eq!(body["category"], "permanent");
+        assert_eq!(body["severity"], "error");
+        assert_eq!(body["retry_hint"], "do_not_retry");
+    }
+
+    #[test]
+    fn error_response_from_transient_db_error_hints_retry() {
+        let err = crate::error::Error::from(CoreError::CheckpointSaveFailed {
+            instance_id: "inst-1".to_string(),
+            reason: "timeout".to_string(),
+        });
+        let body = body_of(error_response_from(
+            "SAVE_CHECKPOINT_ERROR",
+            err,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+        assert_eq!(body["category"], "transient");
+        assert_eq!(body["retry_hint"], "retry_with_backoff");
+    }
+
+    #[test]
+    fn error_response_from_non_core_error_stays_legacy() {
+        // sqlx errors wrap into crate::error::Error::Database, not Core —
+        // so no structured fields are attached, only legacy error/code.
+        let err = crate::error::Error::Other("unexpected state".to_string());
+        let body = body_of(error_response_from(
+            "OTHER_ERROR",
+            err,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+        assert_eq!(body["code"], "OTHER_ERROR");
+        assert_eq!(body["error"], "unexpected state");
+        assert!(body.get("category").is_none());
+    }
 }

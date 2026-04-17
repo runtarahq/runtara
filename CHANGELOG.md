@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > (`v1.0.21` through `v1.6.18`) are available as git tags; their history lives
 > in `git log`.
 
+## [Unreleased]
+
+### Added
+
+- `runtara-environment` HTTP error responses now additively include
+  structured fields (`category`, `severity`, `retry_hint`,
+  `retry_after_ms`, `attributes`) when the underlying error carries them
+  (typically `CoreError` → `StructuredError`). Existing `{error, code}`
+  fields are preserved verbatim; clients that read only those two keep
+  working unchanged.
+
 ## [1.8.0] - 2026-04-13
 
 ### Added
