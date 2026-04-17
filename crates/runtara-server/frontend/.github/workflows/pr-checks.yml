@@ -1,0 +1,127 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+# Placeholder values for env vars the app validates at startup. The mocked suite
+# never reaches Auth0, so real secrets are not required — this lets the gate run
+# on PRs from forks too.
+env:
+  NODE_VERSION: '22'
+  VITE_RUNTARA_API_BASE_URL: 'http://localhost:8081/mocked-api'
+  VITE_OIDC_AUTHORITY: 'https://auth.mocked.test'
+  VITE_OIDC_CLIENT_ID: 'mocked-client'
+  VITE_OIDC_AUDIENCE: 'https://api.mocked.test'
+  VITE_STRIP_ORG_ID: 'true'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run format:check
+
+  knip:
+    name: Knip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run knip
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npx tsc -b --pretty
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+
+  e2e-mocked:
+    name: E2E (mocked)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+      - name: Build app with placeholder env
+        run: npm run build
+      - name: Serve preview build
+        run: |
+          npm run preview -- --port 8081 &
+          npx wait-on http://localhost:8081 --timeout 60000
+      - name: Run mocked Playwright project
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:8081
+          CI: 'true'
+        run: npx playwright test --project=mocked
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-mocked-report
+          path: |
+            e2e-report/
+            e2e-results/
+          retention-days: 14

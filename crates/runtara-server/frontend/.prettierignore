@@ -1,0 +1,10 @@
+dist
+dev-dist
+storybook-static
+e2e-report
+e2e-results
+playwright-report
+coverage
+src/generated
+*.tsbuildinfo
+package-lock.json

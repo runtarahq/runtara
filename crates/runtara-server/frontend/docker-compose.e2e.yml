@@ -1,0 +1,18 @@
+services:
+  e2e-tests:
+    image: mcr.microsoft.com/playwright:v1.57.0-jammy
+    working_dir: /app
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - .env.local
+    environment:
+      - CI=true
+      - E2E_PROJECT=${E2E_PROJECT:-chromium}
+    network_mode: host
+    command: >
+      bash -c "
+        npm ci &&
+        npx playwright test --project=$$E2E_PROJECT
+      "

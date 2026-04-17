@@ -1,0 +1,264 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  @keyframes glow-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 3px 1px rgba(96, 165, 250, 0.15);
+    }
+    50% {
+      box-shadow: 0 0 8px 2px rgba(96, 165, 250, 0.4);
+    }
+  }
+  .animate-glow-pulse {
+    animation: glow-pulse 3s ease-in-out infinite;
+  }
+}
+
+@layer base {
+  :root {
+    /* Safe area insets for iOS */
+    --safe-area-inset-top: env(safe-area-inset-top, 0px);
+    --safe-area-inset-right: env(safe-area-inset-right, 0px);
+    --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-inset-left: env(safe-area-inset-left, 0px);
+
+    --background: 0 0% 100%; /* white */
+    --foreground: 214 32% 20%; /* deep blue-gray */
+    --card: 0 0% 100%; /* white */
+    --card-foreground: 214 32% 20%; /* deep blue-gray */
+    --popover: 0 0% 100%; /* white */
+    --popover-foreground: 214 32% 20%; /* deep blue-gray */
+    --primary: 217 91% 60%; /* vibrant blue */
+    --primary-foreground: 0 0% 100%; /* white */
+    --secondary: 142 76% 93%; /* very light green */
+    --secondary-foreground: 142 76% 20%; /* dark green */
+    --muted: 210 40% 96%; /* very light blue-gray */
+    --muted-foreground: 215 20% 40%; /* medium blue-gray */
+    --accent: 199 89% 94%; /* very light cyan */
+    --accent-foreground: 199 89% 25%; /* dark cyan */
+    --destructive: 0 84% 60%; /* soft red */
+    --destructive-foreground: 0 0% 98%; /* off white */
+    --border: 214 32% 91%; /* light blue-gray border */
+    --input: 214 32% 91%; /* light blue-gray input */
+    --ring: 217 91% 60%; /* vibrant blue */
+    --success: 142 71% 45%; /* green */
+    --warning: 38 92% 50%; /* amber */
+    --error: 0 84% 60%; /* soft red */
+    --chart-1: 217 91% 60%; /* vibrant blue */
+    --chart-2: 174 77% 50%; /* teal */
+    --chart-3: 142 71% 45%; /* green */
+    --chart-4: 38 92% 50%; /* amber */
+    --chart-5: 0 84% 60%; /* soft red */
+    --radius: 0.5rem; /* reduced border radius for cleaner look */
+    --sidebar-background: 210 40% 98%; /* very light blue */
+    --sidebar-foreground: 214 32% 20%; /* deep blue-gray */
+    --sidebar-primary: 217 91% 60%; /* vibrant blue */
+    --sidebar-primary-foreground: 0 0% 100%; /* white */
+    --sidebar-accent: 199 89% 94%; /* very light cyan */
+    --sidebar-accent-foreground: 199 89% 25%; /* dark cyan */
+    --sidebar-border: 214 32% 91%; /* light blue-gray border */
+    --sidebar-ring: 217 91% 60%; /* vibrant blue */
+  }
+  .scrollbar-gutter-stable {
+    scrollbar-gutter: stable both-edges;
+  }
+  .dark {
+    /* Based on docs/dark-color-theme.md with softer contrast like syncmyorders.com */
+    --background: 0 0% 4%; /* #0a0a0a - Near-black base background */
+    --foreground: 0 0% 64%; /* #a3a3a3 - Medium gray for primary text (softer than pure white) */
+    --card: 0 0% 10%; /* #1a1a1a - Elevated surface background */
+    --card-foreground: 0 0% 64%; /* #a3a3a3 - Medium gray for card content */
+    --popover: 0 0% 10%; /* #1a1a1a - Same as card */
+    --popover-foreground: 0 0% 64%; /* #a3a3a3 */
+    --primary: 217 91% 60%; /* #3b82f6 - Bright blue for CTAs */
+    --primary-foreground: 0 0% 100%; /* white */
+    --secondary: 0 0% 7%; /* #111111 - Slightly lighter dark background */
+    --secondary-foreground: 0 0% 45%; /* #737373 - Darker gray for secondary text */
+    --muted: 0 0% 13%; /* #222222 - Card hover background */
+    --muted-foreground: 0 0% 35%; /* #595959 - Even darker gray for muted text */
+    --accent: 217 91% 60%; /* #3b82f6 - Same as primary */
+    --accent-foreground: 0 0% 100%; /* white */
+    --destructive: 0 84% 60%; /* #ef4444 - Red for errors */
+    --destructive-foreground: 0 0% 98%; /* off white */
+    --border: 0 0% 15%; /* #262626 - Subtle dark border */
+    --input: 0 0% 15%; /* #262626 - Same as border */
+    --ring: 217 91% 60%; /* #3b82f6 - Bright blue focus ring */
+    --success: 142 71% 45%; /* #22c55e - Green for success */
+    --warning: 38 92% 50%; /* amber */
+    --error: 0 84% 60%; /* #ef4444 - Red for errors */
+    --chart-1: 217 91% 60%; /* #3b82f6 */
+    --chart-2: 174 77% 50%; /* teal */
+    --chart-3: 142 71% 45%; /* #22c55e */
+    --chart-4: 38 92% 50%; /* amber */
+    --chart-5: 0 84% 60%; /* red */
+    --sidebar-background: 0 0% 7%; /* #111111 - Secondary background */
+    --sidebar-foreground: 0 0% 64%; /* #a3a3a3 - Medium gray */
+    --sidebar-primary: 217 91% 60%; /* #3b82f6 */
+    --sidebar-primary-foreground: 0 0% 100%; /* white */
+    --sidebar-accent: 217 91% 60%; /* #3b82f6 */
+    --sidebar-accent-foreground: 0 0% 100%; /* white */
+    --sidebar-border: 0 0% 15%; /* #262626 */
+    --sidebar-ring: 217 91% 60%; /* #3b82f6 */
+
+    /* Additional theme variables from dark-color-theme.md */
+    --accent-hover: 219 91% 69%; /* #60a5fa - Lighter blue for hover */
+    --accent-dark: 226 73% 40%; /* #1e40af - Darker blue for pressed states */
+    --border-light: 0 0% 25%; /* #404040 - More prominent border */
+  }
+}
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Softer text colors in dark mode for better readability */
+  .dark h1,
+  .dark h2,
+  .dark h3,
+  .dark h4,
+  .dark h5,
+  .dark h6 {
+    @apply text-gray-200;
+  }
+
+  .dark .font-bold,
+  .dark .font-semibold {
+    @apply text-gray-300;
+  }
+
+  /* Softer colors for interactive elements */
+  .dark .text-foreground {
+    color: hsl(0 0% 75%);
+  }
+
+  /* Muted text should be even more subtle */
+  .dark .text-muted-foreground {
+    color: hsl(0 0% 45%);
+  }
+
+  /* Table and list specific styles for softer text */
+  .dark table {
+    color: hsl(0 0% 60%);
+  }
+
+  .dark th {
+    color: hsl(0 0% 50%);
+    font-weight: 500;
+  }
+
+  .dark td {
+    color: hsl(0 0% 65%);
+  }
+
+  /* List items */
+  .dark li {
+    color: hsl(0 0% 65%);
+  }
+
+  /* Make table hover states more subtle */
+  .dark tr:hover td {
+    color: hsl(0 0% 75%);
+  }
+
+  /* Selected or active table rows */
+  .dark tr[data-state='selected'] td,
+  .dark tr.selected td {
+    color: hsl(0 0% 80%);
+  }
+}
+
+/* React Flow custom node fixed dimensions */
+.react-flow__node-BASIC_NODE,
+.react-flow__node-CONDITIONAL_NODE,
+.react-flow__node-EVENT_NODE,
+.react-flow__node-WAIT_NODE,
+.react-flow__node-CREATE_NODE,
+.react-flow__node-GROUP_BY_NODE {
+  width: 132px !important;
+  height: 36px !important;
+}
+
+.react-flow__node-BASIC_NODE > div,
+.react-flow__node-CONDITIONAL_NODE > div,
+.react-flow__node-EVENT_NODE > div,
+.react-flow__node-WAIT_NODE > div,
+.react-flow__node-CREATE_NODE > div,
+.react-flow__node-GROUP_BY_NODE > div {
+  width: 132px !important;
+  height: 36px !important;
+  max-width: 132px !important;
+  max-height: 36px !important;
+}
+
+/* AI Agent node - card layout, width fixed, height driven by content */
+.react-flow__node-AI_AGENT_NODE {
+  width: 252px !important;
+  height: auto !important;
+}
+
+.react-flow__node-AI_AGENT_NODE > div {
+  width: 252px !important;
+  max-width: 252px !important;
+  height: auto !important;
+}
+
+/* Switch node width only - height is dynamic based on cases */
+.react-flow__node-SWITCH_NODE {
+  width: 132px !important;
+}
+
+.react-flow__node-SWITCH_NODE > div {
+  width: 132px !important;
+  max-width: 132px !important;
+}
+
+/* Start indicator node */
+.react-flow__node-START_INDICATOR_NODE {
+  width: 72px !important;
+  height: 36px !important;
+}
+
+.react-flow__node-START_INDICATOR_NODE > div {
+  width: 72px !important;
+  height: 36px !important;
+  max-width: 72px !important;
+  max-height: 36px !important;
+}
+
+/* Container nodes should be resizable */
+.react-flow__node-CONTAINER_NODE {
+  min-width: 168px !important;
+  min-height: 132px !important;
+}
+
+/* PWA Safe area utilities */
+@layer utilities {
+  .pt-safe {
+    padding-top: var(--safe-area-inset-top);
+  }
+  .pb-safe {
+    padding-bottom: var(--safe-area-inset-bottom);
+  }
+  .pl-safe {
+    padding-left: var(--safe-area-inset-left);
+  }
+  .pr-safe {
+    padding-right: var(--safe-area-inset-right);
+  }
+  .p-safe {
+    padding: var(--safe-area-inset-top) var(--safe-area-inset-right)
+      var(--safe-area-inset-bottom) var(--safe-area-inset-left);
+  }
+  .min-h-dvh {
+    min-height: 100dvh;
+  }
+  .h-dvh {
+    height: 100dvh;
+  }
+}

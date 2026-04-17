@@ -1619,6 +1619,34 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .merge(oidc_routes)
         .nest("/mcp", mcp_router);
 
+    // Embedded UI (behind `embed-ui` cargo feature).
+    // - RUNTARA_UI_MOUNT: Axum prefix where UI is served (default `/ui`).
+    // - RUNTARA_UI_BASE_PATH: `<base href>` injected into index.html (default = mount).
+    //   Tenant deployments set this to `/ui/<tenant-id>` so the browser resolves
+    //   tenant-scoped asset URLs correctly; the gateway strips the tenant segment
+    //   before forwarding, so the Axum mount stays constant.
+    #[cfg(feature = "embed-ui")]
+    let public_app = {
+        let mount_raw =
+            std::env::var("RUNTARA_UI_MOUNT").unwrap_or_else(|_| "/ui".to_string());
+        let mount = {
+            let trimmed = mount_raw.trim_end_matches('/');
+            if trimmed.is_empty() {
+                "/ui".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let base_raw = std::env::var("RUNTARA_UI_BASE_PATH").unwrap_or_else(|_| mount.clone());
+        let base_href = {
+            let trimmed = base_raw.trim_end_matches('/');
+            let prefix = if trimmed.is_empty() { mount.as_str() } else { trimmed };
+            format!("{}/", prefix)
+        };
+        tracing::info!(mount = %mount, base_href = %base_href, "Embedded UI enabled");
+        public_app.merge(crate::api::handlers::ui::router(&mount, &base_href))
+    };
+
     // Only expose OpenAPI docs when explicitly enabled (disabled in production)
     let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
         public_app.route(

@@ -26,3 +26,6 @@ pub mod specs;
 pub mod step_events;
 pub mod step_summaries;
 pub mod triggers;
+
+#[cfg(feature = "embed-ui")]
+pub mod ui;

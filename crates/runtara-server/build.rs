@@ -58,6 +58,23 @@ fn main() {
     println!("cargo:rustc-env=BUILD_VERSION={}", version);
     println!("cargo:rerun-if-env-changed=BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=SMO_BUILD_VERSION");
+
+    // When the `embed-ui` feature is on, rust_embed needs frontend/dist to exist at
+    // compile time. Surface a helpful error up-front if it's missing.
+    if std::env::var("CARGO_FEATURE_EMBED_UI").is_ok() {
+        let dist = crate_dir.join("frontend/dist");
+        let index = dist.join("index.html");
+        if !index.exists() {
+            panic!(
+                "\n\n`embed-ui` feature is enabled but {} is missing.\n\
+                 Build the frontend first:\n\n\
+                 \x20   cd {} && npm ci && npm run build\n\n",
+                index.display(),
+                crate_dir.join("frontend").display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", dist.display());
+    }
 }
 
 /// Generate DSL and Agent specs from runtara-dsl

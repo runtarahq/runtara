@@ -16,6 +16,11 @@ path = "src/lib.rs"
 name = "runtara-server"
 path = "src/main.rs"
 
+[features]
+# Embed the pre-built frontend (frontend/dist/) and serve it at the UI mount prefix.
+# Run `npm run build` inside ./frontend before building with this feature enabled.
+embed-ui = ["dep:rust-embed"]
+
 [dependencies]
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }
@@ -48,7 +53,11 @@ axum = { version = "0.8", features = ["multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 http-body-util = "0.1"
+bytes = "1"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+
+# Optional: embedded UI assets (`embed-ui` feature)
+rust-embed = { version = "8", features = ["debug-embed", "mime-guess"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,260 @@
+name: Build and Deploy to Bunny CDN
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  notify-start:
+    name: Notify Build Start
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          # Extract commit messages
+          COMMITS=$(cat << 'EOF'
+          ${{ toJSON(github.event.commits) }}
+          EOF
+          )
+
+          if [ "$COMMITS" = "null" ] || [ "$COMMITS" = "" ] || [ "$COMMITS" = "[]" ]; then
+            COMMIT_LIST="No commits in this push"
+          else
+            COMMIT_LIST=$(echo "$COMMITS" | jq -r 'map("• " + (.message | split("\n")[0]) + " (" + .author.name + ")") | join("\n")' || echo "Unable to parse commits")
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg commits "$COMMIT_LIST" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg event "${{ github.event_name }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg run_number "#${{ github.run_number }}" \
+            '{
+              "attachments": [
+                {
+                  "color": "#2196F3",
+                  "blocks": [
+                    {
+                      "type": "header",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "🚀 Frontend Deploy Started"
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        { "type": "mrkdwn", "text": ("*Branch:*\n" + $branch) },
+                        { "type": "mrkdwn", "text": ("*Event:*\n" + $event) },
+                        { "type": "mrkdwn", "text": ("*Triggered by:*\n" + $actor) },
+                        { "type": "mrkdwn", "text": ("*Run:*\n<" + $run_url + "|" + $run_number + ">") }
+                      ]
+                    },
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ("*Recent Commits:*\n" + $commits)
+                      }
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+    needs: notify-start
+    timeout-minutes: 15
+    outputs:
+      start_time: ${{ steps.timing.outputs.start_time }}
+
+    steps:
+      - name: Record start time
+        id: timing
+        run: echo "start_time=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build application
+        run: npm run build
+        env:
+          VITE_RUNTARA_API_BASE_URL: ${{ vars.VITE_RUNTARA_API_BASE_URL }}
+          VITE_OIDC_AUTHORITY: ${{ vars.VITE_OIDC_AUTHORITY }}
+          VITE_OIDC_CLIENT_ID: ${{ vars.VITE_OIDC_CLIENT_ID }}
+          VITE_OIDC_AUDIENCE: ${{ vars.VITE_OIDC_AUDIENCE }}
+
+      - name: Deploy via SFTP
+        env:
+          SFTP_HOST: ${{ secrets.BUNNY_NET_HOSTNAME }}
+          SFTP_USER: ${{ secrets.BUNNY_NET_USERNAME }}
+          SFTP_PASSWORD: ${{ secrets.BUNNY_NET_PASSWORD }}
+          SFTP_PORT: ${{ secrets.BUNNY_NET_PORT }}
+        run: |
+          sudo apt-get update && sudo apt-get install -y lftp
+
+          lftp -c "
+            set sftp:auto-confirm yes;
+            open -u ${SFTP_USER},${SFTP_PASSWORD} -p ${SFTP_PORT:-22} sftp://${SFTP_HOST};
+            mirror --reverse --delete --verbose ./dist /;
+            quit
+          "
+
+      - name: Purge Bunny CDN cache
+        env:
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+          BUNNY_PULLZONE_ID: ${{ secrets.BUNNY_PULLZONE_ID }}
+        run: |
+          curl --request POST \
+               --url "https://api.bunny.net/pullzone/${BUNNY_PULLZONE_ID}/purgeCache" \
+               --header "accept: application/json" \
+               --header "content-type: application/json" \
+               --header "AccessKey: ${BUNNY_API_KEY}" \
+               --fail
+
+      - name: Output deployment summary
+        run: |
+          echo "### Deployment successful! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**CDN Cache:** Purged" >> $GITHUB_STEP_SUMMARY
+
+  notify-complete:
+    name: Notify Build Complete
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    if: always()
+
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.build-and-deploy.result }}" = "failure" ]; then
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "color=#F44336" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+            echo "text=Failed" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.build-and-deploy.result }}" = "cancelled" ]; then
+            echo "status=cancelled" >> $GITHUB_OUTPUT
+            echo "color=#FFC107" >> $GITHUB_OUTPUT
+            echo "emoji=⚠️" >> $GITHUB_OUTPUT
+            echo "text=Cancelled" >> $GITHUB_OUTPUT
+          else
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "color=#4CAF50" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+            echo "text=Deployed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate duration
+        id: duration
+        run: |
+          START_TIME="${{ needs.build-and-deploy.outputs.start_time }}"
+          if [ -n "$START_TIME" ] && [ "$START_TIME" != "0" ]; then
+            CURRENT_TIME=$(date +%s)
+            DURATION=$((CURRENT_TIME - START_TIME))
+            MINUTES=$((DURATION / 60))
+            SECONDS=$((DURATION % 60))
+            if [ $MINUTES -gt 0 ]; then
+              echo "formatted=${MINUTES}m ${SECONDS}s" >> $GITHUB_OUTPUT
+            else
+              echo "formatted=${SECONDS}s" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "formatted=N/A" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg color "${{ steps.status.outputs.color }}" \
+            --arg emoji "${{ steps.status.outputs.emoji }}" \
+            --arg status_text "${{ steps.status.outputs.text }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg status "${{ steps.status.outputs.status }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg run_number "#${{ github.run_number }}" \
+            --arg duration "${{ steps.duration.outputs.formatted }}" \
+            --arg commit "${{ github.sha }}" \
+            '{
+              "attachments": [
+                {
+                  "color": $color,
+                  "blocks": [
+                    {
+                      "type": "header",
+                      "text": {
+                        "type": "plain_text",
+                        "text": ($emoji + " Frontend Deploy " + $status_text)
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        { "type": "mrkdwn", "text": ("*Branch:*\n" + $branch) },
+                        { "type": "mrkdwn", "text": ("*Status:*\n" + $status) },
+                        { "type": "mrkdwn", "text": ("*Duration:*\n" + $duration) },
+                        { "type": "mrkdwn", "text": ("*Run:*\n<" + $run_url + "|" + $run_number + ">") }
+                      ]
+                    },
+                    {
+                      "type": "context",
+                      "elements": [
+                        {
+                          "type": "mrkdwn",
+                          "text": ("Triggered by " + $actor + " • Commit: `" + ($commit | .[0:7]) + "`")
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"

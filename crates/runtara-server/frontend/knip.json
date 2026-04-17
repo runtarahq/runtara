@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "tags": ["-lintignore"],
+  "entry": ["e2e/**/*.setup.ts", "e2e/**/*.spec.ts"],
+  "project": ["src/**/*.{ts,tsx}", "e2e/**/*.ts"],
+  "ignore": [
+    "e2e/utils/seed.ts",
+    "e2e/utils/test-helpers.ts",
+    "e2e/fixtures/**",
+    "src/generated/**",
+    "src/shared/components/ui/**"
+  ],
+  "ignoreDependencies": ["@vitest/coverage-v8"],
+  "ignoreExportsUsedInFile": true
+}

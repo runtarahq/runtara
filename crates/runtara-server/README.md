@@ -35,6 +35,23 @@ plain environment variables read by `config.rs`; see that module for the
 authoritative list. Once the server is up, the OpenAPI spec is exposed by the
 router and the MCP transport is mounted under the `mcp` module's routes.
 
+## Embedded UI (optional)
+
+The crate can bundle the `./frontend` React app into the binary behind the
+`embed-ui` cargo feature:
+
+```bash
+(cd frontend && npm ci && npm run build)      # produces frontend/dist/
+cargo build -p runtara-server --features embed-ui
+```
+
+Without env config the UI is served at `/ui/` (self-hosted). For a tenant
+deployed behind a gateway that routes `/ui/<tenant-id>/…` externally, set
+`RUNTARA_UI_BASE_PATH=/ui/<tenant-id>` so the `<base href>` injected into
+`index.html` points the browser at tenant-scoped asset URLs. The Axum mount
+prefix stays at `/ui` (override via `RUNTARA_UI_MOUNT` only if the gateway
+does not strip the tenant segment before forwarding).
+
 ## Inside Runtara
 
 - Depends on `runtara-workflows`, `runtara-core` (with the `server` feature),
