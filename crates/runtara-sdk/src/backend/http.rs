@@ -43,29 +43,16 @@ pub struct HttpSdkConfig {
 impl HttpSdkConfig {
     /// Create config from environment variables.
     ///
-    /// Required: `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`, `RUNTARA_HTTP_URL`
+    /// Required: `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`.
+    /// Optional: `RUNTARA_HTTP_URL` (default `http://127.0.0.1:8003`).
     pub fn from_env() -> Result<Self> {
         let instance_id = std::env::var("RUNTARA_INSTANCE_ID")
             .map_err(|_| SdkError::Config("RUNTARA_INSTANCE_ID not set".into()))?;
         let tenant_id = std::env::var("RUNTARA_TENANT_ID")
             .map_err(|_| SdkError::Config("RUNTARA_TENANT_ID not set".into()))?;
 
-        // Try RUNTARA_HTTP_URL first, then derive from RUNTARA_SERVER_ADDR
-        let base_url = if let Ok(url) = std::env::var("RUNTARA_HTTP_URL") {
-            url
-        } else if let Ok(addr) = std::env::var("RUNTARA_SERVER_ADDR") {
-            // RUNTARA_SERVER_ADDR is host:port. HTTP is typically on port+2.
-            let parts: Vec<&str> = addr.split(':').collect();
-            let host = parts.first().unwrap_or(&"127.0.0.1");
-            let base_port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(8001);
-            let http_port = std::env::var("RUNTARA_CORE_HTTP_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(base_port + 2); // Default: base port + 2 (8001 → 8003)
-            format!("http://{}:{}", host, http_port)
-        } else {
-            "http://127.0.0.1:8003".to_string()
-        };
+        let base_url = std::env::var("RUNTARA_HTTP_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8003".to_string());
 
         let request_timeout_ms = std::env::var("RUNTARA_REQUEST_TIMEOUT_MS")
             .ok()
@@ -693,5 +680,80 @@ impl std::fmt::Debug for HttpBackend {
             .field("base_url", &self.base_url)
             .field("connected", &self.connected.load(Ordering::SeqCst))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::HttpSdkConfig;
+    use std::sync::Mutex;
+
+    // Env access in tests is mutex-serialized.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        vars: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            Self { vars: Vec::new() }
+        }
+
+        fn set(&mut self, key: &str, value: &str) {
+            let old = std::env::var(key).ok();
+            self.vars.push((key.to_string(), old));
+            // SAFETY: serialized by ENV_MUTEX.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        fn remove(&mut self, key: &str) {
+            let old = std::env::var(key).ok();
+            self.vars.push((key.to_string(), old));
+            // SAFETY: serialized by ENV_MUTEX.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.vars.drain(..).rev() {
+                // SAFETY: serialized by ENV_MUTEX.
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(&key, v),
+                        None => std::env::remove_var(&key),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_http_sdk_config_ignores_server_addr() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_INSTANCE_ID", "test-instance");
+        guard.set("RUNTARA_TENANT_ID", "test-tenant");
+        guard.remove("RUNTARA_HTTP_URL");
+        guard.set("RUNTARA_SERVER_ADDR", "10.0.0.1:9999");
+        guard.set("RUNTARA_CORE_HTTP_PORT", "9001");
+
+        let cfg = HttpSdkConfig::from_env().unwrap();
+
+        assert_eq!(cfg.base_url, "http://127.0.0.1:8003");
+    }
+
+    #[test]
+    fn test_http_sdk_config_uses_http_url() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.set("RUNTARA_INSTANCE_ID", "test-instance");
+        guard.set("RUNTARA_TENANT_ID", "test-tenant");
+        guard.set("RUNTARA_HTTP_URL", "http://example.test:1234");
+
+        let cfg = HttpSdkConfig::from_env().unwrap();
+
+        assert_eq!(cfg.base_url, "http://example.test:1234");
     }
 }

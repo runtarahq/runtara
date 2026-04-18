@@ -85,7 +85,8 @@ impl WasmRunnerConfig {
                     .unwrap_or(300),
             ),
             skip_cert_verification: std::env::var("RUNTARA_SKIP_CERT_VERIFICATION")
-                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .ok()
+                .map(|v| crate::config::parse_bool_lenient(&v))
                 .unwrap_or(false),
             connection_service_url: std::env::var("RUNTARA_CONNECTION_SERVICE_URL").ok(),
         }
@@ -170,32 +171,11 @@ impl WasmRunner {
             env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
         }
 
-        // HTTP proxy URL for routing all outbound HTTP through smo-runtime
-        if let Ok(url) = std::env::var("RUNTARA_HTTP_PROXY_URL") {
-            env.insert("RUNTARA_HTTP_PROXY_URL".to_string(), url);
-        } else {
-            // Default: smo-runtime's internal proxy endpoint
-            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
-            env.insert(
-                "RUNTARA_HTTP_PROXY_URL".to_string(),
-                format!("http://127.0.0.1:{}/api/internal/proxy", port),
-            );
-        }
-
-        // Forward object model internal API URL for smo-stdlib agents
-        if let Ok(url) = std::env::var("RUNTARA_OBJECT_MODEL_URL") {
-            env.insert("RUNTARA_OBJECT_MODEL_URL".to_string(), url);
-        }
-
-        // Forward agent service URL for native-only capability execution (xlsx, sftp, compression)
-        if let Ok(url) = std::env::var("RUNTARA_AGENT_SERVICE_URL") {
-            env.insert("RUNTARA_AGENT_SERVICE_URL".to_string(), url);
-        }
-
-        // Forward tenant ID for internal API authentication
-        if let Ok(tid) = std::env::var("RUNTARA_TENANT_ID") {
-            env.insert("RUNTARA_TENANT_ID".to_string(), tid);
-        }
+        // RUNTARA_HTTP_PROXY_URL, RUNTARA_OBJECT_MODEL_URL, RUNTARA_AGENT_SERVICE_URL
+        // and RUNTARA_TENANT_ID now arrive via LaunchOptions.env (populated by
+        // the caller from its typed config) and are merged into `env` by the
+        // caller of build_env. The runner no longer reads them from its own
+        // process environment.
 
         // Store the host run_dir path for reference (not visible to guest)
         let _ = run_dir;

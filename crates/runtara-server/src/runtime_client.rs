@@ -272,6 +272,20 @@ impl RuntimeClient {
         options = options.with_env_var("TENANT_ID", tenant_id);
         options = options.with_env_var("INSTANCE_ID", &actual_instance_id);
 
+        // Server-side service URLs and tenant ID forwarded to the guest. These
+        // were previously read by runners via env::var against the host process
+        // environment (set by an unsafe env::set_var in server startup) —
+        // passing them explicitly through StartInstanceOptions removes that
+        // race-prone pattern and makes the scenario ABI typed.
+        let server_config = crate::config::get();
+        options = options.with_env_var("RUNTARA_TENANT_ID", &server_config.tenant_id);
+        options = options.with_env_var("RUNTARA_HTTP_PROXY_URL", &server_config.http_proxy_url);
+        options = options.with_env_var("RUNTARA_OBJECT_MODEL_URL", &server_config.object_model_url);
+        options = options.with_env_var(
+            "RUNTARA_AGENT_SERVICE_URL",
+            &server_config.agent_service_url,
+        );
+
         // Debug mode (pause at breakpoints)
         if debug {
             options = options.with_env_var("DEBUG_MODE", "true");

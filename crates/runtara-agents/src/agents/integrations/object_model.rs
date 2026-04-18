@@ -22,26 +22,16 @@ use std::collections::HashMap;
 // HTTP Client Helpers
 // ============================================================================
 
-/// Get the base URL for the internal object model API.
-fn base_url() -> String {
-    std::env::var("RUNTARA_OBJECT_MODEL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/internal/object-model".to_string())
-}
-
-/// Get the tenant ID from environment.
-fn tenant_id() -> String {
-    std::env::var("RUNTARA_TENANT_ID").unwrap_or_default()
-}
-
 /// Make a POST request to the internal API and parse the JSON response.
 fn http_post(path: &str, body: Value) -> Result<Value, AgentError> {
-    let url = format!("{}{}", base_url(), path);
-    let tid = tenant_id();
+    use crate::integrations::integration_utils::env;
+    let url = format!("{}{}", env::object_model_base_url(), path);
+    let tid = env::tenant_id();
     let client = runtara_http::HttpClient::new();
 
     let resp = client
         .request("POST", &url)
-        .header("X-Org-Id", &tid)
+        .header("X-Org-Id", tid)
         .header("Content-Type", "application/json")
         .body_json(&body)
         .call()
@@ -64,13 +54,14 @@ fn http_post(path: &str, body: Value) -> Result<Value, AgentError> {
 
 /// Make a PUT request to the internal API and parse the JSON response.
 fn http_put(path: &str, body: Value) -> Result<Value, AgentError> {
-    let url = format!("{}{}", base_url(), path);
-    let tid = tenant_id();
+    use crate::integrations::integration_utils::env;
+    let url = format!("{}{}", env::object_model_base_url(), path);
+    let tid = env::tenant_id();
     let client = runtara_http::HttpClient::new();
 
     let resp = client
         .request("PUT", &url)
-        .header("X-Org-Id", &tid)
+        .header("X-Org-Id", tid)
         .header("Content-Type", "application/json")
         .body_json(&body)
         .call()
@@ -93,13 +84,14 @@ fn http_put(path: &str, body: Value) -> Result<Value, AgentError> {
 
 /// Make a GET request to the internal API and parse the JSON response.
 fn http_get(path: &str) -> Result<Value, AgentError> {
-    let url = format!("{}{}", base_url(), path);
-    let tid = tenant_id();
+    use crate::integrations::integration_utils::env;
+    let url = format!("{}{}", env::object_model_base_url(), path);
+    let tid = env::tenant_id();
     let client = runtara_http::HttpClient::new();
 
     let resp = client
         .request("GET", &url)
-        .header("X-Org-Id", &tid)
+        .header("X-Org-Id", tid)
         .call()
         .map_err(|e| {
             AgentError::permanent(
