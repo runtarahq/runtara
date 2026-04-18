@@ -2110,7 +2110,7 @@ fn test_run_in_oci_container() {
         &[
             ("RUNTARA_INSTANCE_ID", "test-instance"),
             ("RUNTARA_TENANT_ID", "test-tenant"),
-            ("RUNTARA_SERVER_ADDR", "127.0.0.1:8001"),
+            ("RUNTARA_HTTP_URL", "http://127.0.0.1:8003"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
         ],
         Some(&input_json),
@@ -2193,7 +2193,7 @@ fn test_run_split_workflow_in_oci_container() {
         &[
             ("RUNTARA_INSTANCE_ID", "test-split-instance"),
             ("RUNTARA_TENANT_ID", "test-tenant"),
-            ("RUNTARA_SERVER_ADDR", "127.0.0.1:8001"),
+            ("RUNTARA_HTTP_URL", "http://127.0.0.1:8003"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
         ],
         Some(&input_json),
@@ -2281,7 +2281,7 @@ fn test_run_start_scenario_workflow_in_oci_container() {
         &[
             ("RUNTARA_INSTANCE_ID", "test-start-scenario-instance"),
             ("RUNTARA_TENANT_ID", "test-tenant"),
-            ("RUNTARA_SERVER_ADDR", "127.0.0.1:8001"),
+            ("RUNTARA_HTTP_URL", "http://127.0.0.1:8003"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
         ],
         Some(&input_json),

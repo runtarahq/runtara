@@ -25,15 +25,22 @@ pub fn native_agent_stub(
     capability_id: &str,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let base_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/internal/agents".to_string());
+    // Env vars are stable for the lifetime of a scenario process — cache on first read.
+    use std::sync::OnceLock;
+    static AGENT_SERVICE_URL: OnceLock<String> = OnceLock::new();
+    static TENANT_ID: OnceLock<String> = OnceLock::new();
+
+    let base_url = AGENT_SERVICE_URL.get_or_init(|| {
+        std::env::var("RUNTARA_AGENT_SERVICE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:7002/api/internal/agents".to_string())
+    });
     let url = format!("{}/{}/{}", base_url, module, capability_id);
-    let tid = std::env::var("RUNTARA_TENANT_ID").unwrap_or_default();
+    let tid = TENANT_ID.get_or_init(|| std::env::var("RUNTARA_TENANT_ID").unwrap_or_default());
 
     let client = runtara_http::HttpClient::new();
     let resp = client
         .request("POST", &url)
-        .header("X-Org-Id", &tid)
+        .header("X-Org-Id", tid)
         .header("Content-Type", "application/json")
         .body_json(&input)
         .call()

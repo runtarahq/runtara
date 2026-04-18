@@ -3452,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -3499,7 +3499,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-ai"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "runtara-http",
  "serde",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-connections"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "aes-gcm",
  "axum 0.8.8",
@@ -3539,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3564,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "inventory",
  "schemars 0.8.22",
@@ -3575,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-http"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3618,7 +3618,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-management-sdk"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-store"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "chrono",
  "regex",
@@ -3648,7 +3648,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-sdk-macros"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-server"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3745,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-test-harness"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "runtara-dsl",
  "runtara-workflow-stdlib",
@@ -3755,7 +3755,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-text-parser"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "chrono",
  "regex",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "inventory",
  "minijinja",
@@ -3789,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "1.8.0"
+version = "2.0.0"
 dependencies = [
  "minijinja",
  "proc-macro2",

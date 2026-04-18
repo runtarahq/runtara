@@ -264,15 +264,11 @@ impl OciRunner {
             env.insert("RUNTARA_CORE_HTTP_PORT".to_string(), port);
         }
 
-        // Forward object model internal API URL for smo-stdlib agents
-        if let Ok(url) = std::env::var("RUNTARA_OBJECT_MODEL_URL") {
-            env.insert("RUNTARA_OBJECT_MODEL_URL".to_string(), url);
-        }
-
-        // Forward tenant ID for internal API authentication
-        if let Ok(tid) = std::env::var("RUNTARA_TENANT_ID") {
-            env.insert("RUNTARA_TENANT_ID".to_string(), tid);
-        }
+        // RUNTARA_OBJECT_MODEL_URL, RUNTARA_AGENT_SERVICE_URL, RUNTARA_HTTP_PROXY_URL
+        // and RUNTARA_TENANT_ID now arrive via LaunchOptions.env (populated by
+        // the caller from its typed config) and are merged into `env` by the
+        // caller of build_env. The runner no longer reads them from its own
+        // process environment.
 
         env
     }

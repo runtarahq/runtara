@@ -214,16 +214,20 @@ impl RequestBuilder {
 
         // Forward tenant ID header (X-Org-Id)
         // Try from original request headers first, then from RUNTARA_TENANT_ID env var
+        // (cached on first read — env is stable for scenario lifetime).
+        static TENANT_ID: OnceLock<Option<String>> = OnceLock::new();
         if let Some(tenant) = self
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("x-org-id"))
         {
             proxy_request.headers.push(tenant.clone());
-        } else if let Ok(tenant_id) = std::env::var("RUNTARA_TENANT_ID") {
+        } else if let Some(tenant_id) =
+            TENANT_ID.get_or_init(|| std::env::var("RUNTARA_TENANT_ID").ok())
+        {
             proxy_request
                 .headers
-                .push(("X-Org-Id".to_string(), tenant_id));
+                .push(("X-Org-Id".to_string(), tenant_id.clone()));
         }
 
         // Execute directly (bypass proxy check to avoid recursion)

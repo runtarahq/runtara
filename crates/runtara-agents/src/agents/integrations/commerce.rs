@@ -23,10 +23,13 @@ fn resolve_integration_id(connection: &RawConnection) -> Result<String, AgentErr
     }
 
     // Fetch from connection service
-    let base_url = std::env::var("CONNECTION_SERVICE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:7002/api/connections".to_string());
-    let tenant_id = std::env::var("RUNTARA_TENANT_ID").unwrap_or_default();
-    let url = format!("{}/{}/{}", base_url, tenant_id, connection.connection_id);
+    use crate::integrations::integration_utils::env;
+    let url = format!(
+        "{}/{}/{}",
+        env::connection_service_url(),
+        env::tenant_id(),
+        connection.connection_id
+    );
 
     let client = runtara_http::HttpClient::new();
     let resp = client.request("GET", &url).call().map_err(|e| {
