@@ -127,7 +127,7 @@ impl AgentExecutionService {
                 // Agent errors are returned as a successful HTTP response with success=false,
                 // not as HTTP errors. This matches the convention used by the dispatcher.
                 // The caller (workflow instance) can then decide how to handle the error
-                // (retry via #[durable], propagate to user, etc.).
+                // (retry via #[resilient], propagate to user, etc.).
                 Ok(ExecutionResult {
                     success: false,
                     output: None,

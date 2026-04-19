@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Proc macros for runtara-sdk.
 //!
-//! Provides the `#[resilient]` attribute macro for transparent durability with retry support,
-//! plus a deprecated `#[durable]` alias kept for backward compatibility.
+//! Provides the `#[resilient]` attribute macro for transparent durability with retry support.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -14,7 +13,7 @@ use syn::{
     parse_macro_input, spanned::Spanned,
 };
 
-/// Parsed configuration from `#[resilient(...)]` (and legacy `#[durable(...)]`) attributes.
+/// Parsed configuration from `#[resilient(...)]` attributes.
 #[derive(Debug, Default)]
 struct ResilientAttr {
     /// Enable durable mode: checkpoint read/write, signal handling via checkpoint result,
@@ -147,22 +146,6 @@ impl Parse for ResilientAttr {
 pub fn resilient(attr: TokenStream, item: TokenStream) -> TokenStream {
     let config = parse_macro_input!(attr as ResilientAttr);
     let input = parse_macro_input!(item as ItemFn);
-
-    match generate_resilient_wrapper(input, config) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
-}
-
-/// Legacy alias for `#[resilient]` with `durable = true`. Retained for backward
-/// compatibility; new code should use `#[resilient]`.
-#[proc_macro_attribute]
-pub fn durable(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut config = parse_macro_input!(attr as ResilientAttr);
-    let input = parse_macro_input!(item as ItemFn);
-
-    // #[durable] always implies durable = true regardless of what the attr parsed.
-    config.durable = Some(true);
 
     match generate_resilient_wrapper(input, config) {
         Ok(tokens) => tokens.into(),
@@ -891,35 +874,35 @@ fn extract_result_ok_type(return_type: &ReturnType) -> syn::Result<Type> {
     let ReturnType::Type(_, ty) = return_type else {
         return Err(syn::Error::new(
             return_type.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         ));
     };
 
     let Type::Path(type_path) = ty.as_ref() else {
         return Err(syn::Error::new(
             ty.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         ));
     };
 
     let segment = type_path.path.segments.last().ok_or_else(|| {
         syn::Error::new(
             ty.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         )
     })?;
 
     if segment.ident != "Result" {
         return Err(syn::Error::new(
             segment.ident.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         ));
     }
 
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
         return Err(syn::Error::new(
             segment.span(),
-            "#[durable] requires Result<T, E> with explicit type parameters",
+            "#[resilient] requires Result<T, E> with explicit type parameters",
         ));
     };
 
@@ -927,7 +910,7 @@ fn extract_result_ok_type(return_type: &ReturnType) -> syn::Result<Type> {
         Some(syn::GenericArgument::Type(t)) => Ok(t.clone()),
         _ => Err(syn::Error::new(
             args.span(),
-            "#[durable] requires Result<T, E> with explicit type parameters",
+            "#[resilient] requires Result<T, E> with explicit type parameters",
         )),
     }
 }
@@ -943,7 +926,7 @@ fn extract_first_arg_ident(
                 let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
                     return Err(syn::Error::new(
                         pat_type.pat.span(),
-                        "#[durable] requires the first argument to be a simple identifier",
+                        "#[resilient] requires the first argument to be a simple identifier",
                     ));
                 };
                 return Ok(pat_ident.ident.clone());
@@ -953,7 +936,7 @@ fn extract_first_arg_ident(
 
     Err(syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[durable] requires at least one argument: the idempotency key (String)",
+        "#[resilient] requires at least one argument: the idempotency key (String)",
     ))
 }
 
@@ -1587,25 +1570,5 @@ mod tests {
             tokens.contains("record_retry_attempt"),
             "durable path must emit record_retry_attempt"
         );
-    }
-
-    #[test]
-    fn test_durable_alias_forces_durable_true() {
-        // The legacy #[durable] macro must behave identically to
-        // #[resilient(durable = true, ...)] regardless of any durable attr.
-        let fn_item: ItemFn = parse_quote! {
-            fn call(key: &str) -> Result<String, String> { Ok(String::new()) }
-        };
-        // Even if caller somehow passes durable=false through the alias, we force true.
-        let config_true = ResilientAttr {
-            durable: Some(true),
-            max_retries: Some(0),
-            ..Default::default()
-        };
-        let tokens = generate_resilient_wrapper(fn_item, config_true)
-            .unwrap()
-            .to_string();
-        assert!(tokens.contains("get_checkpoint"));
-        assert!(tokens.contains(". checkpoint ("));
     }
 }

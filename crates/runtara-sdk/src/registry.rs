@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Global SDK registry for the #[durable] macro.
+//! Global SDK registry for the #[resilient] macro.
 //!
-//! This module provides global SDK registration so the #[durable] macro
+//! This module provides global SDK registration so the #[resilient] macro
 //! can access the SDK without explicit passing.
 //!
 //! # Cancellation Support
@@ -31,7 +31,7 @@ static SDK_INSTANCE: OnceCell<Mutex<RuntaraSdk>> = OnceCell::new();
 /// Global cancellation flag triggered when a cancel signal is received.
 static INSTANCE_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// Register an SDK instance globally for use by #[durable] functions.
+/// Register an SDK instance globally for use by #[resilient] functions.
 ///
 /// This should be called once at application startup after creating and
 /// connecting the SDK.
@@ -49,10 +49,10 @@ static INSTANCE_CANCELLED: AtomicBool = AtomicBool::new(false);
 ///     let sdk = RuntaraSdk::from_env()?;
 ///     sdk.connect()?;
 ///
-///     // Register globally for #[durable] functions
+///     // Register globally for #[resilient] functions
 ///     register_sdk(sdk);
 ///
-///     // Now #[durable] functions will use this SDK
+///     // Now #[resilient] functions will use this SDK
 ///     Ok(())
 /// }
 /// ```
@@ -182,7 +182,7 @@ pub fn reset_cancellation() {
 /// to exit. It sends a SignalAck to the core, which will update the instance
 /// status to "cancelled" (rather than "failed").
 ///
-/// This function is used by the `#[durable]` macro when cancellation is detected.
+/// This function is used by the `#[resilient]` macro when cancellation is detected.
 /// It triggers the local cancellation flag and sends the acknowledgment.
 ///
 /// # Example

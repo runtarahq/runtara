@@ -173,12 +173,12 @@ impl RuntaraSdk {
 
     // ========== Initialization ==========
 
-    /// Initialize SDK: connect, register, and make available globally for #[durable].
+    /// Initialize SDK: connect, register, and make available globally for #[resilient].
     ///
     /// This is a convenience method that combines:
     /// 1. `connect()` - establish connection to runtara-core
     /// 2. `register(checkpoint_id)` - register this instance
-    /// 3. `register_sdk()` - make SDK available globally for #[durable] functions
+    /// 3. `register_sdk()` - make SDK available globally for #[resilient] functions
     ///
     /// # Example
     ///
@@ -186,11 +186,11 @@ impl RuntaraSdk {
     /// use runtara_sdk::RuntaraSdk;
     ///
     /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     // One-liner setup for #[durable] functions
+    ///     // One-liner setup for #[resilient] functions
     ///     RuntaraSdk::from_env()?
     ///         .init(None)?;
     ///
-    ///     // Now #[durable] functions work automatically
+    ///     // Now #[resilient] functions work automatically
     ///     my_durable_function("key".to_string(), args)?;
     ///     Ok(())
     /// }

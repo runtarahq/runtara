@@ -163,7 +163,7 @@ pub async fn execute_proxy_request(
         // ── Pre-flight rate limit check ────────────────────────────────────
         // If adaptive rate limiting is enabled, check the token bucket before
         // dispatching upstream. When tokens are exhausted, return a synthetic
-        // 429 with Retry-After so the agent's #[durable] retry loop can use
+        // 429 with Retry-After so the agent's #[resilient] retry loop can use
         // durable_sleep() (suspendable/resumable) to wait.
         if crate::config::adaptive_rate_limiting_enabled()
             && let Err(retry_after_ms) = facade

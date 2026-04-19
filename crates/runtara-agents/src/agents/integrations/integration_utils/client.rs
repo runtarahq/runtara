@@ -15,7 +15,7 @@
 //! staying on top of the existing `http_request` boundary — it's a shape
 //! over that boundary, not a replacement for it.
 //!
-//! The client does **not** retry. Retries are owned by the `#[durable]`
+//! The client does **not** retry. Retries are owned by the `#[resilient]`
 //! runtime. However, when the upstream returns 429 this module parses
 //! `Retry-After` / `Retry-After-Ms` response headers (via
 //! `crate::types::parse_retry_after_header`) and embeds the value as

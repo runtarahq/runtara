@@ -5,7 +5,7 @@
 //! The EmbedWorkflow step executes a nested child workflow.
 //! When a child workflow's ExecutionGraph is available in the EmitContext,
 //! it will be recursively emitted and embedded into the parent workflow.
-//! The entire child workflow result uses #[durable] macro for checkpoint-based recovery.
+//! The entire child workflow result uses #[resilient] macro for checkpoint-based recovery.
 
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;

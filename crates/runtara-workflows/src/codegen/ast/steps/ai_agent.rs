@@ -18,7 +18,7 @@
 //!    - If LLM returns text response: store as output and continue to next step
 //!    - If max_iterations reached: stop with current response
 //!
-//! Each tool call is wrapped with `#[durable]` for checkpoint-based crash recovery,
+//! Each tool call is wrapped with `#[resilient]` for checkpoint-based crash recovery,
 //! and emits `step_debug_start`/`step_debug_end` events so tool calls appear as
 //! individual steps in the execution trace.
 
@@ -1545,7 +1545,7 @@ fn get_tool_metadata(
 
 /// Build the tool dispatch code — a match on tool name that executes the target step.
 ///
-/// Each tool call is wrapped with `#[durable]` via `__ai_tool_durable` for checkpoint-based
+/// Each tool call is wrapped with `#[resilient]` via `__ai_tool_durable` for checkpoint-based
 /// crash recovery. The cache key includes iteration and call counter for uniqueness.
 ///
 /// EmbedWorkflow tool targets are dispatched by calling the pre-emitted child workflow

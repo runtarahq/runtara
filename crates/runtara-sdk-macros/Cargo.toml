@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Proc macros for runtara-sdk (#[durable] attribute)"
-keywords = ["durable", "workflow", "macro", "checkpoint"]
+description = "Proc macros for runtara-sdk (#[resilient] attribute)"
+keywords = ["resilient", "workflow", "macro", "checkpoint"]
 categories = ["development-tools::procedural-macro-helpers"]
 
 [lib]

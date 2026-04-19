@@ -8,7 +8,7 @@ High-level client library for building durable workflow instances that talk to `
 
 ## What it is
 
-`runtara-sdk` is the ergonomic surface a workflow/instance uses to register itself, checkpoint state, send lifecycle events (heartbeat, completed, failed, suspended), and poll for cancel/pause/resume signals. The central type is `RuntaraSdk`, built from env via `RuntaraSdk::from_env()` or programmatically via `HttpSdkConfig`; `checkpoint()` returns a `CheckpointResult` that distinguishes fresh execution from resume and carries any pending `Signal`. The `#[durable]` proc-macro (re-exported from `runtara-sdk-macros`) wires instance code into a global SDK registry so long-running operations can be cancelled cooperatively.
+`runtara-sdk` is the ergonomic surface a workflow/instance uses to register itself, checkpoint state, send lifecycle events (heartbeat, completed, failed, suspended), and poll for cancel/pause/resume signals. The central type is `RuntaraSdk`, built from env via `RuntaraSdk::from_env()` or programmatically via `HttpSdkConfig`; `checkpoint()` returns a `CheckpointResult` that distinguishes fresh execution from resume and carries any pending `Signal`. The `#[resilient]` proc-macro (re-exported from `runtara-sdk-macros`) wires instance code into a global SDK registry so long-running operations can be cancelled cooperatively.
 
 ## Using it standalone
 
@@ -41,8 +41,8 @@ Requires `RUNTARA_INSTANCE_ID` and `RUNTARA_TENANT_ID` in the environment, plus 
 ## Inside Runtara
 
 - Consumed by `runtara-workflow-stdlib`, which re-exports the SDK with `http` features for workflow authors.
-- Depends on `runtara-sdk-macros` (the `#[durable]` proc-macro) and optionally on `runtara-core` (embedded mode) and `runtara-http` (HTTP mode).
-- Main integration point: the `HttpBackend` calls `runtara-core`'s instance HTTP API; the global registry in `registry.rs` mediates signal delivery so `#[durable]` functions can observe cancellation mid-flight.
+- Depends on `runtara-sdk-macros` (the `#[resilient]` proc-macro) and optionally on `runtara-core` (embedded mode) and `runtara-http` (HTTP mode).
+- Main integration point: the `HttpBackend` calls `runtara-core`'s instance HTTP API; the global registry in `registry.rs` mediates signal delivery so `#[resilient]` functions can observe cancellation mid-flight.
 - Runs in: WASM guest (primary) / native host. The `wasi` and `wasm-js` features target `wasm32-wasip2` and `wasm32-unknown-unknown`; native hosts use the default `http` + `embedded` build.
 
 ## License

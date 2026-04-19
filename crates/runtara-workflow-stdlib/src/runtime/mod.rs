@@ -18,4 +18,4 @@ pub use error::{Error, Result, WorkflowError};
 // Re-export SDK types for workflows
 #[cfg(feature = "native")]
 pub use runtara_sdk::HttpSdkConfig;
-pub use runtara_sdk::{RuntaraSdk, SdkError, durable, register_sdk, resilient, sdk};
+pub use runtara_sdk::{RuntaraSdk, SdkError, register_sdk, resilient, sdk};

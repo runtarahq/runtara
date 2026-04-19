@@ -104,7 +104,7 @@ pub use types::{
 #[cfg(feature = "http")]
 pub use backend::http::HttpSdkConfig;
 
-// Global SDK registry for #[durable] macro
+// Global SDK registry for #[resilient] macro
 pub use registry::{register_sdk, sdk, stop_heartbeat, try_sdk};
 
 // Cancellation/pause support - allows long-running operations to be interrupted
@@ -113,9 +113,8 @@ pub use registry::{
     reset_cancellation, trigger_cancellation, with_cancellation, with_cancellation_err,
 };
 
-// Re-export the #[resilient] macro. #[durable] is kept as a deprecated alias
-// that forwards to #[resilient(durable = true, ...)] for backward compatibility.
-pub use runtara_sdk_macros::{durable, resilient};
+// Re-export the #[resilient] macro.
+pub use runtara_sdk_macros::resilient;
 
 // Re-export persistence trait for embedded mode
 #[cfg(feature = "embedded")]

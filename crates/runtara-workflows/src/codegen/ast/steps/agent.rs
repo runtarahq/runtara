@@ -3,7 +3,7 @@
 //! Agent step emitter.
 //!
 //! The Agent step executes an agent capability.
-//! All agent capabilities use #[durable] macro for checkpoint-based crash recovery.
+//! All agent capabilities use #[resilient] macro for checkpoint-based crash recovery.
 //! Rate limiting is handled via connection service responses.
 
 use proc_macro2::TokenStream;
@@ -42,7 +42,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     let agent_id = &step.agent_id;
     let capability_id = &step.capability_id;
 
-    // All capabilities use #[durable] for crash recovery.
+    // All capabilities use #[resilient] for crash recovery.
     // Rate limiting is only applied to external API calls.
     let needs_rate_limit = needs_rate_limiting(agent_id, capability_id);
 

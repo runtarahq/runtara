@@ -7,7 +7,7 @@
 //!
 //! This version generates native Linux binaries that use runtara-sdk
 //! for communication with runtara-core. All agent capability calls are
-//! wrapped with `#[durable]` for automatic checkpoint-based recovery.
+//! wrapped with `#[resilient]` for automatic checkpoint-based recovery.
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
@@ -553,7 +553,7 @@ fn emit_workflow_variables(graph: &ExecutionGraph) -> TokenStream {
 ///
 /// Generates a main function that:
 /// 1. Creates and connects RuntaraSdk
-/// 2. Registers SDK globally for #[durable] functions
+/// 2. Registers SDK globally for #[resilient] functions
 /// 3. Loads inputs from environment
 /// 4. Executes the workflow asynchronously
 /// 5. Reports completion/failure/cancellation status to Core via SDK
@@ -596,7 +596,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 return ExitCode::FAILURE;
             }
 
-            // Register SDK globally for #[durable] functions
+            // Register SDK globally for #[resilient] functions
             register_sdk(sdk_instance);
 
             // Load input from runtara-core via SDK.

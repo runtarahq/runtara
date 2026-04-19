@@ -3,7 +3,7 @@
 //! Split step emitter.
 //!
 //! The Split step iterates over an array, executing a subgraph for each item.
-//! The Split step uses #[durable] macro to checkpoint its final result.
+//! The Split step uses #[resilient] macro to checkpoint its final result.
 //! Individual steps within the subgraph checkpoint themselves via runtara-sdk,
 //! enabling recovery mid-iteration.
 
@@ -730,7 +730,7 @@ mod tests {
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify retry config in durable macro
+        // Verify retry config in resilient macro
         assert!(
             code.contains("max_retries = 5"),
             "Should include custom max_retries"

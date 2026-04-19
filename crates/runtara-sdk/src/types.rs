@@ -152,9 +152,9 @@ pub enum RetryStrategy {
 
 /// Configuration for retry behavior in durable functions.
 ///
-/// Used by the `#[durable]` macro to control retry logic:
+/// Used by the `#[resilient]` macro to control retry logic:
 /// ```ignore
-/// #[durable(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
+/// #[resilient(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
 /// pub fn my_function(...) -> Result<T, E> { ... }
 /// ```
 #[derive(Debug, Clone)]
