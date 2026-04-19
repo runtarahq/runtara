@@ -52,6 +52,21 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         quote! {}
     };
 
+    let step_durable = ctx.durable && step.durable.unwrap_or(true);
+    let sleep_code = if step_durable {
+        quote! {
+            let __sdk = sdk().lock().unwrap();
+            let __duration = std::time::Duration::from_millis(__duration_ms);
+            __sdk.durable_sleep(__duration)
+                .map_err(|e| format!("Delay step '{}' failed: {}", #step_id, e))?;
+        }
+    } else {
+        quote! {
+            let __duration = std::time::Duration::from_millis(__duration_ms);
+            std::thread::sleep(__duration);
+        }
+    };
+
     Ok(quote! {
         // Build source for mapping
         let #source_var = #build_source;
@@ -79,12 +94,10 @@ pub fn emit(step: &DelayStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 }
             };
 
-            // Perform durable sleep via SDK
+            // Perform the sleep (durable via SDK, or in-process std::thread::sleep
+            // depending on workflow/step `durable` flag)
             {
-                let __sdk = sdk().lock().unwrap();
-                let __duration = std::time::Duration::from_millis(__duration_ms);
-                __sdk.durable_sleep(__duration)
-                    .map_err(|e| format!("Delay step '{}' failed: {}", #step_id, e))?;
+                #sleep_code
             }
 
             // Produce step result
@@ -113,6 +126,7 @@ mod tests {
             name: Some("Test Delay".to_string()),
             duration_ms: duration,
             breakpoint: None,
+            durable: None,
         }
     }
 
@@ -149,5 +163,49 @@ mod tests {
         assert!(result.is_ok());
         let code = result.unwrap().to_string();
         assert!(code.contains("durable_sleep"));
+    }
+
+    #[test]
+    fn test_emit_delay_non_durable_workflow_uses_thread_sleep() {
+        let mut step = create_delay_step(
+            "d",
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(100),
+            }),
+        );
+        step.durable = Some(true); // step explicitly wants durable…
+        let mut ctx = EmitContext::new(false);
+        ctx.durable = false; // …but workflow overrides.
+        let code = emit(&step, &mut ctx).unwrap().to_string();
+        assert!(
+            code.contains("std :: thread :: sleep"),
+            "non-durable workflow must use std::thread::sleep"
+        );
+        assert!(
+            !code.contains("durable_sleep"),
+            "non-durable workflow must NOT call durable_sleep"
+        );
+    }
+
+    #[test]
+    fn test_emit_delay_step_level_opt_out_uses_thread_sleep() {
+        let mut step = create_delay_step(
+            "d",
+            MappingValue::Immediate(ImmediateValue {
+                value: serde_json::json!(100),
+            }),
+        );
+        step.durable = Some(false);
+        let mut ctx = EmitContext::new(false);
+        // ctx.durable = true (default). Step-level opt-out applies.
+        let code = emit(&step, &mut ctx).unwrap().to_string();
+        assert!(
+            code.contains("std :: thread :: sleep"),
+            "step-level durable=false must use std::thread::sleep"
+        );
+        assert!(
+            !code.contains("durable_sleep"),
+            "step-level durable=false must NOT call durable_sleep"
+        );
     }
 }

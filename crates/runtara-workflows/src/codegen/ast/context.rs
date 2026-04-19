@@ -51,6 +51,13 @@ pub struct EmitContext {
     /// Maximum cumulative durable-sleep time for rate-limited retries (ms).
     /// Propagated from `ExecutionGraph.rate_limit_budget_ms`.
     pub rate_limit_budget_ms: u64,
+
+    /// Whether the enclosing workflow is durable. Set once at the top level
+    /// from `ExecutionGraph.durable.unwrap_or(true)`, then inherited
+    /// unconditionally by `emit_graph_as_function` for every nested subgraph
+    /// and embedded child workflow. Step emitters combine this with per-step
+    /// `durable` flags: `effective = ctx.durable && step.durable.unwrap_or(true)`.
+    pub durable: bool,
 }
 
 impl EmitContext {
@@ -68,6 +75,7 @@ impl EmitContext {
             connection_service_url: None,
             tenant_id: None,
             rate_limit_budget_ms: 60_000,
+            durable: true,
         }
     }
 
@@ -98,6 +106,7 @@ impl EmitContext {
             connection_service_url,
             tenant_id,
             rate_limit_budget_ms: 60_000,
+            durable: true,
         }
     }
 
@@ -205,6 +214,15 @@ mod tests {
     fn test_new_track_events_false() {
         let ctx = EmitContext::new(false);
         assert!(!ctx.track_events);
+    }
+
+    #[test]
+    fn test_durable_defaults_to_true() {
+        assert!(EmitContext::new(false).durable);
+        assert!(EmitContext::new(true).durable);
+        let ctx =
+            EmitContext::with_child_workflows(false, HashMap::new(), HashMap::new(), None, None);
+        assert!(ctx.durable);
     }
 
     #[test]

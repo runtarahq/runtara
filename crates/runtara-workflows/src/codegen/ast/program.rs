@@ -1066,6 +1066,10 @@ pub fn emit_graph_as_function(
     ctx.emitted_child_functions = parent_ctx.emitted_child_functions.clone();
     // Use this graph's rate_limit_budget_ms, or inherit from parent
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
+    // Durability is a top-level workflow concern: children and subgraphs always
+    // inherit from the parent context, ignoring any `durable` flag on this graph.
+    // (The top-level compile_with_children sets ctx.durable from its graph directly.)
+    ctx.durable = parent_ctx.durable;
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
@@ -1158,6 +1162,7 @@ mod tests {
                 connection_id: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1215,6 +1220,7 @@ mod tests {
                 connection_id: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -1231,6 +1237,7 @@ mod tests {
                 connection_id: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1284,6 +1291,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1383,6 +1391,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1846,6 +1855,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -2102,6 +2112,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -2166,6 +2177,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 

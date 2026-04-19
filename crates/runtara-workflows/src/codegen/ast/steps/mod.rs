@@ -169,6 +169,14 @@ pub fn emit_breakpoint_check(
     ctx: &EmitContext,
     step_inputs_var: Option<&proc_macro2::Ident>,
 ) -> TokenStream {
+    // Breakpoints rely on the `checkpoint()` SDK call to remember that they were
+    // hit (otherwise every process restart would stop at the same breakpoint).
+    // In a non-durable workflow there is no checkpoint machinery, so the whole
+    // breakpoint mechanism is inapplicable — emit nothing.
+    if !ctx.durable {
+        return quote! {};
+    }
+
     let inputs_var = &ctx.inputs_var;
     let steps_context_var = &ctx.steps_context_var;
 
@@ -866,6 +874,33 @@ mod tests {
     }
 
     #[test]
+    fn test_breakpoint_check_noop_when_non_durable() {
+        let mut ctx = EmitContext::new(false);
+        ctx.durable = false;
+        let tokens = emit_breakpoint_check("bp-1", Some("bp"), "Agent", &ctx, None);
+        assert!(
+            tokens.to_string().is_empty(),
+            "emit_breakpoint_check must return empty tokens when ctx.durable=false; got: {}",
+            tokens
+        );
+    }
+
+    #[test]
+    fn test_breakpoint_check_emits_tokens_when_durable() {
+        let ctx = EmitContext::new(false); // ctx.durable = true by default
+        let tokens = emit_breakpoint_check("bp-2", Some("bp"), "Agent", &ctx, None);
+        let s = tokens.to_string();
+        assert!(
+            s.contains("DEBUG_MODE"),
+            "durable workflow should emit breakpoint check guarded by DEBUG_MODE"
+        );
+        assert!(
+            s.contains("checkpoint"),
+            "durable workflow's breakpoint check should call checkpoint()"
+        );
+    }
+
+    #[test]
     fn test_emit_step_debug_start_disabled_when_not_track_events() {
         let ctx = make_non_debug_ctx();
         let tokens = emit_step_debug_start(
@@ -1234,6 +1269,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = split::emit(&split_step, &mut ctx).unwrap();
@@ -1326,6 +1362,7 @@ mod tests {
             connection_id: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx).unwrap();
@@ -1389,6 +1426,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = embed_workflow::emit(&embed_workflow_step, &mut ctx).unwrap();
@@ -1562,6 +1600,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = split::emit(&split_step, &mut ctx).unwrap();
@@ -1601,6 +1640,7 @@ mod tests {
             connection_id: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = agent::emit(&agent_step, &mut ctx).unwrap();

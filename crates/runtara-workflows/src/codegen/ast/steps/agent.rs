@@ -97,6 +97,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
     // Generate the durable capability execution
     let rate_limit_budget = ctx.rate_limit_budget_ms;
+    let step_durable = ctx.durable && step.durable.unwrap_or(true);
     let execute_capability = if needs_rate_limit {
         emit_durable_rate_limited_call(
             step_id,
@@ -106,6 +107,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             &durable_fn_name,
             step.connection_id.as_deref(),
             ctx,
+            step_durable,
             max_retries,
             retry_delay,
             rate_limit_budget,
@@ -119,6 +121,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             &durable_fn_name,
             step.connection_id.as_deref(),
             ctx,
+            step_durable,
             max_retries,
             retry_delay,
             rate_limit_budget,
@@ -231,7 +234,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     })
 }
 
-/// Emit a durable capability call using #[durable] macro.
+/// Emit a durable capability call using #[resilient] macro.
 #[allow(clippy::too_many_arguments)]
 fn emit_durable_call(
     step_id: &str,
@@ -241,6 +244,7 @@ fn emit_durable_call(
     durable_fn_name: &proc_macro2::Ident,
     connection_id: Option<&str>,
     ctx: &EmitContext,
+    step_durable: bool,
     max_retries: u32,
     retry_delay: u64,
     rate_limit_budget: u64,
@@ -265,6 +269,7 @@ fn emit_durable_call(
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
     let rate_limit_budget_lit = rate_limit_budget;
+    let durable_lit = step_durable;
 
     quote! {
         // Build cache key dynamically, including prefix and loop indices
@@ -304,10 +309,10 @@ fn emit_durable_call(
             }
         };
 
-        // Define the durable agent execution function with cancellation support.
+        // Define the resilient agent execution function with cancellation support.
         // The raw capability error is passed through (not wrapped) so that the
-        // #[durable] macro can parse JSON error category for retry decisions.
-        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
+        // #[resilient] macro can parse JSON error category for retry decisions.
+        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
         fn #durable_fn_name(
             cache_key: &str,
             inputs: serde_json::Value,
@@ -320,8 +325,8 @@ fn emit_durable_call(
 
         #connection_fetch
 
-        // Call the durable function and wrap error with step context AFTER retry
-        // decisions have been made (inside the durable fn, errors are raw JSON)
+        // Call the resilient function and wrap error with step context AFTER retry
+        // decisions have been made (inside the resilient fn, errors are raw JSON)
         let __cap_result = #durable_fn_name(
             &__durable_cache_key,
             #final_inputs.clone(),
@@ -344,6 +349,7 @@ fn emit_durable_rate_limited_call(
     durable_fn_name: &proc_macro2::Ident,
     connection_id: Option<&str>,
     ctx: &EmitContext,
+    step_durable: bool,
     max_retries: u32,
     retry_delay: u64,
     rate_limit_budget: u64,
@@ -368,6 +374,7 @@ fn emit_durable_rate_limited_call(
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
     let rate_limit_budget_lit = rate_limit_budget;
+    let durable_lit = step_durable;
 
     quote! {
         // Build cache key dynamically, including prefix and loop indices
@@ -407,10 +414,10 @@ fn emit_durable_rate_limited_call(
             }
         };
 
-        // Define the durable agent execution function (rate-limited) with cancellation support.
+        // Define the resilient agent execution function (rate-limited) with cancellation support.
         // The raw capability error is passed through (not wrapped) so that the
-        // #[durable] macro can parse JSON error category for retry decisions.
-        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
+        // #[resilient] macro can parse JSON error category for retry decisions.
+        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit, rate_limit_budget = #rate_limit_budget_lit)]
         fn #durable_fn_name(
             cache_key: &str,
             inputs: serde_json::Value,
@@ -423,8 +430,8 @@ fn emit_durable_rate_limited_call(
 
         #connection_fetch
 
-        // Call the durable function and wrap error with step context AFTER retry
-        // decisions have been made (inside the durable fn, errors are raw JSON)
+        // Call the resilient function and wrap error with step context AFTER retry
+        // decisions have been made (inside the resilient fn, errors are raw JSON)
         let __cap_result = #durable_fn_name(
             &__durable_cache_key,
             #final_inputs.clone(),
@@ -503,6 +510,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         }
     }
 
@@ -520,12 +528,50 @@ mod tests {
             "Should build durable cache key"
         );
         assert!(
-            code.contains("# [durable") || code.contains("#[durable"),
-            "Should use #[durable] macro"
+            code.contains("# [resilient") || code.contains("#[resilient"),
+            "Should use #[resilient] macro"
         );
         assert!(
             code.contains("__workflow_dispatch"),
             "Should call __workflow_dispatch"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_durable_true_when_workflow_and_step_both_durable() {
+        let mut ctx = EmitContext::new(false); // ctx.durable defaults to true
+        let step = create_agent_step("a", "utils", "random-double");
+        let code = emit(&step, &mut ctx).unwrap().to_string();
+        assert!(
+            code.contains("durable = true"),
+            "durable-by-default workflow with silent step should emit durable = true, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_non_durable_workflow_forces_durable_false() {
+        let mut ctx = EmitContext::new(false);
+        ctx.durable = false;
+        let mut step = create_agent_step("a", "utils", "random-double");
+        // Even if step explicitly asks for durable, workflow-level wins.
+        step.durable = Some(true);
+        let code = emit(&step, &mut ctx).unwrap().to_string();
+        assert!(
+            code.contains("durable = false"),
+            "workflow durable=false must override step durable=true"
+        );
+    }
+
+    #[test]
+    fn test_emit_agent_step_level_opt_out_within_durable_workflow() {
+        let mut ctx = EmitContext::new(false); // ctx.durable = true
+        let mut step = create_agent_step("a", "utils", "random-double");
+        step.durable = Some(false);
+        let code = emit(&step, &mut ctx).unwrap().to_string();
+        assert!(
+            code.contains("durable = false"),
+            "step-level durable=false should propagate into the resilient attr"
         );
     }
 
@@ -579,6 +625,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -618,6 +665,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -646,6 +694,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -673,6 +722,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -811,6 +861,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -883,6 +934,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();
@@ -1040,6 +1092,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx).unwrap();

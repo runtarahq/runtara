@@ -113,8 +113,9 @@ pub use registry::{
     reset_cancellation, trigger_cancellation, with_cancellation, with_cancellation_err,
 };
 
-// Re-export the #[durable] macro
-pub use runtara_sdk_macros::durable;
+// Re-export the #[resilient] macro. #[durable] is kept as a deprecated alias
+// that forwards to #[resilient(durable = true, ...)] for backward compatibility.
+pub use runtara_sdk_macros::{durable, resilient};
 
 // Re-export persistence trait for embedded mode
 #[cfg(feature = "embedded")]

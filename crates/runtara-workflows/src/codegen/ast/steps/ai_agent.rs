@@ -383,6 +383,7 @@ pub fn emit(
     let max_iter_lit = max_iterations;
     let temp_lit = temperature;
     let max_mem_messages_lit = max_memory_messages;
+    let durable_lit = ctx.durable && step.durable.unwrap_or(true);
 
     // Build memory lifecycle code blocks (conditionally emitted)
     let memory_init_code = if has_memory {
@@ -1050,8 +1051,8 @@ pub fn emit(
                 }
             };
 
-            // Durable wrapper for individual tool calls
-            #[durable(max_retries = 3, delay = 1000)]
+            // Resilient wrapper for individual tool calls
+            #[resilient(durable = #durable_lit, max_retries = 3, delay = 1000)]
             fn __ai_tool_durable(
                 cache_key: &str,
                 inputs: serde_json::Value,
@@ -1062,11 +1063,11 @@ pub fn emit(
                 __workflow_dispatch(agent_id, capability_id, inputs)
             }
 
-            // Durable wrapper for LLM completion calls.
+            // Resilient wrapper for LLM completion calls.
             // The actual LLM call is INSIDE this function so that on checkpoint
-            // resume the #[durable] macro returns the cached result without
+            // resume the #[resilient] macro returns the cached result without
             // re-executing the LLM call, keeping conversation history consistent.
-            #[durable(max_retries = 3, delay = 1000)]
+            #[resilient(durable = #durable_lit, max_retries = 3, delay = 1000)]
             fn __ai_llm_durable(
                 cache_key: &str,
                 integration_id: String,
@@ -1955,6 +1956,7 @@ mod tests {
                 output_schema: None,
             }),
             breakpoint: None,
+            durable: None,
         }
     }
 
@@ -2016,6 +2018,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -2227,6 +2230,7 @@ mod tests {
                     output_schema: None,
                 }),
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -2280,6 +2284,7 @@ mod tests {
                 output_schema: None,
             }),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&step, &mut ctx, &graph).unwrap();
@@ -2338,6 +2343,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(

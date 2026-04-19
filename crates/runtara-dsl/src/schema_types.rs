@@ -36,6 +36,14 @@ pub struct Workflow {
     /// Enable step-level debug instrumentation
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_events: Option<bool>,
+
+    /// Disable durability for this workflow when `false`. Compiled code contains
+    /// no checkpoint reads/writes, no `sdk.durable_sleep`, and no breakpoint
+    /// checkpoints. When this field is `Some(false)`, the setting propagates
+    /// into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
+    /// nested subgraph and embedded child workflow at codegen time. Default: durable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 /// Memory allocation tier for workflow execution
@@ -117,6 +125,14 @@ pub struct ExecutionGraph {
     /// calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
     #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
     pub rate_limit_budget_ms: u64,
+
+    /// Disable durability for this workflow when `Some(false)`. Mirrors
+    /// `Workflow.durable`; `parse_workflow` copies the top-level flag here when
+    /// this field is `None`. Codegen reads `ctx.durable` from this value at
+    /// the root, then inherits it unconditionally into all nested subgraphs
+    /// and embedded children. `None` → durable (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 fn default_rate_limit_budget_ms() -> u64 {
@@ -141,6 +157,7 @@ impl Default for ExecutionGraph {
             nodes: None,
             edges: None,
             rate_limit_budget_ms: default_rate_limit_budget_ms(),
+            durable: None,
         }
     }
 }
@@ -402,6 +419,12 @@ pub struct AgentStep {
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
+
+    /// Disable durability for this step when `Some(false)`. Skips checkpoint
+    /// read/write around the capability call. Ignored when the enclosing
+    /// workflow is already non-durable. Defaults to the workflow setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 /// Evaluates conditions and branches execution
@@ -458,6 +481,13 @@ pub struct SplitStep {
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
+
+    /// Disable durability for this step when `Some(false)`. Skips checkpoint
+    /// on the split's final result; iteration subgraph steps remain durable
+    /// according to the enclosing workflow setting (step-level flag does not
+    /// leak into the subgraph).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 /// Multi-way branch based on value matching
@@ -519,6 +549,13 @@ pub struct EmbedWorkflowStep {
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
+
+    /// Disable durability for this step when `Some(false)`. Skips checkpoint
+    /// on the child workflow's final result at this call site. The child
+    /// workflow's internal steps still run according to the enclosing
+    /// workflow setting (step-level flag does not leak into the child).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 /// Child workflow version specification
@@ -892,6 +929,12 @@ pub struct DelayStep {
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
+
+    /// Disable durability for this step when `Some(false)`. Uses
+    /// `std::thread::sleep` instead of `sdk.durable_sleep` — the delay is
+    /// not suspendable or resumable across crashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 /// Wait for an external signal before continuing execution.
@@ -1034,6 +1077,12 @@ pub struct AiAgentStep {
     /// When true, execution pauses before this step in debug mode
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
+
+    /// Disable durability for this step when `Some(false)`. Skips checkpoint
+    /// on each tool call and LLM call inside this agent's loop. Ignored when
+    /// the enclosing workflow is already non-durable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
 }
 
 /// Configuration for the AI Agent step.
