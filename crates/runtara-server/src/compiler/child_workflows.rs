@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 
 use runtara_workflows::dependency_analysis::{
-    DependencyGraph, WorkflowReference, EmbedWorkflowStepInfo, extract_embed_workflow_steps,
+    DependencyGraph, EmbedWorkflowStepInfo, WorkflowReference, extract_embed_workflow_steps,
     resolve_version,
 };
 

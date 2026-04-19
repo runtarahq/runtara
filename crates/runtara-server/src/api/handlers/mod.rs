@@ -19,13 +19,13 @@ pub mod metrics;
 pub mod object_model;
 pub mod oidc_discovery;
 pub mod operators;
-pub mod workflows;
-pub mod workflows_sync;
 pub mod sessions;
 pub mod specs;
 pub mod step_events;
 pub mod step_summaries;
 pub mod triggers;
+pub mod workflows;
+pub mod workflows_sync;
 
 #[cfg(feature = "embed-ui")]
 pub mod ui;

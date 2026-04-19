@@ -8,7 +8,7 @@
 use schemars::schema_for;
 use serde_json::{Value, json};
 
-use crate::{ConditionOperator, DSL_VERSION, Workflow, SwitchMatchType, agent_meta};
+use crate::{ConditionOperator, DSL_VERSION, SwitchMatchType, Workflow, agent_meta};
 
 /// Generate the complete DSL schema with step type metadata
 pub fn generate_dsl_schema() -> Value {

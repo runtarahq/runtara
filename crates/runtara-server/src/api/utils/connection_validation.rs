@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use runtara_dsl::{Workflow, Step};
+use runtara_dsl::{Step, Workflow};
 
 use super::reference_validation::{IssueCategory, ValidationIssue};
 

@@ -12,9 +12,9 @@ pub mod file_storage;
 pub mod metrics;
 pub mod object_model;
 pub mod operators;
-pub mod workflows;
 pub mod trigger_event;
 pub mod triggers;
+pub mod workflows;
 
 #[allow(unused_imports)]
 #[allow(ambiguous_glob_reexports)]
@@ -26,8 +26,8 @@ pub use metrics::*;
 #[allow(ambiguous_glob_reexports)]
 pub use object_model::*;
 #[allow(unused_imports)]
-pub use workflows::*;
-#[allow(unused_imports)]
 pub use trigger_event::*;
 #[allow(unused_imports)]
 pub use triggers::*;
+#[allow(unused_imports)]
+pub use workflows::*;

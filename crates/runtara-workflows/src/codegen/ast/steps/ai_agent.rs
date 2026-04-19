@@ -1930,8 +1930,8 @@ mod tests {
     use super::*;
     use crate::codegen::ast::context::EmitContext;
     use runtara_dsl::{
-        AgentStep, AiAgentConfig, AiAgentStep, ChildVersion, ExecutionGraph, ExecutionPlanEdge,
-        FinishStep, ImmediateValue, MappingValue, EmbedWorkflowStep, Step,
+        AgentStep, AiAgentConfig, AiAgentStep, ChildVersion, EmbedWorkflowStep, ExecutionGraph,
+        ExecutionPlanEdge, FinishStep, ImmediateValue, MappingValue, Step,
     };
     use std::collections::HashMap;
 

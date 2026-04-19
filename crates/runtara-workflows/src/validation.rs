@@ -2884,7 +2884,7 @@ fn validate_template_syntax(template_str: &str) -> Option<String> {
 mod tests {
     use super::*;
     use runtara_dsl::{
-        AgentStep, FinishStep, LogLevel, LogStep, ReferenceValue, EmbedWorkflowStep,
+        AgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
     };
 
     // Link runtara-agents so that the inventory crate can find registered capabilities

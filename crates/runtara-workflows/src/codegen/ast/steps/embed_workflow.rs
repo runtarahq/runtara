@@ -18,7 +18,7 @@ use super::{
     emit_breakpoint_check, emit_child_workflow_span_start, emit_step_debug_end,
     emit_step_debug_start, emit_step_span_start,
 };
-use runtara_dsl::{ExecutionGraph, EmbedWorkflowStep};
+use runtara_dsl::{EmbedWorkflowStep, ExecutionGraph};
 
 /// Emit code for a EmbedWorkflow step.
 ///

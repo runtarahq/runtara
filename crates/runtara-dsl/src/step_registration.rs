@@ -17,8 +17,8 @@
 mod native {
     use crate::agent_meta::StepTypeMeta;
     use crate::{
-        AgentStep, AiAgentStep, ConditionalStep, ErrorStep, FilterStep, FinishStep, GroupByStep,
-        LogStep, SplitStep, EmbedWorkflowStep, SwitchStep, WaitForSignalStep, WhileStep,
+        AgentStep, AiAgentStep, ConditionalStep, EmbedWorkflowStep, ErrorStep, FilterStep,
+        FinishStep, GroupByStep, LogStep, SplitStep, SwitchStep, WaitForSignalStep, WhileStep,
     };
 
     // ========================================================================
