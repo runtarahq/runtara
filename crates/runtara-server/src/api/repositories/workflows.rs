@@ -98,6 +98,24 @@ impl WorkflowRepository {
         .execute(&self.pool)
         .await?;
 
+        // Point the workflow row at the version we just inserted. Without this,
+        // `workflows.latest_version` stays at 0 (the value `create()` set) and
+        // `get_current_or_latest_version` then asks for definition v=0, which
+        // doesn't exist — every subsequent read 404s.
+        sqlx::query!(
+            r#"
+            UPDATE workflows
+            SET latest_version = 1,
+                version_count = 1,
+                updated_at = NOW()
+            WHERE tenant_id = $1 AND workflow_id = $2
+            "#,
+            tenant_id,
+            workflow_id
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 

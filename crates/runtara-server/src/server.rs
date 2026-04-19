@@ -112,14 +112,30 @@ use runtime_client::RuntimeClient;
         api::handlers::file_storage::download_object,
         api::handlers::file_storage::get_object_info,
         api::handlers::file_storage::delete_object,
-        // NOTE: Connection endpoints are now served by runtara-connections crate
+        // Connection endpoints (served by runtara-connections crate)
+        runtara_connections::handler::connections::create_connection_handler,
+        runtara_connections::handler::connections::list_connections_handler,
+        runtara_connections::handler::connections::get_connection_handler,
+        runtara_connections::handler::connections::update_connection_handler,
+        runtara_connections::handler::connections::delete_connection_handler,
+        runtara_connections::handler::connections::get_connections_by_operator_handler,
+        runtara_connections::handler::connections::list_connection_types_handler,
+        runtara_connections::handler::connections::get_connection_type_handler,
+        runtara_connections::handler::connections::list_connection_categories_handler,
+        runtara_connections::handler::connections::list_connection_auth_types_handler,
+        runtara_connections::handler::oauth::authorize_handler,
+        runtara_connections::handler::oauth::callback_handler,
         // Metrics endpoints
         api::metrics::get_workflow_metrics,
         api::metrics::get_workflow_stats,
         api::metrics::get_tenant_metrics,
         // Analytics endpoints
         api::analytics::get_system_analytics_handler,
-        // NOTE: Rate limit analytics endpoints are now served by runtara-connections crate
+        // Rate limit analytics endpoints (served by runtara-connections crate)
+        runtara_connections::handler::rate_limits::list_rate_limits_handler,
+        runtara_connections::handler::rate_limits::get_connection_rate_limit_status_handler,
+        runtara_connections::handler::rate_limits::get_connection_rate_limit_timeline_handler,
+        runtara_connections::handler::rate_limits::get_connection_rate_limit_history_handler,
         // Invocation Trigger endpoints
         api::handlers::triggers::create_invocation_trigger,
         api::handlers::triggers::list_invocation_triggers,
@@ -266,7 +282,28 @@ use runtime_client::RuntimeClient;
             api::dto::file_storage::FileMetadataResponse,
             api::dto::file_storage::UploadResponse,
             api::dto::file_storage::DeleteResponse,
-            // NOTE: Connection DTOs are now in runtara-connections crate
+            // Connection DTOs (re-exported from runtara-connections crate)
+            runtara_connections::types::ErrorResponse,
+            runtara_connections::types::ConnectionDto,
+            runtara_connections::types::ConnectionStatus,
+            runtara_connections::types::ConnectionResponse,
+            runtara_connections::types::ListConnectionsResponse,
+            runtara_connections::types::CreateConnectionRequest,
+            runtara_connections::types::CreateConnectionResponse,
+            runtara_connections::types::UpdateConnectionRequest,
+            runtara_connections::types::DeleteConnectionResponse,
+            runtara_connections::types::ConnectionCategory,
+            runtara_connections::types::ConnectionCategoryDto,
+            runtara_connections::types::ListConnectionCategoriesResponse,
+            runtara_connections::types::ConnectionAuthType,
+            runtara_connections::types::ConnectionAuthTypeDto,
+            runtara_connections::types::ListConnectionAuthTypesResponse,
+            runtara_connections::types::ConnectionTypeDto,
+            runtara_connections::types::ConnectionFieldDto,
+            runtara_connections::types::OAuthConfigDto,
+            runtara_connections::types::ConnectionTypeResponse,
+            runtara_connections::types::ListConnectionTypesResponse,
+            runtara_connections::handler::oauth::OAuthAuthorizeResponse,
             api::dto::triggers::InvocationTrigger,
             api::dto::triggers::TriggerType,
             api::dto::triggers::CreateInvocationTriggerRequest,
@@ -291,7 +328,20 @@ use runtime_client::RuntimeClient;
             api::analytics::MemoryInfo,
             api::analytics::DiskInfo,
             api::analytics::CpuInfo,
-            // NOTE: Rate limit DTOs are now in runtara-connections crate
+            // Rate limit DTOs (re-exported from runtara-connections crate)
+            runtara_connections::types::RateLimitConfigDto,
+            runtara_connections::types::RateLimitStateDto,
+            runtara_connections::types::RateLimitMetricsDto,
+            runtara_connections::types::RateLimitStatusDto,
+            runtara_connections::types::PeriodStatsDto,
+            runtara_connections::types::GetRateLimitStatusResponse,
+            runtara_connections::types::ListRateLimitsResponse,
+            runtara_connections::types::RateLimitEventType,
+            runtara_connections::types::RateLimitEventDto,
+            runtara_connections::types::RateLimitHistoryResponse,
+            runtara_connections::types::RateLimitTimelineBucket,
+            runtara_connections::types::RateLimitTimelineData,
+            runtara_connections::types::RateLimitTimelineResponse,
         )
     ),
     tags(
@@ -308,6 +358,7 @@ use runtime_client::RuntimeClient;
         (name = "metrics-controller", description = "Metrics and analytics API endpoints"),
         (name = "analytics-controller", description = "Runtime system analytics API endpoints"),
         (name = "rate-limits-controller", description = "Rate limit analytics API endpoints"),
+        (name = "oauth-callback", description = "Public OAuth2 provider callback endpoint (no JWT)"),
         (name = "Invocation Triggers", description = "Invocation trigger management API endpoints"),
         (name = "Event Capture", description = "Fast HTTP event capture API endpoints")
     ),

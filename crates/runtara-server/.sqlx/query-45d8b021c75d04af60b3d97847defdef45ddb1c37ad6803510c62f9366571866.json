@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE workflows\n            SET latest_version = 1,\n                version_count = 1,\n                updated_at = NOW()\n            WHERE tenant_id = $1 AND workflow_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "45d8b021c75d04af60b3d97847defdef45ddb1c37ad6803510c62f9366571866"
+}

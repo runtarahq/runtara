@@ -1,8 +1,23 @@
 //! Types and DTOs for the runtara-connections crate.
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "utoipa")]
-use utoipa::ToSchema;
+
+// ============================================================================
+// Error Response (OpenAPI documentation only)
+// ============================================================================
+
+/// Standard error payload returned by connection endpoints.
+///
+/// Runtime handlers return arbitrary `serde_json::Value` errors; this struct
+/// exists to give OpenAPI consumers a documented shape.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct ErrorResponse {
+    pub success: bool,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
 
 // ============================================================================
 // Configuration DTO (from PostgreSQL)

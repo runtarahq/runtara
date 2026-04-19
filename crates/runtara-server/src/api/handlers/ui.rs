@@ -18,13 +18,22 @@ struct UiAssets;
 #[derive(Clone)]
 pub struct UiState {
     /// index.html with <base href> rewritten to match the deployed mount prefix.
-    /// Built once at startup; cloned (cheap) per request.
+    /// Release builds cache this at startup; debug builds rebuild per request
+    /// so `npm run build:watch` changes are picked up without a server restart.
+    #[cfg(not(debug_assertions))]
     index_html: Bytes,
+    /// `<base href>` value to inject into index.html. Debug-only: rebuild_index_html
+    /// needs it on every request.
+    #[cfg(debug_assertions)]
+    base_href: Arc<str>,
     /// Mount prefix (e.g. `/ui`), stripped from the request URI before looking
     /// up the asset. Lets multi-segment mounts like `/ui/foo` work correctly.
     mount: Arc<str>,
     /// CSP header for HTML responses. Contains a SHA-256 hash of the inline
     /// `window.__RUNTARA_CONFIG__` script so the browser lets it execute.
+    /// Computed once at startup — the inline script body is derived from env
+    /// vars that don't change during process lifetime, so the hash is stable
+    /// even when debug builds rewrite index.html per request.
     html_csp: Arc<str>,
 }
 
@@ -36,9 +45,16 @@ pub struct UiState {
 /// slashes (`/ui` matches but `/ui/` 404s). Registering explicit routes at the
 /// outer level dodges the quirk.
 pub fn router(mount: &str, base_href: &str) -> Router {
-    let (index_html, inline_script_hash) = build_index_html(base_href);
+    // Always build once at startup so we can derive a stable CSP (whose hash is
+    // pinned to the inline script body). In release the rewritten HTML is
+    // reused for every request; in debug we throw it away and rebuild per
+    // request so `npm run build:watch` output is picked up without a restart.
+    let (_built_index_html, inline_script_hash) = build_index_html(base_href);
     let state = UiState {
-        index_html,
+        #[cfg(not(debug_assertions))]
+        index_html: _built_index_html,
+        #[cfg(debug_assertions)]
+        base_href: Arc::from(base_href),
         mount: Arc::from(mount),
         html_csp: Arc::from(build_html_csp(&inline_script_hash).as_str()),
     };
@@ -205,7 +221,7 @@ async fn serve(uri: Uri, State(state): State<UiState>) -> Response {
         .trim_start_matches('/');
 
     if after_mount.is_empty() || after_mount == "index.html" {
-        return html_response(state.index_html.clone(), &state.html_csp);
+        return html_response(current_index_html(&state), &state.html_csp);
     }
 
     if let Some(file) = UiAssets::get(after_mount) {
@@ -213,7 +229,25 @@ async fn serve(uri: Uri, State(state): State<UiState>) -> Response {
     }
 
     // SPA fallback: unknown paths hand back index.html so React Router can route.
-    html_response(state.index_html.clone(), &state.html_csp)
+    html_response(current_index_html(&state), &state.html_csp)
+}
+
+/// Return the index.html body to serve for this request.
+///
+/// Release builds reuse the startup-cached bytes; debug builds rebuild from
+/// disk every request so `npm run build:watch` output is picked up without a
+/// server restart. Asset hashes in index.html change on every frontend build,
+/// so the release cache would quickly go stale without this split.
+fn current_index_html(state: &UiState) -> Bytes {
+    #[cfg(debug_assertions)]
+    {
+        let (html, _hash) = build_index_html(state.base_href.as_ref());
+        html
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        state.index_html.clone()
+    }
 }
 
 fn html_response(body: Bytes, csp: &str) -> Response {

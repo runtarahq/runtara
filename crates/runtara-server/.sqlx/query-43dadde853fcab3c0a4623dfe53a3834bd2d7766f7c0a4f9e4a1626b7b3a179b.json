@@ -9,10 +9,10 @@
         "Varchar",
         "Int4",
         "Text",
-        "Text"
+        "Varchar"
       ]
     },
     "nullable": []
   },
-  "hash": "a875aaee89ce254dcb8458af5df1a8b3c5774f5ee39648ad0e2ae076ccc441d5"
+  "hash": "43dadde853fcab3c0a4623dfe53a3834bd2d7766f7c0a4f9e4a1626b7b3a179b"
 }

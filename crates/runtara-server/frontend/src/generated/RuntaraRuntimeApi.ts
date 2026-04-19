@@ -121,6 +121,20 @@ export enum LogLevel {
   Error = "error",
 }
 
+/** Severity of a validation issue */
+export enum IssueSeverity {
+  Error = "error",
+  Warning = "warning",
+}
+
+/** Category of validation issue */
+export enum IssueCategory {
+  MissingStep = "missing_step",
+  UnknownFieldPath = "unknown_field_path",
+  InvalidReferencePath = "invalid_reference_path",
+  MissingConnection = "missing_connection",
+}
+
 /** Execution status representing the current state of a workflow execution */
 export enum ExecutionStatus {
   Queued = "queued",
@@ -256,6 +270,12 @@ export interface AgentStep {
   compensation?: null | CompensationConfig;
   /** Connection ID for agents requiring authentication */
   connectionId?: string | null;
+  /**
+   * Disable durability for this step when `Some(false)`. Skips checkpoint
+   * read/write around the capability call. Ignored when the enclosing
+   * workflow is already non-durable. Defaults to the workflow setting.
+   */
+  durable?: boolean | null;
   /** Unique step identifier */
   id: string;
   /** Maps data to agent capability inputs */
@@ -403,6 +423,12 @@ export interface AiAgentStep {
   config?: null | AiAgentConfig;
   /** Connection ID for the LLM provider (e.g., OpenAI, Anthropic) */
   connectionId?: string | null;
+  /**
+   * Disable durability for this step when `Some(false)`. Skips checkpoint
+   * on each tool call and LLM call inside this agent's loop. Ignored when
+   * the enclosing workflow is already non-durable.
+   */
+  durable?: boolean | null;
   /** Unique step identifier */
   id: string;
   /** Human-readable step name */
@@ -455,11 +481,6 @@ export interface ApiResponseInvocationTrigger {
      */
     remote_tenant_id?: string | null;
     /**
-     * Reference to the workflow to be invoked
-     * @example "workflow-456"
-     */
-    workflow_id: string;
-    /**
      * Whether only a single instance of this trigger should run at a time
      * @example false
      */
@@ -476,6 +497,11 @@ export interface ApiResponseInvocationTrigger {
      * @example "2025-01-15T10:30:00Z"
      */
     updated_at: string;
+    /**
+     * Reference to the workflow to be invoked
+     * @example "workflow-456"
+     */
+    workflow_id: string;
   };
   message: string;
   success: boolean;
@@ -486,8 +512,8 @@ export interface ApiResponseMoveWorkflowResponse {
   /** Response for move workflow operation */
   data: {
     path: string;
-    workflowId: string;
     success: boolean;
+    workflowId: string;
   };
   message: string;
   success: boolean;
@@ -524,14 +550,93 @@ export interface ApiResponseRenameFolderResponse {
   data: {
     newPath: string;
     oldPath: string;
+    success: boolean;
     /**
      * Number of workflows updated
      * @format int64
      * @min 0
      */
     workflowsUpdated: number;
-    success: boolean;
   };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseVecInvocationTrigger {
+  data: {
+    /**
+     * Whether the trigger is currently active
+     * @example true
+     */
+    active: boolean;
+    /** Trigger-specific configuration in JSON format */
+    configuration?: object | null;
+    /**
+     * Timestamp when the trigger was created
+     * @example "2025-01-15T10:30:00Z"
+     */
+    created_at: string;
+    /**
+     * Unique identifier for the invocation trigger (auto-generated)
+     * @example "550e8400-e29b-41d4-a716-446655440000"
+     */
+    id: string;
+    /**
+     * Timestamp of the last trigger execution (system-managed)
+     * @example "2025-01-15T12:00:00Z"
+     */
+    last_run?: string | null;
+    /**
+     * Remote tenant identifier for external system triggers
+     * @example "remote-tenant-789"
+     */
+    remote_tenant_id?: string | null;
+    /**
+     * Whether only a single instance of this trigger should run at a time
+     * @example false
+     */
+    single_instance: boolean;
+    /**
+     * Tenant identifier for multi-tenancy support
+     * @example "tenant-123"
+     */
+    tenant_id?: string | null;
+    /** Type of trigger */
+    trigger_type: TriggerType;
+    /**
+     * Timestamp when the trigger was last updated
+     * @example "2025-01-15T10:30:00Z"
+     */
+    updated_at: string;
+    /**
+     * Reference to the workflow to be invoked
+     * @example "workflow-456"
+     */
+    workflow_id: string;
+  }[];
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseVecWorkflowVersionInfoDto {
+  data: {
+    /** Whether this version has been compiled */
+    compiled: boolean;
+    /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
+    compiledAt?: string | null;
+    createdAt: string;
+    /** Whether this is the current/active version used for execution */
+    isActive: boolean;
+    /** Whether step-event tracking is enabled for this version */
+    trackEvents: boolean;
+    updatedAt: string;
+    versionId: string;
+    /** @format int32 */
+    versionNumber: number;
+    workflowId: string;
+  }[];
   message: string;
   success: boolean;
 }
@@ -578,85 +683,6 @@ export interface ApiResponseWorkflowDto {
     /** Default variable values (can be overridden at execution time) */
     variables?: any;
   };
-  message: string;
-  success: boolean;
-}
-
-/** Generic API response wrapper */
-export interface ApiResponseVecInvocationTrigger {
-  data: {
-    /**
-     * Whether the trigger is currently active
-     * @example true
-     */
-    active: boolean;
-    /** Trigger-specific configuration in JSON format */
-    configuration?: object | null;
-    /**
-     * Timestamp when the trigger was created
-     * @example "2025-01-15T10:30:00Z"
-     */
-    created_at: string;
-    /**
-     * Unique identifier for the invocation trigger (auto-generated)
-     * @example "550e8400-e29b-41d4-a716-446655440000"
-     */
-    id: string;
-    /**
-     * Timestamp of the last trigger execution (system-managed)
-     * @example "2025-01-15T12:00:00Z"
-     */
-    last_run?: string | null;
-    /**
-     * Remote tenant identifier for external system triggers
-     * @example "remote-tenant-789"
-     */
-    remote_tenant_id?: string | null;
-    /**
-     * Reference to the workflow to be invoked
-     * @example "workflow-456"
-     */
-    workflow_id: string;
-    /**
-     * Whether only a single instance of this trigger should run at a time
-     * @example false
-     */
-    single_instance: boolean;
-    /**
-     * Tenant identifier for multi-tenancy support
-     * @example "tenant-123"
-     */
-    tenant_id?: string | null;
-    /** Type of trigger */
-    trigger_type: TriggerType;
-    /**
-     * Timestamp when the trigger was last updated
-     * @example "2025-01-15T10:30:00Z"
-     */
-    updated_at: string;
-  }[];
-  message: string;
-  success: boolean;
-}
-
-/** Generic API response wrapper */
-export interface ApiResponseVecWorkflowVersionInfoDto {
-  data: {
-    /** Whether this version has been compiled */
-    compiled: boolean;
-    /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
-    compiledAt?: string | null;
-    createdAt: string;
-    /** Whether this is the current/active version used for execution */
-    isActive: boolean;
-    workflowId: string;
-    /** Whether step-event tracking is enabled for this version */
-    trackEvents: boolean;
-    updatedAt: string;
-    versionId: string;
-    /** @format int32 */
-    versionNumber: number;
-  }[];
   message: string;
   success: boolean;
 }
@@ -884,11 +910,11 @@ export interface CompileWorkflowResponse {
   /** @min 0 */
   binarySize: number;
   message: string;
-  workflowId: string;
   success: boolean;
   timestamp: string;
   translatedPath: string;
   version: string;
+  workflowId: string;
 }
 
 export interface Condition {
@@ -1127,25 +1153,17 @@ export interface CreateInvocationTriggerRequest {
    */
   remote_tenant_id?: string | null;
   /**
-   * Reference to the workflow to be invoked
-   * @example "workflow-456"
-   */
-  workflow_id: string;
-  /**
    * Whether only a single instance of this trigger should run at a time
    * @example false
    */
   single_instance?: boolean;
   /** Type of trigger */
   trigger_type: TriggerType;
-}
-
-export interface CreateWorkflowRequest {
-  description: string;
-  memoryTier?: null | MemoryTier;
-  name: string;
-  /** Enable step-event tracking for this workflow version (default: true) */
-  trackEvents?: boolean | null;
+  /**
+   * Reference to the workflow to be invoked
+   * @example "workflow-456"
+   */
+  workflow_id: string;
 }
 
 export interface CreateSchemaRequest {
@@ -1160,6 +1178,14 @@ export interface CreateSchemaResponse {
   message: string;
   schemaId: string;
   success: boolean;
+}
+
+export interface CreateWorkflowRequest {
+  description: string;
+  memoryTier?: null | MemoryTier;
+  name: string;
+  /** Enable step-event tracking for this workflow version (default: true) */
+  trackEvents?: boolean | null;
 }
 
 /** Request body for CSV export */
@@ -1262,6 +1288,12 @@ export interface DelayStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
   /**
+   * Disable durability for this step when `Some(false)`. Uses
+   * `std::thread::sleep` instead of `sdk.durable_sleep` — the delay is
+   * not suspendable or resumable across crashes.
+   */
+  durable?: boolean | null;
+  /**
    * Duration to delay in milliseconds.
    * Can be an immediate value or a reference to data/variables.
    */
@@ -1300,7 +1332,53 @@ export interface DiskInfo {
   totalBytes: number;
 }
 
-/** Standard error response used across all endpoints */
+/** Executes a nested child workflow */
+export interface EmbedWorkflowStep {
+  /** When true, execution pauses before this step in debug mode */
+  breakpoint?: boolean | null;
+  /** Version of child workflow ("latest" or specific version number) */
+  childVersion: ChildVersion;
+  /** ID of the child workflow to execute */
+  childWorkflowId: string;
+  /**
+   * Disable durability for this step when `Some(false)`. Skips checkpoint
+   * on the child workflow's final result at this call site. The child
+   * workflow's internal steps still run according to the enclosing
+   * workflow setting (step-level flag does not leak into the child).
+   */
+  durable?: boolean | null;
+  /** Unique step identifier */
+  id: string;
+  /** Maps parent data to child workflow inputs */
+  inputMapping?: null | HashMap;
+  /**
+   * Maximum retry attempts (default: 3)
+   * @format int32
+   * @min 0
+   */
+  maxRetries?: number | null;
+  /** Human-readable step name */
+  name?: string | null;
+  /**
+   * Base delay between retries in milliseconds (default: 1000)
+   * @format int64
+   * @min 0
+   */
+  retryDelay?: number | null;
+  /**
+   * Step timeout in milliseconds. If exceeded, step fails.
+   * @format int64
+   * @min 0
+   */
+  timeout?: number | null;
+}
+
+/**
+ * Standard error payload returned by connection endpoints.
+ *
+ * Runtime handlers return arbitrary `serde_json::Value` errors; this struct
+ * exists to give OpenAPI consumers a documented shape.
+ */
 export interface ErrorResponse {
   error: string;
   message?: string | null;
@@ -1423,6 +1501,14 @@ export interface ExecuteWorkflowResponse {
 export interface ExecutionGraph {
   /** Detailed description of what the workflow does */
   description?: string | null;
+  /**
+   * Disable durability for this workflow when `Some(false)`. Mirrors
+   * `Workflow.durable`; `parse_workflow` copies the top-level flag here when
+   * this field is `None`. Codegen reads `ctx.durable` from this value at
+   * the root, then inherits it unconditionally into all nested subgraphs
+   * and embedded children. `None` → durable (default).
+   */
+  durable?: boolean | null;
   /**
    * UI edge positions for the visual workflow editor.
    * This is opaque data managed by the UI - the runtime does not interpret this field.
@@ -1874,11 +1960,6 @@ export interface InvocationTrigger {
    */
   remote_tenant_id?: string | null;
   /**
-   * Reference to the workflow to be invoked
-   * @example "workflow-456"
-   */
-  workflow_id: string;
-  /**
    * Whether only a single instance of this trigger should run at a time
    * @example false
    */
@@ -1895,6 +1976,11 @@ export interface InvocationTrigger {
    * @example "2025-01-15T10:30:00Z"
    */
   updated_at: string;
+  /**
+   * Reference to the workflow to be invoked
+   * @example "workflow-456"
+   */
+  workflow_id: string;
 }
 
 /** API-compatible known error info */
@@ -1997,12 +2083,6 @@ export interface ListObjectsResponse {
   files: FileObjectDto[];
   /** Token for fetching next page (null if no more results) */
   nextContinuationToken?: string | null;
-}
-
-/** Query parameters for listing rate limits */
-export interface ListRateLimitsQuery {
-  /** Time interval for aggregated stats: 1h, 24h, 7d, 30d (default: 24h) */
-  interval?: string;
 }
 
 /** Response for listing all connections' rate limit status */
@@ -2124,8 +2204,8 @@ export interface MoveWorkflowRequest {
 /** Response for move workflow operation */
 export interface MoveWorkflowResponse {
   path: string;
-  workflowId: string;
   success: boolean;
+  workflowId: string;
 }
 
 export interface NotImplementedResponse {
@@ -2159,6 +2239,11 @@ export interface Note {
    * @format double
    */
   y: number;
+}
+
+export interface OAuthAuthorizeResponse {
+  authorizationUrl: string;
+  success: boolean;
 }
 
 /** OAuth2 configuration for a connection type (authorization code flow) */
@@ -2306,32 +2391,6 @@ export interface RateLimitEventDto {
   metadata?: any;
 }
 
-/** Query parameters for rate limit history */
-export interface RateLimitHistoryQuery {
-  /** Filter by event type */
-  eventType?: string | null;
-  /**
-   * Filter events after this timestamp
-   * @format date-time
-   */
-  from?: string | null;
-  /**
-   * Maximum number of events to return (default: 100, max: 1000)
-   * @format int64
-   */
-  limit?: number;
-  /**
-   * Number of events to skip (for pagination)
-   * @format int64
-   */
-  offset?: number;
-  /**
-   * Filter events before this timestamp
-   * @format date-time
-   */
-  to?: string | null;
-}
-
 /** Response for rate limit history endpoint */
 export interface RateLimitHistoryResponse {
   data: RateLimitEventDto[];
@@ -2458,24 +2517,6 @@ export interface RateLimitTimelineData {
   startTime: string;
 }
 
-/** Query parameters for rate limit timeline (time-bucketed aggregation) */
-export interface RateLimitTimelineQuery {
-  /**
-   * End time (ISO 8601), defaults to now
-   * @format date-time
-   */
-  endTime?: string | null;
-  /** Time granularity: minute, hourly, daily (default: minute) */
-  granularity?: string;
-  /**
-   * Start time (ISO 8601), defaults to 1 hour ago
-   * @format date-time
-   */
-  startTime?: string | null;
-  /** Optional tag filter (e.g. agent name like "shopify_graphql") */
-  tag?: string | null;
-}
-
 /** Response for the timeline endpoint */
 export interface RateLimitTimelineResponse {
   /** @min 0 */
@@ -2532,332 +2573,13 @@ export interface RenameFolderRequest {
 export interface RenameFolderResponse {
   newPath: string;
   oldPath: string;
+  success: boolean;
   /**
    * Number of workflows updated
    * @format int64
    * @min 0
    */
   workflowsUpdated: number;
-  success: boolean;
-}
-
-/** Complete workflow definition */
-export interface Workflow {
-  /** The execution graph containing all steps */
-  executionGraph: ExecutionGraph;
-  /** Memory allocation tier for workflow execution */
-  memoryTier?: null | MemoryTier;
-  /** Enable step-level debug instrumentation */
-  trackEvents?: boolean | null;
-}
-
-export interface WorkflowDto {
-  created: string;
-  /**
-   * The active/current version that will be used when executing this workflow
-   * Can be set explicitly via the set-current-version endpoint, otherwise defaults to latest_version
-   * @format int32
-   */
-  currentVersionNumber: number;
-  description: string;
-  executionGraph: any;
-  /** @format int64 */
-  executionTime?: number | null;
-  /** @format int64 */
-  executionTimeout?: number | null;
-  finished?: string | null;
-  id: string;
-  inputSchema: any;
-  /**
-   * The highest version number that exists for this workflow
-   * @format int32
-   */
-  lastVersionNumber: number;
-  /** Memory allocation tier for workflow execution */
-  memoryTier?: MemoryTier;
-  name: string;
-  /** Visual notes/annotations for the workflow canvas */
-  notes?: Note[];
-  outputSchema: any;
-  /**
-   * Folder path for organization (e.g., "/Sales/Shopify/")
-   * Defaults to "/" (root folder)
-   */
-  path?: string;
-  started?: string | null;
-  /** Whether this version is compiled with step-event tracking instrumentation */
-  trackEvents?: boolean;
-  updated: string;
-  /** Default variable values (can be overridden at execution time) */
-  variables?: any;
-}
-
-export interface WorkflowInstanceDto {
-  created: string;
-  /** @format double */
-  executionDurationSeconds?: number | null;
-  /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
-  hasPendingInput?: boolean;
-  id: string;
-  inputs: InstanceInputs;
-  /** @format double */
-  maxMemoryMb?: number | null;
-  outputs?: any;
-  /** @format double */
-  processingOverheadSeconds?: number | null;
-  /** @format double */
-  queueDurationSeconds?: number | null;
-  workflowId: string;
-  /** Workflow name (populated when listing all executions) */
-  workflowName?: string | null;
-  /** Current execution status */
-  status: ExecutionStatus;
-  steps?: WorkflowStepDto[];
-  tags?: string[];
-  /** Reason for termination (set for all terminal states including successful completion) */
-  terminationType?: null | TerminationType;
-  updated: string;
-  /** @format int32 */
-  usedVersion: number;
-}
-
-/** Daily aggregated metrics */
-export interface WorkflowMetricsDaily {
-  /** @format double */
-  avgDurationSeconds?: number | null;
-  /** @format double */
-  avgMemoryMb?: number | null;
-  /** @format double */
-  avgProcessingOverheadSeconds?: number | null;
-  /** @format double */
-  avgQueueDurationSeconds?: number | null;
-  /** @format date-time */
-  dayBucket?: string | null;
-  /** @format int64 */
-  failureCount?: number | null;
-  /** @format int64 */
-  invocationCount?: number | null;
-  /** @format double */
-  maxDurationSeconds?: number | null;
-  /** @format double */
-  maxMemoryMb?: number | null;
-  /** @format double */
-  maxProcessingOverheadSeconds?: number | null;
-  /** @format double */
-  maxQueueDurationSeconds?: number | null;
-  /** @format double */
-  minDurationSeconds?: number | null;
-  /** @format double */
-  minMemoryMb?: number | null;
-  /** @format double */
-  minProcessingOverheadSeconds?: number | null;
-  /** @format double */
-  minQueueDurationSeconds?: number | null;
-  workflowId: string;
-  /** @format int64 */
-  successCount?: number | null;
-  /** @format double */
-  successRatePercent?: number | null;
-  tenantId: string;
-  /** @format int64 */
-  timeoutCount?: number | null;
-  /** @format int32 */
-  version: number;
-}
-
-/** Response for workflow metrics (daily) */
-export interface WorkflowMetricsDailyResponse {
-  /** Response data for workflow metrics endpoint */
-  data: WorkflowMetricsData;
-  message: string;
-  success: boolean;
-}
-
-/** Response data for workflow metrics endpoint */
-export interface WorkflowMetricsData {
-  /** @format date-time */
-  endTime: string;
-  granularity: string;
-  metrics: WorkflowMetricsDaily[];
-  workflowId: string;
-  /** @format date-time */
-  startTime: string;
-  /** @format int32 */
-  version?: number | null;
-}
-
-/** Hourly metrics for a workflow */
-export interface WorkflowMetricsHourly {
-  /** @format date-time */
-  created_at: string;
-  /** @format int32 */
-  failure_count: number;
-  /** @format date-time */
-  hour_bucket: string;
-  /** @format int64 */
-  id: number;
-  /** @format int32 */
-  invocation_count: number;
-  /** @format double */
-  max_duration_seconds?: number | null;
-  /** @format double */
-  max_memory_mb?: number | null;
-  /** @format double */
-  max_processing_overhead_seconds?: number | null;
-  /** @format double */
-  max_queue_duration_seconds?: number | null;
-  /** @format double */
-  min_duration_seconds?: number | null;
-  /** @format double */
-  min_memory_mb?: number | null;
-  /** @format double */
-  min_processing_overhead_seconds?: number | null;
-  /** @format double */
-  min_queue_duration_seconds?: number | null;
-  workflow_id: string;
-  side_effect_counts: any;
-  /** @format int32 */
-  success_count: number;
-  tenant_id: string;
-  /** @format int32 */
-  timeout_count: number;
-  /** @format double */
-  total_duration_seconds?: number | null;
-  /** @format double */
-  total_memory_mb?: number | null;
-  /** @format double */
-  total_processing_overhead_seconds?: number | null;
-  /** @format double */
-  total_queue_duration_seconds?: number | null;
-  /** @format date-time */
-  updated_at: string;
-  /** @format int32 */
-  version: number;
-}
-
-/** Response data for workflow metrics hourly endpoint */
-export interface WorkflowMetricsHourlyData {
-  /** @format date-time */
-  endTime: string;
-  granularity: string;
-  metrics: WorkflowMetricsHourly[];
-  workflowId: string;
-  /** @format date-time */
-  startTime: string;
-  /** @format int32 */
-  version?: number | null;
-}
-
-/** Response for workflow metrics (hourly) */
-export interface WorkflowMetricsHourlyResponse {
-  /** Response data for workflow metrics hourly endpoint */
-  data: WorkflowMetricsHourlyData;
-  message: string;
-  success: boolean;
-}
-
-/** Overall workflow statistics */
-export interface WorkflowStats {
-  /** @format double */
-  avgDurationSeconds?: number | null;
-  /** @format double */
-  avgMemoryMb?: number | null;
-  /** @format double */
-  avgProcessingOverheadSeconds?: number | null;
-  /** @format double */
-  avgQueueDurationSeconds?: number | null;
-  /** @format double */
-  maxDurationSeconds?: number | null;
-  /** @format double */
-  maxMemoryMb?: number | null;
-  /** @format double */
-  maxProcessingOverheadSeconds?: number | null;
-  /** @format double */
-  maxQueueDurationSeconds?: number | null;
-  /** @format double */
-  minDurationSeconds?: number | null;
-  /** @format double */
-  minMemoryMb?: number | null;
-  /** @format double */
-  minProcessingOverheadSeconds?: number | null;
-  /** @format double */
-  minQueueDurationSeconds?: number | null;
-  /** @format double */
-  p95DurationSeconds?: number | null;
-  /** @format double */
-  p95QueueDurationSeconds?: number | null;
-  /** @format double */
-  p99DurationSeconds?: number | null;
-  /** @format double */
-  p99QueueDurationSeconds?: number | null;
-  /** @format double */
-  successRatePercent?: number | null;
-  /** @format int64 */
-  totalFailures?: number | null;
-  /** @format int64 */
-  totalInvocations?: number | null;
-  /** @format int64 */
-  totalSuccesses?: number | null;
-  /** @format int64 */
-  totalTimeouts?: number | null;
-}
-
-/** Statistics data */
-export interface WorkflowStatsData {
-  workflowId: string;
-  /** Overall workflow statistics */
-  stats: WorkflowStats;
-  /** @format int32 */
-  version?: number | null;
-}
-
-/** Response for workflow statistics */
-export interface WorkflowStatsResponse {
-  /** Statistics data */
-  data: WorkflowStatsData;
-  message: string;
-  success: boolean;
-}
-
-export interface WorkflowStepDto {
-  connectionDataId?: string | null;
-  created: string;
-  /** @format int64 */
-  executionTime?: number | null;
-  /** @format int64 */
-  executionTimeout?: number | null;
-  finished?: string | null;
-  id: string;
-  inputMapping?: any;
-  inputs?: any;
-  /** @format int32 */
-  maxDepth?: number | null;
-  nextStepId?: string | null;
-  outputs?: any;
-  workflowInstanceId?: string | null;
-  started?: string | null;
-  stepLabel?: string | null;
-  stepName?: string | null;
-  stepType?: string | null;
-  subInstances?: string[];
-  updated: string;
-}
-
-export interface WorkflowVersionInfoDto {
-  /** Whether this version has been compiled */
-  compiled: boolean;
-  /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
-  compiledAt?: string | null;
-  createdAt: string;
-  /** Whether this is the current/active version used for execution */
-  isActive: boolean;
-  workflowId: string;
-  /** Whether step-event tracking is enabled for this version */
-  trackEvents: boolean;
-  updatedAt: string;
-  versionId: string;
-  /** @format int32 */
-  versionNumber: number;
 }
 
 export interface Schema {
@@ -3012,6 +2734,13 @@ export interface SplitStep {
   breakpoint?: boolean | null;
   /** Split configuration: array to iterate, parallelism settings, error handling */
   config?: null | SplitConfig;
+  /**
+   * Disable durability for this step when `Some(false)`. Skips checkpoint
+   * on the split's final result; iteration subgraph steps remain durable
+   * according to the enclosing workflow setting (step-level flag does not
+   * leak into the subgraph).
+   */
+  durable?: boolean | null;
   /** Unique step identifier */
   id: string;
   /**
@@ -3028,40 +2757,6 @@ export interface SplitStep {
   outputSchema?: Partial<Record<string, SchemaField>>;
   /** Nested execution graph for each iteration */
   subgraph: ExecutionGraph;
-}
-
-/** Executes a nested child workflow */
-export interface EmbedWorkflowStep {
-  /** When true, execution pauses before this step in debug mode */
-  breakpoint?: boolean | null;
-  /** ID of the child workflow to execute */
-  childWorkflowId: string;
-  /** Version of child workflow ("latest" or specific version number) */
-  childVersion: ChildVersion;
-  /** Unique step identifier */
-  id: string;
-  /** Maps parent data to child workflow inputs */
-  inputMapping?: null | HashMap;
-  /**
-   * Maximum retry attempts (default: 3)
-   * @format int32
-   * @min 0
-   */
-  maxRetries?: number | null;
-  /** Human-readable step name */
-  name?: string | null;
-  /**
-   * Base delay between retries in milliseconds (default: 1000)
-   * @format int64
-   * @min 0
-   */
-  retryDelay?: number | null;
-  /**
-   * Step timeout in milliseconds. If exceeded, step fails.
-   * @format int64
-   * @min 0
-   */
-  timeout?: number | null;
 }
 
 /** Union of all step types, discriminated by stepType field */
@@ -3212,12 +2907,12 @@ export interface StepEventsResponseData {
    * @min 0
    */
   offset: number;
-  workflowId: string;
   /**
    * @format int32
    * @min 0
    */
   totalCount: number;
+  workflowId: string;
 }
 
 /** Response for step subinstances query */
@@ -3254,13 +2949,13 @@ export interface StepSummariesResponseData {
    * @min 0
    */
   offset: number;
-  workflowId: string;
   steps: StepSummaryResponse[];
   /**
    * @format int32
    * @min 0
    */
   totalCount: number;
+  workflowId: string;
 }
 
 /** Individual step summary in the response */
@@ -3503,28 +3198,17 @@ export interface UpdateInvocationTriggerRequest {
    */
   remote_tenant_id?: string | null;
   /**
-   * Reference to the workflow to be invoked
-   * @example "workflow-456"
-   */
-  workflow_id: string;
-  /**
    * Whether only a single instance of this trigger should run at a time
    * @example false
    */
   single_instance: boolean;
   /** Type of trigger */
   trigger_type: TriggerType;
-}
-
-export interface UpdateWorkflowRequest {
   /**
-   * The execution graph containing workflow definition.
-   * Must include 'name' and optionally 'description' fields.
+   * Reference to the workflow to be invoked
+   * @example "workflow-456"
    */
-  executionGraph: any;
-  memoryTier?: null | MemoryTier;
-  /** Enable step-event tracking for this workflow version (optional, keeps existing if not provided) */
-  trackEvents?: boolean | null;
+  workflow_id: string;
 }
 
 export interface UpdateSchemaRequest {
@@ -3544,6 +3228,17 @@ export interface UpdateTrackEventsRequest {
   trackEvents: boolean;
 }
 
+export interface UpdateWorkflowRequest {
+  /**
+   * The execution graph containing workflow definition.
+   * Must include 'name' and optionally 'description' fields.
+   */
+  executionGraph: any;
+  memoryTier?: null | MemoryTier;
+  /** Enable step-event tracking for this workflow version (optional, keeps existing if not provided) */
+  trackEvents?: boolean | null;
+}
+
 export interface UploadResponse {
   key: string;
   /**
@@ -3553,6 +3248,19 @@ export interface UploadResponse {
    */
   size: number;
   success: boolean;
+}
+
+/** Response for validate-mappings endpoint */
+export interface ValidateMappingsResponse {
+  /** @min 0 */
+  errorCount: number;
+  issues: ValidationIssue[];
+  success: boolean;
+  /** @format int32 */
+  version?: number | null;
+  /** @min 0 */
+  warningCount: number;
+  workflowId: string;
 }
 
 /** Structured validation error with step context for frontend highlighting */
@@ -3567,6 +3275,22 @@ export interface ValidationErrorDto {
   relatedStepIds?: string[] | null;
   /** Step ID where the error occurred (if applicable) */
   stepId?: string | null;
+}
+
+/** A validation issue with structured information */
+export interface ValidationIssue {
+  /** Category of the issue */
+  category: IssueCategory;
+  /** Field name in input_mapping (if applicable) */
+  fieldName?: string | null;
+  /** Human-readable message */
+  message: string;
+  /** The problematic reference path (if applicable) */
+  referencePath?: string | null;
+  /** Severity: error (blocking) or warning (non-blocking) */
+  severity: IssueSeverity;
+  /** Step ID where the issue was found */
+  stepId: string;
 }
 
 /**
@@ -3738,6 +3462,316 @@ export interface WhileStep {
   subgraph: ExecutionGraph;
 }
 
+/** Complete workflow definition */
+export interface Workflow {
+  /**
+   * Disable durability for this workflow when `false`. Compiled code contains
+   * no checkpoint reads/writes, no `sdk.durable_sleep`, and no breakpoint
+   * checkpoints. When this field is `Some(false)`, the setting propagates
+   * into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
+   * nested subgraph and embedded child workflow at codegen time. Default: durable.
+   */
+  durable?: boolean | null;
+  /** The execution graph containing all steps */
+  executionGraph: ExecutionGraph;
+  /** Memory allocation tier for workflow execution */
+  memoryTier?: null | MemoryTier;
+  /** Enable step-level debug instrumentation */
+  trackEvents?: boolean | null;
+}
+
+export interface WorkflowDto {
+  created: string;
+  /**
+   * The active/current version that will be used when executing this workflow
+   * Can be set explicitly via the set-current-version endpoint, otherwise defaults to latest_version
+   * @format int32
+   */
+  currentVersionNumber: number;
+  description: string;
+  executionGraph: any;
+  /** @format int64 */
+  executionTime?: number | null;
+  /** @format int64 */
+  executionTimeout?: number | null;
+  finished?: string | null;
+  id: string;
+  inputSchema: any;
+  /**
+   * The highest version number that exists for this workflow
+   * @format int32
+   */
+  lastVersionNumber: number;
+  /** Memory allocation tier for workflow execution */
+  memoryTier?: MemoryTier;
+  name: string;
+  /** Visual notes/annotations for the workflow canvas */
+  notes?: Note[];
+  outputSchema: any;
+  /**
+   * Folder path for organization (e.g., "/Sales/Shopify/")
+   * Defaults to "/" (root folder)
+   */
+  path?: string;
+  started?: string | null;
+  /** Whether this version is compiled with step-event tracking instrumentation */
+  trackEvents?: boolean;
+  updated: string;
+  /** Default variable values (can be overridden at execution time) */
+  variables?: any;
+}
+
+export interface WorkflowInstanceDto {
+  created: string;
+  /** @format double */
+  executionDurationSeconds?: number | null;
+  /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
+  hasPendingInput?: boolean;
+  id: string;
+  inputs: InstanceInputs;
+  /** @format double */
+  maxMemoryMb?: number | null;
+  outputs?: any;
+  /** @format double */
+  processingOverheadSeconds?: number | null;
+  /** @format double */
+  queueDurationSeconds?: number | null;
+  /** Current execution status */
+  status: ExecutionStatus;
+  steps?: WorkflowStepDto[];
+  tags?: string[];
+  /** Reason for termination (set for all terminal states including successful completion) */
+  terminationType?: null | TerminationType;
+  updated: string;
+  /** @format int32 */
+  usedVersion: number;
+  workflowId: string;
+  /** Workflow name (populated when listing all executions) */
+  workflowName?: string | null;
+}
+
+/** Daily aggregated metrics */
+export interface WorkflowMetricsDaily {
+  /** @format double */
+  avgDurationSeconds?: number | null;
+  /** @format double */
+  avgMemoryMb?: number | null;
+  /** @format double */
+  avgProcessingOverheadSeconds?: number | null;
+  /** @format double */
+  avgQueueDurationSeconds?: number | null;
+  /** @format date-time */
+  dayBucket?: string | null;
+  /** @format int64 */
+  failureCount?: number | null;
+  /** @format int64 */
+  invocationCount?: number | null;
+  /** @format double */
+  maxDurationSeconds?: number | null;
+  /** @format double */
+  maxMemoryMb?: number | null;
+  /** @format double */
+  maxProcessingOverheadSeconds?: number | null;
+  /** @format double */
+  maxQueueDurationSeconds?: number | null;
+  /** @format double */
+  minDurationSeconds?: number | null;
+  /** @format double */
+  minMemoryMb?: number | null;
+  /** @format double */
+  minProcessingOverheadSeconds?: number | null;
+  /** @format double */
+  minQueueDurationSeconds?: number | null;
+  /** @format int64 */
+  successCount?: number | null;
+  /** @format double */
+  successRatePercent?: number | null;
+  tenantId: string;
+  /** @format int64 */
+  timeoutCount?: number | null;
+  /** @format int32 */
+  version: number;
+  workflowId: string;
+}
+
+/** Response for workflow metrics (daily) */
+export interface WorkflowMetricsDailyResponse {
+  /** Response data for workflow metrics endpoint */
+  data: WorkflowMetricsData;
+  message: string;
+  success: boolean;
+}
+
+/** Response data for workflow metrics endpoint */
+export interface WorkflowMetricsData {
+  /** @format date-time */
+  endTime: string;
+  granularity: string;
+  metrics: WorkflowMetricsDaily[];
+  /** @format date-time */
+  startTime: string;
+  /** @format int32 */
+  version?: number | null;
+  workflowId: string;
+}
+
+/** Hourly metrics for a workflow */
+export interface WorkflowMetricsHourly {
+  /** @format date-time */
+  created_at: string;
+  /** @format int32 */
+  failure_count: number;
+  /** @format date-time */
+  hour_bucket: string;
+  /** @format int64 */
+  id: number;
+  /** @format int32 */
+  invocation_count: number;
+  /** @format double */
+  max_duration_seconds?: number | null;
+  /** @format double */
+  max_memory_mb?: number | null;
+  /** @format double */
+  max_processing_overhead_seconds?: number | null;
+  /** @format double */
+  max_queue_duration_seconds?: number | null;
+  /** @format double */
+  min_duration_seconds?: number | null;
+  /** @format double */
+  min_memory_mb?: number | null;
+  /** @format double */
+  min_processing_overhead_seconds?: number | null;
+  /** @format double */
+  min_queue_duration_seconds?: number | null;
+  side_effect_counts: any;
+  /** @format int32 */
+  success_count: number;
+  tenant_id: string;
+  /** @format int32 */
+  timeout_count: number;
+  /** @format double */
+  total_duration_seconds?: number | null;
+  /** @format double */
+  total_memory_mb?: number | null;
+  /** @format double */
+  total_processing_overhead_seconds?: number | null;
+  /** @format double */
+  total_queue_duration_seconds?: number | null;
+  /** @format date-time */
+  updated_at: string;
+  /** @format int32 */
+  version: number;
+  workflow_id: string;
+}
+
+/** Response data for workflow metrics hourly endpoint */
+export interface WorkflowMetricsHourlyData {
+  /** @format date-time */
+  endTime: string;
+  granularity: string;
+  metrics: WorkflowMetricsHourly[];
+  /** @format date-time */
+  startTime: string;
+  /** @format int32 */
+  version?: number | null;
+  workflowId: string;
+}
+
+/** Response for workflow metrics (hourly) */
+export interface WorkflowMetricsHourlyResponse {
+  /** Response data for workflow metrics hourly endpoint */
+  data: WorkflowMetricsHourlyData;
+  message: string;
+  success: boolean;
+}
+
+/** Overall workflow statistics */
+export interface WorkflowStats {
+  /** @format double */
+  avgDurationSeconds?: number | null;
+  /** @format double */
+  avgMemoryMb?: number | null;
+  /** @format double */
+  avgProcessingOverheadSeconds?: number | null;
+  /** @format double */
+  avgQueueDurationSeconds?: number | null;
+  /** @format double */
+  maxDurationSeconds?: number | null;
+  /** @format double */
+  maxMemoryMb?: number | null;
+  /** @format double */
+  maxProcessingOverheadSeconds?: number | null;
+  /** @format double */
+  maxQueueDurationSeconds?: number | null;
+  /** @format double */
+  minDurationSeconds?: number | null;
+  /** @format double */
+  minMemoryMb?: number | null;
+  /** @format double */
+  minProcessingOverheadSeconds?: number | null;
+  /** @format double */
+  minQueueDurationSeconds?: number | null;
+  /** @format double */
+  p95DurationSeconds?: number | null;
+  /** @format double */
+  p95QueueDurationSeconds?: number | null;
+  /** @format double */
+  p99DurationSeconds?: number | null;
+  /** @format double */
+  p99QueueDurationSeconds?: number | null;
+  /** @format double */
+  successRatePercent?: number | null;
+  /** @format int64 */
+  totalFailures?: number | null;
+  /** @format int64 */
+  totalInvocations?: number | null;
+  /** @format int64 */
+  totalSuccesses?: number | null;
+  /** @format int64 */
+  totalTimeouts?: number | null;
+}
+
+/** Statistics data */
+export interface WorkflowStatsData {
+  /** Overall workflow statistics */
+  stats: WorkflowStats;
+  /** @format int32 */
+  version?: number | null;
+  workflowId: string;
+}
+
+/** Response for workflow statistics */
+export interface WorkflowStatsResponse {
+  /** Statistics data */
+  data: WorkflowStatsData;
+  message: string;
+  success: boolean;
+}
+
+export interface WorkflowStepDto {
+  connectionDataId?: string | null;
+  created: string;
+  /** @format int64 */
+  executionTime?: number | null;
+  /** @format int64 */
+  executionTimeout?: number | null;
+  finished?: string | null;
+  id: string;
+  inputMapping?: any;
+  inputs?: any;
+  /** @format int32 */
+  maxDepth?: number | null;
+  nextStepId?: string | null;
+  outputs?: any;
+  started?: string | null;
+  stepLabel?: string | null;
+  stepName?: string | null;
+  stepType?: string | null;
+  subInstances?: string[];
+  updated: string;
+  workflowInstanceId?: string | null;
+}
+
 /** Response returned when workflow validation fails */
 export interface WorkflowValidationErrorResponse {
   /** Summary message describing the validation failure */
@@ -3746,6 +3780,23 @@ export interface WorkflowValidationErrorResponse {
   success: boolean;
   /** Detailed validation errors with step context */
   validationErrors: ValidationErrorDto[];
+}
+
+export interface WorkflowVersionInfoDto {
+  /** Whether this version has been compiled */
+  compiled: boolean;
+  /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
+  compiledAt?: string | null;
+  createdAt: string;
+  /** Whether this is the current/active version used for execution */
+  isActive: boolean;
+  /** Whether step-event tracking is enabled for this version */
+  trackEvents: boolean;
+  updatedAt: string;
+  versionId: string;
+  /** @format int32 */
+  versionNumber: number;
+  workflowId: string;
 }
 
 import type {
@@ -3934,6 +3985,35 @@ export class Api<
   SecurityDataType extends unknown,
 > extends HttpClient<SecurityDataType> {
   api = {
+    /**
+     * @description This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider redirecting the user's browser after consent.
+     *
+     * @tags oauth-callback
+     * @name CallbackHandler
+     * @summary Handle the OAuth2 provider callback.
+     * @request GET:/api/oauth/{tenant_id}/callback
+     */
+    callbackHandler: (
+      tenantId: string,
+      query?: {
+        /** Authorization code returned by the provider */
+        code?: string;
+        /** Opaque state value used for CSRF protection and connection lookup */
+        state?: string;
+        /** Error code if the provider reports a failure */
+        error?: string;
+        /** Human-readable error description from the provider */
+        error_description?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<void, any>({
+        path: `/api/oauth/${tenantId}/callback`,
+        method: "GET",
+        query: query,
+        ...params,
+      }),
+
     /**
      * No description
      *
@@ -4317,6 +4397,22 @@ export class Api<
       }),
 
     /**
+     * @description The frontend should open this URL in a popup window. After user consent, the provider redirects to /api/oauth/{tenant_id}/callback.
+     *
+     * @tags connections-controller
+     * @name AuthorizeHandler
+     * @summary Generate an OAuth2 authorization URL for a connection.
+     * @request GET:/api/runtime/connections/{id}/oauth/authorize
+     */
+    authorizeHandler: (id: string, params: RequestParams = {}) =>
+      this.request<OAuthAuthorizeResponse, ErrorResponse>({
+        path: `/api/runtime/connections/${id}/oauth/authorize`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
      * @description Returns historical rate limit events including requests, rate limited events, and retries for the specified connection. Data is retained for 30 days.
      *
      * @tags rate-limits-controller
@@ -4346,7 +4442,7 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<RateLimitHistoryResponse, void>({
+      this.request<RateLimitHistoryResponse, ErrorResponse>({
         path: `/api/runtime/connections/${id}/rate-limit-history`,
         method: "GET",
         query: query,
@@ -4366,7 +4462,7 @@ export class Api<
       id: string,
       params: RequestParams = {},
     ) =>
-      this.request<GetRateLimitStatusResponse, void>({
+      this.request<GetRateLimitStatusResponse, ErrorResponse>({
         path: `/api/runtime/connections/${id}/rate-limit-status`,
         method: "GET",
         format: "json",
@@ -4395,7 +4491,7 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<RateLimitTimelineResponse, void>({
+      this.request<RateLimitTimelineResponse, ErrorResponse>({
         path: `/api/runtime/connections/${id}/rate-limit-timeline`,
         method: "GET",
         query: query,
@@ -4747,6 +4843,33 @@ export class Api<
      * No description
      *
      * @tags metrics-controller
+     * @name GetTenantMetrics
+     * @summary Get tenant-level metrics aggregated across all workflows (hourly)
+     * @request GET:/api/runtime/metrics/tenant
+     */
+    getTenantMetrics: (
+      query?: {
+        /** Start time (ISO 8601), defaults to 24 hours ago */
+        startTime?: string;
+        /** End time (ISO 8601), defaults to now */
+        endTime?: string;
+        /** Time granularity: 'hourly' or 'daily' (default: hourly) */
+        granularity?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<TenantMetricsResponse, MetricsResponse>({
+        path: `/api/runtime/metrics/tenant`,
+        method: "GET",
+        query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags metrics-controller
      * @name GetWorkflowMetrics
      * @summary Get metrics for a specific workflow
      * @request GET:/api/runtime/metrics/workflows/{workflow_id}
@@ -4797,33 +4920,6 @@ export class Api<
     ) =>
       this.request<WorkflowStatsResponse, MetricsResponse>({
         path: `/api/runtime/metrics/workflows/${workflowId}/stats`,
-        method: "GET",
-        query: query,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags metrics-controller
-     * @name GetTenantMetrics
-     * @summary Get tenant-level metrics aggregated across all workflows (hourly)
-     * @request GET:/api/runtime/metrics/tenant
-     */
-    getTenantMetrics: (
-      query?: {
-        /** Start time (ISO 8601), defaults to 24 hours ago */
-        startTime?: string;
-        /** End time (ISO 8601), defaults to now */
-        endTime?: string;
-        /** Time granularity: 'hourly' or 'daily' (default: hourly) */
-        granularity?: string;
-      },
-      params: RequestParams = {},
-    ) =>
-      this.request<TenantMetricsResponse, MetricsResponse>({
-        path: `/api/runtime/metrics/tenant`,
         method: "GET",
         query: query,
         format: "json",
@@ -5315,11 +5411,261 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<ListRateLimitsResponse, void>({
+      this.request<ListRateLimitsResponse, ErrorResponse>({
         path: `/api/runtime/rate-limits`,
         method: "GET",
         query: query,
         format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns the OpenAPI 3.1 specification for all agents, matching the exact format returned by the agent API endpoints.
+     *
+     * @tags Specifications
+     * @name GetAgentsSpec
+     * @summary Get the agent OpenAPI specification
+     * @request GET:/api/runtime/specs/agents
+     */
+    getAgentsSpec: (params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/agents`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Specifications
+     * @name GetAgentsChangelog
+     * @summary Get the agent changelog
+     * @request GET:/api/runtime/specs/agents/changelog
+     */
+    getAgentsChangelog: (params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/agents/changelog`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Currently only the embedded version is available.
+     *
+     * @tags Specifications
+     * @name GetAgentsSpecVersion
+     * @summary Get a specific version of the agent spec
+     * @request GET:/api/runtime/specs/agents/{version}
+     */
+    getAgentsSpecVersion: (version: string, params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/agents/${version}`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns the JSON Schema for the core DSL structure including: - Step types (7 types after GroupBy removal) - Execution graph format - Data mapping DSL
+     *
+     * @tags Specifications
+     * @name GetDslSpec
+     * @summary Get the current DSL specification
+     * @request GET:/api/runtime/specs/dsl
+     */
+    getDslSpec: (params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/dsl`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Specifications
+     * @name GetDslChangelog
+     * @summary Get the DSL changelog
+     * @request GET:/api/runtime/specs/dsl/changelog
+     */
+    getDslChangelog: (params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/dsl/changelog`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns a list of all available step types with full JSON Schema for each. This is generated dynamically from the inventory-registered step metadata.
+     *
+     * @tags Specifications
+     * @name ListStepTypes
+     * @summary List all step types with their schemas
+     * @request GET:/api/runtime/specs/dsl/steps
+     */
+    listStepTypes: (params: RequestParams = {}) =>
+      this.request<void, any>({
+        path: `/api/runtime/specs/dsl/steps`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns the full JSON Schema for the specified step type.
+     *
+     * @tags Specifications
+     * @name GetStepTypeSchema
+     * @summary Get schema for a specific step type
+     * @request GET:/api/runtime/specs/dsl/steps/{stepType}
+     */
+    getStepTypeSchema: (stepType: string, params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/dsl/steps/${stepType}`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Currently only the embedded version is available.
+     *
+     * @tags Specifications
+     * @name GetDslSpecVersion
+     * @summary Get a specific version of the DSL spec
+     * @request GET:/api/runtime/specs/dsl/{version}
+     */
+    getDslSpecVersion: (version: string, params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/specs/dsl/${version}`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Specifications
+     * @name GetSpecVersions
+     * @summary Get all available spec versions
+     * @request GET:/api/runtime/specs/versions
+     */
+    getSpecVersions: (params: RequestParams = {}) =>
+      this.request<void, any>({
+        path: `/api/runtime/specs/versions`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Returns hardcoded metadata about available step types. No database or external dependencies - just static data.
+     *
+     * @tags workflow-controller
+     * @name ListStepTypesHandler
+     * @summary List all supported step types
+     * @request GET:/api/runtime/steps
+     */
+    listStepTypesHandler: (params: RequestParams = {}) =>
+      this.request<ListStepTypesResponse, void>({
+        path: `/api/runtime/steps`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Invocation Triggers
+     * @name ListInvocationTriggers
+     * @summary List all invocation triggers
+     * @request GET:/api/runtime/triggers
+     */
+    listInvocationTriggers: (params: RequestParams = {}) =>
+      this.request<ApiResponseVecInvocationTrigger, void>({
+        path: `/api/runtime/triggers`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Invocation Triggers
+     * @name CreateInvocationTrigger
+     * @summary Create a new invocation trigger
+     * @request POST:/api/runtime/triggers
+     */
+    createInvocationTrigger: (
+      data: CreateInvocationTriggerRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseInvocationTrigger, void>({
+        path: `/api/runtime/triggers`,
+        method: "POST",
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Invocation Triggers
+     * @name GetInvocationTrigger
+     * @summary Get a single invocation trigger by ID
+     * @request GET:/api/runtime/triggers/{id}
+     */
+    getInvocationTrigger: (id: string, params: RequestParams = {}) =>
+      this.request<ApiResponseInvocationTrigger, void>({
+        path: `/api/runtime/triggers/${id}`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Invocation Triggers
+     * @name UpdateInvocationTrigger
+     * @summary Update an invocation trigger by ID
+     * @request PUT:/api/runtime/triggers/{id}
+     */
+    updateInvocationTrigger: (
+      id: string,
+      data: UpdateInvocationTriggerRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseInvocationTrigger, void>({
+        path: `/api/runtime/triggers/${id}`,
+        method: "PUT",
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags Invocation Triggers
+     * @name DeleteInvocationTrigger
+     * @summary Delete an invocation trigger by ID
+     * @request DELETE:/api/runtime/triggers/{id}
+     */
+    deleteInvocationTrigger: (id: string, params: RequestParams = {}) =>
+      this.request<void, void>({
+        path: `/api/runtime/triggers/${id}`,
+        method: "DELETE",
         ...params,
       }),
 
@@ -5738,6 +6084,33 @@ export class Api<
      * No description
      *
      * @tags workflow-controller
+     * @name ValidateMappingsHandler
+     * @summary Validate workflow mappings without full compilation Returns validation issues (errors and warnings) for reference paths, types, and connections
+     * @request POST:/api/runtime/workflows/{id}/validate-mappings
+     */
+    validateMappingsHandler: (
+      id: string,
+      query?: {
+        /**
+         * Version number (defaults to latest)
+         * @format int32
+         */
+        versionNumber?: number;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<ValidateMappingsResponse, ErrorResponse>({
+        path: `/api/runtime/workflows/${id}/validate-mappings`,
+        method: "POST",
+        query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags workflow-controller
      * @name ListWorkflowVersionsHandler
      * @summary Get all versions of a specific workflow
      * @request GET:/api/runtime/workflows/{id}/versions
@@ -6021,256 +6394,6 @@ export class Api<
       this.request<void, ErrorResponse>({
         path: `/api/runtime/workflows/${workflowId}/versions/${versionNumber}/set-current`,
         method: "POST",
-        ...params,
-      }),
-
-    /**
-     * @description Returns the OpenAPI 3.1 specification for all agents, matching the exact format returned by the agent API endpoints.
-     *
-     * @tags Specifications
-     * @name GetAgentsSpec
-     * @summary Get the agent OpenAPI specification
-     * @request GET:/api/runtime/specs/agents
-     */
-    getAgentsSpec: (params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/agents`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Specifications
-     * @name GetAgentsChangelog
-     * @summary Get the agent changelog
-     * @request GET:/api/runtime/specs/agents/changelog
-     */
-    getAgentsChangelog: (params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/agents/changelog`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Currently only the embedded version is available.
-     *
-     * @tags Specifications
-     * @name GetAgentsSpecVersion
-     * @summary Get a specific version of the agent spec
-     * @request GET:/api/runtime/specs/agents/{version}
-     */
-    getAgentsSpecVersion: (version: string, params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/agents/${version}`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Returns the JSON Schema for the core DSL structure including: - Step types (7 types after GroupBy removal) - Execution graph format - Data mapping DSL
-     *
-     * @tags Specifications
-     * @name GetDslSpec
-     * @summary Get the current DSL specification
-     * @request GET:/api/runtime/specs/dsl
-     */
-    getDslSpec: (params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/dsl`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Specifications
-     * @name GetDslChangelog
-     * @summary Get the DSL changelog
-     * @request GET:/api/runtime/specs/dsl/changelog
-     */
-    getDslChangelog: (params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/dsl/changelog`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Returns a list of all available step types with full JSON Schema for each. This is generated dynamically from the inventory-registered step metadata.
-     *
-     * @tags Specifications
-     * @name ListStepTypes
-     * @summary List all step types with their schemas
-     * @request GET:/api/runtime/specs/dsl/steps
-     */
-    listStepTypes: (params: RequestParams = {}) =>
-      this.request<void, any>({
-        path: `/api/runtime/specs/dsl/steps`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Returns the full JSON Schema for the specified step type.
-     *
-     * @tags Specifications
-     * @name GetStepTypeSchema
-     * @summary Get schema for a specific step type
-     * @request GET:/api/runtime/specs/dsl/steps/{stepType}
-     */
-    getStepTypeSchema: (stepType: string, params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/dsl/steps/${stepType}`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Currently only the embedded version is available.
-     *
-     * @tags Specifications
-     * @name GetDslSpecVersion
-     * @summary Get a specific version of the DSL spec
-     * @request GET:/api/runtime/specs/dsl/{version}
-     */
-    getDslSpecVersion: (version: string, params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/specs/dsl/${version}`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Specifications
-     * @name GetSpecVersions
-     * @summary Get all available spec versions
-     * @request GET:/api/runtime/specs/versions
-     */
-    getSpecVersions: (params: RequestParams = {}) =>
-      this.request<void, any>({
-        path: `/api/runtime/specs/versions`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * @description Returns hardcoded metadata about available step types. No database or external dependencies - just static data.
-     *
-     * @tags workflow-controller
-     * @name ListStepTypesHandler
-     * @summary List all supported step types
-     * @request GET:/api/runtime/steps
-     */
-    listStepTypesHandler: (params: RequestParams = {}) =>
-      this.request<ListStepTypesResponse, void>({
-        path: `/api/runtime/steps`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Invocation Triggers
-     * @name ListInvocationTriggers
-     * @summary List all invocation triggers
-     * @request GET:/api/runtime/triggers
-     */
-    listInvocationTriggers: (params: RequestParams = {}) =>
-      this.request<ApiResponseVecInvocationTrigger, void>({
-        path: `/api/runtime/triggers`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Invocation Triggers
-     * @name CreateInvocationTrigger
-     * @summary Create a new invocation trigger
-     * @request POST:/api/runtime/triggers
-     */
-    createInvocationTrigger: (
-      data: CreateInvocationTriggerRequest,
-      params: RequestParams = {},
-    ) =>
-      this.request<ApiResponseInvocationTrigger, void>({
-        path: `/api/runtime/triggers`,
-        method: "POST",
-        body: data,
-        type: ContentType.Json,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Invocation Triggers
-     * @name GetInvocationTrigger
-     * @summary Get a single invocation trigger by ID
-     * @request GET:/api/runtime/triggers/{id}
-     */
-    getInvocationTrigger: (id: string, params: RequestParams = {}) =>
-      this.request<ApiResponseInvocationTrigger, void>({
-        path: `/api/runtime/triggers/${id}`,
-        method: "GET",
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Invocation Triggers
-     * @name UpdateInvocationTrigger
-     * @summary Update an invocation trigger by ID
-     * @request PUT:/api/runtime/triggers/{id}
-     */
-    updateInvocationTrigger: (
-      id: string,
-      data: UpdateInvocationTriggerRequest,
-      params: RequestParams = {},
-    ) =>
-      this.request<ApiResponseInvocationTrigger, void>({
-        path: `/api/runtime/triggers/${id}`,
-        method: "PUT",
-        body: data,
-        type: ContentType.Json,
-        format: "json",
-        ...params,
-      }),
-
-    /**
-     * No description
-     *
-     * @tags Invocation Triggers
-     * @name DeleteInvocationTrigger
-     * @summary Delete an invocation trigger by ID
-     * @request DELETE:/api/runtime/triggers/{id}
-     */
-    deleteInvocationTrigger: (id: string, params: RequestParams = {}) =>
-      this.request<void, void>({
-        path: `/api/runtime/triggers/${id}`,
-        method: "DELETE",
         ...params,
       }),
   };

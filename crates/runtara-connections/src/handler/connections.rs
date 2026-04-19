@@ -19,6 +19,18 @@ use crate::service::rate_limits::RateLimitService;
 use crate::types::*;
 
 /// Create a new connection
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections",
+    request_body = CreateConnectionRequest,
+    responses(
+        (status = 201, description = "Connection created successfully", body = CreateConnectionResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 409, description = "Connection with this title already exists", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn create_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -68,6 +80,22 @@ pub async fn create_connection_handler(
 
 /// List all connections for a tenant
 /// SECURITY: Does NOT return connection_parameters field
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections",
+    params(
+        ("integrationId" = Option<String>, Query, description = "Filter by integration ID (connection type identifier)"),
+        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)"),
+        ("includeRateLimitStats" = Option<bool>, Query, description = "Include rate limit statistics for each connection"),
+        ("interval" = Option<String>, Query, description = "Time interval for rate limit stats: 1h, 24h, 7d, 30d (default: 24h)")
+    ),
+    responses(
+        (status = 200, description = "List of connections (without sensitive connection_parameters)", body = ListConnectionsResponse),
+        (status = 400, description = "Invalid interval parameter", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn list_connections_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -146,6 +174,19 @@ pub async fn list_connections_handler(
 
 /// Get a single connection by ID
 /// SECURITY: Does NOT return connection_parameters field
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/{id}",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Connection details (without sensitive connection_parameters)", body = ConnectionResponse),
+        (status = 404, description = "Connection not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn get_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -182,6 +223,21 @@ pub async fn get_connection_handler(
 }
 
 /// Update a connection
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    put,
+    path = "/api/runtime/connections/{id}",
+    request_body = UpdateConnectionRequest,
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Connection updated successfully", body = ConnectionResponse),
+        (status = 404, description = "Connection not found", body = ErrorResponse),
+        (status = 409, description = "Connection title already exists", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn update_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -234,6 +290,19 @@ pub async fn update_connection_handler(
 }
 
 /// Delete a connection
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    delete,
+    path = "/api/runtime/connections/{id}",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Connection deleted successfully", body = DeleteConnectionResponse),
+        (status = 404, description = "Connection not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn delete_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -282,6 +351,19 @@ pub async fn delete_connection_handler(
 /// The operator's supported integration_ids are automatically looked up from the operator registry.
 ///
 /// SECURITY: Does NOT return connection_parameters field
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/operator/{operatorName}",
+    params(
+        ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'SFTP')"),
+        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)")
+    ),
+    responses(
+        (status = 200, description = "List of connections for the operator (without sensitive connection_parameters)", body = ListConnectionsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn get_connections_by_operator_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -358,6 +440,14 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
 ///
 /// Returns all registered connection types with their parameter schemas.
 /// This endpoint is used by the frontend to dynamically generate connection forms.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/types",
+    responses(
+        (status = 200, description = "List of all connection types with their schemas", body = ListConnectionTypesResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn list_connection_types_handler() -> Json<ListConnectionTypesResponse> {
     let connection_types: Vec<ConnectionTypeDto> =
         get_all_connection_types().map(meta_to_dto).collect();
@@ -374,6 +464,14 @@ pub async fn list_connection_types_handler() -> Json<ListConnectionTypesResponse
 ///
 /// Returns the canonical list of connection categories with display names and descriptions.
 /// Used by the frontend to populate category filters and grouping UI.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/categories",
+    responses(
+        (status = 200, description = "List of all connection categories", body = ListConnectionCategoriesResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn list_connection_categories_handler() -> Json<ListConnectionCategoriesResponse> {
     let categories: Vec<ConnectionCategoryDto> = ConnectionCategory::ALL
         .iter()
@@ -392,6 +490,14 @@ pub async fn list_connection_categories_handler() -> Json<ListConnectionCategori
 ///
 /// Returns the canonical list of authentication / credential types.
 /// Used by the frontend to populate auth type selectors when creating connections.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/auth-types",
+    responses(
+        (status = 200, description = "List of all connection auth types", body = ListConnectionAuthTypesResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn list_connection_auth_types_handler() -> Json<ListConnectionAuthTypesResponse> {
     let auth_types: Vec<ConnectionAuthTypeDto> = ConnectionAuthType::ALL
         .iter()
@@ -410,6 +516,18 @@ pub async fn list_connection_auth_types_handler() -> Json<ListConnectionAuthType
 ///
 /// Returns the connection type schema for the given integration_id.
 /// This endpoint is used by the frontend to get the form schema for a specific connection type.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/types/{integration_id}",
+    params(
+        ("integration_id" = String, Path, description = "Connection type integration ID (e.g., 'shopify_access_token', 'http_bearer')")
+    ),
+    responses(
+        (status = 200, description = "Connection type with its schema", body = ConnectionTypeResponse),
+        (status = 404, description = "Connection type not found", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn get_connection_type_handler(
     Path(integration_id): Path<String>,
 ) -> Result<Json<ConnectionTypeResponse>, (StatusCode, Json<Value>)> {

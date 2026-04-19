@@ -35,6 +35,20 @@ pub struct ErrorResponse {
 ///
 /// The frontend should open this URL in a popup window.
 /// After user consent, the provider redirects to /api/oauth/{tenant_id}/callback.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/{id}/oauth/authorize",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "OAuth2 authorization URL generated", body = OAuthAuthorizeResponse),
+        (status = 400, description = "Integration does not support OAuth or missing required parameter", body = crate::types::ErrorResponse),
+        (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::types::ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
 pub async fn authorize_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(state): State<ConnectionsState>,
@@ -97,6 +111,21 @@ pub struct OAuthCallbackQuery {
 ///
 /// This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider
 /// redirecting the user's browser after consent.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/oauth/{tenant_id}/callback",
+    params(
+        ("tenant_id" = String, Path, description = "Tenant ID encoded in the OAuth redirect URI"),
+        ("code" = Option<String>, Query, description = "Authorization code returned by the provider"),
+        ("state" = Option<String>, Query, description = "Opaque state value used for CSRF protection and connection lookup"),
+        ("error" = Option<String>, Query, description = "Error code if the provider reports a failure"),
+        ("error_description" = Option<String>, Query, description = "Human-readable error description from the provider")
+    ),
+    responses(
+        (status = 200, description = "HTML page that posts the result to window.opener and closes the popup", content_type = "text/html")
+    ),
+    tag = "oauth-callback"
+))]
 pub async fn callback_handler(
     State(state): State<ConnectionsState>,
     Path(_tenant_id): Path<String>,
