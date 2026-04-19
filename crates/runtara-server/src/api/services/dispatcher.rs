@@ -179,7 +179,7 @@ pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 /// v22: Compile to WASM (same mechanism as workflows) instead of native host binary
 /// v23: Load input from runtara-core via SDK instead of /data/input.json (WASM has no filesystem)
 /// v24: Use static dispatch table instead of inventory registry (inventory unavailable in WASM)
-pub const DISPATCHER_VERSION: u32 = 24;
+pub const DISPATCHER_VERSION: u32 = 25;
 
 /// Service for managing the agent dispatcher binary
 pub struct DispatcherService {
