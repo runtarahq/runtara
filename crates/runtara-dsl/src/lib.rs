@@ -45,9 +45,18 @@ pub fn parse_execution_graph(json: &serde_json::Value) -> Result<ExecutionGraph,
         .map_err(|e| format!("Failed to parse execution graph: {}", e))
 }
 
-/// Parse a complete workflow from JSON Value
+/// Parse a complete workflow from JSON Value.
+///
+/// If `workflow.durable` is set but `workflow.execution_graph.durable` is not,
+/// the top-level flag is copied down so codegen can read it from a single
+/// source of truth on `ExecutionGraph`.
 pub fn parse_workflow(json: &serde_json::Value) -> Result<Workflow, String> {
-    serde_json::from_value(json.clone()).map_err(|e| format!("Failed to parse workflow: {}", e))
+    let mut workflow: Workflow = serde_json::from_value(json.clone())
+        .map_err(|e| format!("Failed to parse workflow: {}", e))?;
+    if workflow.execution_graph.durable.is_none() {
+        workflow.execution_graph.durable = workflow.durable;
+    }
+    Ok(workflow)
 }
 
 /// Metadata about a step type for documentation
@@ -756,6 +765,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let json = serde_json::to_value(&step).unwrap();
@@ -887,6 +897,83 @@ mod tests {
         let result = parse_workflow(&json);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to parse workflow"));
+    }
+
+    // ========================================================================
+    // durable field: scenario, graph, and step levels
+    // ========================================================================
+
+    #[test]
+    fn test_parse_workflow_durable_none_by_default() {
+        let json = serde_json::json!({
+            "executionGraph": { "entryPoint": "s", "steps": {} }
+        });
+        let wf = parse_workflow(&json).expect("parse");
+        assert_eq!(wf.durable, None);
+        assert_eq!(wf.execution_graph.durable, None);
+    }
+
+    #[test]
+    fn test_parse_workflow_durable_propagates_to_graph_when_graph_silent() {
+        let json = serde_json::json!({
+            "durable": false,
+            "executionGraph": { "entryPoint": "s", "steps": {} }
+        });
+        let wf = parse_workflow(&json).expect("parse");
+        assert_eq!(wf.durable, Some(false));
+        assert_eq!(
+            wf.execution_graph.durable,
+            Some(false),
+            "parse_workflow should copy workflow.durable into graph.durable when graph is silent"
+        );
+    }
+
+    #[test]
+    fn test_parse_workflow_graph_durable_preserved_when_set() {
+        let json = serde_json::json!({
+            "durable": true,
+            "executionGraph": { "durable": false, "entryPoint": "s", "steps": {} }
+        });
+        let wf = parse_workflow(&json).expect("parse");
+        // Graph-level setting is preserved; top-level does not overwrite.
+        assert_eq!(wf.execution_graph.durable, Some(false));
+    }
+
+    #[test]
+    fn test_parse_execution_graph_durable_roundtrip() {
+        let json = serde_json::json!({
+            "entryPoint": "s",
+            "steps": {},
+            "durable": false
+        });
+        let g = parse_execution_graph(&json).expect("parse");
+        assert_eq!(g.durable, Some(false));
+        let re = serde_json::to_value(&g).unwrap();
+        assert_eq!(re.get("durable"), Some(&serde_json::Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_parse_execution_graph_durable_omitted_when_none() {
+        let json = serde_json::json!({ "entryPoint": "s", "steps": {} });
+        let g = parse_execution_graph(&json).expect("parse");
+        assert_eq!(g.durable, None);
+        let re = serde_json::to_value(&g).unwrap();
+        // `durable: None` must not appear in the serialized JSON.
+        assert!(re.get("durable").is_none());
+    }
+
+    #[test]
+    fn test_agent_step_durable_roundtrip() {
+        let json = serde_json::json!({
+            "id": "a",
+            "agentId": "utils",
+            "capabilityId": "noop",
+            "durable": false
+        });
+        let step: AgentStep = serde_json::from_value(json).expect("parse");
+        assert_eq!(step.durable, Some(false));
+        let re = serde_json::to_value(&step).unwrap();
+        assert_eq!(re.get("durable"), Some(&serde_json::Value::Bool(false)));
     }
 
     // ========================================================================
@@ -1793,6 +1880,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
 

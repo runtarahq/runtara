@@ -2912,6 +2912,7 @@ mod tests {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         })
     }
 
@@ -3077,6 +3078,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3118,6 +3120,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3156,6 +3159,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3493,6 +3497,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3533,6 +3538,7 @@ mod tests {
                 timeout: Some(30_000),   // 30 seconds - normal
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3576,6 +3582,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3613,6 +3620,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -3650,6 +3658,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -4569,6 +4578,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -4585,6 +4595,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -4638,6 +4649,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -4657,6 +4669,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         subgraph_steps.insert(
@@ -4696,6 +4709,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -4747,6 +4761,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -4763,6 +4778,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -5107,6 +5123,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -5208,6 +5225,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -5321,6 +5339,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -5416,6 +5435,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -5537,6 +5557,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -5608,6 +5629,7 @@ mod tests {
                 timeout: None,
                 compensation: None, // No compensation defined
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));
@@ -5738,6 +5760,7 @@ mod tests {
                     order: None,
                 }),
                 breakpoint: None,
+                durable: None,
             }),
         );
         // Add a rollback step (even though we won't actually execute it in this test)
@@ -5770,6 +5793,7 @@ mod tests {
                 timeout: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert("finish".to_string(), create_finish_step("finish", None));

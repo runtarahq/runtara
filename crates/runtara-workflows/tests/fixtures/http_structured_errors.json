@@ -23,7 +23,7 @@
     "handle_transient_error": {
       "stepType": "Log",
       "id": "handle_transient_error",
-      "message": "Transient error - will be retried by #[durable]",
+      "message": "Transient error - will be retried by #[resilient]",
       "data": { "valueType": "reference", "value": "__error" }
     },
     "handle_permanent_error": {

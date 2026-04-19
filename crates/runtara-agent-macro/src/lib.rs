@@ -403,7 +403,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[doc(hidden)]
         fn #executor_fn_ident(input: serde_json::Value) -> Result<serde_json::Value, String> {
             // Helper to create JSON-structured errors matching AgentError format.
-            // All capability errors must be parseable JSON so the #[durable] macro
+            // All capability errors must be parseable JSON so the #[resilient] macro
             // can check error category for retry decisions.
             let __to_json_error = |code: &str, msg: String| -> String {
                 serde_json::json!({

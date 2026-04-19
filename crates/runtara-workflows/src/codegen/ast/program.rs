@@ -7,7 +7,7 @@
 //!
 //! This version generates native Linux binaries that use runtara-sdk
 //! for communication with runtara-core. All agent capability calls are
-//! wrapped with `#[durable]` for automatic checkpoint-based recovery.
+//! wrapped with `#[resilient]` for automatic checkpoint-based recovery.
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
@@ -553,7 +553,7 @@ fn emit_workflow_variables(graph: &ExecutionGraph) -> TokenStream {
 ///
 /// Generates a main function that:
 /// 1. Creates and connects RuntaraSdk
-/// 2. Registers SDK globally for #[durable] functions
+/// 2. Registers SDK globally for #[resilient] functions
 /// 3. Loads inputs from environment
 /// 4. Executes the workflow asynchronously
 /// 5. Reports completion/failure/cancellation status to Core via SDK
@@ -596,7 +596,7 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 return ExitCode::FAILURE;
             }
 
-            // Register SDK globally for #[durable] functions
+            // Register SDK globally for #[resilient] functions
             register_sdk(sdk_instance);
 
             // Load input from runtara-core via SDK.
@@ -1066,6 +1066,10 @@ pub fn emit_graph_as_function(
     ctx.emitted_child_functions = parent_ctx.emitted_child_functions.clone();
     // Use this graph's rate_limit_budget_ms, or inherit from parent
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
+    // Durability is a top-level workflow concern: children and subgraphs always
+    // inherit from the parent context, ignoring any `durable` flag on this graph.
+    // (The top-level compile_with_children sets ctx.durable from its graph directly.)
+    ctx.durable = parent_ctx.durable;
 
     // Build execution order
     let step_order = steps::build_execution_order(graph);
@@ -1158,6 +1162,7 @@ mod tests {
                 connection_id: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1215,6 +1220,7 @@ mod tests {
                 connection_id: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
         steps.insert(
@@ -1231,6 +1237,7 @@ mod tests {
                 connection_id: None,
                 compensation: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1284,6 +1291,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1383,6 +1391,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -1846,6 +1855,7 @@ mod tests {
                 input_schema: HashMap::new(),
                 output_schema: HashMap::new(),
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -2102,6 +2112,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 
@@ -2166,6 +2177,7 @@ mod tests {
                 retry_delay: None,
                 timeout: None,
                 breakpoint: None,
+                durable: None,
             }),
         );
 

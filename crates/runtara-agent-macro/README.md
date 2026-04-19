@@ -41,7 +41,7 @@ Most downstream code should just depend on `runtara-agents`, which already pulls
 - `runtara-agents/src/agents/extractors/*` uses `#[derive(ConnectionParams)]` for the built-in connection types (`http_bearer`, `http_api_key`, `sftp`).
 - Generated metadata targets types in `runtara-dsl::agent_meta` and is indexed via `inventory::submit!`, gated on `not(target_family = "wasm")`.
 - Deps: `syn` 2 (full/parsing/extra-traits), `quote`, `proc-macro2`, `darling` 0.20.
-- The `#[capability]` executor wrapper normalizes errors into JSON envelopes (`code` / `message` / `category` / `severity`) so the `#[durable]` layer can make retry decisions.
+- The `#[capability]` executor wrapper normalizes errors into JSON envelopes (`code` / `message` / `category` / `severity`) so the `#[resilient]` layer can make retry decisions.
 - Runs in: proc-macro at compile time.
 
 ## License

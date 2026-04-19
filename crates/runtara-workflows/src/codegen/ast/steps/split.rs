@@ -3,7 +3,7 @@
 //! Split step emitter.
 //!
 //! The Split step iterates over an array, executing a subgraph for each item.
-//! The Split step uses #[durable] macro to checkpoint its final result.
+//! The Split step uses #[resilient] macro to checkpoint its final result.
 //! Individual steps within the subgraph checkpoint themselves via runtara-sdk,
 //! enabling recovery mid-iteration.
 
@@ -151,9 +151,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Static base for cache key - will be combined with prefix/workflow_id at runtime
     let cache_key_base = format!("split::{}", step_id);
 
-    // Generate the durable function with configurable retry settings
+    // Generate the resilient function with configurable retry settings
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
+    let durable_lit = ctx.durable && step.durable.unwrap_or(true);
 
     Ok(quote! {
         let #source_var = #build_source;
@@ -263,8 +264,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         // Define the subgraph function
         #subgraph_code
 
-        // Define the durable split execution function
-        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        // Define the resilient split execution function
+        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         fn #durable_fn_name(
             cache_key: &str,
             split_array: Vec<serde_json::Value>,
@@ -560,6 +561,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         }
     }
 
@@ -588,6 +590,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -626,6 +629,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -681,6 +685,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -719,12 +724,13 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify retry config in durable macro
+        // Verify retry config in resilient macro
         assert!(
             code.contains("max_retries = 5"),
             "Should include custom max_retries"
@@ -743,11 +749,11 @@ mod tests {
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify durable function is generated
-        // Token stream formats attributes as "# [durable" with spaces
+        // Verify resilient function is generated
+        // Token stream formats attributes as "# [resilient" with spaces
         assert!(
-            code.contains("# [durable") || code.contains("#[durable"),
-            "Should have durable macro"
+            code.contains("# [resilient") || code.contains("#[resilient"),
+            "Should have resilient macro"
         );
         assert!(code.contains("fn "), "Should be a function");
         assert!(
@@ -820,6 +826,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -930,6 +937,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -983,6 +991,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1021,6 +1030,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1068,6 +1078,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1106,6 +1117,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1148,6 +1160,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1186,6 +1199,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1228,6 +1242,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1270,6 +1285,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1320,6 +1336,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1364,6 +1381,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1433,6 +1451,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1490,6 +1509,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();
@@ -1528,6 +1548,7 @@ mod tests {
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),
             breakpoint: None,
+            durable: None,
         };
 
         let tokens = emit(&split_step, &mut ctx).unwrap();

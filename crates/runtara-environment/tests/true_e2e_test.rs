@@ -184,6 +184,7 @@ fn create_transform_graph() -> ExecutionGraph {
             timeout: None,
             compensation: None,
             breakpoint: None,
+            durable: None,
         }),
     );
 

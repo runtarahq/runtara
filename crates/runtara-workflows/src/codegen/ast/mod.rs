@@ -105,6 +105,7 @@ pub fn compile_with_children(
         tenant_id,
     );
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
+    ctx.durable = graph.durable.unwrap_or(true);
     let tokens = program::emit_program(graph, &mut { ctx })?;
     Ok(tokens.to_string())
 }

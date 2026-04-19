@@ -149,7 +149,7 @@ pub struct LlmUsage {
 /// Structured error for agent capabilities.
 ///
 /// Provides error classification for proper handling:
-/// - **Transient**: Temporary failures (network, timeout, rate limit) - `#[durable]` retries
+/// - **Transient**: Temporary failures (network, timeout, rate limit) - `#[resilient]` retries
 /// - **Permanent**: Non-recoverable failures (404, validation, business rules) - human intervention may help
 ///
 /// To distinguish technical vs business errors within Permanent category, use:
@@ -264,7 +264,7 @@ impl AgentError {
         self
     }
 
-    /// Should the `#[durable]` macro retry this error?
+    /// Should the `#[resilient]` macro retry this error?
     pub fn should_retry(&self) -> bool {
         self.category == ErrorCategory::Transient
     }
@@ -371,7 +371,7 @@ pub fn http_error(status: u16, body: impl Into<String>) -> AgentError {
 /// Create an AgentError from an HTTP response status, with optional response headers.
 ///
 /// When headers are provided and the status is 429, extracts the `Retry-After` header
-/// to populate `retry_after_ms` so the `#[durable]` retry loop can honor server-specified delays.
+/// to populate `retry_after_ms` so the `#[resilient]` retry loop can honor server-specified delays.
 pub fn http_error_with_headers(
     status: u16,
     body: impl Into<String>,
@@ -459,7 +459,7 @@ pub mod attrs {
     pub const INTEGRATION: &str = "integration";
     /// Retry-after hint duplicated into attributes for legacy consumers.
     /// Prefer the typed [`AgentError::retry_after_ms`] field — which is
-    /// what the `#[durable]` retry loop actually reads.
+    /// what the `#[resilient]` retry loop actually reads.
     pub const RETRY_AFTER_MS: &str = "retry_after_ms";
     /// Nested validation details (typically an object or array).
     pub const DETAILS: &str = "details";
@@ -482,7 +482,7 @@ pub mod attrs {
 /// Every constructor populates [`attrs::STATUS_CODE`] (where applicable)
 /// and [`attrs::BODY`] consistently. Rate-limited errors additionally
 /// set the typed [`AgentError::retry_after_ms`] field so the
-/// `#[durable]` retry loop can honor server-specified delays.
+/// `#[resilient]` retry loop can honor server-specified delays.
 pub mod http {
     use super::{
         AgentError, ErrorCategory, ErrorSeverity, Value, attrs, classify_http_status,
@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn http_rate_limited_populates_typed_retry_after_ms_field() {
-        // Critical: the #[durable] retry loop reads top-level `retryAfterMs`
+        // Critical: the #[resilient] retry loop reads top-level `retryAfterMs`
         // (camelCase) from the serialized error JSON. This test locks in
         // that wire-format contract — regressing it silently drops server
         // rate-limit hints.

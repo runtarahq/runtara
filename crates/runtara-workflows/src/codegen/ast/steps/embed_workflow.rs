@@ -5,7 +5,7 @@
 //! The EmbedWorkflow step executes a nested child workflow.
 //! When a child workflow's ExecutionGraph is available in the EmitContext,
 //! it will be recursively emitted and embedded into the parent workflow.
-//! The entire child workflow result uses #[durable] macro for checkpoint-based recovery.
+//! The entire child workflow result uses #[resilient] macro for checkpoint-based recovery.
 
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
@@ -230,6 +230,7 @@ fn emit_with_embedded_child(
 
     let max_retries_lit = max_retries;
     let retry_delay_lit = retry_delay;
+    let durable_lit = ctx.durable && step.durable.unwrap_or(true);
 
     // Generate code to inject child workflow's default variables into __child_vars.
     // Without this, child variables like "source", "fixed_fee" etc. defined in the
@@ -301,7 +302,7 @@ fn emit_with_embedded_child(
         };
 
         // Define the durable child workflow execution function
-        #[durable(max_retries = #max_retries_lit, delay = #retry_delay_lit)]
+        #[resilient(durable = #durable_lit, max_retries = #max_retries_lit, delay = #retry_delay_lit)]
         fn #durable_fn_name(
             cache_key: &str,
             child_inputs: serde_json::Value,
@@ -560,6 +561,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             breakpoint: None,
+            durable: None,
         }
     }
 
@@ -574,6 +576,7 @@ mod tests {
             retry_delay: None,
             timeout: None,
             breakpoint: None,
+            durable: None,
         }
     }
 

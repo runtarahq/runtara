@@ -2,20 +2,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Proc macros for runtara-sdk.
 //!
-//! Provides the `#[durable]` attribute macro for transparent durability with retry support.
+//! Provides the `#[resilient]` attribute macro for transparent durability with retry support.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    FnArg, Ident, ItemFn, LitInt, Pat, PatType, ReturnType, Token, Type, parse_macro_input,
-    spanned::Spanned,
+    FnArg, Ident, ItemFn, LitBool, LitInt, Pat, PatType, ReturnType, Token, Type,
+    parse_macro_input, spanned::Spanned,
 };
 
-/// Parsed configuration from `#[durable(...)]` attributes.
+/// Parsed configuration from `#[resilient(...)]` attributes.
 #[derive(Debug, Default)]
-struct DurableAttr {
+struct ResilientAttr {
+    /// Enable durable mode: checkpoint read/write, signal handling via checkpoint result,
+    /// and `sdk.sleep`/`record_retry_attempt` during rate-limited retries (default: true).
+    /// When false, retries still run but all sleeps are `std::thread::sleep` and no
+    /// checkpoint calls are emitted.
+    durable: Option<bool>,
     /// Maximum number of retry attempts (default: 3)
     max_retries: Option<u32>,
     /// Retry strategy (default: ExponentialBackoff)
@@ -27,15 +32,19 @@ struct DurableAttr {
     rate_limit_budget: Option<u64>,
 }
 
-impl Parse for DurableAttr {
+impl Parse for ResilientAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut attr = DurableAttr::default();
+        let mut attr = ResilientAttr::default();
 
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
 
             match ident.to_string().as_str() {
+                "durable" => {
+                    let lit: LitBool = input.parse()?;
+                    attr.durable = Some(lit.value);
+                }
                 "max_retries" => {
                     let lit: LitInt = input.parse()?;
                     attr.max_retries = Some(lit.base10_parse()?);
@@ -63,7 +72,7 @@ impl Parse for DurableAttr {
                     return Err(syn::Error::new(
                         ident.span(),
                         format!(
-                            "Unknown attribute '{}'. Valid attributes: max_retries, strategy, delay, rate_limit_budget",
+                            "Unknown attribute '{}'. Valid attributes: durable, max_retries, strategy, delay, rate_limit_budget",
                             ident
                         ),
                     ));
@@ -79,28 +88,30 @@ impl Parse for DurableAttr {
     }
 }
 
-/// Makes a function durable by wrapping it with checkpoint-based caching and retry support.
+/// Makes a function resilient by wrapping it with retry support and (optionally)
+/// checkpoint-based caching.
 ///
 /// The macro automatically:
-/// - Checks for existing checkpoint before execution
-/// - Returns cached result if checkpoint exists
-/// - Retries the function on failure (if max_retries > 0)
-/// - Records retry attempts to runtara-core for audit trail
-/// - Executes function and saves result as checkpoint on success
+/// - Retries the function on failure (if `max_retries > 0`)
+/// - When `durable = true` (default): checks for an existing checkpoint, returns the
+///   cached result on resume, records retry attempts to runtara-core, and saves the
+///   successful result as a checkpoint.
+/// - When `durable = false`: executes with retries only (no checkpoint I/O, no
+///   `sdk.sleep` — all backoff uses `std::thread::sleep`, no `record_retry_attempt`).
 ///
 /// # Requirements
 ///
 /// - Function must be synchronous (not async)
 /// - **First parameter is the idempotency key** (any type that implements `Display`)
 /// - Function must return `Result<T, E>` where `T: Serialize + DeserializeOwned`
-/// - SDK must be registered via `RuntaraSdk::init()` before calling
+/// - When `durable = true`, SDK must be registered via `RuntaraSdk::init()` before calling
 ///
 /// # Example - Basic (no retries)
 ///
 /// ```ignore
-/// use runtara_sdk::durable;
+/// use runtara_sdk::resilient;
 ///
-/// #[durable]
+/// #[resilient]
 /// pub fn fetch_order(key: &str, order_id: &str) -> Result<Order, OrderError> {
 ///     // The key determines caching - same key = same cached result
 ///     db.fetch_order(order_id)
@@ -110,9 +121,9 @@ impl Parse for DurableAttr {
 /// # Example - With retries
 ///
 /// ```ignore
-/// use runtara_sdk::durable;
+/// use runtara_sdk::resilient;
 ///
-/// #[durable(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
+/// #[resilient(max_retries = 3, strategy = ExponentialBackoff, delay = 1000)]
 /// pub fn submit_order(key: &str, order: &Order) -> Result<OrderResult, OrderError> {
 ///     // Retries up to 3 times with exponential backoff:
 ///     // - First retry: 1000ms delay
@@ -121,18 +132,28 @@ impl Parse for DurableAttr {
 ///     external_service.submit(order)
 /// }
 /// ```
+///
+/// # Example - Non-durable (retries only, no checkpoint)
+///
+/// ```ignore
+/// #[resilient(durable = false, max_retries = 3)]
+/// pub fn send_metric(key: &str, metric: &Metric) -> Result<(), MetricError> {
+///     // Retries with std::thread::sleep backoff, no checkpoint read/write.
+///     metric_client.send(metric)
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn durable(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let config = parse_macro_input!(attr as DurableAttr);
+pub fn resilient(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let config = parse_macro_input!(attr as ResilientAttr);
     let input = parse_macro_input!(item as ItemFn);
 
-    match generate_durable_wrapper(input, config) {
+    match generate_resilient_wrapper(input, config) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<TokenStream2> {
+fn generate_resilient_wrapper(input: ItemFn, config: ResilientAttr) -> syn::Result<TokenStream2> {
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
     let vis = &input.vis;
@@ -144,7 +165,7 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
     if sig.asyncness.is_some() {
         return Err(syn::Error::new(
             sig.fn_token.span,
-            "#[durable] only works with synchronous (non-async) functions",
+            "#[resilient] only works with synchronous (non-async) functions",
         ));
     }
 
@@ -154,14 +175,14 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
     // Extract the first argument as the idempotency key
     let idempotency_key_ident = extract_first_arg_ident(&sig.inputs)?;
 
-    // Get retry configuration with defaults
+    // Get configuration with defaults
+    let durable = config.durable.unwrap_or(true);
     let max_retries = config.max_retries.unwrap_or(3);
     let base_delay_ms = config.delay.unwrap_or(1000);
     let rate_limit_budget_ms = config.rate_limit_budget;
 
     // Generate appropriate code based on whether retries are enabled
     if max_retries == 0 {
-        // No retries - use simpler code path (original behavior)
         generate_no_retry_wrapper(
             fn_name_str,
             vis,
@@ -170,9 +191,9 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
             block,
             ok_type,
             idempotency_key_ident,
+            durable,
         )
     } else {
-        // With retries - generate retry loop
         generate_retry_wrapper(
             fn_name_str,
             vis,
@@ -181,6 +202,7 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
             block,
             ok_type,
             idempotency_key_ident,
+            durable,
             max_retries,
             base_delay_ms,
             rate_limit_budget_ms,
@@ -189,6 +211,7 @@ fn generate_durable_wrapper(input: ItemFn, config: DurableAttr) -> syn::Result<T
 }
 
 /// Generate wrapper without retry logic (original behavior, for max_retries = 0)
+#[allow(clippy::too_many_arguments)]
 fn generate_no_retry_wrapper(
     fn_name_str: String,
     vis: &syn::Visibility,
@@ -197,7 +220,22 @@ fn generate_no_retry_wrapper(
     block: &syn::Block,
     ok_type: Type,
     idempotency_key_ident: Ident,
+    durable: bool,
 ) -> syn::Result<TokenStream2> {
+    if !durable {
+        // Non-durable: just execute the function body. No checkpoint I/O,
+        // no signal handling via checkpoint result. The idempotency key parameter
+        // is accepted but unused (kept for call-site compatibility across modes).
+        return Ok(quote! {
+            #(#attrs)*
+            #vis #sig {
+                let _ = #idempotency_key_ident;
+                let __result: std::result::Result<_, _> = (|| #block)();
+                __result
+            }
+        });
+    }
+
     Ok(quote! {
         #(#attrs)*
         #vis #sig {
@@ -332,6 +370,7 @@ fn generate_retry_wrapper(
     block: &syn::Block,
     ok_type: Type,
     idempotency_key_ident: Ident,
+    durable: bool,
     max_retries: u32,
     base_delay_ms: u64,
     rate_limit_budget_ms: Option<u64>,
@@ -361,6 +400,157 @@ fn generate_retry_wrapper(
                 .unwrap_or(60_000u64)
         },
     };
+
+    if !durable {
+        // Non-durable retry path: same retry/backoff/error-category logic but
+        // no checkpoint I/O, no sdk.sleep, no record_retry_attempt, no
+        // signal-handling-via-checkpoint. All backoff is std::thread::sleep.
+        let _ = ok_type; // not used on the non-durable path
+        return Ok(quote! {
+            #(#attrs)*
+            #vis #sig {
+                let _ = #idempotency_key_ident;
+                let __max_retries: u32 = #max_retries;
+                let __base_delay_ms: u64 = #base_delay_ms;
+
+                let mut __last_error: Option<String> = None;
+                let __total_attempts: u32 = #total_attempts;
+                let mut __attempt: u32 = 0;
+                let mut __rate_limit_wait_total_ms: u64 = 0;
+
+                loop {
+                    __attempt += 1;
+
+                    #(#clone_statements)*
+
+                    if __attempt > 1 {
+                        let __max_retry_delay_ms: u64 = #rate_limit_budget_init;
+
+                        let __retry_after_override: Option<u64> = (|| -> Option<u64> {
+                            let parsed: ::serde_json::Value = ::serde_json::from_str(
+                                __last_error.as_deref()?
+                            ).ok()?;
+                            parsed.get("retryAfterMs")?.as_u64()
+                        })();
+
+                        let __delay = if let Some(__retry_after) = __retry_after_override {
+                            let __capped = __retry_after.min(__max_retry_delay_ms);
+                            ::std::time::Duration::from_millis(__capped)
+                        } else {
+                            let __backoff_attempt = __attempt.min(__total_attempts);
+                            let __delay_multiplier = 2u64.pow(__backoff_attempt.saturating_sub(2));
+                            ::std::time::Duration::from_millis(
+                                __base_delay_ms.saturating_mul(__delay_multiplier)
+                                    .min(__max_retry_delay_ms)
+                            )
+                        };
+
+                        ::tracing::info!(
+                            function = #fn_name_str,
+                            attempt = __attempt,
+                            max_retries = __max_retries,
+                            delay_ms = __delay.as_millis() as u64,
+                            retry_after_override = ?__retry_after_override,
+                            rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
+                            last_error = ?__last_error,
+                            "Retrying after backoff (non-durable)"
+                        );
+
+                        ::std::thread::sleep(__delay);
+                    }
+
+                    let __result: std::result::Result<_, _> = (|| #block)();
+
+                    match __result {
+                        Ok(_) => {
+                            return __result;
+                        }
+                        Err(ref e) => {
+                            let __err_str = format!("{}", e);
+
+                            let (__is_permanent, __is_rate_limited, __err_retry_after) =
+                                (|| -> Option<(bool, bool, Option<u64>)> {
+                                    let parsed: ::serde_json::Value = ::serde_json::from_str(&__err_str).ok()?;
+                                    let category = parsed.get("category")?.as_str()?;
+                                    let code = parsed.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                                    let is_rate_limited = code.contains("RATE_LIMITED") || code == "HTTP_RATE_LIMITED";
+                                    let retry_after = parsed.get("retryAfterMs").and_then(|v| v.as_u64());
+                                    Some((category == "permanent", is_rate_limited, retry_after))
+                                })().unwrap_or((false, false, None));
+
+                            let __auto_retry_429: bool = ::std::env::var("AUTO_RETRY_ON_429")
+                                .ok()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(true);
+
+                            if __is_permanent || (__is_rate_limited && !__auto_retry_429) {
+                                ::tracing::warn!(
+                                    function = #fn_name_str,
+                                    attempt = __attempt,
+                                    error = %e,
+                                    is_rate_limited = __is_rate_limited,
+                                    auto_retry_429 = __auto_retry_429,
+                                    "Non-retryable error detected, skipping retries"
+                                );
+                                return __result;
+                            }
+
+                            __last_error = Some(__err_str);
+
+                            let __max_retry_delay_ms: u64 = #rate_limit_budget_init;
+
+                            if __is_rate_limited {
+                                let __wait = __err_retry_after.unwrap_or(__base_delay_ms);
+                                __rate_limit_wait_total_ms += __wait;
+
+                                if __rate_limit_wait_total_ms <= __max_retry_delay_ms {
+                                    ::tracing::info!(
+                                        function = #fn_name_str,
+                                        attempt = __attempt,
+                                        rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
+                                        max_wait_ms = __max_retry_delay_ms,
+                                        error = %e,
+                                        "Rate limited, will thread::sleep and retry (non-durable)"
+                                    );
+                                    continue;
+                                } else {
+                                    ::tracing::error!(
+                                        function = #fn_name_str,
+                                        attempt = __attempt,
+                                        rate_limit_wait_total_ms = __rate_limit_wait_total_ms,
+                                        max_wait_ms = __max_retry_delay_ms,
+                                        error = %e,
+                                        "Rate limit wait budget exhausted"
+                                    );
+                                    return __result;
+                                }
+                            }
+
+                            if __attempt < __total_attempts {
+                                ::tracing::warn!(
+                                    function = #fn_name_str,
+                                    attempt = __attempt,
+                                    max_retries = __max_retries,
+                                    error = %e,
+                                    "Attempt failed, will retry (non-durable)"
+                                );
+                                continue;
+                            } else {
+                                ::tracing::error!(
+                                    function = #fn_name_str,
+                                    attempt = __attempt,
+                                    max_retries = __max_retries,
+                                    error = %e,
+                                    "All retry attempts exhausted"
+                                );
+                                return __result;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     Ok(quote! {
         #(#attrs)*
@@ -684,35 +874,35 @@ fn extract_result_ok_type(return_type: &ReturnType) -> syn::Result<Type> {
     let ReturnType::Type(_, ty) = return_type else {
         return Err(syn::Error::new(
             return_type.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         ));
     };
 
     let Type::Path(type_path) = ty.as_ref() else {
         return Err(syn::Error::new(
             ty.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         ));
     };
 
     let segment = type_path.path.segments.last().ok_or_else(|| {
         syn::Error::new(
             ty.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         )
     })?;
 
     if segment.ident != "Result" {
         return Err(syn::Error::new(
             segment.ident.span(),
-            "#[durable] requires function to return Result<T, E>",
+            "#[resilient] requires function to return Result<T, E>",
         ));
     }
 
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
         return Err(syn::Error::new(
             segment.span(),
-            "#[durable] requires Result<T, E> with explicit type parameters",
+            "#[resilient] requires Result<T, E> with explicit type parameters",
         ));
     };
 
@@ -720,7 +910,7 @@ fn extract_result_ok_type(return_type: &ReturnType) -> syn::Result<Type> {
         Some(syn::GenericArgument::Type(t)) => Ok(t.clone()),
         _ => Err(syn::Error::new(
             args.span(),
-            "#[durable] requires Result<T, E> with explicit type parameters",
+            "#[resilient] requires Result<T, E> with explicit type parameters",
         )),
     }
 }
@@ -736,7 +926,7 @@ fn extract_first_arg_ident(
                 let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
                     return Err(syn::Error::new(
                         pat_type.pat.span(),
-                        "#[durable] requires the first argument to be a simple identifier",
+                        "#[resilient] requires the first argument to be a simple identifier",
                     ));
                 };
                 return Ok(pat_ident.ident.clone());
@@ -746,7 +936,7 @@ fn extract_first_arg_ident(
 
     Err(syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[durable] requires at least one argument: the idempotency key (String)",
+        "#[resilient] requires at least one argument: the idempotency key (String)",
     ))
 }
 
@@ -796,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_empty() {
-        let attr: DurableAttr = syn::parse2(quote! {}).unwrap();
+        let attr: ResilientAttr = syn::parse2(quote! {}).unwrap();
         assert!(attr.max_retries.is_none());
         assert!(attr.strategy.is_none());
         assert!(attr.delay.is_none());
@@ -804,7 +994,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_max_retries() {
-        let attr: DurableAttr = syn::parse2(quote! { max_retries = 5 }).unwrap();
+        let attr: ResilientAttr = syn::parse2(quote! { max_retries = 5 }).unwrap();
         assert_eq!(attr.max_retries, Some(5));
         assert!(attr.strategy.is_none());
         assert!(attr.delay.is_none());
@@ -812,7 +1002,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_delay() {
-        let attr: DurableAttr = syn::parse2(quote! { delay = 2000 }).unwrap();
+        let attr: ResilientAttr = syn::parse2(quote! { delay = 2000 }).unwrap();
         assert!(attr.max_retries.is_none());
         assert!(attr.strategy.is_none());
         assert_eq!(attr.delay, Some(2000));
@@ -820,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_strategy() {
-        let attr: DurableAttr = syn::parse2(quote! { strategy = ExponentialBackoff }).unwrap();
+        let attr: ResilientAttr = syn::parse2(quote! { strategy = ExponentialBackoff }).unwrap();
         assert!(attr.max_retries.is_none());
         assert_eq!(attr.strategy, Some("ExponentialBackoff".to_string()));
         assert!(attr.delay.is_none());
@@ -828,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_all_options() {
-        let attr: DurableAttr =
+        let attr: ResilientAttr =
             syn::parse2(quote! { max_retries = 3, strategy = ExponentialBackoff, delay = 1000 })
                 .unwrap();
         assert_eq!(attr.max_retries, Some(3));
@@ -838,7 +1028,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_unknown_attribute_fails() {
-        let result: Result<DurableAttr, _> = syn::parse2(quote! { unknown = 5 });
+        let result: Result<ResilientAttr, _> = syn::parse2(quote! { unknown = 5 });
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Unknown attribute"));
@@ -846,7 +1036,7 @@ mod tests {
 
     #[test]
     fn test_durable_attr_parsing_invalid_strategy_fails() {
-        let result: Result<DurableAttr, _> = syn::parse2(quote! { strategy = LinearBackoff });
+        let result: Result<ResilientAttr, _> = syn::parse2(quote! { strategy = LinearBackoff });
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Only ExponentialBackoff"));
@@ -959,45 +1149,45 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_durable_wrapper_async_fails() {
+    fn test_generate_resilient_wrapper_async_fails() {
         let fn_item: ItemFn = parse_quote! {
             async fn foo(key: &str) -> Result<(), ()> {
                 Ok(())
             }
         };
-        let config = DurableAttr::default();
-        let result = generate_durable_wrapper(fn_item, config);
+        let config = ResilientAttr::default();
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("synchronous"));
     }
 
     #[test]
-    fn test_generate_durable_wrapper_valid() {
+    fn test_generate_resilient_wrapper_valid() {
         let fn_item: ItemFn = parse_quote! {
             fn foo(key: &str) -> Result<String, String> {
                 Ok("hello".to_string())
             }
         };
-        let config = DurableAttr::default();
-        let result = generate_durable_wrapper(fn_item, config);
+        let config = ResilientAttr::default();
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_generate_durable_wrapper_zero_retries() {
+    fn test_generate_resilient_wrapper_zero_retries() {
         let fn_item: ItemFn = parse_quote! {
             fn foo(key: &str) -> Result<String, String> {
                 Ok("hello".to_string())
             }
         };
-        let config = DurableAttr {
+        let config = ResilientAttr {
             max_retries: Some(0),
             strategy: None,
             delay: None,
             ..Default::default()
         };
-        let result = generate_durable_wrapper(fn_item, config);
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         // Should generate the no-retry path
         let tokens = result.unwrap().to_string();
@@ -1006,19 +1196,19 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_durable_wrapper_with_retries() {
+    fn test_generate_resilient_wrapper_with_retries() {
         let fn_item: ItemFn = parse_quote! {
             fn foo(key: &str) -> Result<String, String> {
                 Ok("hello".to_string())
             }
         };
-        let config = DurableAttr {
+        let config = ResilientAttr {
             max_retries: Some(3),
             strategy: None,
             delay: Some(1000),
             ..Default::default()
         };
-        let result = generate_durable_wrapper(fn_item, config);
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         // Should generate the retry path
         let tokens = result.unwrap().to_string();
@@ -1034,13 +1224,13 @@ mod tests {
                 Ok(())
             }
         };
-        let config = DurableAttr {
+        let config = ResilientAttr {
             max_retries: Some(0),
             strategy: None,
             delay: None,
             ..Default::default()
         };
-        let result = generate_durable_wrapper(fn_item, config);
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         let tokens = result.unwrap().to_string();
 
@@ -1082,13 +1272,13 @@ mod tests {
                 Ok(())
             }
         };
-        let config = DurableAttr {
+        let config = ResilientAttr {
             max_retries: Some(3),
             strategy: None,
             delay: Some(1000),
             ..Default::default()
         };
-        let result = generate_durable_wrapper(fn_item, config);
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         let tokens = result.unwrap().to_string();
 
@@ -1130,8 +1320,8 @@ mod tests {
                 Ok(42)
             }
         };
-        let config = DurableAttr::default();
-        let result = generate_durable_wrapper(fn_item, config);
+        let config = ResilientAttr::default();
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         let tokens = result.unwrap().to_string();
 
@@ -1173,7 +1363,7 @@ mod tests {
                     Ok(())
                 }
             };
-            let config = DurableAttr {
+            let config = ResilientAttr {
                 max_retries,
                 strategy: None,
                 delay: if max_retries == Some(3) {
@@ -1183,7 +1373,7 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let result = generate_durable_wrapper(fn_item, config);
+            let result = generate_resilient_wrapper(fn_item, config);
             assert!(result.is_ok(), "{} path should compile", path_name);
             let tokens = result.unwrap().to_string();
 
@@ -1220,8 +1410,8 @@ mod tests {
                 Ok("hello".to_string())
             }
         };
-        let config = DurableAttr::default();
-        let result = generate_durable_wrapper(fn_item, config);
+        let config = ResilientAttr::default();
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         let tokens = result.unwrap().to_string();
 
@@ -1243,13 +1433,13 @@ mod tests {
                 Ok("hello".to_string())
             }
         };
-        let config = DurableAttr {
+        let config = ResilientAttr {
             max_retries: Some(3),
             strategy: None,
             delay: Some(1000),
             ..Default::default()
         };
-        let result = generate_durable_wrapper(fn_item, config);
+        let result = generate_resilient_wrapper(fn_item, config);
         assert!(result.is_ok());
         let tokens = result.unwrap().to_string();
 
@@ -1261,6 +1451,124 @@ mod tests {
         assert!(
             !tokens.contains("tokio :: time :: sleep"),
             "Generated code should NOT use tokio::time::sleep"
+        );
+    }
+
+    #[test]
+    fn test_resilient_attr_parses_durable_flag() {
+        let attr: ResilientAttr = syn::parse2(quote! { durable = false }).unwrap();
+        assert_eq!(attr.durable, Some(false));
+        let attr: ResilientAttr = syn::parse2(quote! { durable = true }).unwrap();
+        assert_eq!(attr.durable, Some(true));
+    }
+
+    #[test]
+    fn test_resilient_durable_false_no_retry_omits_checkpoint_calls() {
+        let fn_item: ItemFn = parse_quote! {
+            fn call(key: &str) -> Result<String, String> { Ok(String::new()) }
+        };
+        let config = ResilientAttr {
+            durable: Some(false),
+            max_retries: Some(0),
+            ..Default::default()
+        };
+        let tokens = generate_resilient_wrapper(fn_item, config)
+            .unwrap()
+            .to_string();
+        assert!(
+            !tokens.contains("get_checkpoint"),
+            "non-durable no-retry path must not emit get_checkpoint"
+        );
+        assert!(
+            !tokens.contains(". checkpoint ("),
+            "non-durable no-retry path must not emit checkpoint() call"
+        );
+        assert!(
+            !tokens.contains("should_cancel"),
+            "non-durable no-retry path must not emit checkpoint-result signal checks"
+        );
+    }
+
+    #[test]
+    fn test_resilient_durable_false_retry_omits_durability_bits_but_keeps_retry() {
+        let fn_item: ItemFn = parse_quote! {
+            fn call(key: &str) -> Result<String, String> { Ok(String::new()) }
+        };
+        let config = ResilientAttr {
+            durable: Some(false),
+            max_retries: Some(3),
+            delay: Some(1000),
+            ..Default::default()
+        };
+        let tokens = generate_resilient_wrapper(fn_item, config)
+            .unwrap()
+            .to_string();
+        assert!(
+            !tokens.contains("get_checkpoint"),
+            "non-durable retry path must not call get_checkpoint"
+        );
+        assert!(
+            !tokens.contains(". checkpoint ("),
+            "non-durable retry path must not call checkpoint()"
+        );
+        assert!(
+            !tokens.contains("record_retry_attempt"),
+            "non-durable retry path must not call record_retry_attempt"
+        );
+        // Rate-limited retries must use thread::sleep, not sdk.sleep
+        assert!(
+            tokens.contains("std :: thread :: sleep"),
+            "non-durable retry path must use std::thread::sleep"
+        );
+        assert!(
+            !tokens.contains("__sdk_guard . sleep"),
+            "non-durable retry path must not use sdk.sleep"
+        );
+        // Retry loop structure must still be present
+        assert!(
+            tokens.contains("__max_retries"),
+            "non-durable retry path must still have retry loop"
+        );
+        // Error-category parsing preserved
+        assert!(
+            tokens.contains("AUTO_RETRY_ON_429"),
+            "non-durable retry path must still honor AUTO_RETRY_ON_429"
+        );
+        assert!(
+            tokens.contains("RATE_LIMITED") || tokens.contains("HTTP_RATE_LIMITED"),
+            "non-durable retry path must still recognize rate-limited errors"
+        );
+        assert!(
+            tokens.contains("permanent"),
+            "non-durable retry path must still classify permanent errors"
+        );
+    }
+
+    #[test]
+    fn test_resilient_durable_true_still_emits_checkpoint_calls() {
+        let fn_item: ItemFn = parse_quote! {
+            fn call(key: &str) -> Result<String, String> { Ok(String::new()) }
+        };
+        let config = ResilientAttr {
+            durable: Some(true),
+            max_retries: Some(3),
+            delay: Some(1000),
+            ..Default::default()
+        };
+        let tokens = generate_resilient_wrapper(fn_item, config)
+            .unwrap()
+            .to_string();
+        assert!(
+            tokens.contains("get_checkpoint"),
+            "durable path must emit get_checkpoint"
+        );
+        assert!(
+            tokens.contains(". checkpoint ("),
+            "durable path must emit checkpoint() call"
+        );
+        assert!(
+            tokens.contains("record_retry_attempt"),
+            "durable path must emit record_retry_attempt"
         );
     }
 }
