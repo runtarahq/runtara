@@ -13,9 +13,9 @@ import { ExecutionHistoryItem } from '../types';
 import { formatDate } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import { isActiveStatus } from '@/shared/utils/status-display';
-import { ReplayButton } from '@/features/scenarios/components/ReplayButton';
-import { ResumeButton } from '@/features/scenarios/components/ResumeButton';
-import { StopButton } from '@/features/scenarios/components/StopButton';
+import { ReplayButton } from '@/features/workflows/components/ReplayButton';
+import { ResumeButton } from '@/features/workflows/components/ResumeButton';
+import { StopButton } from '@/features/workflows/components/StopButton';
 
 // Helper to format duration
 const formatDuration = (seconds: number | null | undefined): string => {
@@ -141,23 +141,23 @@ const StatusBadge = ({ status }: { status: string }) => {
 
 export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
   {
-    id: 'scenarioId',
-    accessorKey: 'scenarioName',
-    header: 'Scenario',
+    id: 'workflowId',
+    accessorKey: 'workflowName',
+    header: 'Workflow',
     enableSorting: false,
     cell: ({ row }) => {
-      const scenarioId = row.original.scenarioId;
-      const scenarioName = row.original.scenarioName || scenarioId;
+      const workflowId = row.original.workflowId;
+      const workflowName = row.original.workflowName || workflowId;
       const instanceId = row.original.instanceId;
 
       return (
         <div className="flex flex-col gap-0.5">
-          {scenarioName ? (
+          {workflowName ? (
             <Link
-              to={`/scenarios/${scenarioId}`}
+              to={`/workflows/${workflowId}`}
               className="text-sm font-medium text-slate-900 hover:text-blue-600 inline-flex items-center gap-1.5 group/link dark:text-slate-100 dark:hover:text-blue-400"
             >
-              {scenarioName}
+              {workflowName}
               <ExternalLink className="w-3 h-3 text-slate-400 group-hover/link:text-blue-500 transition-colors dark:group-hover/link:text-blue-400" />
             </Link>
           ) : (
@@ -215,7 +215,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           <StatusBadge status={status} />
           {hasPendingInput && (
             <Link
-              to={`/scenarios/${row.original.scenarioId}/chat/${row.original.instanceId}`}
+              to={`/workflows/${row.original.workflowId}/chat/${row.original.instanceId}`}
               className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-full text-amber-700 bg-amber-50 border border-amber-200/60 hover:bg-amber-100 dark:text-amber-400 dark:bg-amber-900/30 dark:border-amber-700/40 dark:hover:bg-amber-900/50 transition-colors"
               title="Continue chat"
             >
@@ -267,7 +267,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       cellClassName: 'text-right',
     },
     cell: ({ row }) => {
-      const { instanceId, scenarioId, status, hasPendingInput } = row.original;
+      const { instanceId, workflowId, status, hasPendingInput } = row.original;
       if (!instanceId) return null;
 
       const shouldShowStop = isActiveStatus(status);
@@ -275,7 +275,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
       return (
         <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
           {status === ExecutionStatus.Suspended && (
-            <Link to={`/scenarios/${scenarioId}?attachInstance=${instanceId}`}>
+            <Link to={`/workflows/${workflowId}?attachInstance=${instanceId}`}>
               <Button
                 variant="ghost"
                 size="icon"
@@ -287,7 +287,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
             </Link>
           )}
           {hasPendingInput && (
-            <Link to={`/scenarios/${scenarioId}/chat/${instanceId}`}>
+            <Link to={`/workflows/${workflowId}/chat/${instanceId}`}>
               <Button
                 variant="ghost"
                 size="icon"
@@ -298,7 +298,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               </Button>
             </Link>
           )}
-          <Link to={`/scenarios/${scenarioId}/history/${instanceId}`}>
+          <Link to={`/workflows/${workflowId}/history/${instanceId}`}>
             <Button
               variant="ghost"
               size="icon"

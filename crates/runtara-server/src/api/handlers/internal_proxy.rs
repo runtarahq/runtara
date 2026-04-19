@@ -1,6 +1,6 @@
 //! Internal HTTP Proxy Handler
 //!
-//! Proxies HTTP requests on behalf of WASM scenarios, injecting connection
+//! Proxies HTTP requests on behalf of WASM workflows, injecting connection
 //! credentials server-side so that WASM modules never see secrets directly.
 //!
 //! Mounted at `POST /api/internal/proxy` without authentication middleware —

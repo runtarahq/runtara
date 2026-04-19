@@ -60,10 +60,10 @@ pub mod telemetry;
 // Template rendering for MappingValue::Template
 pub mod template;
 
-// Child scenario input validation (runtime)
+// Child workflow input validation (runtime)
 pub mod child_input_validation;
 
-// Capability dispatch for generated scenario binaries
+// Capability dispatch for generated workflow binaries
 // Product stdlibs can override with static dispatch tables
 pub mod dispatch;
 
@@ -99,10 +99,10 @@ pub mod prelude {
     // Agent registry (server-side, inventory-based)
     pub use runtara_agents::registry;
 
-    // Capability dispatch (static dispatch for scenario binaries)
+    // Capability dispatch (static dispatch for workflow binaries)
     pub use crate::dispatch;
 
-    // Child input validation for StartScenario steps
+    // Child input validation for EmbedWorkflow steps
     pub use crate::child_input_validation::{
         ChildInputSchema, ChildInputValidationError, RequiredField, validate_child_inputs,
     };

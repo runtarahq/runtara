@@ -20,6 +20,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields are preserved verbatim; clients that read only those two keep
   working unchanged.
 
+## [3.0.0]
+
+### Changed (BREAKING)
+
+- Renamed the core primitive `Scenario` → `Workflow` across the whole
+  codebase — Rust types, REST endpoints, database schema, MCP tools,
+  frontend routes, and generated API clients.
+- Renamed the nested-workflow DSL step `StartScenario` → `EmbedWorkflow`.
+  Serde discriminator `"stepType": "StartScenario"` becomes
+  `"EmbedWorkflow"`; struct fields `childScenarioId` / `childScenarioVersion`
+  become `childWorkflowId` / `childWorkflowVersion`.
+- REST API: every `/api/runtime/scenarios/*` path moves to
+  `/api/runtime/workflows/*`; path param `:scenarioId` becomes `:workflowId`.
+- MCP tool names: `scenarios.*` → `workflows.*`.
+- Error codes: `CHILD_SCENARIO_FAILED` → `CHILD_WORKFLOW_FAILED`.
+- Telemetry env var: `SCENARIO_ID` → `WORKFLOW_ID` (OTel resource attribute).
+- Database schema: tables `scenarios`, `scenario_definitions`,
+  `scenario_executions`, `scenario_execution_events`,
+  `scenario_compilations`, `scenario_metrics_hourly`, and
+  `scenario_dependencies` are renamed to their `workflow*` equivalents,
+  along with every `scenario_id` column. Forward migration
+  `20260419000000_rename_scenarios_to_workflows.sql` performs the rename
+  idempotently with `ALTER TABLE ... RENAME`.
+
+### Migration notes
+
+- No backward-compat shims. SDK consumers, REST clients, frontends, and
+  operators must update together. If you have operators exporting
+  `SCENARIO_ID=...` for OTel, switch to `WORKFLOW_ID`.
+- Historical rows in `error_history.error_code = 'CHILD_SCENARIO_FAILED'`
+  are left as-is; only new errors use the new code.
+
 ## [1.8.0] - 2026-04-13
 
 ### Added

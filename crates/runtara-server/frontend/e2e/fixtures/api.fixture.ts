@@ -142,11 +142,11 @@ export const mockData = {
   }),
 
   /**
-   * Create mock scenario data
+   * Create mock workflow data
    */
-  scenario: (overrides = {}) => ({
-    id: 'scenario-123',
-    name: 'Test Scenario',
+  workflow: (overrides = {}) => ({
+    id: 'workflow-123',
+    name: 'Test Workflow',
     status: 'active',
     steps: [],
     createdAt: new Date().toISOString(),

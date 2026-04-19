@@ -13,7 +13,7 @@ import { fileURLToPath } from 'url';
  * SYN-244: Switch step with Default output wasn't saving (config dropped when value empty)
  * SYN-242: Log step couldn't be configured (missing frontend handler)
  *
- * Uses runtime API directly (X-Org-Id header) for scenario CRUD.
+ * Uses runtime API directly (X-Org-Id header) for workflow CRUD.
  *
  * Requires: runtara-server on :7001 with PostgreSQL
  */
@@ -22,7 +22,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const RUNTIME_URL = process.env.RUNTIME_URL || 'http://localhost:7001';
-const API_BASE = `${RUNTIME_URL}/api/runtime/scenarios`;
+const API_BASE = `${RUNTIME_URL}/api/runtime/workflows`;
 const TENANT_ID = process.env.TEST_ORG_ID || 'org_xxxxx';
 
 function getAccessToken(): string {
@@ -55,7 +55,7 @@ function apiHeaders(token: string): Record<string, string> {
 // ---------- SYN-217: Filter step condition saves ----------
 
 test.describe.serial('SYN-217: Filter step condition saves', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -63,9 +63,9 @@ test.describe.serial('SYN-217: Filter step condition saves', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${API_BASE}/${scenarioId}/delete`, {
+      await fetch(`${API_BASE}/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -77,7 +77,7 @@ test.describe.serial('SYN-217: Filter step condition saves', () => {
   test('save Filter step with condition and verify it persists', async ({
     request,
   }) => {
-    // 1. Create scenario
+    // 1. Create workflow
     const createRes = await request.post(`${API_BASE}/create`, {
       headers: apiHeaders(token),
       data: {
@@ -86,7 +86,7 @@ test.describe.serial('SYN-217: Filter step condition saves', () => {
       },
     });
     expect(createRes.status()).toBe(200);
-    scenarioId = (await createRes.json()).data.id;
+    workflowId = (await createRes.json()).data.id;
 
     // 2. Update with a Filter step that has a condition
     const filterCondition = {
@@ -98,7 +98,7 @@ test.describe.serial('SYN-217: Filter step condition saves', () => {
       ],
     };
 
-    const updateRes = await request.post(`${API_BASE}/${scenarioId}/update`, {
+    const updateRes = await request.post(`${API_BASE}/${workflowId}/update`, {
       headers: apiHeaders(token),
       data: {
         executionGraph: {
@@ -159,13 +159,13 @@ test.describe.serial('SYN-217: Filter step condition saves', () => {
       `Update failed: ${JSON.stringify(updateBody).slice(0, 500)}`
     ).toBe(200);
 
-    // 3. Fetch scenario back and verify filter config persists
-    const getRes = await request.get(`${API_BASE}/${scenarioId}`, {
+    // 3. Fetch workflow back and verify filter config persists
+    const getRes = await request.get(`${API_BASE}/${workflowId}`, {
       headers: apiHeaders(token),
     });
     expect(getRes.status()).toBe(200);
-    const scenario = await getRes.json();
-    const filterStep = scenario.data.executionGraph.steps['filter-step'];
+    const workflow = await getRes.json();
+    const filterStep = workflow.data.executionGraph.steps['filter-step'];
 
     expect(filterStep).toBeTruthy();
     expect(filterStep.config).toBeTruthy();
@@ -180,7 +180,7 @@ test.describe.serial('SYN-217: Filter step condition saves', () => {
 // ---------- SYN-244: Switch step with Default output saves ----------
 
 test.describe.serial('SYN-244: Switch step with Default output saves', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -188,9 +188,9 @@ test.describe.serial('SYN-244: Switch step with Default output saves', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${API_BASE}/${scenarioId}/delete`, {
+      await fetch(`${API_BASE}/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -202,7 +202,7 @@ test.describe.serial('SYN-244: Switch step with Default output saves', () => {
   test('save Switch step with default output and verify it persists', async ({
     request,
   }) => {
-    // 1. Create scenario
+    // 1. Create workflow
     const createRes = await request.post(`${API_BASE}/create`, {
       headers: apiHeaders(token),
       data: {
@@ -211,10 +211,10 @@ test.describe.serial('SYN-244: Switch step with Default output saves', () => {
       },
     });
     expect(createRes.status()).toBe(200);
-    scenarioId = (await createRes.json()).data.id;
+    workflowId = (await createRes.json()).data.id;
 
     // 2. Update with a Switch step that has cases and a default output
-    const updateRes = await request.post(`${API_BASE}/${scenarioId}/update`, {
+    const updateRes = await request.post(`${API_BASE}/${workflowId}/update`, {
       headers: apiHeaders(token),
       data: {
         executionGraph: {
@@ -263,12 +263,12 @@ test.describe.serial('SYN-244: Switch step with Default output saves', () => {
     ).toBe(200);
 
     // 3. Verify switch config persists with default
-    const getRes = await request.get(`${API_BASE}/${scenarioId}`, {
+    const getRes = await request.get(`${API_BASE}/${workflowId}`, {
       headers: apiHeaders(token),
     });
     expect(getRes.status()).toBe(200);
-    const scenario = await getRes.json();
-    const switchStep = scenario.data.executionGraph.steps['switch-step'];
+    const workflow = await getRes.json();
+    const switchStep = workflow.data.executionGraph.steps['switch-step'];
 
     expect(switchStep).toBeTruthy();
     expect(switchStep.config).toBeTruthy();
@@ -281,7 +281,7 @@ test.describe.serial('SYN-244: Switch step with Default output saves', () => {
 // ---------- SYN-242: Log step saves and loads correctly ----------
 
 test.describe.serial('SYN-242: Log step saves and loads correctly', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -289,9 +289,9 @@ test.describe.serial('SYN-242: Log step saves and loads correctly', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${API_BASE}/${scenarioId}/delete`, {
+      await fetch(`${API_BASE}/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -301,7 +301,7 @@ test.describe.serial('SYN-242: Log step saves and loads correctly', () => {
   });
 
   test('save Log step via API and verify roundtrip', async ({ request }) => {
-    // 1. Create scenario
+    // 1. Create workflow
     const createRes = await request.post(`${API_BASE}/create`, {
       headers: apiHeaders(token),
       data: {
@@ -310,10 +310,10 @@ test.describe.serial('SYN-242: Log step saves and loads correctly', () => {
       },
     });
     expect(createRes.status()).toBe(200);
-    scenarioId = (await createRes.json()).data.id;
+    workflowId = (await createRes.json()).data.id;
 
     // 2. Update with a Log step
-    const updateRes = await request.post(`${API_BASE}/${scenarioId}/update`, {
+    const updateRes = await request.post(`${API_BASE}/${workflowId}/update`, {
       headers: apiHeaders(token),
       data: {
         executionGraph: {
@@ -347,12 +347,12 @@ test.describe.serial('SYN-242: Log step saves and loads correctly', () => {
     ).toBe(200);
 
     // 3. Fetch back and verify Log step fields persist
-    const getRes = await request.get(`${API_BASE}/${scenarioId}`, {
+    const getRes = await request.get(`${API_BASE}/${workflowId}`, {
       headers: apiHeaders(token),
     });
     expect(getRes.status()).toBe(200);
-    const scenario = await getRes.json();
-    const logStep = scenario.data.executionGraph.steps['log-step'];
+    const workflow = await getRes.json();
+    const logStep = workflow.data.executionGraph.steps['log-step'];
 
     expect(logStep).toBeTruthy();
     expect(logStep.stepType).toBe('Log');

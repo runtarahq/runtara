@@ -1,5 +1,5 @@
 /**
- * File data types for handling file inputs/outputs in scenarios and operators.
+ * File data types for handling file inputs/outputs in workflows and operators.
  *
  * The runtime supports a `file` type that accepts two formats:
  * 1. FileData object (full format) with content, filename, and mimeType

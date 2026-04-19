@@ -31,7 +31,7 @@
 mod common;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_workflows::{CompilationInput, compile_scenario};
+use runtara_workflows::{CompilationInput, compile_workflow};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -165,8 +165,8 @@ fn test_parse_parallel_split_workflow() {
 }
 
 #[test]
-fn test_parse_start_scenario_workflow() {
-    let workflow_json = include_str!("fixtures/start_scenario_workflow.json");
+fn test_parse_embed_workflow_workflow() {
+    let workflow_json = include_str!("fixtures/embed_workflow_workflow.json");
     let graph: ExecutionGraph =
         serde_json::from_str(workflow_json).expect("Failed to parse workflow JSON");
 
@@ -174,12 +174,12 @@ fn test_parse_start_scenario_workflow() {
     assert!(graph.steps.contains_key("call_child"));
     assert!(graph.steps.contains_key("finish"));
 
-    // Verify the start scenario step properties
+    // Verify the start workflow step properties
     use runtara_dsl::Step;
-    if let Some(Step::StartScenario(start_step)) = graph.steps.get("call_child") {
-        assert_eq!(start_step.child_scenario_id, "child_scenario");
+    if let Some(Step::EmbedWorkflow(start_step)) = graph.steps.get("call_child") {
+        assert_eq!(start_step.child_workflow_id, "child_workflow");
     } else {
-        panic!("Expected StartScenario step");
+        panic!("Expected EmbedWorkflow step");
     }
 }
 
@@ -1049,15 +1049,15 @@ fn test_compile_simple_passthrough() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "passthrough".to_string(),
+        workflow_id: "passthrough".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1086,15 +1086,15 @@ fn test_compile_transform_workflow() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "transform".to_string(),
+        workflow_id: "transform".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1123,15 +1123,15 @@ fn test_compile_conditional_workflow() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "conditional".to_string(),
+        workflow_id: "conditional".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1159,15 +1159,15 @@ fn test_compile_conditional_length_comparison() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "length-comparison".to_string(),
+        workflow_id: "length-comparison".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1195,15 +1195,15 @@ fn test_compile_split_workflow() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "split".to_string(),
+        workflow_id: "split".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1218,28 +1218,28 @@ fn test_compile_split_workflow() {
 
 #[test]
 #[ignore = "requires pre-built native library"]
-fn test_compile_start_scenario_workflow() {
+fn test_compile_embed_workflow_workflow() {
     if !native_library_available() {
         eprintln!("Skipping: native library not available");
         return;
     }
 
     // Load parent workflow
-    let parent_json = include_str!("fixtures/start_scenario_workflow.json");
+    let parent_json = include_str!("fixtures/embed_workflow_workflow.json");
     let parent_graph: ExecutionGraph =
         serde_json::from_str(parent_json).expect("Failed to parse parent workflow JSON");
 
-    // Load child scenario
-    let child_json = include_str!("fixtures/child_scenario.json");
+    // Load child workflow
+    let child_json = include_str!("fixtures/child_workflow.json");
     let child_graph: ExecutionGraph =
-        serde_json::from_str(child_json).expect("Failed to parse child scenario JSON");
+        serde_json::from_str(child_json).expect("Failed to parse child workflow JSON");
 
     let temp_dir = setup_test_env();
 
-    // Create child scenario compilation input
-    let child_scenario = runtara_workflows::ChildScenarioInput {
+    // Create child workflow compilation input
+    let child_workflow = runtara_workflows::ChildWorkflowInput {
         step_id: "call_child".to_string(),
-        scenario_id: "child_scenario".to_string(),
+        workflow_id: "child_workflow".to_string(),
         version_requested: "latest".to_string(),
         version_resolved: 1,
         execution_graph: child_graph,
@@ -1247,22 +1247,22 @@ fn test_compile_start_scenario_workflow() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "start_scenario".to_string(),
+        workflow_id: "embed_workflow".to_string(),
         version: 1,
         execution_graph: parent_graph,
         track_events: false,
-        child_scenarios: vec![child_scenario],
+        child_workflows: vec![child_workflow],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
-    // StartScenario workflow with transform agent should not have side effects
+    // EmbedWorkflow workflow with transform agent should not have side effects
     assert!(
         !result.has_side_effects,
-        "StartScenario workflow with transform agent should not have side effects"
+        "EmbedWorkflow workflow with transform agent should not have side effects"
     );
 
     drop(temp_dir);
@@ -1284,15 +1284,15 @@ fn test_compile_with_track_events() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "passthrough_debug".to_string(),
+        workflow_id: "passthrough_debug".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: true, // Enable debug mode
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     // Debug mode binaries may be larger due to debug info, but should still work
@@ -1356,15 +1356,15 @@ fn test_side_effects_detection() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "http_workflow".to_string(),
+        workflow_id: "http_workflow".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(
         result.has_side_effects,
@@ -1394,15 +1394,15 @@ fn test_compile_while_simple() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "while_simple".to_string(),
+        workflow_id: "while_simple".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1430,15 +1430,15 @@ fn test_compile_while_nested_condition() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "while_nested".to_string(),
+        workflow_id: "while_nested".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1462,15 +1462,15 @@ fn test_compile_while_with_loop_index() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "while_loop_index".to_string(),
+        workflow_id: "while_loop_index".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1498,15 +1498,15 @@ fn test_compile_log_all_levels() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "log_all_levels".to_string(),
+        workflow_id: "log_all_levels".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1535,15 +1535,15 @@ fn test_compile_log_with_context() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "log_with_context".to_string(),
+        workflow_id: "log_with_context".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1567,15 +1567,15 @@ fn test_compile_log_in_subgraph() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "log_in_subgraph".to_string(),
+        workflow_id: "log_in_subgraph".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1790,15 +1790,15 @@ fn test_compile_error_all_categories() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "error_all_categories".to_string(),
+        workflow_id: "error_all_categories".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1827,15 +1827,15 @@ fn test_compile_error_with_context() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "error_with_context".to_string(),
+        workflow_id: "error_with_context".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1859,15 +1859,15 @@ fn test_compile_error_transient() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "error_transient".to_string(),
+        workflow_id: "error_transient".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1891,15 +1891,15 @@ fn test_compile_error_in_loop() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "error_in_loop".to_string(),
+        workflow_id: "error_in_loop".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -1978,7 +1978,7 @@ fn test_parse_error_retry_exhausted() {
 
     use runtara_dsl::{ErrorCategory, Step};
 
-    // Verify the error step captures retry exhaustion scenario
+    // Verify the error step captures retry exhaustion workflow
     if let Some(Step::Error(err)) = graph.steps.get("handle_retries_exhausted") {
         assert_eq!(err.code, "RETRIES_EXHAUSTED");
         assert_eq!(err.category, ErrorCategory::Permanent);
@@ -2008,15 +2008,15 @@ fn test_compile_http_structured_errors() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "http_structured_errors".to_string(),
+        workflow_id: "http_structured_errors".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -2044,15 +2044,15 @@ fn test_compile_error_retry_exhausted() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "error_retry_exhausted".to_string(),
+        workflow_id: "error_retry_exhausted".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     assert!(result.binary_path.exists(), "Binary should exist");
     assert!(result.binary_size > 0, "Binary should have non-zero size");
@@ -2090,15 +2090,15 @@ fn test_run_in_oci_container() {
     // 1. Compile workflow
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "passthrough".to_string(),
+        workflow_id: "passthrough".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     // 2. Create OCI bundle
     let bundle_path = temp_dir.path().join("bundle");
@@ -2164,15 +2164,15 @@ fn test_run_split_workflow_in_oci_container() {
     // 1. Compile workflow
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "split".to_string(),
+        workflow_id: "split".to_string(),
         version: 1,
         execution_graph: graph,
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     // 2. Create OCI bundle with array input for Split to iterate over
     let bundle_path = temp_dir.path().join("bundle");
@@ -2216,11 +2216,11 @@ fn test_run_split_workflow_in_oci_container() {
     drop(temp_dir);
 }
 
-/// Test running a StartScenario workflow in an OCI container.
-/// The parent workflow calls a child scenario.
+/// Test running a EmbedWorkflow workflow in an OCI container.
+/// The parent workflow calls a child workflow.
 #[test]
 #[ignore = "requires crun and runtara-core running"]
-fn test_run_start_scenario_workflow_in_oci_container() {
+fn test_run_embed_workflow_workflow_in_oci_container() {
     use common::oci;
 
     if !native_library_available() {
@@ -2234,21 +2234,21 @@ fn test_run_start_scenario_workflow_in_oci_container() {
     }
 
     // Load parent workflow
-    let parent_json = include_str!("fixtures/start_scenario_workflow.json");
+    let parent_json = include_str!("fixtures/embed_workflow_workflow.json");
     let parent_graph: ExecutionGraph =
         serde_json::from_str(parent_json).expect("Failed to parse parent workflow JSON");
 
-    // Load child scenario
-    let child_json = include_str!("fixtures/child_scenario.json");
+    // Load child workflow
+    let child_json = include_str!("fixtures/child_workflow.json");
     let child_graph: ExecutionGraph =
-        serde_json::from_str(child_json).expect("Failed to parse child scenario JSON");
+        serde_json::from_str(child_json).expect("Failed to parse child workflow JSON");
 
     let temp_dir = setup_test_env();
 
-    // 1. Compile workflow with child scenario
-    let child_scenario = runtara_workflows::ChildScenarioInput {
+    // 1. Compile workflow with child workflow
+    let child_workflow = runtara_workflows::ChildWorkflowInput {
         step_id: "call_child".to_string(),
-        scenario_id: "child_scenario".to_string(),
+        workflow_id: "child_workflow".to_string(),
         version_requested: "latest".to_string(),
         version_resolved: 1,
         execution_graph: child_graph,
@@ -2256,15 +2256,15 @@ fn test_run_start_scenario_workflow_in_oci_container() {
 
     let input = CompilationInput {
         tenant_id: "test".to_string(),
-        scenario_id: "start_scenario".to_string(),
+        workflow_id: "embed_workflow".to_string(),
         version: 1,
         execution_graph: parent_graph,
         track_events: false,
-        child_scenarios: vec![child_scenario],
+        child_workflows: vec![child_workflow],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input).expect("Compilation failed");
+    let result = compile_workflow(input).expect("Compilation failed");
 
     // 2. Create OCI bundle
     let bundle_path = temp_dir.path().join("bundle");
@@ -2279,7 +2279,7 @@ fn test_run_start_scenario_workflow_in_oci_container() {
         &bundle_path,
         &result.binary_path,
         &[
-            ("RUNTARA_INSTANCE_ID", "test-start-scenario-instance"),
+            ("RUNTARA_INSTANCE_ID", "test-start-workflow-instance"),
             ("RUNTARA_TENANT_ID", "test-tenant"),
             ("RUNTARA_HTTP_URL", "http://127.0.0.1:8003"),
             ("RUNTARA_SKIP_CERT_VERIFICATION", "true"),
@@ -2289,17 +2289,17 @@ fn test_run_start_scenario_workflow_in_oci_container() {
     .expect("Failed to create OCI bundle");
 
     // 3. Run container
-    let container_id = format!("test_start_scenario_{}", std::process::id());
+    let container_id = format!("test_embed_workflow_{}", std::process::id());
     let output = oci::run_container(&bundle_path, &container_id).expect("Failed to run container");
 
     // 4. Verify output
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    eprintln!("StartScenario container stdout: {}", stdout);
-    eprintln!("StartScenario container stderr: {}", stderr);
+    eprintln!("EmbedWorkflow container stdout: {}", stdout);
+    eprintln!("EmbedWorkflow container stderr: {}", stderr);
 
-    // The parent workflow should call the child scenario and return its result
+    // The parent workflow should call the child workflow and return its result
 
     drop(temp_dir);
 }

@@ -1,5 +1,5 @@
 /**
- * Status display utility for scenario instances
+ * Status display utility for workflow instances
  * Maps status and terminationType to display properties
  */
 
@@ -15,7 +15,7 @@ interface TerminationTypeDisplayInfo {
 }
 
 /**
- * Get display information for a scenario instance status
+ * Get display information for a workflow instance status
  * Returns only the status information (separate from termination type)
  */
 export function getStatusDisplay(

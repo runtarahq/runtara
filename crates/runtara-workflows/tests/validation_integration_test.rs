@@ -167,7 +167,7 @@ fn test_error_unknown_agent_with_suggestion() {
 }
 
 // ============================================================================
-// Child Scenario Error Tests
+// Child Workflow Error Tests
 // ============================================================================
 
 #[test]
@@ -196,7 +196,7 @@ fn test_error_invalid_child_version() {
 
 #[test]
 fn test_compile_time_validation_missing_child_input() {
-    // Load parent and child scenarios
+    // Load parent and child workflows
     let parent_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/parent_missing_child_input.json");
     let child_path =
@@ -207,9 +207,9 @@ fn test_compile_time_validation_missing_child_input() {
     let child_content = fs::read_to_string(&child_path)
         .unwrap_or_else(|e| panic!("Failed to read child fixture: {}", e));
 
-    let parent: runtara_dsl::Scenario = serde_json::from_str(&parent_content)
+    let parent: runtara_dsl::Workflow = serde_json::from_str(&parent_content)
         .unwrap_or_else(|e| panic!("Failed to parse parent fixture: {}", e));
-    let child: runtara_dsl::Scenario = serde_json::from_str(&child_content)
+    let child: runtara_dsl::Workflow = serde_json::from_str(&child_content)
         .unwrap_or_else(|e| panic!("Failed to parse child fixture: {}", e));
 
     let mut children = HashMap::new();

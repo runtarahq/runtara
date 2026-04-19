@@ -7,17 +7,17 @@
 //! Usage:
 //!
 //! ```text
-//! runtara-compile --workflow <path> --tenant <id> --scenario <id> [--version <n>] [--output <path>]
+//! runtara-compile --workflow <path> --tenant <id> --workflow-id <id> [--version <n>] [--output <path>]
 //! ```
 //!
 //! Example:
 //!
 //! ```text
-//! runtara-compile --workflow workflow.json --tenant test --scenario my-workflow --output ./my-workflow
+//! runtara-compile --workflow workflow.json --tenant test --workflow my-workflow --output ./my-workflow
 //! ```
 
 use runtara_dsl::{ExecutionGraph, Step};
-use runtara_workflows::compile::{CompilationInput, compile_scenario};
+use runtara_workflows::compile::{CompilationInput, compile_workflow};
 
 // Force-link agent crate so inventory can discover capability metadata at
 // validation time. Without this, the validator reports "Available
@@ -41,7 +41,7 @@ Compile a workflow JSON file to a native binary.
 OPTIONS:
     --workflow <path>       Path to workflow JSON file (required)
     --tenant <id>           Tenant ID (required)
-    --scenario <id>         Scenario ID (required)
+    --workflow-id <id>      Workflow ID (required)
     --version <n>           Version number (default: 1)
     --output <path>         Output binary path (default: prints to stdout info)
     --debug                 Enable debug mode in generated code
@@ -56,19 +56,19 @@ ENVIRONMENT:
 
 EXAMPLES:
     # Compile and copy to specific location
-    runtara-compile --workflow my-flow.json --tenant acme --scenario order-sync --output ./order-sync
+    runtara-compile --workflow my-flow.json --tenant acme --workflow order-sync --output ./order-sync
 
     # Compile with debug mode and verbose output
-    runtara-compile --workflow my-flow.json --tenant acme --scenario order-sync --debug --verbose
+    runtara-compile --workflow my-flow.json --tenant acme --workflow order-sync --debug --verbose
 
     # Analyze workflow structure
-    runtara-compile --workflow my-flow.json --tenant acme --scenario order-sync --analyze
+    runtara-compile --workflow my-flow.json --tenant acme --workflow order-sync --analyze
 
     # Validate only (no compilation)
-    runtara-compile --workflow my-flow.json --tenant acme --scenario order-sync --validate
+    runtara-compile --workflow my-flow.json --tenant acme --workflow order-sync --validate
 
     # Save generated source code for debugging
-    runtara-compile --workflow my-flow.json --tenant acme --scenario order-sync --emit-source ./debug.rs
+    runtara-compile --workflow my-flow.json --tenant acme --workflow order-sync --emit-source ./debug.rs
 "#
     );
 }
@@ -76,7 +76,7 @@ EXAMPLES:
 struct Args {
     workflow_path: PathBuf,
     tenant_id: String,
-    scenario_id: String,
+    workflow_id: String,
     version: u32,
     output_path: Option<PathBuf>,
     track_events: bool,
@@ -91,7 +91,7 @@ fn parse_args() -> Result<Args, String> {
 
     let mut workflow_path: Option<PathBuf> = None;
     let mut tenant_id: Option<String> = None;
-    let mut scenario_id: Option<String> = None;
+    let mut workflow_id: Option<String> = None;
     let mut version: u32 = 1;
     let mut output_path: Option<PathBuf> = None;
     let mut track_events = false;
@@ -121,12 +121,12 @@ fn parse_args() -> Result<Args, String> {
                 }
                 tenant_id = Some(args[i].clone());
             }
-            "--scenario" => {
+            "--workflow-id" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err("--scenario requires an ID".to_string());
+                    return Err("--workflow-id requires an ID".to_string());
                 }
-                scenario_id = Some(args[i].clone());
+                workflow_id = Some(args[i].clone());
             }
             "--version" => {
                 i += 1;
@@ -172,12 +172,12 @@ fn parse_args() -> Result<Args, String> {
 
     let workflow_path = workflow_path.ok_or("--workflow is required")?;
     let tenant_id = tenant_id.ok_or("--tenant is required")?;
-    let scenario_id = scenario_id.ok_or("--scenario is required")?;
+    let workflow_id = workflow_id.ok_or("--workflow-id is required")?;
 
     Ok(Args {
         workflow_path,
         tenant_id,
-        scenario_id,
+        workflow_id,
         version,
         output_path,
         track_events,
@@ -207,14 +207,14 @@ fn print_analysis(graph: &ExecutionGraph) {
     // Count step types
     let mut step_counts: HashMap<&str, usize> = HashMap::new();
     let mut agent_counts: HashMap<String, usize> = HashMap::new();
-    let mut child_scenario_count = 0;
+    let mut child_workflow_count = 0;
     let mut has_side_effects = false;
 
     count_steps(
         graph,
         &mut step_counts,
         &mut agent_counts,
-        &mut child_scenario_count,
+        &mut child_workflow_count,
         &mut has_side_effects,
     );
 
@@ -242,8 +242,8 @@ fn print_analysis(graph: &ExecutionGraph) {
     println!();
 
     // Print additional info
-    if child_scenario_count > 0 {
-        println!("Child scenarios: {}", child_scenario_count);
+    if child_workflow_count > 0 {
+        println!("Child workflows: {}", child_workflow_count);
     }
     println!(
         "Has side effects: {}",
@@ -284,7 +284,7 @@ fn count_steps(
     graph: &ExecutionGraph,
     step_counts: &mut HashMap<&'static str, usize>,
     agent_counts: &mut HashMap<String, usize>,
-    child_scenario_count: &mut usize,
+    child_workflow_count: &mut usize,
     has_side_effects: &mut bool,
 ) {
     for step in graph.steps.values() {
@@ -305,15 +305,15 @@ fn count_steps(
                     &split.subgraph,
                     step_counts,
                     agent_counts,
-                    child_scenario_count,
+                    child_workflow_count,
                     has_side_effects,
                 );
                 "Split"
             }
             Step::Switch(_) => "Switch",
-            Step::StartScenario(_) => {
-                *child_scenario_count += 1;
-                "StartScenario"
+            Step::EmbedWorkflow(_) => {
+                *child_workflow_count += 1;
+                "EmbedWorkflow"
             }
             Step::While(while_step) => {
                 // Recursively count subgraph
@@ -321,7 +321,7 @@ fn count_steps(
                     &while_step.subgraph,
                     step_counts,
                     agent_counts,
-                    child_scenario_count,
+                    child_workflow_count,
                     has_side_effects,
                 );
                 "While"
@@ -478,17 +478,17 @@ fn main() -> ExitCode {
         eprintln!("[3/5] Validating workflow...");
     }
     eprintln!(
-        "Compiling workflow: tenant={}, scenario={}, version={}",
-        args.tenant_id, args.scenario_id, args.version
+        "Compiling workflow: tenant={}, workflow={}, version={}",
+        args.tenant_id, args.workflow_id, args.version
     );
 
     let input = CompilationInput {
         tenant_id: args.tenant_id.clone(),
-        scenario_id: args.scenario_id.clone(),
+        workflow_id: args.workflow_id.clone(),
         version: args.version,
         execution_graph: execution_graph.clone(),
         track_events: args.track_events,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
@@ -496,7 +496,7 @@ fn main() -> ExitCode {
         eprintln!("[4/5] Compiling to native binary...");
     }
     let compile_start = Instant::now();
-    let result = match compile_scenario(input) {
+    let result = match compile_workflow(input) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("Compilation failed: {}", e);

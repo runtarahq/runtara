@@ -8,11 +8,11 @@
 //! Signal ID Generation:
 //! The signal_id is deterministically generated from:
 //! - instance_id (from SDK)
-//! - scenario_id (from context)
+//! - workflow_id (from context)
 //! - step_id (from DSL)
 //! - loop_indices (from runtime context, if in nested loops)
 //!
-//! Format: "{instance_id}/{scenario_id}/{step_id}/{loop_indices}"
+//! Format: "{instance_id}/{workflow_id}/{step_id}/{loop_indices}"
 //! Example: "inst-abc/root/approval_step/[0,2]"
 
 use proc_macro2::TokenStream;
@@ -98,7 +98,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                 vars.insert("_signal_id".to_string(), serde_json::json!(__signal_id));
                 vars.insert("_instance_id".to_string(), serde_json::json!(__instance_id));
 
-                ScenarioInputs {
+                WorkflowInputs {
                     data: #inputs_var.data.clone(),
                     variables: Arc::new(serde_json::Value::Object(vars)),
                     parent_scope_id: #inputs_var.parent_scope_id.clone(),
@@ -206,10 +206,10 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
 
             // Build deterministic signal_id
             let __signal_id = {
-                // Get scenario_id from context
-                let scenario_id = (*#inputs_var.variables)
+                // Get workflow_id from context
+                let workflow_id = (*#inputs_var.variables)
                     .as_object()
-                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|vars| vars.get("_workflow_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("root");
 
@@ -227,7 +227,7 @@ pub fn emit(step: &WaitForSignalStep, ctx: &mut EmitContext) -> Result<TokenStre
                     })
                     .unwrap_or_default();
 
-                format!("{}/{}/{}{}", __instance_id, scenario_id, #step_id, indices_suffix)
+                format!("{}/{}/{}{}", __instance_id, workflow_id, #step_id, indices_suffix)
             };
 
             tracing::debug!(signal_id = %__signal_id, "WaitForSignal: computed signal_id");
@@ -432,7 +432,7 @@ mod tests {
         assert!(result.is_ok());
         let code = result.unwrap().to_string();
         // Should include signal_id generation logic
-        assert!(code.contains("_scenario_id"));
+        assert!(code.contains("_workflow_id"));
         assert!(code.contains("_loop_indices"));
         assert!(code.contains("approval-step"));
     }

@@ -1,0 +1,38 @@
+{
+  "name": "EmbedWorkflow Workflow",
+  "description": "A workflow that calls a child workflow using EmbedWorkflow step",
+  "steps": {
+    "call_child": {
+      "stepType": "EmbedWorkflow",
+      "id": "call_child",
+      "childWorkflowId": "child_workflow",
+      "childVersion": "latest",
+      "inputMapping": {
+        "childInput": {
+          "valueType": "reference",
+          "value": "data.input"
+        }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "result": {
+          "valueType": "reference",
+          "value": "steps.call_child.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "call_child",
+  "executionPlan": [
+    {
+      "fromStep": "call_child",
+      "toStep": "finish"
+    }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}

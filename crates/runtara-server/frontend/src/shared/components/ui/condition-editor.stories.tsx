@@ -15,7 +15,7 @@ const meta: Meta<typeof ConditionEditor> = {
     docs: {
       description: {
         component:
-          'A visual boolean logic builder supporting nested conditions with 15+ operators. Used for building conditional expressions in workflow scenarios.',
+          'A visual boolean logic builder supporting nested conditions with 15+ operators. Used for building conditional expressions in workflow workflows.',
       },
     },
   },

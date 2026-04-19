@@ -2,12 +2,12 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
-use crate::api::repositories::scenarios::ScenarioRepository;
-use crate::compiler::child_scenarios::load_child_scenarios;
+use crate::api::repositories::workflows::WorkflowRepository;
+use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
 use runtara_dsl::parse_execution_graph;
 use runtara_management_sdk::{RegisterImageStreamOptions, RunnerType};
-use runtara_workflows::{ChildScenarioInput, CompilationInput, compile_scenario};
+use runtara_workflows::{ChildWorkflowInput, CompilationInput, compile_workflow};
 
 /// Global semaphore limiting concurrent compilations across all code paths.
 /// Prevents OOM when multiple compilations are triggered simultaneously.
@@ -28,9 +28,9 @@ fn compilation_semaphore() -> &'static Semaphore {
     })
 }
 
-/// Service for scenario compilation operations
+/// Service for workflow compilation operations
 pub struct CompilationService {
-    repository: Arc<ScenarioRepository>,
+    repository: Arc<WorkflowRepository>,
     connection_service_url: Option<String>,
     /// Runtime client for registering images with runtara-environment
     runtime_client: Option<Arc<RuntimeClient>>,
@@ -38,7 +38,7 @@ pub struct CompilationService {
 
 impl CompilationService {
     pub fn new(
-        repository: Arc<ScenarioRepository>,
+        repository: Arc<WorkflowRepository>,
         connection_service_url: Option<String>,
         runtime_client: Option<Arc<RuntimeClient>>,
     ) -> Self {
@@ -49,45 +49,45 @@ impl CompilationService {
         }
     }
 
-    /// Compile a scenario to binary and optionally register with runtara-environment
+    /// Compile a workflow to binary and optionally register with runtara-environment
     ///
     /// This orchestrates the full compilation pipeline:
-    /// 1. Fetch scenario definition from database
-    /// 2. Load child scenarios from database
+    /// 1. Fetch workflow definition from database
+    /// 2. Load child workflows from database
     /// 3. Compile to binary (native or WASM, depending on target)
     /// 4. Record compilation result in database
     ///
     /// # Arguments
     /// * `tenant_id` - The tenant identifier
-    /// * `scenario_id` - The scenario identifier
+    /// * `workflow_id` - The workflow identifier
     /// * `version` - The version number
     ///
     /// # Returns
     /// Result with compilation metadata or a ServiceError
-    pub async fn compile_scenario(
+    pub async fn compile_workflow(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: i32,
     ) -> Result<CompilationResultDto, ServiceError> {
         let compile_start = std::time::Instant::now();
         info!(
-            "Starting compilation for scenario {} version {}",
-            scenario_id, version
+            "Starting compilation for workflow {} version {}",
+            workflow_id, version
         );
 
-        // 1. Fetch scenario definition and track-events mode
+        // 1. Fetch workflow definition and track-events mode
         let step_start = std::time::Instant::now();
         debug!("compile: step 1 - fetching definition from database");
         let (definition, track_events) = self
             .repository
-            .get_definition_with_track_events(tenant_id, scenario_id, version)
+            .get_definition_with_track_events(tenant_id, workflow_id, version)
             .await
             .map_err(|e| ServiceError::DatabaseError(format!("Failed to fetch definition: {}", e)))?
             .ok_or_else(|| {
                 ServiceError::NotFound(format!(
-                    "Scenario '{}' version {} not found",
-                    scenario_id, version
+                    "Workflow '{}' version {} not found",
+                    workflow_id, version
                 ))
             })?;
         debug!(
@@ -108,36 +108,36 @@ impl CompilationService {
             "compile: step 2 completed - execution graph parsed"
         );
 
-        // 3. Load child scenarios from database
+        // 3. Load child workflows from database
         let step_start = std::time::Instant::now();
-        debug!("compile: step 3 - loading child scenarios from database");
-        let child_scenarios = self
-            .load_child_scenarios_as_input(tenant_id, scenario_id, version, &definition)
+        debug!("compile: step 3 - loading child workflows from database");
+        let child_workflows = self
+            .load_child_workflows_as_input(tenant_id, workflow_id, version, &definition)
             .await?;
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
-            child_count = child_scenarios.len(),
-            "compile: step 3 completed - child scenarios loaded"
+            child_count = child_workflows.len(),
+            "compile: step 3 completed - child workflows loaded"
         );
 
         // 4. Build compilation input
         let compilation_input = CompilationInput {
             tenant_id: tenant_id.to_string(),
-            scenario_id: scenario_id.to_string(),
+            workflow_id: workflow_id.to_string(),
             version: version_u32,
             execution_graph,
             track_events,
-            child_scenarios,
+            child_workflows,
             connection_service_url: self.connection_service_url.clone(),
         };
 
         // 5. Check if already registered BEFORE compiling
-        // This prevents FK constraint violations when re-compiling scenarios that are already registered
+        // This prevents FK constraint violations when re-compiling workflows that are already registered
         let step_start = std::time::Instant::now();
         debug!("compile: step 5 - checking if already registered in database");
         let existing_image_id = self
             .repository
-            .get_registered_image_id(tenant_id, scenario_id, version)
+            .get_registered_image_id(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to check existing image: {}", e))
@@ -151,13 +151,13 @@ impl CompilationService {
         if let Some(existing_id) = existing_image_id {
             info!(
                 total_duration_ms = compile_start.elapsed().as_millis(),
-                "Scenario {} version {} already registered with image {}, skipping compilation",
-                scenario_id,
+                "Workflow {} version {} already registered with image {}, skipping compilation",
+                workflow_id,
                 version,
                 existing_id
             );
             return Ok(CompilationResultDto {
-                scenario_id: scenario_id.to_string(),
+                workflow_id: workflow_id.to_string(),
                 version,
                 build_dir: String::new(),
                 binary_size: 0,
@@ -169,7 +169,7 @@ impl CompilationService {
         // 5b. Also check runtara-environment directly in case we have an orphaned image
         // (image exists in runtara but no local record due to failed registration save)
         if let Some(client) = &self.runtime_client {
-            let image_name = format!("{}:{}", scenario_id, version);
+            let image_name = format!("{}:{}", workflow_id, version);
             let step_start = std::time::Instant::now();
             debug!("compile: step 5b - checking runtara-environment for existing image");
             match client.find_image_by_name(tenant_id, &image_name).await {
@@ -177,18 +177,18 @@ impl CompilationService {
                     info!(
                         duration_ms = step_start.elapsed().as_millis(),
                         total_duration_ms = compile_start.elapsed().as_millis(),
-                        "Found existing image {} in runtara-environment for scenario {} version {}, recording locally",
+                        "Found existing image {} in runtara-environment for workflow {} version {}, recording locally",
                         existing_id,
-                        scenario_id,
+                        workflow_id,
                         version
                     );
                     // Record this in our DB so we don't check again
                     let _ = self
                         .repository
-                        .record_registered_image_id(tenant_id, scenario_id, version, &existing_id)
+                        .record_registered_image_id(tenant_id, workflow_id, version, &existing_id)
                         .await;
                     return Ok(CompilationResultDto {
-                        scenario_id: scenario_id.to_string(),
+                        workflow_id: workflow_id.to_string(),
                         version,
                         build_dir: String::new(),
                         binary_size: 0,
@@ -213,7 +213,7 @@ impl CompilationService {
         }
 
         // 6. Compile to native binary
-        // IMPORTANT: compile_scenario is a synchronous blocking function that runs cargo build.
+        // IMPORTANT: compile_workflow is a synchronous blocking function that runs cargo build.
         // We MUST use spawn_blocking to prevent blocking the tokio runtime, which would
         // starve all other async tasks (API handlers, database queries, etc.) during compilation.
         //
@@ -229,7 +229,7 @@ impl CompilationService {
             "compile: step 6 - semaphore acquired, compiling to native binary"
         );
         let compile_start_time = std::time::Instant::now();
-        let result = tokio::task::spawn_blocking(move || compile_scenario(compilation_input))
+        let result = tokio::task::spawn_blocking(move || compile_workflow(compilation_input))
             .await
             .map_err(|e| {
                 ServiceError::CompilationError(format!("Compilation task panicked: {}", e))
@@ -249,7 +249,7 @@ impl CompilationService {
         self.repository
             .record_compilation_success(
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 version,
                 &result.build_dir,
                 result.binary_size as i32,
@@ -266,7 +266,7 @@ impl CompilationService {
         );
 
         // 8. Register with runtara-environment (REQUIRED)
-        // Compilation without registration is useless - the scenario can't be executed
+        // Compilation without registration is useless - the workflow can't be executed
         let client = self.runtime_client.as_ref().ok_or_else(|| {
             ServiceError::RegistrationError(
                 "Runtime client not configured. Compilation requires runtara-environment connection.".to_string()
@@ -279,7 +279,7 @@ impl CompilationService {
             "compile: step 8 - registering image with runtara-environment"
         );
         let image_id = self
-            .register_image(client, tenant_id, scenario_id, version_u32, &result)
+            .register_image(client, tenant_id, workflow_id, version_u32, &result)
             .await?;
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
@@ -291,7 +291,7 @@ impl CompilationService {
         let step_start = std::time::Instant::now();
         debug!("compile: step 8b - recording registered image ID in database");
         self.repository
-            .record_registered_image_id(tenant_id, scenario_id, version, &image_id)
+            .record_registered_image_id(tenant_id, workflow_id, version, &image_id)
             .await
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to record registered image ID: {}", e))
@@ -301,30 +301,30 @@ impl CompilationService {
             "compile: step 8b completed - image ID recorded in database"
         );
 
-        // 9. Record child scenario dependencies
+        // 9. Record child workflow dependencies
         if !result.child_dependencies.is_empty() {
             let step_start = std::time::Instant::now();
             debug!(
                 dependency_count = result.child_dependencies.len(),
-                "compile: step 9 - recording child scenario dependencies"
+                "compile: step 9 - recording child workflow dependencies"
             );
             for dep in &result.child_dependencies {
                 let insert_result = sqlx::query!(
                     r#"
-                    INSERT INTO scenario_dependencies
-                        (parent_tenant_id, parent_scenario_id, parent_version, child_scenario_id,
+                    INSERT INTO workflow_dependencies
+                        (parent_tenant_id, parent_workflow_id, parent_version, child_workflow_id,
                          child_version_requested, child_version_resolved, step_id)
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    ON CONFLICT (parent_tenant_id, parent_scenario_id, parent_version, step_id)
+                    ON CONFLICT (parent_tenant_id, parent_workflow_id, parent_version, step_id)
                     DO UPDATE SET
-                        child_scenario_id = $4,
+                        child_workflow_id = $4,
                         child_version_requested = $5,
                         child_version_resolved = $6
                     "#,
                     tenant_id,
-                    scenario_id,
+                    workflow_id,
                     version,
-                    dep.child_scenario_id,
+                    dep.child_workflow_id,
                     dep.child_version_requested,
                     dep.child_version_resolved,
                     dep.step_id
@@ -343,21 +343,21 @@ impl CompilationService {
             debug!(
                 duration_ms = step_start.elapsed().as_millis(),
                 dependency_count = result.child_dependencies.len(),
-                "compile: step 9 completed - child scenario dependencies recorded"
+                "compile: step 9 completed - child workflow dependencies recorded"
             );
         }
 
         info!(
             total_duration_ms = compile_start.elapsed().as_millis(),
-            "Compilation successful for scenario {} version {} ({} bytes) [registered: {}]",
-            scenario_id,
+            "Compilation successful for workflow {} version {} ({} bytes) [registered: {}]",
+            workflow_id,
             version,
             result.binary_size,
             image_id
         );
 
         Ok(CompilationResultDto {
-            scenario_id: scenario_id.to_string(),
+            workflow_id: workflow_id.to_string(),
             version,
             build_dir: result.build_dir.to_string_lossy().to_string(),
             binary_size: result.binary_size,
@@ -366,56 +366,56 @@ impl CompilationService {
         })
     }
 
-    /// Load child scenarios from database and convert to ChildScenarioInput
-    async fn load_child_scenarios_as_input(
+    /// Load child workflows from database and convert to ChildWorkflowInput
+    async fn load_child_workflows_as_input(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: i32,
         definition: &serde_json::Value,
-    ) -> Result<Vec<ChildScenarioInput>, ServiceError> {
-        let child_scenarios_list = load_child_scenarios(
+    ) -> Result<Vec<ChildWorkflowInput>, ServiceError> {
+        let child_workflows_list = load_child_workflows(
             self.repository.pool(),
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             definition,
         )
         .await
         .map_err(|e| {
-            ServiceError::CompilationError(format!("Failed to load child scenarios: {}", e))
+            ServiceError::CompilationError(format!("Failed to load child workflows: {}", e))
         })?;
 
-        if !child_scenarios_list.is_empty() {
+        if !child_workflows_list.is_empty() {
             debug!(
                 tenant_id = %tenant_id,
-                scenario_id = %scenario_id,
+                workflow_id = %workflow_id,
                 version = version,
-                child_scenario_count = child_scenarios_list.len(),
-                "Loaded child scenarios for compilation"
+                child_workflow_count = child_workflows_list.len(),
+                "Loaded child workflows for compilation"
             );
         }
 
-        // Convert to ChildScenarioInput
-        let mut child_scenarios = Vec::new();
-        for info in child_scenarios_list {
+        // Convert to ChildWorkflowInput
+        let mut child_workflows = Vec::new();
+        for info in child_workflows_list {
             let graph = parse_execution_graph(&info.execution_graph).map_err(|e| {
                 ServiceError::CompilationError(format!(
-                    "Failed to parse child scenario '{}': {}",
-                    info.scenario_ref.scenario_id, e
+                    "Failed to parse child workflow '{}': {}",
+                    info.workflow_ref.workflow_id, e
                 ))
             })?;
 
-            child_scenarios.push(ChildScenarioInput {
+            child_workflows.push(ChildWorkflowInput {
                 step_id: info.step_id,
-                scenario_id: info.scenario_ref.scenario_id,
+                workflow_id: info.workflow_ref.workflow_id,
                 version_requested: info.version_requested,
-                version_resolved: info.scenario_ref.version,
+                version_resolved: info.workflow_ref.version,
                 execution_graph: graph,
             });
         }
 
-        Ok(child_scenarios)
+        Ok(child_workflows)
     }
 
     /// Register a compiled binary with runtara-environment using streaming upload
@@ -423,15 +423,15 @@ impl CompilationService {
         &self,
         client: &RuntimeClient,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: u32,
         compilation_result: &runtara_workflows::NativeCompilationResult,
     ) -> Result<String, ServiceError> {
-        // Build the image name: {scenario_id}:{version}
-        let image_name = format!("{}:{}", scenario_id, version);
+        // Build the image name: {workflow_id}:{version}
+        let image_name = format!("{}:{}", workflow_id, version);
 
         // Get binary path and size (use binary_path from compilation result,
-        // which is target-aware: "scenario" for native, "scenario.wasm" for WASM)
+        // which is target-aware: "workflow" for native, "workflow.wasm" for WASM)
         let binary_path = &compilation_result.binary_path;
         let metadata = tokio::fs::metadata(&binary_path).await.map_err(|e| {
             ServiceError::RegistrationError(format!("Failed to read binary metadata: {}", e))
@@ -443,9 +443,9 @@ impl CompilationService {
             image_name, tenant_id, binary_size
         );
 
-        // Create registration options with scenario variables as metadata
+        // Create registration options with workflow variables as metadata
         let options = RegisterImageStreamOptions::new(tenant_id, &image_name, binary_size)
-            .with_description(format!("Scenario {} version {}", scenario_id, version))
+            .with_description(format!("Workflow {} version {}", workflow_id, version))
             .with_runner_type(
                 if compilation_result
                     .binary_path
@@ -489,7 +489,7 @@ impl CompilationService {
 /// DTO for compilation result
 #[derive(Debug)]
 pub struct CompilationResultDto {
-    pub scenario_id: String,
+    pub workflow_id: String,
     pub version: i32,
     pub build_dir: String,
     pub binary_size: usize,
@@ -531,10 +531,10 @@ mod tests {
 
     #[test]
     fn test_service_error_not_found_display() {
-        let error = ServiceError::NotFound("Scenario 'test' version 5 not found".to_string());
+        let error = ServiceError::NotFound("Workflow 'test' version 5 not found".to_string());
         assert_eq!(
             error.to_string(),
-            "Not found: Scenario 'test' version 5 not found"
+            "Not found: Workflow 'test' version 5 not found"
         );
     }
 
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn test_compilation_result_dto_fields() {
         let result = CompilationResultDto {
-            scenario_id: "my-scenario".to_string(),
+            workflow_id: "my-workflow".to_string(),
             version: 7,
             build_dir: "/tmp/builds/abc123".to_string(),
             binary_size: 5_242_880, // 5MB
@@ -613,7 +613,7 @@ mod tests {
             image_id: Some("img-uuid-12345".to_string()),
         };
 
-        assert_eq!(result.scenario_id, "my-scenario");
+        assert_eq!(result.workflow_id, "my-workflow");
         assert_eq!(result.version, 7);
         assert_eq!(result.build_dir, "/tmp/builds/abc123");
         assert_eq!(result.binary_size, 5_242_880);
@@ -624,9 +624,9 @@ mod tests {
     #[test]
     fn test_compilation_result_dto_without_image_id() {
         let result = CompilationResultDto {
-            scenario_id: "local-only".to_string(),
+            workflow_id: "local-only".to_string(),
             version: 1,
-            build_dir: "/data/scenarios/local-only/build".to_string(),
+            build_dir: "/data/workflows/local-only/build".to_string(),
             binary_size: 1024,
             binary_checksum: "sha256:1234".to_string(),
             image_id: None,
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn test_compilation_result_dto_debug_format() {
         let result = CompilationResultDto {
-            scenario_id: "test".to_string(),
+            workflow_id: "test".to_string(),
             version: 1,
             build_dir: "/tmp".to_string(),
             binary_size: 100,
@@ -647,7 +647,7 @@ mod tests {
         };
 
         let debug_str = format!("{:?}", result);
-        assert!(debug_str.contains("scenario_id"));
+        assert!(debug_str.contains("workflow_id"));
         assert!(debug_str.contains("test"));
         assert!(debug_str.contains("version"));
         assert!(debug_str.contains("binary_size"));
@@ -657,7 +657,7 @@ mod tests {
     fn test_compilation_result_dto_large_binary() {
         // Test with realistic large binary size (100MB)
         let result = CompilationResultDto {
-            scenario_id: "large-scenario".to_string(),
+            workflow_id: "large-workflow".to_string(),
             version: 1,
             build_dir: "/data/builds".to_string(),
             binary_size: 104_857_600,

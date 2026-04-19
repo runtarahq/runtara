@@ -125,8 +125,8 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         )
     };
 
-    // Clone scenario inputs var for debug events (to access _loop_indices)
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Clone workflow inputs var for debug events (to access _loop_indices)
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Error output variable for debug events on failure
     let error_output_var = ctx.temp_var("error_output");
@@ -139,7 +139,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         "Agent",
         Some(&step_inputs_var),
         input_mapping_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     let debug_end = emit_step_debug_end(
@@ -148,7 +148,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         step_name,
         "Agent",
         Some(&result_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     // Debug end event for error path — uses error output variable instead of result
@@ -158,7 +158,7 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         step_name,
         "Agent",
         Some(&error_output_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 
@@ -248,8 +248,8 @@ fn emit_durable_call(
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
 
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Get the workflow inputs variable to access _loop_indices at runtime
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Generate connection fetching code if connection_id is present and service URL is configured
     let (connection_fetch, final_inputs) = emit_connection_fetch(
@@ -269,15 +269,15 @@ fn emit_durable_call(
     quote! {
         // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
-            // Get prefix from parent context (set by StartScenario)
-            let prefix = (*#scenario_inputs_var.variables)
+            // Get prefix from parent context (set by EmbedWorkflow)
+            let prefix = (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_cache_key_prefix"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
             let base = #cache_key_base;
-            let indices_suffix = (*#scenario_inputs_var.variables)
+            let indices_suffix = (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_loop_indices"))
                 .and_then(|v| v.as_array())
@@ -291,14 +291,14 @@ fn emit_durable_call(
                 .unwrap_or_default();
 
             if prefix.is_empty() {
-                // No cache prefix - use _scenario_id to prevent collisions between
-                // independent scenarios running the same agent steps
-                let scenario_id = (*#scenario_inputs_var.variables)
+                // No cache prefix - use _workflow_id to prevent collisions between
+                // independent workflows running the same agent steps
+                let workflow_id = (*#workflow_inputs_var.variables)
                     .as_object()
-                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|vars| vars.get("_workflow_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("root");
-                format!("{}::{}{}", scenario_id, base, indices_suffix)
+                format!("{}::{}{}", workflow_id, base, indices_suffix)
             } else {
                 format!("{}::{}{}", prefix, base, indices_suffix)
             }
@@ -315,7 +315,7 @@ fn emit_durable_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            __scenario_dispatch(agent_id, capability_id, inputs)
+            __workflow_dispatch(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -351,8 +351,8 @@ fn emit_durable_rate_limited_call(
     // Static base for cache key - will be combined with loop indices at runtime
     let cache_key_base = format!("agent::{}::{}::{}", agent_id, capability_id, step_id);
 
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Get the workflow inputs variable to access _loop_indices at runtime
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Generate connection fetching code with rate limit handling
     let (connection_fetch, final_inputs) = emit_connection_fetch(
@@ -372,15 +372,15 @@ fn emit_durable_rate_limited_call(
     quote! {
         // Build cache key dynamically, including prefix and loop indices
         let __durable_cache_key = {
-            // Get prefix from parent context (set by StartScenario)
-            let prefix = (*#scenario_inputs_var.variables)
+            // Get prefix from parent context (set by EmbedWorkflow)
+            let prefix = (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_cache_key_prefix"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
             let base = #cache_key_base;
-            let indices_suffix = (*#scenario_inputs_var.variables)
+            let indices_suffix = (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_loop_indices"))
                 .and_then(|v| v.as_array())
@@ -394,14 +394,14 @@ fn emit_durable_rate_limited_call(
                 .unwrap_or_default();
 
             if prefix.is_empty() {
-                // No cache prefix - use _scenario_id to prevent collisions between
-                // independent scenarios running the same agent steps
-                let scenario_id = (*#scenario_inputs_var.variables)
+                // No cache prefix - use _workflow_id to prevent collisions between
+                // independent workflows running the same agent steps
+                let workflow_id = (*#workflow_inputs_var.variables)
                     .as_object()
-                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|vars| vars.get("_workflow_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("root");
-                format!("{}::{}{}", scenario_id, base, indices_suffix)
+                format!("{}::{}{}", workflow_id, base, indices_suffix)
             } else {
                 format!("{}::{}{}", prefix, base, indices_suffix)
             }
@@ -418,7 +418,7 @@ fn emit_durable_rate_limited_call(
             capability_id: &str,
             step_id: &str,
         ) -> std::result::Result<serde_json::Value, String> {
-            __scenario_dispatch(agent_id, capability_id, inputs)
+            __workflow_dispatch(agent_id, capability_id, inputs)
         }
 
         #connection_fetch
@@ -524,8 +524,8 @@ mod tests {
             "Should use #[durable] macro"
         );
         assert!(
-            code.contains("__scenario_dispatch"),
-            "Should call __scenario_dispatch"
+            code.contains("__workflow_dispatch"),
+            "Should call __workflow_dispatch"
         );
     }
 
@@ -787,7 +787,7 @@ mod tests {
 
         // Core agent logic should still be present
         assert!(
-            code.contains("__scenario_dispatch"),
+            code.contains("__workflow_dispatch"),
             "Should have capability execution"
         );
         assert!(
@@ -947,47 +947,47 @@ mod tests {
     }
 
     // =============================================================================
-    // Cache key collision prevention tests (scenario_id usage)
+    // Cache key collision prevention tests (workflow_id usage)
     // =============================================================================
 
     #[test]
-    fn test_emit_agent_uses_scenario_id_when_no_prefix() {
-        // Verifies that Agent step uses _scenario_id when _cache_key_prefix is empty
-        // This prevents cache collisions between independent scenarios
+    fn test_emit_agent_uses_workflow_id_when_no_prefix() {
+        // Verifies that Agent step uses _workflow_id when _cache_key_prefix is empty
+        // This prevents cache collisions between independent workflows
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("check-file", "sftp", "exists");
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // When prefix is empty, should read _scenario_id
+        // When prefix is empty, should read _workflow_id
         assert!(
-            code.contains("_scenario_id"),
-            "Should read _scenario_id when prefix is empty"
+            code.contains("_workflow_id"),
+            "Should read _workflow_id when prefix is empty"
         );
-        // Should fallback to "root" if _scenario_id is not set
+        // Should fallback to "root" if _workflow_id is not set
         assert!(
             code.contains("unwrap_or (\"root\")"),
-            "Should fallback to 'root' if no scenario_id"
+            "Should fallback to 'root' if no workflow_id"
         );
     }
 
     #[test]
-    fn test_emit_agent_cache_key_format_with_scenario_id() {
-        // Verifies the cache key format uses scenario_id when no prefix
+    fn test_emit_agent_cache_key_format_with_workflow_id() {
+        // Verifies the cache key format uses workflow_id when no prefix
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("my-step", "http", "request");
 
         let tokens = emit(&step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // The format should be: format!("{}::{}{}", scenario_id, base, indices_suffix)
+        // The format should be: format!("{}::{}{}", workflow_id, base, indices_suffix)
         // This appears in the prefix.is_empty() branch
         assert!(
-            code.contains("scenario_id")
+            code.contains("workflow_id")
                 && code.contains("base")
                 && code.contains("indices_suffix"),
-            "Cache key should combine scenario_id, base, and indices_suffix"
+            "Cache key should combine workflow_id, base, and indices_suffix"
         );
     }
 
@@ -995,7 +995,7 @@ mod tests {
     fn test_emit_agent_collision_prevention_structure() {
         // This test verifies all elements needed for collision prevention:
         // 1. Check for existing _cache_key_prefix
-        // 2. If empty, use _scenario_id
+        // 2. If empty, use _workflow_id
         // 3. Format cache key with proper uniqueness
         let mut ctx = EmitContext::new(false);
         let step = create_agent_step("process-data", "transform", "flatten");
@@ -1009,19 +1009,19 @@ mod tests {
             "Must check for _cache_key_prefix"
         );
 
-        // 2. Must handle empty prefix case with scenario_id
+        // 2. Must handle empty prefix case with workflow_id
         assert!(
-            code.contains("prefix . is_empty ()") && code.contains("_scenario_id"),
-            "Must use _scenario_id when prefix is empty"
+            code.contains("prefix . is_empty ()") && code.contains("_workflow_id"),
+            "Must use _workflow_id when prefix is empty"
         );
 
         // 3. Both branches should produce unique keys
         // - With prefix: "prefix::base::indices"
-        // - Without prefix: "scenario_id::base::indices"
+        // - Without prefix: "workflow_id::base::indices"
         let has_both_formats = code.contains("\"{}::{}{}\"");
         assert!(
             has_both_formats,
-            "Should have proper format for cache key with scenario_id"
+            "Should have proper format for cache key with workflow_id"
         );
     }
 

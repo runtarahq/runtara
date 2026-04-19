@@ -77,10 +77,10 @@ export const WithCustomContent: Story = {
   args: {
     open: true,
     title: 'Confirm Clone',
-    description: 'You are about to clone this scenario.',
+    description: 'You are about to clone this workflow.',
     children: (
       <div className="p-4 bg-muted rounded-lg">
-        <p className="text-sm font-medium">Scenario: Order Processing Flow</p>
+        <p className="text-sm font-medium">Workflow: Order Processing Flow</p>
         <p className="text-xs text-muted-foreground mt-1">ID: scn_abc123xyz</p>
       </div>
     ),
@@ -165,12 +165,12 @@ const InteractiveCloneExample = () => {
     <div className="space-y-4">
       <Button variant="outline" onClick={() => setOpen(true)}>
         <Copy className="h-4 w-4 mr-2" />
-        Clone Scenario
+        Clone Workflow
       </Button>
       <ConfirmationDialog
         open={open}
-        title="Clone Scenario"
-        description="This will create a copy of the scenario with all its configuration."
+        title="Clone Workflow"
+        description="This will create a copy of the workflow with all its configuration."
         loading={loading}
         onClose={() => setOpen(false)}
         onConfirm={handleConfirm}

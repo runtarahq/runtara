@@ -16,8 +16,8 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListExecutionsParams {
-    #[schemars(description = "Filter by scenario ID")]
-    pub scenario_id: Option<String>,
+    #[schemars(description = "Filter by workflow ID")]
+    pub workflow_id: Option<String>,
     #[schemars(
         description = "Comma-separated statuses: queued,compiling,running,completed,failed,timeout,cancelled"
     )]
@@ -40,8 +40,8 @@ pub struct GetExecutionParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetStepEventsParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
     #[schemars(
@@ -58,8 +58,8 @@ pub struct GetStepEventsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetStepSummariesParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
     #[schemars(description = "Filter by status (running, completed, failed)")]
@@ -81,9 +81,9 @@ pub struct StopExecutionParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExecuteScenarioWaitParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+pub struct ExecuteWorkflowWaitParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(
         description = "Input data as JSON (format: {\"data\": {...}, \"variables\": {...}})"
     )]
@@ -101,8 +101,8 @@ pub async fn list_executions(
     params: ListExecutionsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let mut query = Vec::new();
-    if let Some(sid) = &params.scenario_id {
-        query.push(format!("scenario_id={}", sid));
+    if let Some(sid) = &params.workflow_id {
+        query.push(format!("workflow_id={}", sid));
     }
     if let Some(status) = &params.status {
         query.push(format!("status={}", status));
@@ -151,7 +151,7 @@ pub async fn get_execution(
     validate_path_param("instance_id", &params.instance_id)?;
     let mut result = api_get(
         server,
-        &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+        &format!("/api/runtime/workflows/instances/{}", params.instance_id),
     )
     .await?;
 
@@ -183,7 +183,7 @@ pub async fn get_step_events(
     server: &SmoMcpServer,
     params: GetStepEventsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
     let mut query = Vec::new();
     if let Some(subtype) = &params.subtype {
@@ -206,8 +206,8 @@ pub async fn get_step_events(
     let result = api_get(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/instances/{}/step-events{}",
-            params.scenario_id, params.instance_id, qs
+            "/api/runtime/workflows/{}/instances/{}/step-events{}",
+            params.workflow_id, params.instance_id, qs
         ),
     )
     .await?;
@@ -218,7 +218,7 @@ pub async fn get_step_summaries(
     server: &SmoMcpServer,
     params: GetStepSummariesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
     let mut query = Vec::new();
     if let Some(status) = &params.status {
@@ -238,8 +238,8 @@ pub async fn get_step_summaries(
     let mut result = api_get(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/instances/{}/steps{}",
-            params.scenario_id, params.instance_id, qs
+            "/api/runtime/workflows/{}/instances/{}/steps{}",
+            params.workflow_id, params.instance_id, qs
         ),
     )
     .await?;
@@ -270,7 +270,7 @@ pub async fn stop_execution(
     let result = api_post(
         server,
         &format!(
-            "/api/runtime/scenarios/instances/{}/stop",
+            "/api/runtime/workflows/instances/{}/stop",
             params.instance_id
         ),
         None,
@@ -299,7 +299,7 @@ pub async fn pause_execution(
     let result = api_post(
         server,
         &format!(
-            "/api/runtime/scenarios/instances/{}/pause",
+            "/api/runtime/workflows/instances/{}/pause",
             params.instance_id
         ),
         None,
@@ -316,7 +316,7 @@ pub async fn resume_execution(
     let result = api_post(
         server,
         &format!(
-            "/api/runtime/scenarios/instances/{}/resume",
+            "/api/runtime/workflows/instances/{}/resume",
             params.instance_id
         ),
         None,
@@ -329,8 +329,8 @@ pub async fn resume_execution(
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InspectStepParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
     #[schemars(description = "Step ID to inspect")]
@@ -339,8 +339,8 @@ pub struct InspectStepParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TraceReferenceParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
     #[schemars(
@@ -351,17 +351,17 @@ pub struct TraceReferenceParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WhyExecutionFailedParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
 }
 
-pub async fn execute_scenario_wait(
+pub async fn execute_workflow_wait(
     server: &SmoMcpServer,
-    params: ExecuteScenarioWaitParams,
+    params: ExecuteWorkflowWaitParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     let timeout = params.timeout_seconds.unwrap_or(120).min(300);
 
     // Step 1: Queue execution
@@ -375,8 +375,8 @@ pub async fn execute_scenario_wait(
     let exec_result = api_post(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/execute{}",
-            params.scenario_id, qs
+            "/api/runtime/workflows/{}/execute{}",
+            params.workflow_id, qs
         ),
         Some(body),
     )
@@ -403,7 +403,7 @@ pub async fn execute_scenario_wait(
 
         let result = api_get(
             server,
-            &format!("/api/runtime/scenarios/instances/{}", instance_id),
+            &format!("/api/runtime/workflows/instances/{}", instance_id),
         )
         .await?;
 
@@ -439,14 +439,14 @@ pub async fn execute_scenario_wait(
 /// Helper: fetch all step summaries with full inputs/outputs for an instance.
 async fn fetch_full_step_summaries(
     server: &SmoMcpServer,
-    scenario_id: &str,
+    workflow_id: &str,
     instance_id: &str,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
     api_get(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/instances/{}/steps?compact=false&limit=500",
-            scenario_id, instance_id
+            "/api/runtime/workflows/{}/instances/{}/steps?compact=false&limit=500",
+            workflow_id, instance_id
         ),
     )
     .await
@@ -547,7 +547,7 @@ fn resolve_input_mappings(
                                 entry["resolvedValue"] =
                                     resolve_json_path(inputs, &field).unwrap_or(json!(null));
                             }
-                            entry["source"] = json!("scenario_input");
+                            entry["source"] = json!("workflow_input");
                         }
                         Some("variables") if parts.len() >= 2 => {
                             entry["source"] = json!("variable");
@@ -576,12 +576,12 @@ pub async fn inspect_step(
     server: &SmoMcpServer,
     params: InspectStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
 
-    // Fetch step summaries (full, not compact) and scenario definition in parallel
+    // Fetch step summaries (full, not compact) and workflow definition in parallel
     let summaries =
-        fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
+        fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
 
     let target = find_step_in_summaries(&summaries, &params.step_id).ok_or_else(|| {
         rmcp::ErrorData::internal_error(
@@ -593,24 +593,24 @@ pub async fn inspect_step(
         )
     })?;
 
-    // Fetch scenario definition to get inputMapping
-    let scenario = api_get(
+    // Fetch workflow definition to get inputMapping
+    let workflow = api_get(
         server,
-        &format!("/api/runtime/scenarios/{}", params.scenario_id),
+        &format!("/api/runtime/workflows/{}", params.workflow_id),
     )
     .await?;
 
     // Fetch execution for input data
     let execution = api_get(
         server,
-        &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+        &format!("/api/runtime/workflows/instances/{}", params.instance_id),
     )
     .await?;
 
-    // Extract step definition from scenario graph
-    let input_mapping = scenario
+    // Extract step definition from workflow graph
+    let input_mapping = workflow
         .pointer("/data/definition/executionGraph/steps")
-        .or_else(|| scenario.pointer("/data/executionGraph/steps"))
+        .or_else(|| workflow.pointer("/data/executionGraph/steps"))
         .and_then(|steps| steps.get(&params.step_id))
         .and_then(|step| step.get("inputMapping"))
         .cloned()
@@ -638,7 +638,7 @@ pub async fn trace_reference(
     server: &SmoMcpServer,
     params: TraceReferenceParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
 
     let parts: Vec<&str> = params.reference.splitn(4, '.').collect();
@@ -665,7 +665,7 @@ pub async fn trace_reference(
             };
 
             let summaries =
-                fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
+                fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
 
             let step = find_step_in_summaries(&summaries, step_id).ok_or_else(|| {
                 rmcp::ErrorData::internal_error(
@@ -700,7 +700,7 @@ pub async fn trace_reference(
             let field = parts[1..].join(".");
             let execution = api_get(
                 server,
-                &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+                &format!("/api/runtime/workflows/instances/{}", params.instance_id),
             )
             .await?;
 
@@ -717,22 +717,22 @@ pub async fn trace_reference(
                 "resolved": !resolved.is_null(),
                 "value": resolved,
                 "source": {
-                    "type": "scenario_input",
+                    "type": "workflow_input",
                     "fullInputs": inputs,
                 }
             }))
         }
         "variables" => {
             let var_name = parts[1..].join(".");
-            let scenario = api_get(
+            let workflow = api_get(
                 server,
-                &format!("/api/runtime/scenarios/{}", params.scenario_id),
+                &format!("/api/runtime/workflows/{}", params.workflow_id),
             )
             .await?;
 
-            let variables = scenario
+            let variables = workflow
                 .pointer("/data/definition/executionGraph/variables")
-                .or_else(|| scenario.pointer("/data/executionGraph/variables"))
+                .or_else(|| workflow.pointer("/data/executionGraph/variables"))
                 .cloned()
                 .unwrap_or(json!({}));
 
@@ -762,13 +762,13 @@ pub async fn why_execution_failed(
     server: &SmoMcpServer,
     params: WhyExecutionFailedParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
 
     // Fetch execution status
     let execution = api_get(
         server,
-        &format!("/api/runtime/scenarios/instances/{}", params.instance_id),
+        &format!("/api/runtime/workflows/instances/{}", params.instance_id),
     )
     .await?;
 
@@ -789,7 +789,7 @@ pub async fn why_execution_failed(
 
     // Fetch all step summaries (full)
     let summaries =
-        fetch_full_step_summaries(server, &params.scenario_id, &params.instance_id).await?;
+        fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
 
     let steps = summaries
         .pointer("/data/steps")
@@ -820,18 +820,18 @@ pub async fn why_execution_failed(
             .unwrap_or("");
 
         // Try to resolve inputs for the failing step
-        let scenario = api_get(
+        let workflow = api_get(
             server,
-            &format!("/api/runtime/scenarios/{}", params.scenario_id),
+            &format!("/api/runtime/workflows/{}", params.workflow_id),
         )
         .await
         .ok();
 
-        let input_mapping = scenario
+        let input_mapping = workflow
             .as_ref()
             .and_then(|s| s.pointer("/data/definition/executionGraph/steps"))
             .or_else(|| {
-                scenario
+                workflow
                     .as_ref()
                     .and_then(|s| s.pointer("/data/executionGraph/steps"))
             })

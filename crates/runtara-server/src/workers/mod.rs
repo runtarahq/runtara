@@ -1,4 +1,4 @@
-//! Background workers for scenario execution
+//! Background workers for workflow execution
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

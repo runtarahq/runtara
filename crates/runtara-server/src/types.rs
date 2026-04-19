@@ -1,4 +1,4 @@
-// Type-safe enums for scenario execution states and configuration
+// Type-safe enums for workflow execution states and configuration
 
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 // Re-export CancellationHandle from workers module
 pub use crate::workers::CancellationHandle;
 
-/// Execution status representing the current state of a scenario execution
+/// Execution status representing the current state of a workflow execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type, ToSchema)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -123,7 +123,7 @@ impl TerminationType {
 // MemoryTier - Wrapper around runtara_dsl::MemoryTier with sqlx support
 // ============================================================================
 
-/// Memory tier configuration for scenarios
+/// Memory tier configuration for workflows
 ///
 /// This is a newtype wrapper around runtara_dsl::MemoryTier that adds sqlx support.
 /// Determines initial memory allocation and HTTP buffer sizes.
@@ -145,7 +145,7 @@ impl utoipa::PartialSchema for MemoryTier {
         ObjectBuilder::new()
             .schema_type(SchemaType::Type(Type::String))
             .enum_values(Some(["S", "M", "L", "XL"]))
-            .description(Some("Memory allocation tier for scenario execution"))
+            .description(Some("Memory allocation tier for workflow execution"))
             .into()
     }
 }

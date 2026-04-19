@@ -244,7 +244,7 @@ fn precompile_native_libraries(stable_cache_dir: &Path, workspace_root: &Path) {
     }
 
     // Copy native .a libraries from WASM build scripts (e.g. wit-bindgen-rt's cabi_realloc)
-    // These live in build/*/out/ and are needed by the linker at scenario compilation time.
+    // These live in build/*/out/ and are needed by the linker at workflow compilation time.
     let wasm_build_dir = stdlib_build_dir.join(target).join("release").join("build");
     if wasm_build_dir.exists() {
         let deps_cache = final_cache_dir.join("deps");
@@ -259,7 +259,7 @@ fn precompile_native_libraries(stable_cache_dir: &Path, workspace_root: &Path) {
         }
     }
 
-    // Copy host proc-macro .so files (needed for scenario compilation)
+    // Copy host proc-macro .so files (needed for workflow compilation)
     let host_release_deps = stdlib_build_dir.join("release").join("deps");
     if host_release_deps.exists() {
         let deps_cache = final_cache_dir.join("deps");

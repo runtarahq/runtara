@@ -14,7 +14,7 @@ use super::shopify;
 
 /// Resolve the integration_id for a connection.
 ///
-/// In compiled scenario binaries, the connection stub has an empty integration_id.
+/// In compiled workflow binaries, the connection stub has an empty integration_id.
 /// This helper fetches the real integration_id from the connection service.
 fn resolve_integration_id(connection: &RawConnection) -> Result<String, AgentError> {
     let integration_id = &connection.integration_id;

@@ -23,7 +23,7 @@ const meta: Meta<typeof EntityTile> = {
     docs: {
       description: {
         component:
-          'A flexible card component for displaying entity information with title, description, metadata, badges, and action buttons. Used for scenarios, connections, and other list items.',
+          'A flexible card component for displaying entity information with title, description, metadata, badges, and action buttons. Used for workflows, connections, and other list items.',
       },
     },
   },
@@ -65,7 +65,7 @@ export const WithMetadata: Story = {
   render: () => (
     <EntityTile
       kicker="v2"
-      title="Customer Sync Scenario"
+      title="Customer Sync Workflow"
       description="Synchronizes customer data between systems every 15 minutes."
       metadata={[
         <>

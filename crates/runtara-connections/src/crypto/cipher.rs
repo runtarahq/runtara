@@ -53,7 +53,7 @@ pub trait CredentialCipher: Send + Sync {
 
     /// Decrypt an envelope JSON value. If the input is not a recognized
     /// envelope (no `"v"` + `"alg"` fields), return it unchanged — this
-    /// supports the gradual-rollout scenario where existing rows are still
+    /// supports the gradual-rollout workflow where existing rows are still
     /// plaintext.
     fn decrypt(&self, stored: &Value) -> Result<Value, CipherError>;
 

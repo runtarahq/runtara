@@ -4,7 +4,7 @@
 //! handlers can remain thin wrappers over `ExecutionEngine`. The engine
 //! exposes `ExecutionError::http_status()` as the recommended status mapping;
 //! these helpers pair that with the canonical `{success, message, data}`
-//! body shape used across scenario handlers.
+//! body shape used across workflow handlers.
 
 use axum::http::StatusCode;
 use axum::response::Json;
@@ -63,7 +63,7 @@ mod tests {
                 StatusCode::NOT_FOUND,
             ),
             (
-                ExecutionError::ScenarioNotFound("gone".into()),
+                ExecutionError::WorkflowNotFound("gone".into()),
                 StatusCode::NOT_FOUND,
             ),
             (

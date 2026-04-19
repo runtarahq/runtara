@@ -15,16 +15,16 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListPendingSignalsParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetSignalSchemaParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
     #[schemars(description = "Signal ID to get the response schema for")]
@@ -52,13 +52,13 @@ pub async fn list_pending_signals(
     server: &SmoMcpServer,
     params: ListPendingSignalsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
     let result = api_get(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/instances/{}/pending-input",
-            params.scenario_id, params.instance_id
+            "/api/runtime/workflows/{}/instances/{}/pending-input",
+            params.workflow_id, params.instance_id
         ),
     )
     .await?;
@@ -70,14 +70,14 @@ pub async fn get_signal_schema(
     server: &SmoMcpServer,
     params: GetSignalSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
     validate_path_param("signal_id", &params.signal_id)?;
     let result = api_get(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/instances/{}/pending-input",
-            params.scenario_id, params.instance_id
+            "/api/runtime/workflows/{}/instances/{}/pending-input",
+            params.workflow_id, params.instance_id
         ),
     )
     .await?;

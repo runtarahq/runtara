@@ -417,7 +417,7 @@ fn test_launch_result_backward_compatible_deserialization() {
 
 #[test]
 fn test_launch_result_failure_with_both_error_and_stderr() {
-    // Common scenario: container crashes, we have both a user-friendly error
+    // Common workflow: container crashes, we have both a user-friendly error
     // and raw stderr for debugging
     let result = LaunchResult {
         instance_id: "crash-inst".to_string(),
@@ -445,7 +445,7 @@ fn test_launch_result_failure_with_both_error_and_stderr() {
 #[test]
 fn test_launch_result_output_missing_with_stderr() {
     // Test case: container exits successfully (crun returns 0) but no output.json
-    // This is the bug scenario where stderr wasn't being captured
+    // This is the bug workflow where stderr wasn't being captured
     let result = LaunchResult {
         instance_id: "no-output-inst".to_string(),
         success: false,

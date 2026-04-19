@@ -184,7 +184,7 @@ Add `timeout` field to all step types (currently only execution-level timeout ex
 **Behavior:**
 - Step fails if execution exceeds timeout
 - Distinct from retry behavior
-- Applies to: Agent, Split, StartScenario, While
+- Applies to: Agent, Split, EmbedWorkflow, While
 
 ---
 
@@ -254,7 +254,7 @@ Agents declare security capability via `secure` flag in metadata:
 
 **Use Cases:**
 - Dynamic API calls with credentials not known at agent build time
-- Converting scenarios into reusable agents
+- Converting workflows into reusable agents
 - Multi-tenant connection handling
 - Custom integrations without building dedicated agents
 
@@ -313,7 +313,7 @@ Agents declare security capability via `secure` flag in metadata:
 ### Implementation Notes
 
 #### Per-Step Timeout
-The `timeout` field is added to Agent, Split, StartScenario, and While steps.
+The `timeout` field is added to Agent, Split, EmbedWorkflow, and While steps.
 Runtime enforcement will wrap step execution with tokio::time::timeout.
 
 #### Connection Step Security
@@ -332,4 +332,4 @@ The connection step implementation includes:
    - Detects connection data leakage to non-secure agents
    - Prevents connection data in Finish step outputs
    - Prevents connection data in Log step context
-   - Validation runs before code generation in `compile_scenario()`
+   - Validation runs before code generation in `compile_workflow()`

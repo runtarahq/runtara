@@ -6,11 +6,11 @@ import { fileURLToPath } from 'url';
 /**
  * Problem Tab Step Reference E2E Test (SYN-234)
  *
- * Verifies that when a scenario is saved with a step missing required configuration
+ * Verifies that when a workflow is saved with a step missing required configuration
  * (e.g., Group By without config), the Problem tab shows an ERROR (not just a warning)
  * that references the correct step name ("Group By").
  *
- * Currently the backend returns a flat string error "Invalid scenario format: missing
+ * Currently the backend returns a flat string error "Invalid workflow format: missing
  * field 'config'" with no step context, so the Problem tab only shows client-side
  * warnings (which may reference the wrong step). The fix should make the backend
  * return a structured validation error with the step ID.
@@ -22,7 +22,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
-const SCENARIO_NAME = `E2E Step Ref ${Date.now()}`;
+const WORKFLOW_NAME = `E2E Step Ref ${Date.now()}`;
 
 /** Read the access token from the Playwright auth state file. */
 function getAccessToken(): string {
@@ -53,18 +53,18 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 test.describe.serial('Problem tab shows correct step name (SYN-234)', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
     token = getAccessToken();
   });
 
-  // Safety-net cleanup: delete scenario via API if UI deletion fails
+  // Safety-net cleanup: delete workflow via API if UI deletion fails
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -73,26 +73,26 @@ test.describe.serial('Problem tab shows correct step name (SYN-234)', () => {
     }
   });
 
-  test('create scenario', async ({ page }) => {
-    await page.goto('/scenarios/create');
+  test('create workflow', async ({ page }) => {
+    await page.goto('/workflows/create');
     await page.waitForLoadState('networkidle');
 
-    await page.getByLabel('Name').fill(SCENARIO_NAME);
+    await page.getByLabel('Name').fill(WORKFLOW_NAME);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await page.waitForURL(
-      (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
       { timeout: 15000 }
     );
 
-    scenarioId = page.url().split('/scenarios/').pop()!;
-    expect(scenarioId).toBeTruthy();
+    workflowId = page.url().split('/workflows/').pop()!;
+    expect(workflowId).toBeTruthy();
   });
 
   test('add Group By step without config, save, and verify error references correct step', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -122,7 +122,7 @@ test.describe.serial('Problem tab shows correct step name (SYN-234)', () => {
       page.locator('.react-flow__node').filter({ hasText: 'Group By' })
     ).toBeVisible({ timeout: 10000 });
 
-    // Save the scenario — triggers backend validation error about missing config
+    // Save the workflow — triggers backend validation error about missing config
     const saveButton = page.getByTitle('Save changes');
     await expect(saveButton).toBeVisible({ timeout: 5000 });
     await saveButton.click();
@@ -162,17 +162,17 @@ test.describe.serial('Problem tab shows correct step name (SYN-234)', () => {
     await expect(errorWithStep).toBeVisible({ timeout: 5000 });
   });
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: SCENARIO_NAME });
+    const card = page.locator('article').filter({ hasText: WORKFLOW_NAME });
     await expect(card).toBeVisible({ timeout: 10000 });
 
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
 
     await expect(card).not.toBeVisible({ timeout: 10000 });
-    scenarioId = '';
+    workflowId = '';
   });
 });

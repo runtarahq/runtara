@@ -376,7 +376,7 @@ pub struct StartInstanceResponse {
 /// 1. Merge default variable values from image metadata (fill missing only)
 /// 2. Strip system variables (prefixed with `_`)
 ///
-/// This ensures the stored input reflects what the scenario actually receives,
+/// This ensures the stored input reflects what the workflow actually receives,
 /// while hiding internal runtime variables from API users.
 pub fn enrich_input_for_storage(
     mut input: serde_json::Value,
@@ -1638,11 +1638,11 @@ mod tests {
             "data": {},
             "variables": {
                 "user_var": "keep",
-                "_scenario_id": "should-be-removed",
+                "_workflow_id": "should-be-removed",
                 "_scope_id": "should-be-removed",
                 "_cache_key_prefix": "should-be-removed",
                 "_loop_indices": [0, 1],
-                "_parent_scenario_id": "should-be-removed"
+                "_parent_workflow_id": "should-be-removed"
             }
         });
         let image = make_image(None);

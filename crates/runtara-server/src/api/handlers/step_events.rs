@@ -31,7 +31,7 @@ pub struct StepEventsQuery {
     pub created_before: Option<DateTime<Utc>>,
     /// Full-text search in event payload JSON
     pub payload_contains: Option<String>,
-    /// Filter events by scope ID (for hierarchical step events in Split/While/StartScenario)
+    /// Filter events by scope ID (for hierarchical step events in Split/While/EmbedWorkflow)
     pub scope_id: Option<String>,
     /// Filter events by parent scope ID (use "null" for root-level events)
     pub parent_scope_id: Option<String>,
@@ -54,7 +54,7 @@ pub struct StepEventsResponse {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StepEventsResponseData {
-    pub scenario_id: String,
+    pub workflow_id: String,
     pub instance_id: String,
     pub events: Vec<StepEventResponse>,
     pub count: usize,
@@ -84,17 +84,17 @@ pub struct StepEventResponse {
     pub created_at: DateTime<Utc>,
 }
 
-/// Handler to get step events for a scenario execution
+/// Handler to get step events for a workflow execution
 ///
-/// GET /api/runtime/scenarios/{scenario_id}/instances/{instance_id}/step-events
+/// GET /api/runtime/workflows/{workflow_id}/instances/{instance_id}/step-events
 ///
-/// Retrieves debug step events from runtara-environment. The scenario must be
+/// Retrieves debug step events from runtara-environment. The workflow must be
 /// compiled with track_events enabled for events to be recorded.
 #[utoipa::path(
     get,
-    path = "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/step-events",
+    path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
     params(
-        ("scenarioId" = String, Path, description = "Scenario identifier"),
+        ("workflowId" = String, Path, description = "Workflow identifier"),
         ("instanceId" = String, Path, description = "Instance identifier (UUID)"),
         StepEventsQuery
     ),
@@ -105,11 +105,11 @@ pub struct StepEventResponse {
         (status = 503, description = "Runtime client not configured", body = Value),
         (status = 500, description = "Internal server error", body = Value)
     ),
-    tag = "scenario-controller"
+    tag = "workflow-controller"
 )]
 pub async fn get_step_events(
     crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
-    Path((scenario_id, instance_id)): Path<(String, String)>,
+    Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<StepEventsQuery>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
@@ -219,7 +219,7 @@ pub async fn get_step_events(
                 "success": true,
                 "message": "Step events retrieved successfully",
                 "data": {
-                    "scenarioId": scenario_id,
+                    "workflowId": workflow_id,
                     "instanceId": instance_id,
                     "events": events,
                     "count": count,
@@ -268,7 +268,7 @@ pub struct ScopeAncestorResponse {
     /// Human-readable step name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step_name: Option<String>,
-    /// Step type (e.g., "Split", "While", "StartScenario")
+    /// Step type (e.g., "Split", "While", "EmbedWorkflow")
     pub step_type: String,
     /// Iteration index for Split/While steps
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,16 +300,16 @@ pub struct ScopeAncestorsResponseData {
 
 /// Handler to get ancestor scopes for a given scope ID
 ///
-/// GET /api/runtime/scenarios/{scenario_id}/instances/{instance_id}/scopes/{scope_id}/ancestors
+/// GET /api/runtime/workflows/{workflow_id}/instances/{instance_id}/scopes/{scope_id}/ancestors
 ///
 /// Returns the chain of parent scopes from the given scope up to the root,
 /// useful for reconstructing the call stack in hierarchical step execution
-/// (Split/While/StartScenario).
+/// (Split/While/EmbedWorkflow).
 #[utoipa::path(
     get,
-    path = "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+    path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
     params(
-        ("scenarioId" = String, Path, description = "Scenario identifier"),
+        ("workflowId" = String, Path, description = "Workflow identifier"),
         ("instanceId" = String, Path, description = "Instance identifier (UUID)"),
         ("scopeId" = String, Path, description = "Scope identifier to get ancestors for")
     ),
@@ -320,11 +320,11 @@ pub struct ScopeAncestorsResponseData {
         (status = 503, description = "Runtime client not configured", body = Value),
         (status = 500, description = "Internal server error", body = Value)
     ),
-    tag = "scenario-controller"
+    tag = "workflow-controller"
 )]
 pub async fn get_scope_ancestors(
     crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
-    Path((_scenario_id, instance_id, scope_id)): Path<(String, String, String)>,
+    Path((_workflow_id, instance_id, scope_id)): Path<(String, String, String)>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
     // Parse instance UUID
@@ -415,7 +415,7 @@ pub struct PendingInputResponse {
     pub tool_name: Option<String>,
     /// Message from the AI Agent explaining what input is needed
     pub message: String,
-    /// Schema describing expected response fields (same format as scenario inputSchema)
+    /// Schema describing expected response fields (same format as workflow inputSchema)
     pub response_schema: Option<Value>,
     /// The AI Agent step that initiated this request
     pub ai_agent_step_id: Option<String>,
@@ -435,9 +435,9 @@ pub struct PendingInputResponse {
 /// waiting for human-in-the-loop input.
 #[utoipa::path(
     get,
-    path = "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/pending-input",
+    path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
     params(
-        ("scenarioId" = String, Path, description = "Scenario ID"),
+        ("workflowId" = String, Path, description = "Workflow ID"),
         ("instanceId" = String, Path, description = "Instance/execution ID"),
     ),
     responses(
@@ -449,7 +449,7 @@ pub struct PendingInputResponse {
 )]
 pub async fn get_pending_input(
     crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
-    Path((_scenario_id, instance_id)): Path<(String, String)>,
+    Path((_workflow_id, instance_id)): Path<(String, String)>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
     // Parse instance UUID

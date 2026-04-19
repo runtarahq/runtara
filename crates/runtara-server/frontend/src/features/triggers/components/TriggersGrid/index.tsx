@@ -50,9 +50,9 @@ export function TriggersGrid({ data = [] }: TriggersGridProps) {
     );
   }
 
-  // Sort triggers by scenario name
+  // Sort triggers by workflow name
   const sortedTriggers = [...data].sort((a, b) =>
-    (a.scenarioName || '').localeCompare(b.scenarioName || '')
+    (a.workflowName || '').localeCompare(b.workflowName || '')
   );
 
   return (

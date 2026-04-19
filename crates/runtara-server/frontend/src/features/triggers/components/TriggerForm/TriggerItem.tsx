@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ScenarioField } from './ScenarioField';
+import { WorkflowField } from './WorkflowField';
 import { ScheduleField } from './ScheduleField';
 import { ConfigurationField } from './ConfigurationField';
 import { ChannelConnectionField } from './ChannelConnectionField';
@@ -14,12 +14,12 @@ export const defaultScheduleConfig: ScheduleConfig = {
 
 export const fieldsConfig = [
   {
-    label: 'Scenario',
-    name: 'scenarioId',
+    label: 'Workflow',
+    name: 'workflowId',
     options: [],
     initialValue: '',
     renderFormField: (config: Record<string, unknown>) => (
-      <ScenarioField {...config} />
+      <WorkflowField {...config} />
     ),
   },
   {
@@ -100,7 +100,7 @@ export const fieldsConfig = [
     label: 'Single instance',
     name: 'singleInstance',
     initialValue: false,
-    hint: 'Only launch a new scenario instance if no other instances of the same scenario are running',
+    hint: 'Only launch a new workflow instance if no other instances of the same workflow are running',
   },
 ];
 
@@ -150,7 +150,7 @@ const intervalLimits: Record<
 
 export const schema = z
   .object({
-    scenarioId: z.string().nonempty('Please choose a Scenario.'),
+    workflowId: z.string().nonempty('Please choose a Workflow.'),
     triggerType: z.string().nonempty('Please choose a Trigger Type.'),
     active: z.boolean(),
     singleInstance: z.boolean(),

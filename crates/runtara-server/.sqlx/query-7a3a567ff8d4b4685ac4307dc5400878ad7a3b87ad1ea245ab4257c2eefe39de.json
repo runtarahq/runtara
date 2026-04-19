@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE workflows\n            SET path = $3, updated_at = NOW()\n            WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bbdb575b0dd13eedbe756591c8a0a51d0eb0be628eca37abe811a376a543b5d2"
+}

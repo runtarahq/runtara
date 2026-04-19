@@ -1,12 +1,12 @@
-//! Trigger event types for stream-based scenario execution
+//! Trigger event types for stream-based workflow execution
 //!
-//! These types define the event schema for all scenario triggers:
+//! These types define the event schema for all workflow triggers:
 //! HTTP API, HTTP webhooks, cron schedules, email triggers, and application webhooks.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Event published to Valkey stream to trigger scenario execution
+/// Event published to Valkey stream to trigger workflow execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerEvent {
     /// Pre-generated instance ID (UUID string)
@@ -15,13 +15,13 @@ pub struct TriggerEvent {
     /// Tenant identifier
     pub tenant_id: String,
 
-    /// Target scenario ID
-    pub scenario_id: String,
+    /// Target workflow ID
+    pub workflow_id: String,
 
     /// Specific version to execute (None = use current/latest)
     pub version: Option<i32>,
 
-    /// Scenario input data (JSON)
+    /// Workflow input data (JSON)
     pub inputs: Value,
 
     /// Source of this trigger
@@ -109,7 +109,7 @@ impl TriggerEvent {
     pub fn http_api(
         instance_id: String,
         tenant_id: String,
-        scenario_id: String,
+        workflow_id: String,
         version: Option<i32>,
         inputs: Value,
         track_events: bool,
@@ -119,7 +119,7 @@ impl TriggerEvent {
         Self {
             instance_id,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             inputs,
             trigger: TriggerSource::HttpApi { correlation_id },
@@ -134,7 +134,7 @@ impl TriggerEvent {
     pub fn http_event(
         instance_id: String,
         tenant_id: String,
-        scenario_id: String,
+        workflow_id: String,
         version: Option<i32>,
         inputs: Value,
         track_events: bool,
@@ -147,7 +147,7 @@ impl TriggerEvent {
         Self {
             instance_id,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             inputs,
             trigger: TriggerSource::HttpEvent {
@@ -167,7 +167,7 @@ impl TriggerEvent {
     pub fn cron(
         instance_id: String,
         tenant_id: String,
-        scenario_id: String,
+        workflow_id: String,
         version: Option<i32>,
         inputs: Value,
         track_events: bool,
@@ -179,7 +179,7 @@ impl TriggerEvent {
         Self {
             instance_id,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             inputs,
             trigger: TriggerSource::Cron {
@@ -228,7 +228,7 @@ impl TriggerEvent {
     pub fn recovery(
         instance_id: String,
         tenant_id: String,
-        scenario_id: String,
+        workflow_id: String,
         version: Option<i32>,
         inputs: Value,
         track_events: bool,
@@ -237,7 +237,7 @@ impl TriggerEvent {
         Self {
             instance_id,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             inputs,
             trigger: TriggerSource::Recovery { checkpoint_count },
@@ -258,7 +258,7 @@ mod tests {
         let event = TriggerEvent::http_api(
             "test-instance-id".to_string(),
             "test-tenant".to_string(),
-            "test-scenario".to_string(),
+            "test-workflow".to_string(),
             Some(1),
             json!({"key": "value"}),
             false,
@@ -270,7 +270,7 @@ mod tests {
         let parsed: TriggerEvent = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.instance_id, "test-instance-id");
-        assert_eq!(parsed.scenario_id, "test-scenario");
+        assert_eq!(parsed.workflow_id, "test-workflow");
         assert!(matches!(parsed.trigger, TriggerSource::HttpApi { .. }));
     }
 

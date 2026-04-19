@@ -241,7 +241,7 @@ pub async fn list_step_types() -> Json<Value> {
     let mut all_step_types = vec![json!({
         "type": "Start",
         "displayName": "Start",
-        "description": "Entry point - receives scenario inputs",
+        "description": "Entry point - receives workflow inputs",
         "category": "control",
         "schema": null
     })];

@@ -326,9 +326,9 @@ mod tests {
                 // fields: [field, value, field, value, ...]
                 Value::Array(vec![
                     Value::BulkString(b"event_type".to_vec()),
-                    Value::BulkString(b"trigger_scenario".to_vec()),
+                    Value::BulkString(b"trigger_workflow".to_vec()),
                     Value::BulkString(b"data".to_vec()),
-                    Value::BulkString(b"{\"scenario_id\":\"test-123\"}".to_vec()),
+                    Value::BulkString(b"{\"workflow_id\":\"test-123\"}".to_vec()),
                 ]),
             ])]),
             // deleted-ids (empty)
@@ -343,10 +343,10 @@ mod tests {
         let (entry_id, event) = &events[0];
         assert_eq!(entry_id, "1234567890123-0");
         assert_eq!(event.event_id, Some("1234567890123-0".to_string()));
-        assert_eq!(event.event_type, Some("trigger_scenario".to_string()));
+        assert_eq!(event.event_type, Some("trigger_workflow".to_string()));
         assert_eq!(
             event.raw_data.get("data"),
-            Some(&"{\"scenario_id\":\"test-123\"}".to_string())
+            Some(&"{\"workflow_id\":\"test-123\"}".to_string())
         );
     }
 
@@ -433,8 +433,8 @@ mod tests {
                 Value::BulkString(b"1234567890123-0".to_vec()),
                 Value::Array(vec![
                     Value::BulkString(b"event_type".to_vec()),
-                    Value::BulkString(b"trigger_scenario".to_vec()),
-                    Value::BulkString(b"scenario_id".to_vec()),
+                    Value::BulkString(b"trigger_workflow".to_vec()),
+                    Value::BulkString(b"workflow_id".to_vec()),
                     Value::BulkString(b"abc-123".to_vec()),
                 ]),
             ])]),
@@ -445,8 +445,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (entry_id, event) = &events[0];
         assert_eq!(entry_id, "1234567890123-0");
-        assert_eq!(event.event_type, Some("trigger_scenario".to_string()));
-        assert_eq!(event.scenario_id, Some("abc-123".to_string()));
+        assert_eq!(event.event_type, Some("trigger_workflow".to_string()));
+        assert_eq!(event.workflow_id, Some("abc-123".to_string()));
     }
 
     #[test]

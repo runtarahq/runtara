@@ -15,9 +15,9 @@ pub struct ListAllExecutionsQuery {
     #[serde(default)]
     pub size: Option<i32>,
 
-    /// Filter by scenario ID
-    #[serde(rename = "scenarioId")]
-    pub scenario_id: Option<String>,
+    /// Filter by workflow ID
+    #[serde(rename = "workflowId")]
+    pub workflow_id: Option<String>,
 
     /// Filter by status (comma-separated, lowercase: queued,completed,failed,running,compiling,timeout,cancelled)
     pub status: Option<String>,
@@ -38,7 +38,7 @@ pub struct ListAllExecutionsQuery {
     #[serde(rename = "completedTo")]
     pub completed_to: Option<DateTime<Utc>>,
 
-    /// Sort by field (default: completedAt). Options: createdAt, completedAt, status, scenarioId
+    /// Sort by field (default: completedAt). Options: createdAt, completedAt, status, workflowId
     #[serde(rename = "sortBy")]
     pub sort_by: Option<String>,
 
@@ -51,13 +51,13 @@ pub struct ListAllExecutionsQuery {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListAllExecutionsResponse {
     pub success: bool,
-    pub data: super::scenarios::PageScenarioInstanceHistoryDto,
+    pub data: super::workflows::PageWorkflowInstanceHistoryDto,
 }
 
 /// Filter parameters passed to repository
 #[derive(Debug, Clone)]
 pub struct ExecutionFilters {
-    pub scenario_id: Option<String>,
+    pub workflow_id: Option<String>,
     pub statuses: Option<Vec<String>>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
@@ -70,7 +70,7 @@ pub struct ExecutionFilters {
 impl Default for ExecutionFilters {
     fn default() -> Self {
         Self {
-            scenario_id: None,
+            workflow_id: None,
             statuses: None,
             created_from: None,
             created_to: None,

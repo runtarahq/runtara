@@ -6,12 +6,12 @@ import { fileURLToPath } from 'url';
 /**
  * SYN-106: Input validation failed for array/object input types
  *
- * Reproduces the bug where executing a scenario with array or object
+ * Reproduces the bug where executing a workflow with array or object
  * input schema fields failed with "Input validation failed: Invalid
  * schema: true is not of type 'array'".
  *
  * Root causes fixed:
- * 1. Frontend: ScenarioExecuteDialog used raw text <Input> for array/object
+ * 1. Frontend: WorkflowExecuteDialog used raw text <Input> for array/object
  *    fields, sending stringified JSON instead of actual arrays/objects.
  *    Fix: replaced with CompositeValueEditor.
  * 2. Frontend: buildSchemaFromFields generated non-standard JSON Schema
@@ -59,8 +59,8 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 test.describe.serial('SYN-106: Execute with complex input types', () => {
-  const scenarioName = `SYN-106 Complex Input ${Date.now()}`;
-  let scenarioId: string;
+  const workflowName = `SYN-106 Complex Input ${Date.now()}`;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -68,9 +68,9 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -79,19 +79,19 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
     }
   });
 
-  // ── Setup: create scenario with required array/object input schema ───
+  // ── Setup: create workflow with required array/object input schema ───
 
-  test('create scenario with array/object input schema', async ({ page }) => {
-    await page.goto('/scenarios/create');
+  test('create workflow with array/object input schema', async ({ page }) => {
+    await page.goto('/workflows/create');
     await page.waitForLoadState('networkidle');
-    await page.getByLabel('Name').fill(scenarioName);
+    await page.getByLabel('Name').fill(workflowName);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await page.waitForURL(
-      (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
       { timeout: 15000 }
     );
-    scenarioId = page.url().split('/scenarios/').pop()!;
+    workflowId = page.url().split('/workflows/').pop()!;
 
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -117,7 +117,7 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
     await row2.getByRole('combobox').click();
     await page.getByRole('option', { name: 'Object' }).click();
 
-    // Add a random-double step so the scenario has a valid graph
+    // Add a random-double step so the workflow has a valid graph
     const startNode = page
       .locator('.react-flow__node')
       .filter({ hasText: 'Start' });
@@ -153,11 +153,11 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
   test('frontend rejects empty required array/object fields', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
-    const playButton = page.getByTitle('Start scenario');
+    const playButton = page.getByTitle('Start workflow');
     await expect(playButton).toBeVisible({ timeout: 10000 });
     await expect(playButton).toBeEnabled({ timeout: 5000 });
     await playButton.click();
@@ -185,7 +185,7 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
     // Send a string where an array is expected, and a number where an object
     // is expected — directly via API to test backend JSON Schema validation.
     const res = await fetch(
-      `${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/execute`,
+      `${GATEWAY_URL}/api/runtime/workflows/${workflowId}/execute`,
       {
         method: 'POST',
         headers: apiHeaders(token),
@@ -213,11 +213,11 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
   test('execute with valid array/object data passes validation', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
-    const playButton = page.getByTitle('Start scenario');
+    const playButton = page.getByTitle('Start workflow');
     await expect(playButton).toBeVisible({ timeout: 10000 });
     await expect(playButton).toBeEnabled({ timeout: 5000 });
     await playButton.click();
@@ -255,7 +255,7 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
     // Intercept the HTTP request to verify wire format
     const executeRequestPromise = page.waitForRequest(
       (req) =>
-        req.url().includes(`/scenarios/${scenarioId}/execute`) &&
+        req.url().includes(`/workflows/${workflowId}/execute`) &&
         req.method() === 'POST'
     );
 
@@ -288,16 +288,16 @@ test.describe.serial('SYN-106: Execute with complex input types', () => {
 
   // ── Cleanup ──────────────────────────────────────────────────────────
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: scenarioName });
+    const card = page.locator('article').filter({ hasText: workflowName });
     await expect(card).toBeVisible({ timeout: 10000 });
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
     await expect(card).not.toBeVisible({ timeout: 10000 });
 
-    scenarioId = '';
+    workflowId = '';
   });
 });

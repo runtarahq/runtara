@@ -1,0 +1,120 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                SUM(invocation_count) as total_invocations,\n                SUM(success_count) as total_successes,\n                SUM(failure_count) as total_failures,\n                SUM(timeout_count) as total_timeouts,\n                CASE\n                    WHEN SUM(invocation_count) > 0\n                    THEN SUM(total_duration_seconds) / SUM(invocation_count)\n                    ELSE 0::double precision\n                END as avg_duration_seconds,\n                MIN(min_duration_seconds) as min_duration_seconds,\n                MAX(max_duration_seconds) as max_duration_seconds,\n                CASE\n                    WHEN SUM(invocation_count) > 0\n                    THEN SUM(total_memory_mb) / SUM(invocation_count)\n                    ELSE 0::double precision\n                END as avg_memory_mb,\n                MIN(min_memory_mb) as min_memory_mb,\n                MAX(max_memory_mb) as max_memory_mb,\n                CASE\n                    WHEN SUM(invocation_count) > 0\n                    THEN SUM(total_queue_duration_seconds) / SUM(invocation_count)\n                    ELSE 0::double precision\n                END as avg_queue_duration_seconds,\n                MIN(min_queue_duration_seconds) as min_queue_duration_seconds,\n                MAX(max_queue_duration_seconds) as max_queue_duration_seconds,\n                CASE\n                    WHEN SUM(invocation_count) > 0\n                    THEN SUM(total_processing_overhead_seconds) / SUM(invocation_count)\n                    ELSE 0::double precision\n                END as avg_processing_overhead_seconds,\n                MIN(min_processing_overhead_seconds) as min_processing_overhead_seconds,\n                MAX(max_processing_overhead_seconds) as max_processing_overhead_seconds,\n                CASE\n                    WHEN SUM(invocation_count) > 0\n                    THEN ROUND((SUM(success_count)::numeric / SUM(invocation_count)::numeric * 100), 2)::double precision\n                    ELSE 0::double precision\n                END as success_rate_percent\n            FROM workflow_metrics_hourly\n            WHERE tenant_id = $1\n              AND workflow_id = $2\n              AND ($3::integer IS NULL OR version = $3)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_invocations",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_successes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_failures",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_timeouts",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "avg_duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "min_duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "max_duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "avg_memory_mb",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "min_memory_mb",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 9,
+        "name": "max_memory_mb",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "avg_queue_duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "min_queue_duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 12,
+        "name": "max_queue_duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 13,
+        "name": "avg_processing_overhead_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 14,
+        "name": "min_processing_overhead_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 15,
+        "name": "max_processing_overhead_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "success_rate_percent",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e79c57b6579542538f000411968833bdcf3c68be66eff123c0f895474e933bb8"
+}

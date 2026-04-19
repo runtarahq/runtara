@@ -1,7 +1,7 @@
 //! Agent Execution DTOs
 //!
 //! Request/response types for host-mediated agent capability execution.
-//! Used by scenario instances to delegate I/O agent work to the host.
+//! Used by workflow instances to delegate I/O agent work to the host.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,7 +28,7 @@ pub struct ExecuteAgentRequest {
     )]
     pub connection_id: Option<String>,
 
-    /// Instance ID of the calling scenario (for tracing/logging).
+    /// Instance ID of the calling workflow (for tracing/logging).
     #[serde(
         rename = "instanceId",
         default,
@@ -36,7 +36,7 @@ pub struct ExecuteAgentRequest {
     )]
     pub instance_id: Option<String>,
 
-    /// Tenant ID of the calling scenario.
+    /// Tenant ID of the calling workflow.
     /// Used as fallback if not available from auth context.
     #[serde(rename = "tenantId", default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,

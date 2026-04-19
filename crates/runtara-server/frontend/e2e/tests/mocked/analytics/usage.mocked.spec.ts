@@ -13,7 +13,7 @@ test.describe('Analytics / Usage (mocked)', () => {
       successfulExecutions: 40,
       failedExecutions: 2,
       executionTimeSeries: [],
-      scenarioBreakdown: [],
+      workflowBreakdown: [],
     });
 
     const view = new AnalyticsUsagePage(page);

@@ -8,12 +8,12 @@ import {
 } from '@/generated/RuntaraRuntimeApi';
 
 /**
- * Extended execution instance with scenario name for display in history view.
+ * Extended execution instance with workflow name for display in history view.
  */
 export interface ExecutionHistoryItem {
   instanceId: string;
-  scenarioId: string;
-  scenarioName?: string;
+  workflowId: string;
+  workflowName?: string;
   createdAt: string;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -31,12 +31,12 @@ export interface ExecutionHistoryItem {
  * Filter options for the invocation history table.
  */
 export interface ExecutionHistoryFilters {
-  scenarioId?: string;
+  workflowId?: string;
   status?: string;
   createdFrom?: string;
   createdTo?: string;
   completedFrom?: string;
   completedTo?: string;
-  sortBy?: 'createdAt' | 'completedAt' | 'status' | 'scenarioId';
+  sortBy?: 'createdAt' | 'completedAt' | 'status' | 'workflowId';
   sortOrder?: 'asc' | 'desc';
 }

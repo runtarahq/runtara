@@ -10,9 +10,9 @@ import {
 
 export const menu = [
   {
-    key: 'scenarios',
-    title: 'Scenarios',
-    to: '/scenarios',
+    key: 'workflows',
+    title: 'Workflows',
+    to: '/workflows',
     icon: <Workflow size={16} />,
     allowedGroups: [],
   },

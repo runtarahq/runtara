@@ -351,7 +351,7 @@ fn generate_retry_wrapper(
         })
         .collect();
 
-    // Generate rate limit budget: compile-time value from scenario, or env var fallback
+    // Generate rate limit budget: compile-time value from workflow, or env var fallback
     let rate_limit_budget_init = match rate_limit_budget_ms {
         Some(ms) => quote! { #ms },
         None => quote! {
@@ -430,7 +430,7 @@ fn generate_retry_wrapper(
 
                 // Record retry attempt (for attempts > 1)
                 if __attempt > 1 {
-                    // Rate limit budget: scenario setting (compile-time) or env var fallback
+                    // Rate limit budget: workflow setting (compile-time) or env var fallback
                     let __max_retry_delay_ms: u64 = #rate_limit_budget_init;
 
                     // Try to extract retryAfterMs from the last error JSON.

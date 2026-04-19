@@ -194,7 +194,7 @@ impl AgentTestingService {
             .execute_sync(
                 &image_id,
                 tenant_id,
-                "agent-dispatcher", // Scenario ID for tracing context
+                "agent-dispatcher", // Workflow ID for tracing context
                 None,               // Generate instance_id automatically
                 Some(dispatcher_input),
                 Some(30), // 30 second timeout for agent tests

@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router';
 import { toast } from 'sonner';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { ScenarioDto } from '@/generated/RuntaraRuntimeApi';
+import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { Loader } from '@/shared/components/loader.tsx';
 import { TriggerForm } from '@/features/triggers/components/TriggerForm';
 import { queryClient } from '@/main';
@@ -11,7 +11,7 @@ import {
   getInvocationTriggerById,
   updateInvocationTrigger,
 } from '@/features/triggers/queries';
-import { getScenarios } from '@/features/scenarios/queries';
+import { getWorkflows } from '@/features/workflows/queries';
 import { getConnections } from '@/features/connections/queries';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { defaultScheduleConfig } from '@/features/triggers/components/TriggerForm/TriggerItem';
@@ -35,14 +35,14 @@ export function EditTrigger() {
       : 'Edit Invocation Trigger'
   );
 
-  const scenarios = useCustomQuery({
-    queryKey: queryKeys.scenarios.all,
-    queryFn: getScenarios,
+  const workflows = useCustomQuery({
+    queryKey: queryKeys.workflows.all,
+    queryFn: getWorkflows,
     select: (response: any) => {
-      const scenariosData = response?.data?.content || [];
-      return scenariosData.map((scenario: ScenarioDto) => ({
-        id: scenario.id,
-        name: scenario.name,
+      const workflowsData = response?.data?.content || [];
+      return workflowsData.map((workflow: WorkflowDto) => ({
+        id: workflow.id,
+        name: workflow.name,
       }));
     },
   });
@@ -122,7 +122,7 @@ export function EditTrigger() {
 
   if (
     trigger.isFetching ||
-    scenarios.isFetching ||
+    workflows.isFetching ||
     connectionsQuery.isFetching
   ) {
     return <Loader />;
@@ -200,9 +200,9 @@ export function EditTrigger() {
         <section className="space-y-4 px-4 sm:px-5">
           <TriggerForm
             title="Trigger details"
-            description="Adjust the scenario mapping, schedule, and application payloads."
+            description="Adjust the workflow mapping, schedule, and application payloads."
             fieldProps={{
-              scenarios: scenarios.data,
+              workflows: workflows.data,
               connections: connectionsQuery.data,
             }}
             initValues={initValues}

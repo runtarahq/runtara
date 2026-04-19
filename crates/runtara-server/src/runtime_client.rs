@@ -189,7 +189,7 @@ impl RuntimeClient {
     /// # Arguments
     /// * `image_id` - The compiled workflow image ID (UUID from runtara-environment)
     /// * `tenant_id` - The tenant identifier
-    /// * `scenario_id` - The scenario identifier (for tracing context)
+    /// * `workflow_id` - The workflow identifier (for tracing context)
     /// * `instance_id` - Optional custom instance ID
     /// * `input` - Input data for the workflow
     /// * `timeout_secs` - Optional timeout in seconds
@@ -201,7 +201,7 @@ impl RuntimeClient {
         &self,
         image_id: &str,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         instance_id: Option<String>,
         input: Option<Value>,
         timeout_secs: Option<u32>,
@@ -234,7 +234,7 @@ impl RuntimeClient {
         let effective_timeout = timeout_secs.unwrap_or(self.config.default_timeout_secs);
         options = options.with_timeout(effective_timeout);
 
-        // Pass database URLs to scenario for object_model agent
+        // Pass database URLs to workflow for object_model agent
         if let Ok(url) = std::env::var("OBJECT_STORE_DATABASE_URL") {
             options = options.with_env_var("OBJECT_STORE_DATABASE_URL", &url);
         } else if let Ok(url) = std::env::var("OBJECT_MODEL_DATABASE_URL") {
@@ -249,10 +249,10 @@ impl RuntimeClient {
                 options = options.with_env_var("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint);
             }
 
-            // Service name (standard OTEL var, derived from scenario_id)
+            // Service name (standard OTEL var, derived from workflow_id)
             options = options.with_env_var(
                 "OTEL_SERVICE_NAME",
-                format!("runtara-scenario-{}", scenario_id),
+                format!("runtara-workflow-{}", workflow_id),
             );
 
             // Resource attributes - map vendor-specific vars (DD_*) to standard OTEL format
@@ -260,15 +260,15 @@ impl RuntimeClient {
                 options = options.with_env_var("OTEL_RESOURCE_ATTRIBUTES", &attrs);
             }
 
-            // W3C Trace Context (links scenario spans to parent)
+            // W3C Trace Context (links workflow spans to parent)
             if let Some(traceparent) = trace_context::format_traceparent() {
                 options = options.with_env_var("TRACEPARENT", &traceparent);
-                debug!(traceparent = %traceparent, "Propagating trace context to scenario");
+                debug!(traceparent = %traceparent, "Propagating trace context to workflow");
             }
         }
 
-        // Scenario context (always pass these for correlation)
-        options = options.with_env_var("SCENARIO_ID", scenario_id);
+        // Workflow context (always pass these for correlation)
+        options = options.with_env_var("WORKFLOW_ID", workflow_id);
         options = options.with_env_var("TENANT_ID", tenant_id);
         options = options.with_env_var("INSTANCE_ID", &actual_instance_id);
 
@@ -276,7 +276,7 @@ impl RuntimeClient {
         // were previously read by runners via env::var against the host process
         // environment (set by an unsafe env::set_var in server startup) —
         // passing them explicitly through StartInstanceOptions removes that
-        // race-prone pattern and makes the scenario ABI typed.
+        // race-prone pattern and makes the workflow ABI typed.
         let server_config = crate::config::get();
         options = options.with_env_var("RUNTARA_TENANT_ID", &server_config.tenant_id);
         options = options.with_env_var("RUNTARA_HTTP_PROXY_URL", &server_config.http_proxy_url);
@@ -305,7 +305,7 @@ impl RuntimeClient {
         info!(
             instance_id = %result.instance_id,
             image_id = %image_id,
-            scenario_id = %scenario_id,
+            workflow_id = %workflow_id,
             tenant_id = %tenant_id,
             "Started workflow instance"
         );
@@ -447,7 +447,7 @@ impl RuntimeClient {
         &self,
         image_id: &str,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         instance_id: Option<String>,
         input: Option<Value>,
         timeout_secs: Option<u32>,
@@ -457,7 +457,7 @@ impl RuntimeClient {
             .start_instance(
                 image_id,
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 instance_id,
                 input,
                 timeout_secs,
@@ -673,7 +673,7 @@ impl RuntimeClient {
 
     /// Get image info by image ID
     ///
-    /// Returns image details including the human-readable name (format: scenario_id:version).
+    /// Returns image details including the human-readable name (format: workflow_id:version).
     pub async fn get_image(
         &self,
         image_id: &str,
@@ -820,7 +820,7 @@ impl RuntimeClient {
     /// List events for an instance with optional filtering
     ///
     /// Returns events for the specified instance, including debug step events when
-    /// the scenario was compiled with track_events enabled.
+    /// the workflow was compiled with track_events enabled.
     ///
     /// # Arguments
     /// * `instance_id` - The instance to list events for
@@ -873,7 +873,7 @@ impl RuntimeClient {
     ///
     /// Returns the chain of parent scopes from the given scope up to the root,
     /// useful for reconstructing the call stack in hierarchical step execution
-    /// (Split/While/StartScenario).
+    /// (Split/While/EmbedWorkflow).
     pub async fn get_scope_ancestors(
         &self,
         instance_id: &str,
@@ -916,11 +916,11 @@ impl RuntimeClient {
 /// Build a human-readable image name for registration
 ///
 /// This returns the name used when registering images with runtara-environment.
-/// Format: {scenario_id}:{version}
+/// Format: {workflow_id}:{version}
 ///
 /// **IMPORTANT**: This is the NAME for registration, NOT the ID for execution!
 /// When executing, you must use the UUID returned from `register_image_stream`.
-/// The UUID is stored in `scenario_compilations.registered_image_id`.
-pub fn build_image_name(scenario_id: &str, version: u32) -> String {
-    format!("{}:{}", scenario_id, version)
+/// The UUID is stored in `workflow_compilations.registered_image_id`.
+pub fn build_image_name(workflow_id: &str, version: u32) -> String {
+    format!("{}:{}", workflow_id, version)
 }

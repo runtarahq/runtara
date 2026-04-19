@@ -100,7 +100,7 @@ export function getLocalizedMessage(error: StructuredError): string {
 }
 
 /**
- * Get actionable guidance for common error scenarios.
+ * Get actionable guidance for common error workflows.
  * Provides specific steps users can take to resolve the error.
  *
  * @param errorCode - Error code

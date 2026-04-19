@@ -9,15 +9,15 @@ pub struct ValkeyEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
 
-    /// Event type (e.g., "trigger_scenario", "webhook", etc.)
+    /// Event type (e.g., "trigger_workflow", "webhook", etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_type: Option<String>,
 
-    /// Target scenario ID to invoke
+    /// Target workflow ID to invoke
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scenario_id: Option<String>,
+    pub workflow_id: Option<String>,
 
-    /// JSON payload for scenario inputs
+    /// JSON payload for workflow inputs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inputs: Option<Value>,
 
@@ -34,7 +34,7 @@ impl ValkeyEvent {
     /// Parse event from Redis stream entry fields
     pub fn from_stream_fields(fields: HashMap<String, String>) -> Self {
         let event_type = fields.get("event_type").cloned();
-        let scenario_id = fields.get("scenario_id").cloned();
+        let workflow_id = fields.get("workflow_id").cloned();
 
         // Try to parse inputs field as JSON
         let inputs = fields
@@ -49,7 +49,7 @@ impl ValkeyEvent {
         ValkeyEvent {
             event_id: None, // Will be set by caller with stream ID
             event_type,
-            scenario_id,
+            workflow_id,
             inputs,
             metadata,
             raw_data: fields,

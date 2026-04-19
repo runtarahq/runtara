@@ -1,7 +1,7 @@
 //! Compilation Worker
 //!
-//! Background worker that processes scenario compilation requests from the queue.
-//! Ensures only one compilation per scenario:version happens at a time.
+//! Background worker that processes workflow compilation requests from the queue.
+//! Ensures only one compilation per workflow:version happens at a time.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use opentelemetry::KeyValue;
 use sqlx::PgPool;
 use tracing::{error, info, instrument, warn};
 
-use crate::api::repositories::scenarios::ScenarioRepository;
+use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::compilation::CompilationService;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
@@ -24,7 +24,7 @@ pub struct CompilationWorkerConfig {
     pub redis_url: String,
     /// Timeout for blocking dequeue (seconds)
     pub dequeue_timeout_secs: u64,
-    /// Connection service URL for compiled scenarios
+    /// Connection service URL for compiled workflows
     pub connection_service_url: Option<String>,
 }
 
@@ -87,7 +87,7 @@ pub async fn run(
         }
     }
 
-    let repository = Arc::new(ScenarioRepository::new(pool.clone()));
+    let repository = Arc::new(WorkflowRepository::new(pool.clone()));
     let compilation_service = CompilationService::new(
         repository.clone(),
         config.connection_service_url.clone(),
@@ -108,7 +108,7 @@ pub async fn run(
                 info!(
                     worker_id = %worker_id,
                     tenant_id = %request.tenant_id,
-                    scenario_id = %request.scenario_id,
+                    workflow_id = %request.workflow_id,
                     version = request.version,
                     "Processing compilation request"
                 );
@@ -117,7 +117,7 @@ pub async fn run(
                 let should_compile = match check_compilation_status(
                     &pool,
                     &request.tenant_id,
-                    &request.scenario_id,
+                    &request.workflow_id,
                     request.version,
                 )
                 .await
@@ -125,9 +125,9 @@ pub async fn run(
                     Ok(CompilationStatus::Success) => {
                         info!(
                             tenant_id = %request.tenant_id,
-                            scenario_id = %request.scenario_id,
+                            workflow_id = %request.workflow_id,
                             version = request.version,
-                            "Scenario already compiled, skipping"
+                            "Workflow already compiled, skipping"
                         );
                         false
                     }
@@ -135,7 +135,7 @@ pub async fn run(
                     Err(e) => {
                         error!(
                             tenant_id = %request.tenant_id,
-                            scenario_id = %request.scenario_id,
+                            workflow_id = %request.workflow_id,
                             version = request.version,
                             error = %e,
                             "Failed to check compilation status, will attempt compilation"
@@ -148,7 +148,7 @@ pub async fn run(
                     let compile_start = Instant::now();
                     let attributes = [
                         KeyValue::new("tenant_id", request.tenant_id.clone()),
-                        KeyValue::new("scenario_id", request.scenario_id.clone()),
+                        KeyValue::new("workflow_id", request.workflow_id.clone()),
                     ];
 
                     // Track active compilations
@@ -158,7 +158,7 @@ pub async fn run(
 
                     // Perform compilation (target determined by RUNTARA_COMPILE_TARGET env var)
                     let compile_result = compilation_service
-                        .compile_scenario(&request.tenant_id, &request.scenario_id, request.version)
+                        .compile_workflow(&request.tenant_id, &request.workflow_id, request.version)
                         .await;
 
                     // Record metrics
@@ -168,7 +168,7 @@ pub async fn run(
                     if let Some(m) = metrics() {
                         let result_attrs = [
                             KeyValue::new("tenant_id", request.tenant_id.clone()),
-                            KeyValue::new("scenario_id", request.scenario_id.clone()),
+                            KeyValue::new("workflow_id", request.workflow_id.clone()),
                             KeyValue::new("status", if success { "success" } else { "failed" }),
                         ];
                         m.compilations_total.add(1, &result_attrs);
@@ -180,7 +180,7 @@ pub async fn run(
                         Ok(result) => {
                             info!(
                                 tenant_id = %request.tenant_id,
-                                scenario_id = %request.scenario_id,
+                                workflow_id = %request.workflow_id,
                                 version = request.version,
                                 binary_size = result.binary_size,
                                 image_id = ?result.image_id,
@@ -191,7 +191,7 @@ pub async fn run(
                         Err(e) => {
                             error!(
                                 tenant_id = %request.tenant_id,
-                                scenario_id = %request.scenario_id,
+                                workflow_id = %request.workflow_id,
                                 version = request.version,
                                 error = %e,
                                 duration_secs = duration,
@@ -201,7 +201,7 @@ pub async fn run(
                             if let Err(db_err) = record_compilation_failure(
                                 &pool,
                                 &request.tenant_id,
-                                &request.scenario_id,
+                                &request.workflow_id,
                                 request.version,
                                 &e.to_string(),
                             )
@@ -217,7 +217,7 @@ pub async fn run(
                 if let Err(e) = queue.complete(&request).await {
                     error!(
                         tenant_id = %request.tenant_id,
-                        scenario_id = %request.scenario_id,
+                        workflow_id = %request.workflow_id,
                         version = request.version,
                         error = %e,
                         "Failed to mark compilation as complete"
@@ -243,21 +243,21 @@ enum CompilationStatus {
     NotCompiled,
 }
 
-/// Check if a scenario version is already compiled
+/// Check if a workflow version is already compiled
 async fn check_compilation_status(
     pool: &PgPool,
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     version: i32,
 ) -> Result<CompilationStatus, sqlx::Error> {
     let result = sqlx::query!(
         r#"
         SELECT compilation_status, registered_image_id
-        FROM scenario_compilations
-        WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3
+        FROM workflow_compilations
+        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
         "#,
         tenant_id,
-        scenario_id,
+        workflow_id,
         version
     )
     .fetch_optional(pool)
@@ -282,16 +282,16 @@ async fn check_compilation_status(
 async fn record_compilation_failure(
     pool: &PgPool,
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     version: i32,
     error_message: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
-        INSERT INTO scenario_compilations
-            (tenant_id, scenario_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version)
+        INSERT INTO workflow_compilations
+            (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version)
         VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5)
-        ON CONFLICT (tenant_id, scenario_id, version)
+        ON CONFLICT (tenant_id, workflow_id, version)
         DO UPDATE SET
             compilation_status = 'failed',
             compiled_at = NOW(),
@@ -299,7 +299,7 @@ async fn record_compilation_failure(
             runtara_version = $5
         "#,
         tenant_id,
-        scenario_id,
+        workflow_id,
         version,
         error_message,
         env!("BUILD_VERSION")
@@ -309,7 +309,7 @@ async fn record_compilation_failure(
 
     warn!(
         tenant_id = %tenant_id,
-        scenario_id = %scenario_id,
+        workflow_id = %workflow_id,
         version = version,
         error = %error_message,
         "Recorded compilation failure"
@@ -318,18 +318,18 @@ async fn record_compilation_failure(
     Ok(())
 }
 
-/// Enqueue a scenario for compilation
+/// Enqueue a workflow for compilation
 ///
 /// This is the main entry point for scheduling compilations.
 /// Returns `true` if the request was queued, `false` if already pending.
 pub async fn enqueue_compilation(
     redis_url: &str,
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     version: i32,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
     let queue = CompilationQueue::new(redis_url.to_string())?;
-    let request = CompilationRequest::new(tenant_id.to_string(), scenario_id.to_string(), version);
+    let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     queue.enqueue(&request).await
 }
 
@@ -337,11 +337,11 @@ pub async fn enqueue_compilation(
 pub async fn is_compilation_pending(
     redis_url: &str,
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     version: i32,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
     let queue = CompilationQueue::new(redis_url.to_string())?;
-    let request = CompilationRequest::new(tenant_id.to_string(), scenario_id.to_string(), version);
+    let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     queue.is_pending(&request).await
 }
 
@@ -351,12 +351,12 @@ pub async fn is_compilation_pending(
 pub async fn wait_for_compilation(
     redis_url: &str,
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     version: i32,
     timeout: Duration,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
     let queue = CompilationQueue::new(redis_url.to_string())?;
-    let request = CompilationRequest::new(tenant_id.to_string(), scenario_id.to_string(), version);
+    let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
     let poll_interval = Duration::from_millis(100);
     queue
         .wait_for_completion(&request, timeout, poll_interval)

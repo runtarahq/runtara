@@ -1,6 +1,6 @@
 //! Trigger Worker
 //!
-//! Consumes trigger events from Valkey streams and executes scenarios.
+//! Consumes trigger events from Valkey streams and executes workflows.
 //! This replaces the DB-polling native_worker with stream-based execution.
 
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::api::dto::trigger_event::TriggerEvent;
-use crate::api::repositories::scenarios::ScenarioRepository;
+use crate::api::repositories::workflows::WorkflowRepository;
 use crate::observability::metrics;
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
@@ -78,7 +78,7 @@ impl Default for TriggerWorkerConfig {
 }
 
 /// Background worker that consumes trigger events from Valkey streams
-/// and executes scenarios using the ExecutionEngine.
+/// and executes workflows using the ExecutionEngine.
 #[instrument(skip(pool, running_executions, runtime_client, valkey_config, shutdown))]
 pub async fn run(
     pool: PgPool,
@@ -133,10 +133,10 @@ pub async fn run(
     );
 
     // Create execution engine (wrapped in Arc for sharing across spawned tasks)
-    let scenario_repo = Arc::new(ScenarioRepository::new(pool.clone()));
+    let workflow_repo = Arc::new(WorkflowRepository::new(pool.clone()));
     let engine = Arc::new(ExecutionEngine::new(
         pool.clone(),
-        scenario_repo,
+        workflow_repo,
         runtime_client,
         None, // trigger_stream not needed for the trigger worker
         Some(running_executions.clone()),
@@ -244,7 +244,7 @@ async fn process_event(
     info!(
         entry_id = %entry_id,
         instance_id = %trigger_event.instance_id,
-        scenario_id = %trigger_event.scenario_id,
+        workflow_id = %trigger_event.workflow_id,
         trigger_type = %trigger_event.trigger_type(),
         is_retry = is_retry,
         "Processing trigger event{}",
@@ -255,7 +255,7 @@ async fn process_event(
     let process_start = Instant::now();
     let attributes = [
         KeyValue::new("tenant_id", trigger_event.tenant_id.clone()),
-        KeyValue::new("scenario_id", trigger_event.scenario_id.clone()),
+        KeyValue::new("workflow_id", trigger_event.workflow_id.clone()),
         KeyValue::new("trigger_type", trigger_event.trigger_type().to_string()),
     ];
 
@@ -372,13 +372,13 @@ fn parse_trigger_event(
 
 /// Process a single trigger event
 ///
-/// Launches the scenario via runtara-environment in detached mode.
+/// Launches the workflow via runtara-environment in detached mode.
 /// All execution state is stored in runtara-environment, not in the local database.
 /// Use the /api/runtime/executions endpoint to query execution status (proxies to runtara).
 ///
 /// Returns:
 /// - `ProcessResult::Success` if the instance was started successfully (or skipped due to single_instance)
-/// - `ProcessResult::RetryLater` if the scenario is not compiled (will be retried)
+/// - `ProcessResult::RetryLater` if the workflow is not compiled (will be retried)
 /// - `ProcessResult::PermanentFailure` for other errors that won't benefit from retry
 async fn process_trigger_event(
     engine: Arc<ExecutionEngine>,
@@ -390,14 +390,14 @@ async fn process_trigger_event(
             Ok(Some(true)) => {
                 // single_instance is enabled - check for running instances
                 match engine
-                    .has_running_instance(&event.tenant_id, &event.scenario_id)
+                    .has_running_instance(&event.tenant_id, &event.workflow_id)
                     .await
                 {
                     Ok(true) => {
                         // Instance already running - skip silently
                         info!(
                             instance_id = %event.instance_id,
-                            scenario_id = %event.scenario_id,
+                            workflow_id = %event.workflow_id,
                             trigger_id = %trigger_id,
                             trigger_type = %event.trigger_type(),
                             "Skipping execution: single_instance enabled and instance already running"
@@ -411,7 +411,7 @@ async fn process_trigger_event(
                         // Failed to check - log warning but proceed (fail-open)
                         warn!(
                             instance_id = %event.instance_id,
-                            scenario_id = %event.scenario_id,
+                            workflow_id = %event.workflow_id,
                             error = %e,
                             "Failed to check running instances, proceeding with execution"
                         );
@@ -449,22 +449,22 @@ async fn process_trigger_event(
             ProcessResult::Success
         }
         Err(ExecutionError::NotCompiled {
-            scenario_id,
+            workflow_id,
             version,
             compilation_queued,
         }) => {
-            // Scenario not compiled yet - this is retryable
+            // Workflow not compiled yet - this is retryable
             // Compilation has been queued (or was already pending)
             info!(
                 instance_id = %event.instance_id,
-                scenario_id = %scenario_id,
+                workflow_id = %workflow_id,
                 version = version,
                 compilation_queued = compilation_queued,
-                "Scenario not compiled, will retry after compilation"
+                "Workflow not compiled, will retry after compilation"
             );
             ProcessResult::RetryLater(format!(
-                "Scenario '{}' v{} not compiled (queued: {})",
-                scenario_id, version, compilation_queued
+                "Workflow '{}' v{} not compiled (queued: {})",
+                workflow_id, version, compilation_queued
             ))
         }
         Err(e) => {
@@ -543,7 +543,7 @@ mod tests {
             r#"{
                 "instance_id": "inst-123",
                 "tenant_id": "tenant-1",
-                "scenario_id": "scenario-abc",
+                "workflow_id": "workflow-abc",
                 "version": 1,
                 "inputs": {},
                 "trigger": {"type": "http_api", "correlation_id": null},
@@ -555,8 +555,8 @@ mod tests {
 
         let valkey_event = crate::valkey::events::ValkeyEvent {
             event_id: Some("1234-0".to_string()),
-            event_type: Some("trigger_scenario".to_string()),
-            scenario_id: Some("scenario-abc".to_string()),
+            event_type: Some("trigger_workflow".to_string()),
+            workflow_id: Some("workflow-abc".to_string()),
             inputs: None,
             metadata: None,
             raw_data,
@@ -568,7 +568,7 @@ mod tests {
         let trigger = result.unwrap();
         assert_eq!(trigger.instance_id, "inst-123");
         assert_eq!(trigger.tenant_id, "tenant-1");
-        assert_eq!(trigger.scenario_id, "scenario-abc");
+        assert_eq!(trigger.workflow_id, "workflow-abc");
         assert_eq!(trigger.version, Some(1));
         assert_eq!(trigger.trigger_type(), "http_api");
     }
@@ -582,7 +582,7 @@ mod tests {
             r#"{
                 "instance_id": "inst-456",
                 "tenant_id": "tenant-2",
-                "scenario_id": "scenario-xyz",
+                "workflow_id": "workflow-xyz",
                 "version": null,
                 "inputs": {"key": "value"},
                 "trigger": {"type": "cron", "trigger_id": "cron-1", "schedule": "0 * * * *", "scheduled_at": 1234567890000},
@@ -593,8 +593,8 @@ mod tests {
 
         let valkey_event = crate::valkey::events::ValkeyEvent {
             event_id: Some("1234-1".to_string()),
-            event_type: Some("trigger_scenario".to_string()),
-            scenario_id: Some("scenario-xyz".to_string()),
+            event_type: Some("trigger_workflow".to_string()),
+            workflow_id: Some("workflow-xyz".to_string()),
             inputs: None,
             metadata: None,
             raw_data,
@@ -614,8 +614,8 @@ mod tests {
     fn test_parse_trigger_event_missing_data() {
         let valkey_event = crate::valkey::events::ValkeyEvent {
             event_id: Some("1234-0".to_string()),
-            event_type: Some("trigger_scenario".to_string()),
-            scenario_id: Some("scenario-abc".to_string()),
+            event_type: Some("trigger_workflow".to_string()),
+            workflow_id: Some("workflow-abc".to_string()),
             inputs: None,
             metadata: None,
             raw_data: HashMap::new(), // No "data" field
@@ -634,7 +634,7 @@ mod tests {
         let valkey_event = crate::valkey::events::ValkeyEvent {
             event_id: Some("1234-0".to_string()),
             event_type: None,
-            scenario_id: None,
+            workflow_id: None,
             inputs: None,
             metadata: None,
             raw_data,

@@ -40,9 +40,9 @@ pub struct InvocationTrigger {
     #[schema(example = "tenant-123")]
     pub tenant_id: Option<String>,
 
-    /// Reference to the scenario to be invoked
-    #[schema(example = "scenario-456")]
-    pub scenario_id: String,
+    /// Reference to the workflow to be invoked
+    #[schema(example = "workflow-456")]
+    pub workflow_id: String,
 
     /// Type of trigger
     #[schema(example = "CRON")]
@@ -84,9 +84,9 @@ pub struct InvocationTrigger {
 /// Request payload for creating a new invocation trigger
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateInvocationTriggerRequest {
-    /// Reference to the scenario to be invoked
-    #[schema(example = "scenario-456")]
-    pub scenario_id: String,
+    /// Reference to the workflow to be invoked
+    #[schema(example = "workflow-456")]
+    pub workflow_id: String,
 
     /// Type of trigger
     #[schema(example = "CRON")]
@@ -114,9 +114,9 @@ pub struct CreateInvocationTriggerRequest {
 /// Request payload for updating an invocation trigger
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateInvocationTriggerRequest {
-    /// Reference to the scenario to be invoked
-    #[schema(example = "scenario-456")]
-    pub scenario_id: String,
+    /// Reference to the workflow to be invoked
+    #[schema(example = "workflow-456")]
+    pub workflow_id: String,
 
     /// Type of trigger
     #[schema(example = "CRON")]

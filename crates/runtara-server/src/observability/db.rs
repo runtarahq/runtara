@@ -8,8 +8,8 @@
 //! ```ignore
 //! use crate::observability::db::record_query;
 //!
-//! let result = record_query("get_scenario", async {
-//!     sqlx::query!("SELECT * FROM scenarios WHERE id = $1", id)
+//! let result = record_query("get_workflow", async {
+//!     sqlx::query!("SELECT * FROM workflows WHERE id = $1", id)
 //!         .fetch_optional(&pool)
 //!         .await
 //! }).await;
@@ -19,8 +19,8 @@
 //! ```ignore
 //! use crate::observability::instrument_query;
 //!
-//! let result = instrument_query!("get_scenario", {
-//!     sqlx::query!("SELECT * FROM scenarios WHERE id = $1", id)
+//! let result = instrument_query!("get_workflow", {
+//!     sqlx::query!("SELECT * FROM workflows WHERE id = $1", id)
 //!         .fetch_optional(&pool)
 //!         .await
 //! });
@@ -56,8 +56,8 @@ macro_rules! instrument_query {
 /// ```ignore
 /// use crate::observability::db::record_query;
 ///
-/// let result = record_query("get_scenario", async {
-///     sqlx::query!("SELECT * FROM scenarios WHERE id = $1", id)
+/// let result = record_query("get_workflow", async {
+///     sqlx::query!("SELECT * FROM workflows WHERE id = $1", id)
 ///         .fetch_optional(&pool)
 ///         .await
 /// }).await;

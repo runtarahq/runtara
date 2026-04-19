@@ -3,9 +3,9 @@
     "name": "Parent missing child input",
     "steps": {
       "call_child": {
-        "stepType": "StartScenario",
+        "stepType": "EmbedWorkflow",
         "id": "call_child",
-        "childScenarioId": "child-with-schema",
+        "childWorkflowId": "child-with-schema",
         "childVersion": "latest",
         "inputMapping": {
           "optional_field": { "valueType": "immediate", "value": "optional" }

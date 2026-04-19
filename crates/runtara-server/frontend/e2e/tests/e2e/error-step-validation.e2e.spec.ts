@@ -9,8 +9,8 @@ import { fileURLToPath } from 'url';
  * Verifies that the Error step form enforces required fields (Error Code, Error Message)
  * and prevents saving when they are empty.
  *
- * Flow: create scenario → add Error step → attempt save with empty fields → verify validation errors →
- *       fill required fields → save successfully → delete scenario
+ * Flow: create workflow → add Error step → attempt save with empty fields → verify validation errors →
+ *       fill required fields → save successfully → delete workflow
  *
  * Requires: full local stack running (gateway, runtime, management, frontend)
  */
@@ -19,7 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
-const SCENARIO_NAME = `E2E Step Validation ${Date.now()}`;
+const WORKFLOW_NAME = `E2E Step Validation ${Date.now()}`;
 
 /** Read the access token from the Playwright auth state file. */
 function getAccessToken(): string {
@@ -50,18 +50,18 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 test.describe.serial('Error Step Validation (SYN-204)', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
     token = getAccessToken();
   });
 
-  // Safety-net cleanup: delete scenario via API if UI deletion fails
+  // Safety-net cleanup: delete workflow via API if UI deletion fails
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -70,26 +70,26 @@ test.describe.serial('Error Step Validation (SYN-204)', () => {
     }
   });
 
-  test('create scenario', async ({ page }) => {
-    await page.goto('/scenarios/create');
+  test('create workflow', async ({ page }) => {
+    await page.goto('/workflows/create');
     await page.waitForLoadState('networkidle');
 
-    await page.getByLabel('Name').fill(SCENARIO_NAME);
+    await page.getByLabel('Name').fill(WORKFLOW_NAME);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await page.waitForURL(
-      (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
       { timeout: 15000 }
     );
 
-    scenarioId = page.url().split('/scenarios/').pop()!;
-    expect(scenarioId).toBeTruthy();
+    workflowId = page.url().split('/workflows/').pop()!;
+    expect(workflowId).toBeTruthy();
   });
 
   test('Error step Save is blocked when required fields are empty', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -105,7 +105,7 @@ test.describe.serial('Error Step Validation (SYN-204)', () => {
     await expect(searchInput).toBeVisible();
     await searchInput.fill('Error');
 
-    // Click the Error step type (use description to avoid matching scenario title)
+    // Click the Error step type (use description to avoid matching workflow title)
     const errorResult = page.getByText('Emit a structured error');
     await expect(errorResult).toBeVisible({ timeout: 10000 });
     await errorResult.click();
@@ -145,7 +145,7 @@ test.describe.serial('Error Step Validation (SYN-204)', () => {
   test('Error step saves successfully with required fields filled', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -160,7 +160,7 @@ test.describe.serial('Error Step Validation (SYN-204)', () => {
     await expect(searchInput).toBeVisible();
     await searchInput.fill('Error');
 
-    // Click the Error step type (use description to avoid matching scenario title)
+    // Click the Error step type (use description to avoid matching workflow title)
     const errorResult = page.getByText('Emit a structured error');
     await expect(errorResult).toBeVisible({ timeout: 10000 });
     await errorResult.click();
@@ -191,17 +191,17 @@ test.describe.serial('Error Step Validation (SYN-204)', () => {
     ).toBeVisible({ timeout: 10000 });
   });
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: SCENARIO_NAME });
+    const card = page.locator('article').filter({ hasText: WORKFLOW_NAME });
     await expect(card).toBeVisible({ timeout: 10000 });
 
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
 
     await expect(card).not.toBeVisible({ timeout: 10000 });
-    scenarioId = '';
+    workflowId = '';
   });
 });

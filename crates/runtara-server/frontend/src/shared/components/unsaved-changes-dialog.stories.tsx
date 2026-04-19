@@ -121,8 +121,8 @@ export const Interactive: Story = {
   },
 };
 
-// Form scenario example
-const FormScenarioExample = () => {
+// Form workflow example
+const FormWorkflowExample = () => {
   const [open, setOpen] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [formValue, setFormValue] = useState('');
@@ -183,14 +183,14 @@ const FormScenarioExample = () => {
   );
 };
 
-export const FormScenario: Story = {
-  name: 'Form Scenario',
-  render: () => <FormScenarioExample />,
+export const FormWorkflow: Story = {
+  name: 'Form Workflow',
+  render: () => <FormWorkflowExample />,
   parameters: {
     docs: {
       description: {
         story:
-          'Demonstrates the dialog in a typical form scenario. Type something, then click "Navigate Away" to see the dialog.',
+          'Demonstrates the dialog in a typical form workflow. Type something, then click "Navigate Away" to see the dialog.',
       },
     },
   },

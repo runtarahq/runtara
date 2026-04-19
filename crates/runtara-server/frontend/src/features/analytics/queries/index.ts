@@ -6,15 +6,15 @@ export type {
   TenantMetricsResponse,
   TenantMetricsData,
   TenantMetricsDataPoint,
-  ScenarioMetricsHourlyResponse,
-  ScenarioMetricsHourlyData,
-  ScenarioMetricsHourly,
-  ScenarioMetricsDaily,
-  ScenarioMetricsDailyResponse,
-  ScenarioMetricsData,
-  ScenarioStatsResponse,
-  ScenarioStatsData,
-  ScenarioStats,
+  WorkflowMetricsHourlyResponse,
+  WorkflowMetricsHourlyData,
+  WorkflowMetricsHourly,
+  WorkflowMetricsDaily,
+  WorkflowMetricsDailyResponse,
+  WorkflowMetricsData,
+  WorkflowStatsResponse,
+  WorkflowStatsData,
+  WorkflowStats,
   SystemAnalyticsResponse,
   SystemAnalyticsData,
   CpuInfo,
@@ -23,7 +23,7 @@ export type {
 } from '@/generated/RuntaraRuntimeApi';
 
 /**
- * Get tenant-level metrics aggregated across all scenarios
+ * Get tenant-level metrics aggregated across all workflows
  * @param token - Authentication token
  * @param startTime - Start time in ISO 8601 format
  * @param endTime - End time in ISO 8601 format

@@ -16,7 +16,7 @@ pub mod finish;
 pub mod group_by;
 pub mod log;
 pub mod split;
-pub mod start_scenario;
+pub mod embed_workflow;
 pub mod switch;
 pub mod wait_for_signal;
 pub mod while_loop;
@@ -34,7 +34,7 @@ pub trait StepEmitter {
     ///
     /// # Errors
     ///
-    /// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+    /// Returns `CodegenError` if code generation fails (e.g., missing child workflow).
     fn emit(
         &self,
         ctx: &mut EmitContext,
@@ -54,7 +54,7 @@ impl StepEmitter for Step {
             Step::Conditional(s) => conditional::emit(s, ctx, graph),
             Step::Switch(s) => switch::emit(s, ctx, graph),
             Step::Split(s) => split::emit(s, ctx),
-            Step::StartScenario(s) => start_scenario::emit(s, ctx),
+            Step::EmbedWorkflow(s) => embed_workflow::emit(s, ctx),
             Step::While(s) => while_loop::emit(s, ctx),
             Step::Log(s) => log::emit(s, ctx),
             Step::Error(s) => error::emit(s, ctx),
@@ -75,7 +75,7 @@ pub fn step_type_str(step: &Step) -> &'static str {
         Step::Conditional(_) => "Conditional",
         Step::Switch(_) => "Switch",
         Step::Split(_) => "Split",
-        Step::StartScenario(_) => "StartScenario",
+        Step::EmbedWorkflow(_) => "EmbedWorkflow",
         Step::While(_) => "While",
         Step::Log(_) => "Log",
         Step::Error(_) => "Error",
@@ -95,7 +95,7 @@ pub fn step_id(step: &Step) -> &str {
         Step::Conditional(s) => &s.id,
         Step::Switch(s) => &s.id,
         Step::Split(s) => &s.id,
-        Step::StartScenario(s) => &s.id,
+        Step::EmbedWorkflow(s) => &s.id,
         Step::While(s) => &s.id,
         Step::Log(s) => &s.id,
         Step::Error(s) => &s.id,
@@ -115,7 +115,7 @@ pub fn step_name(step: &Step) -> Option<&str> {
         Step::Conditional(s) => s.name.as_deref(),
         Step::Switch(s) => s.name.as_deref(),
         Step::Split(s) => s.name.as_deref(),
-        Step::StartScenario(s) => s.name.as_deref(),
+        Step::EmbedWorkflow(s) => s.name.as_deref(),
         Step::While(s) => s.name.as_deref(),
         Step::Log(s) => s.name.as_deref(),
         Step::Error(s) => s.name.as_deref(),
@@ -135,7 +135,7 @@ pub fn step_has_breakpoint(step: &Step) -> bool {
         Step::Conditional(s) => s.breakpoint.unwrap_or(false),
         Step::Switch(s) => s.breakpoint.unwrap_or(false),
         Step::Split(s) => s.breakpoint.unwrap_or(false),
-        Step::StartScenario(s) => s.breakpoint.unwrap_or(false),
+        Step::EmbedWorkflow(s) => s.breakpoint.unwrap_or(false),
         Step::While(s) => s.breakpoint.unwrap_or(false),
         Step::Log(s) => s.breakpoint.unwrap_or(false),
         Step::Error(s) => s.breakpoint.unwrap_or(false),
@@ -149,7 +149,7 @@ pub fn step_has_breakpoint(step: &Step) -> bool {
 
 /// Emit breakpoint check code for a step.
 ///
-/// When the scenario is running in debug mode (DEBUG_MODE env var) and this step
+/// When the workflow is running in debug mode (DEBUG_MODE env var) and this step
 /// has a breakpoint, the generated code will:
 /// 1. Call checkpoint() once — if found, the breakpoint was already hit (resume path, skip)
 /// 2. If not found, checkpoint() saves the marker and we emit a "breakpoint_hit" event
@@ -250,11 +250,11 @@ pub fn emit_breakpoint_check(
 ///
 /// # Arguments
 /// * `step_id` - The step ID creating this scope
-/// * `scenario_inputs_var` - Variable holding ScenarioInputs (for extracting _loop_indices)
+/// * `workflow_inputs_var` - Variable holding WorkflowInputs (for extracting _loop_indices)
 /// * `iteration_index_var` - Optional variable holding the current iteration index
 pub fn emit_generate_scope_id(
     step_id: &str,
-    scenario_inputs_var: &proc_macro2::Ident,
+    workflow_inputs_var: &proc_macro2::Ident,
     iteration_index_var: Option<&str>,
 ) -> TokenStream {
     let index_part = if let Some(idx_var) = iteration_index_var {
@@ -268,7 +268,7 @@ pub fn emit_generate_scope_id(
 
     quote! {
         {
-            let parent_scope = (*#scenario_inputs_var.variables)
+            let parent_scope = (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_scope_id"))
                 .and_then(|v| v.as_str())
@@ -286,7 +286,7 @@ pub fn emit_generate_scope_id(
     }
 }
 
-/// Emit scope_enter event for entering a hierarchical step (Split, While, StartScenario).
+/// Emit scope_enter event for entering a hierarchical step (Split, While, EmbedWorkflow).
 ///
 /// The generated code builds a scope_enter event payload and sends it via `sdk.custom_event()`.
 ///
@@ -294,17 +294,17 @@ pub fn emit_generate_scope_id(
 /// * `ctx` - Emit context (checks track_events)
 /// * `step_id` - Unique step identifier
 /// * `step_name` - Optional human-readable step name
-/// * `step_type` - Step type string ("Split", "While", "StartScenario")
+/// * `step_type` - Step type string ("Split", "While", "EmbedWorkflow")
 /// * `scope_id_var` - Variable name holding the generated scope_id
-/// * `scenario_inputs_var` - Variable holding ScenarioInputs (for extracting parent_scope_id)
-/// * `iteration_index_var` - Optional variable name holding iteration index (omit for StartScenario)
+/// * `workflow_inputs_var` - Variable holding WorkflowInputs (for extracting parent_scope_id)
+/// * `iteration_index_var` - Optional variable name holding iteration index (omit for EmbedWorkflow)
 pub fn emit_scope_enter_event(
     ctx: &EmitContext,
     step_id: &str,
     step_name: Option<&str>,
     step_type: &str,
     scope_id_var: &str,
-    scenario_inputs_var: &proc_macro2::Ident,
+    workflow_inputs_var: &proc_macro2::Ident,
     iteration_index_var: Option<&str>,
 ) -> TokenStream {
     if !ctx.track_events {
@@ -326,7 +326,7 @@ pub fn emit_scope_enter_event(
 
     quote! {
         {
-            let __parent_scope_id = (*#scenario_inputs_var.variables)
+            let __parent_scope_id = (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_scope_id"))
                 .and_then(|v| v.as_str())
@@ -385,8 +385,8 @@ pub fn emit_scope_exit_event(ctx: &EmitContext, scope_id_var: &str) -> TokenStre
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `inputs_var` - Optional Ident of variable holding step inputs (as serde_json::Value)
 /// * `input_mapping_json` - Optional static JSON string of input mapping DSL
-/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices and _scope_id)
-/// * `override_scope_id` - Optional scope_id override for scope-creating steps (Split, While, StartScenario)
+/// * `workflow_inputs_var` - Optional Ident of workflow inputs variable (for extracting _loop_indices and _scope_id)
+/// * `override_scope_id` - Optional scope_id override for scope-creating steps (Split, While, EmbedWorkflow)
 #[allow(clippy::too_many_arguments)]
 pub fn emit_step_debug_start(
     ctx: &EmitContext,
@@ -395,7 +395,7 @@ pub fn emit_step_debug_start(
     step_type: &str,
     inputs_var: Option<&proc_macro2::Ident>,
     input_mapping_json: Option<&str>,
-    scenario_inputs_var: Option<&proc_macro2::Ident>,
+    workflow_inputs_var: Option<&proc_macro2::Ident>,
     override_scope_id: Option<&str>,
 ) -> TokenStream {
     if !ctx.track_events {
@@ -416,8 +416,8 @@ pub fn emit_step_debug_start(
         })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
-    // Extract loop_indices from scenario inputs if available
-    let loop_indices_expr = scenario_inputs_var
+    // Extract loop_indices from workflow inputs if available
+    let loop_indices_expr = workflow_inputs_var
         .map(|v| {
             quote! {
                 (*#v.variables)
@@ -433,7 +433,7 @@ pub fn emit_step_debug_start(
     let scope_id_expr = if let Some(scope_id) = override_scope_id {
         quote! { Some(#scope_id.to_string()) }
     } else {
-        scenario_inputs_var
+        workflow_inputs_var
             .map(|v| {
                 quote! {
                     (*#v.variables)
@@ -446,8 +446,8 @@ pub fn emit_step_debug_start(
             .unwrap_or(quote! { None::<String> })
     };
 
-    // Extract parent_scope_id from ScenarioInputs struct field
-    let parent_scope_id_expr = scenario_inputs_var
+    // Extract parent_scope_id from WorkflowInputs struct field
+    let parent_scope_id_expr = workflow_inputs_var
         .map(|v| {
             quote! {
                 #v.parent_scope_id.clone()
@@ -485,15 +485,15 @@ pub fn emit_step_debug_start(
 /// * `step_name` - Optional human-readable step name
 /// * `step_type` - Step type string (e.g., "Agent", "Conditional")
 /// * `outputs_var` - Optional Ident of variable holding step outputs (as serde_json::Value)
-/// * `scenario_inputs_var` - Optional Ident of scenario inputs variable (for extracting _loop_indices and _scope_id)
-/// * `override_scope_id` - Optional scope_id override for scope-creating steps (Split, While, StartScenario)
+/// * `workflow_inputs_var` - Optional Ident of workflow inputs variable (for extracting _loop_indices and _scope_id)
+/// * `override_scope_id` - Optional scope_id override for scope-creating steps (Split, While, EmbedWorkflow)
 pub fn emit_step_debug_end(
     ctx: &EmitContext,
     step_id: &str,
     step_name: Option<&str>,
     step_type: &str,
     outputs_var: Option<&proc_macro2::Ident>,
-    scenario_inputs_var: Option<&proc_macro2::Ident>,
+    workflow_inputs_var: Option<&proc_macro2::Ident>,
     override_scope_id: Option<&str>,
 ) -> TokenStream {
     if !ctx.track_events {
@@ -508,8 +508,8 @@ pub fn emit_step_debug_end(
         .map(|v| quote! { Some(#v.clone()) })
         .unwrap_or(quote! { None::<serde_json::Value> });
 
-    // Extract loop_indices from scenario inputs if available
-    let loop_indices_expr = scenario_inputs_var
+    // Extract loop_indices from workflow inputs if available
+    let loop_indices_expr = workflow_inputs_var
         .map(|v| {
             quote! {
                 (*#v.variables)
@@ -525,7 +525,7 @@ pub fn emit_step_debug_end(
     let scope_id_expr = if let Some(scope_id) = override_scope_id {
         quote! { Some(#scope_id.to_string()) }
     } else {
-        scenario_inputs_var
+        workflow_inputs_var
             .map(|v| {
                 quote! {
                     (*#v.variables)
@@ -538,8 +538,8 @@ pub fn emit_step_debug_end(
             .unwrap_or(quote! { None::<String> })
     };
 
-    // Extract parent_scope_id from ScenarioInputs struct field
-    let parent_scope_id_expr = scenario_inputs_var
+    // Extract parent_scope_id from WorkflowInputs struct field
+    let parent_scope_id_expr = workflow_inputs_var
         .map(|v| {
             quote! {
                 #v.parent_scope_id.clone()
@@ -703,22 +703,22 @@ pub fn emit_iteration_span_end() -> TokenStream {
     quote! {}
 }
 
-/// Emit code for child scenario span (StartScenario step).
+/// Emit code for child workflow span (EmbedWorkflow step).
 ///
-/// Creates a span definition for the child scenario execution.
-/// The child scenario call should be wrapped with `.instrument(__child_span).await`.
+/// Creates a span definition for the child workflow execution.
+/// The child workflow call should be wrapped with `.instrument(__child_span).await`.
 ///
 /// # Arguments
-/// * `parent_step_id` - The StartScenario step ID
-/// * `child_scenario_id` - The child scenario ID
-pub fn emit_child_scenario_span_start(
+/// * `parent_step_id` - The EmbedWorkflow step ID
+/// * `child_workflow_id` - The child workflow ID
+pub fn emit_child_workflow_span_start(
     parent_step_id: &str,
-    child_scenario_id: &str,
+    child_workflow_id: &str,
 ) -> TokenStream {
     quote! {
         let __child_span = tracing::info_span!(
-            "scenario.child",
-            scenario.id = #child_scenario_id,
+            "workflow.child",
+            workflow.id = #child_workflow_id,
             parent_step.id = #parent_step_id,
             otel.kind = "INTERNAL"
         );
@@ -727,10 +727,10 @@ pub fn emit_child_scenario_span_start(
 
 /// Placeholder for backwards compatibility.
 ///
-/// Child scenario calls now use `.instrument(__child_span).await`
+/// Child workflow calls now use `.instrument(__child_span).await`
 /// directly, so this function returns empty tokens.
-#[deprecated(note = "Child scenario should use .instrument(__child_span).await directly")]
-pub fn emit_child_scenario_span_end() -> TokenStream {
+#[deprecated(note = "Child workflow should use .instrument(__child_span).await directly")]
+pub fn emit_child_workflow_span_end() -> TokenStream {
     quote! {}
 }
 
@@ -970,10 +970,10 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_step_debug_start_with_scenario_inputs() {
+    fn test_emit_step_debug_start_with_workflow_inputs() {
         let ctx = make_debug_ctx();
-        let scenario_var =
-            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let workflow_var =
+            proc_macro2::Ident::new("workflow_inputs", proc_macro2::Span::call_site());
         let tokens = emit_step_debug_start(
             &ctx,
             "step-loop",
@@ -981,15 +981,15 @@ mod tests {
             "Agent",
             None,
             None,
-            Some(&scenario_var),
+            Some(&workflow_var),
             None,
         );
         let code = tokens.to_string();
 
-        // Verify loop_indices extraction from scenario inputs
+        // Verify loop_indices extraction from workflow inputs
         assert!(
-            code.contains("scenario_inputs"),
-            "Should reference scenario inputs variable"
+            code.contains("workflow_inputs"),
+            "Should reference workflow inputs variable"
         );
         assert!(
             code.contains("_loop_indices"),
@@ -1055,25 +1055,25 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_step_debug_end_with_scenario_inputs() {
+    fn test_emit_step_debug_end_with_workflow_inputs() {
         let ctx = make_debug_ctx();
-        let scenario_var =
-            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let workflow_var =
+            proc_macro2::Ident::new("workflow_inputs", proc_macro2::Span::call_site());
         let tokens = emit_step_debug_end(
             &ctx,
             "step-loop",
             None,
             "Agent",
             None,
-            Some(&scenario_var),
+            Some(&workflow_var),
             None,
         );
         let code = tokens.to_string();
 
-        // Verify loop_indices extraction from scenario inputs
+        // Verify loop_indices extraction from workflow inputs
         assert!(
-            code.contains("scenario_inputs"),
-            "Should reference scenario inputs variable"
+            code.contains("workflow_inputs"),
+            "Should reference workflow inputs variable"
         );
         assert!(
             code.contains("_loop_indices"),
@@ -1354,35 +1354,35 @@ mod tests {
     }
 
     #[test]
-    fn test_start_scenario_emits_dynamic_cache_key() {
-        use runtara_dsl::{ChildVersion, StartScenarioStep};
+    fn test_embed_workflow_emits_dynamic_cache_key() {
+        use runtara_dsl::{ChildVersion, EmbedWorkflowStep};
         use std::collections::HashMap;
 
-        // Create a context with a child scenario
+        // Create a context with a child workflow
         let child_graph = create_minimal_graph("child-finish");
 
-        let mut child_scenarios = HashMap::new();
-        // Key by scenario_id::version_resolved
-        child_scenarios.insert("child-scenario::1".to_string(), child_graph);
+        let mut child_workflows = HashMap::new();
+        // Key by workflow_id::version_resolved
+        child_workflows.insert("child-workflow::1".to_string(), child_graph);
 
         let mut step_to_child_ref = HashMap::new();
         step_to_child_ref.insert(
-            "start-scenario-test".to_string(),
-            ("child-scenario".to_string(), 1),
+            "start-workflow-test".to_string(),
+            ("child-workflow".to_string(), 1),
         );
 
-        let mut ctx = EmitContext::with_child_scenarios(
+        let mut ctx = EmitContext::with_child_workflows(
             false,
-            child_scenarios,
+            child_workflows,
             step_to_child_ref,
             None,
             None,
         );
 
-        let start_scenario_step = StartScenarioStep {
-            id: "start-scenario-test".to_string(),
-            name: Some("Test StartScenario".to_string()),
-            child_scenario_id: "child-scenario".to_string(),
+        let embed_workflow_step = EmbedWorkflowStep {
+            id: "start-workflow-test".to_string(),
+            name: Some("Test EmbedWorkflow".to_string()),
+            child_workflow_id: "child-workflow".to_string(),
             child_version: ChildVersion::Latest("latest".to_string()),
             input_mapping: None,
             max_retries: None,
@@ -1391,21 +1391,21 @@ mod tests {
             breakpoint: None,
         };
 
-        let tokens = start_scenario::emit(&start_scenario_step, &mut ctx).unwrap();
+        let tokens = embed_workflow::emit(&embed_workflow_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
         // Verify that dynamic cache key generation is present
         assert!(
             code.contains("__durable_cache_key"),
-            "StartScenario should generate dynamic cache key"
+            "EmbedWorkflow should generate dynamic cache key"
         );
         assert!(
             code.contains("_loop_indices"),
-            "StartScenario should check for _loop_indices in variables"
+            "EmbedWorkflow should check for _loop_indices in variables"
         );
         assert!(
             code.contains("indices_suffix"),
-            "StartScenario should build indices suffix for cache key"
+            "EmbedWorkflow should build indices suffix for cache key"
         );
     }
 
@@ -1428,7 +1428,7 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        // Without scenario_inputs_var, loop_indices defaults to empty array
+        // Without workflow_inputs_var, loop_indices defaults to empty array
         assert!(
             code.contains("serde_json :: Value :: Array (vec ! [])"),
             "Debug start event should pass default empty array for loop_indices"
@@ -1442,7 +1442,7 @@ mod tests {
             emit_step_debug_end(&ctx, "test-step", Some("Test"), "Agent", None, None, None);
         let code = tokens.to_string();
 
-        // Without scenario_inputs_var, loop_indices defaults to empty array
+        // Without workflow_inputs_var, loop_indices defaults to empty array
         assert!(
             code.contains("serde_json :: Value :: Array (vec ! [])"),
             "Debug end event should pass default empty array for loop_indices"
@@ -1450,10 +1450,10 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_event_extracts_loop_indices_from_scenario_inputs() {
+    fn test_debug_event_extracts_loop_indices_from_workflow_inputs() {
         let ctx = make_debug_ctx();
-        let scenario_var =
-            proc_macro2::Ident::new("my_scenario_inputs", proc_macro2::Span::call_site());
+        let workflow_var =
+            proc_macro2::Ident::new("my_workflow_inputs", proc_macro2::Span::call_site());
         let tokens = emit_step_debug_start(
             &ctx,
             "step-in-loop",
@@ -1461,20 +1461,20 @@ mod tests {
             "Agent",
             None,
             None,
-            Some(&scenario_var),
+            Some(&workflow_var),
             None,
         );
         let code = tokens.to_string();
 
         // Verify loop_indices extraction logic is present
         assert!(
-            code.contains("my_scenario_inputs"),
-            "Should reference the provided scenario inputs variable"
+            code.contains("my_workflow_inputs"),
+            "Should reference the provided workflow inputs variable"
         );
         // proc_macro2 tokenizes with spaces, so `.variables` becomes `. variables`
         assert!(
             code.contains(". variables"),
-            "Should access variables from scenario inputs"
+            "Should access variables from workflow inputs"
         );
         assert!(
             code.contains("\"_loop_indices\""),
@@ -1487,9 +1487,9 @@ mod tests {
     }
 
     #[test]
-    fn test_debug_event_defaults_to_empty_array_without_scenario_inputs() {
+    fn test_debug_event_defaults_to_empty_array_without_workflow_inputs() {
         let ctx = make_debug_ctx();
-        // No scenario_inputs_var provided
+        // No workflow_inputs_var provided
         let tokens = emit_step_debug_start(
             &ctx,
             "top-level-step",
@@ -1502,18 +1502,18 @@ mod tests {
         );
         let code = tokens.to_string();
 
-        // When no scenario inputs var is provided, should default to empty array
+        // When no workflow inputs var is provided, should default to empty array
         assert!(
             code.contains("serde_json :: Value :: Array (vec ! [])"),
-            "Should default to empty array when no scenario inputs provided"
+            "Should default to empty array when no workflow inputs provided"
         );
     }
 
     #[test]
     fn test_debug_event_defaults_to_empty_array_when_loop_indices_missing() {
         let ctx = make_debug_ctx();
-        let scenario_var =
-            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let workflow_var =
+            proc_macro2::Ident::new("workflow_inputs", proc_macro2::Span::call_site());
         let tokens = emit_step_debug_start(
             &ctx,
             "step",
@@ -1521,7 +1521,7 @@ mod tests {
             "Agent",
             None,
             None,
-            Some(&scenario_var),
+            Some(&workflow_var),
             None,
         );
         let code = tokens.to_string();
@@ -1534,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_step_passes_scenario_inputs_to_debug_events() {
+    fn test_split_step_passes_workflow_inputs_to_debug_events() {
         use runtara_dsl::{ImmediateValue, MappingValue, SplitConfig, SplitStep};
         use std::collections::HashMap;
 
@@ -1583,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_step_passes_scenario_inputs_to_debug_events() {
+    fn test_agent_step_passes_workflow_inputs_to_debug_events() {
         use runtara_dsl::AgentStep;
 
         // Enable debug mode
@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn test_while_step_passes_scenario_inputs_to_debug_events() {
+    fn test_while_step_passes_workflow_inputs_to_debug_events() {
         use runtara_dsl::{
             ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
             ImmediateValue, MappingValue, ReferenceValue, WhileConfig, WhileStep,
@@ -1668,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn test_conditional_step_passes_scenario_inputs_to_debug_events() {
+    fn test_conditional_step_passes_workflow_inputs_to_debug_events() {
         use runtara_dsl::{
             ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator,
             ConditionalStep, ImmediateValue, MappingValue,
@@ -1712,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_step_passes_scenario_inputs_to_debug_events() {
+    fn test_finish_step_passes_workflow_inputs_to_debug_events() {
         use runtara_dsl::FinishStep;
 
         // Enable debug mode
@@ -1740,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_switch_step_passes_scenario_inputs_to_debug_events() {
+    fn test_switch_step_passes_workflow_inputs_to_debug_events() {
         use runtara_dsl::{ImmediateValue, MappingValue, SwitchConfig, SwitchStep};
 
         // Enable debug mode
@@ -1778,8 +1778,8 @@ mod tests {
     fn test_debug_events_not_emitted_when_track_events_disabled() {
         // Debug mode OFF
         let ctx = make_non_debug_ctx();
-        let scenario_var =
-            proc_macro2::Ident::new("scenario_inputs", proc_macro2::Span::call_site());
+        let workflow_var =
+            proc_macro2::Ident::new("workflow_inputs", proc_macro2::Span::call_site());
 
         let start_tokens = emit_step_debug_start(
             &ctx,
@@ -1788,11 +1788,11 @@ mod tests {
             "Agent",
             None,
             None,
-            Some(&scenario_var),
+            Some(&workflow_var),
             None,
         );
         let end_tokens =
-            emit_step_debug_end(&ctx, "step", None, "Agent", None, Some(&scenario_var), None);
+            emit_step_debug_end(&ctx, "step", None, "Agent", None, Some(&workflow_var), None);
 
         assert!(
             start_tokens.is_empty(),
@@ -1807,7 +1807,7 @@ mod tests {
     #[test]
     fn test_loop_indices_cloned_from_variables() {
         let ctx = make_debug_ctx();
-        let scenario_var = proc_macro2::Ident::new("inputs", proc_macro2::Span::call_site());
+        let workflow_var = proc_macro2::Ident::new("inputs", proc_macro2::Span::call_site());
         let tokens = emit_step_debug_start(
             &ctx,
             "step",
@@ -1815,7 +1815,7 @@ mod tests {
             "Agent",
             None,
             None,
-            Some(&scenario_var),
+            Some(&workflow_var),
             None,
         );
         let code = tokens.to_string();
@@ -1949,25 +1949,25 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_child_scenario_span_start() {
-        let tokens = emit_child_scenario_span_start("start-scenario-1", "child-scenario-abc");
+    fn test_emit_child_workflow_span_start() {
+        let tokens = emit_child_workflow_span_start("start-workflow-1", "child-workflow-abc");
         let code = tokens.to_string();
 
         assert!(
-            code.contains("\"scenario.child\""),
-            "Span name should be scenario.child"
+            code.contains("\"workflow.child\""),
+            "Span name should be workflow.child"
         );
-        assert!(code.contains("scenario . id"), "Should include scenario.id");
+        assert!(code.contains("workflow . id"), "Should include workflow.id");
         assert!(
             code.contains("parent_step . id"),
             "Should include parent_step.id"
         );
         assert!(
-            code.contains("child-scenario-abc"),
-            "Should include child scenario ID"
+            code.contains("child-workflow-abc"),
+            "Should include child workflow ID"
         );
         assert!(
-            code.contains("start-scenario-1"),
+            code.contains("start-workflow-1"),
             "Should include parent step ID"
         );
         assert!(code.contains("__child_span"), "Should create child span");
@@ -1975,11 +1975,11 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn test_emit_child_scenario_span_end() {
-        let tokens = emit_child_scenario_span_end();
+    fn test_emit_child_workflow_span_end() {
+        let tokens = emit_child_workflow_span_end();
         let code = tokens.to_string();
 
-        // This function now returns empty tokens since child scenario calls use
+        // This function now returns empty tokens since child workflow calls use
         // .instrument(__child_span).await directly
         assert!(code.is_empty(), "Should return empty tokens (deprecated)");
     }

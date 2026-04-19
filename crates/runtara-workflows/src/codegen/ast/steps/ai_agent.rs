@@ -4,7 +4,7 @@
 //!
 //! The AI Agent step uses an LLM to autonomously decide which tools to call.
 //! Tools are defined as labeled edges in the execution plan, each pointing to
-//! a concrete step (Agent, StartScenario, WaitForSignal).
+//! a concrete step (Agent, EmbedWorkflow, WaitForSignal).
 //!
 //! Without tool edges, it acts as a simple LLM completion step.
 //!
@@ -99,7 +99,7 @@ pub fn emit(
     let step_var = ctx.declare_step(step_id);
     let source_var = ctx.temp_var("source");
     let steps_context = ctx.steps_context_var.clone();
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
@@ -173,7 +173,7 @@ pub fn emit(
     // Connection ID
     let connection_id = step.connection_id.as_deref();
 
-    // Connection setup — credentials are NEVER fetched into the scenario binary.
+    // Connection setup — credentials are NEVER fetched into the workflow binary.
     // The proxy (RUNTARA_HTTP_PROXY_URL) injects credentials server-side.
     // We only need the connection_id to pass via the X-Runtara-Connection-Id header.
     let connection_fetch = if let Some(conn_id) = connection_id {
@@ -234,32 +234,32 @@ pub fn emit(
         }
     };
 
-    // Pre-emit child scenario functions for StartScenario tool targets.
+    // Pre-emit child workflow functions for EmbedWorkflow tool targets.
     // These must be emitted before the agent loop so they're available as callable functions.
     let mut child_fn_tokens: Vec<TokenStream> = Vec::new();
     let mut child_fn_names: HashMap<String, proc_macro2::Ident> = HashMap::new();
 
     for (_label, target_step_id) in &tool_edges {
-        if let Some(Step::StartScenario(start_step)) = graph.steps.get(*target_step_id) {
-            let (child_scenario_id_ref, child_version) = ctx
+        if let Some(Step::EmbedWorkflow(start_step)) = graph.steps.get(*target_step_id) {
+            let (child_workflow_id_ref, child_version) = ctx
                 .step_to_child_ref
                 .get(*target_step_id)
                 .cloned()
-                .ok_or_else(|| CodegenError::MissingChildScenario {
+                .ok_or_else(|| CodegenError::MissingChildWorkflow {
                     step_id: target_step_id.to_string(),
-                    child_scenario_id: start_step.child_scenario_id.clone(),
+                    child_workflow_id: start_step.child_workflow_id.clone(),
                 })?;
 
             let child_graph = ctx
-                .get_child_scenario(&child_scenario_id_ref, child_version)
+                .get_child_workflow(&child_workflow_id_ref, child_version)
                 .cloned()
-                .ok_or_else(|| CodegenError::MissingChildScenario {
+                .ok_or_else(|| CodegenError::MissingChildWorkflow {
                     step_id: target_step_id.to_string(),
-                    child_scenario_id: start_step.child_scenario_id.clone(),
+                    child_workflow_id: start_step.child_workflow_id.clone(),
                 })?;
 
             let (fn_name, already_emitted) =
-                ctx.get_or_create_child_fn(&child_scenario_id_ref, child_version);
+                ctx.get_or_create_child_fn(&child_workflow_id_ref, child_version);
 
             if !already_emitted {
                 let fn_code = program::emit_graph_as_function(&fn_name, &child_graph, ctx)?;
@@ -280,7 +280,7 @@ pub fn emit(
         graph,
         ctx,
         &child_fn_names,
-        &scenario_inputs_var,
+        &workflow_inputs_var,
     )?;
 
     // Debug events — AI Agent emits debug_start AFTER prompts are resolved so we can
@@ -308,21 +308,21 @@ pub fn emit(
             .map(|n| quote! { Some(#n) })
             .unwrap_or(quote! { None::<&str> });
         let loop_indices_expr = quote! {
-            (*#scenario_inputs_var.variables)
+            (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_loop_indices"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Array(vec![]))
         };
         let scope_id_expr = quote! {
-            (*#scenario_inputs_var.variables)
+            (*#workflow_inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_scope_id"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         };
         let parent_scope_id_expr = quote! {
-            #scenario_inputs_var.parent_scope_id.clone()
+            #workflow_inputs_var.parent_scope_id.clone()
         };
         let mapping_expr = ai_input_mapping_json
             .as_deref()
@@ -366,7 +366,7 @@ pub fn emit(
         step_name,
         "AiAgent",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 
@@ -411,12 +411,12 @@ pub fn emit(
                     &__mem_load_step_id,
                     Some(&__mem_load_step_name),
                     "AiAgentMemoryLoad",
-                    (*#scenario_inputs_var.variables).as_object()
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_scope_id"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    #scenario_inputs_var.parent_scope_id.clone(),
-                    (*#scenario_inputs_var.variables).as_object()
+                    #workflow_inputs_var.parent_scope_id.clone(),
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
@@ -614,12 +614,12 @@ pub fn emit(
                     &__mem_load_step_id,
                     Some(&__mem_load_step_name),
                     "AiAgentMemoryLoad",
-                    (*#scenario_inputs_var.variables).as_object()
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_scope_id"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    #scenario_inputs_var.parent_scope_id.clone(),
-                    (*#scenario_inputs_var.variables).as_object()
+                    #workflow_inputs_var.parent_scope_id.clone(),
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
@@ -657,12 +657,12 @@ pub fn emit(
                             &__compact_step_id,
                             Some(&__compact_step_name),
                             "AiAgentMemoryCompaction",
-                            (*#scenario_inputs_var.variables).as_object()
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_scope_id"))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            #scenario_inputs_var.parent_scope_id.clone(),
-                            (*#scenario_inputs_var.variables).as_object()
+                            #workflow_inputs_var.parent_scope_id.clone(),
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_loop_indices"))
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Array(vec![])),
@@ -746,12 +746,12 @@ pub fn emit(
                             &__compact_step_id,
                             Some(&__compact_step_name),
                             "AiAgentMemoryCompaction",
-                            (*#scenario_inputs_var.variables).as_object()
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_scope_id"))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            #scenario_inputs_var.parent_scope_id.clone(),
-                            (*#scenario_inputs_var.variables).as_object()
+                            #workflow_inputs_var.parent_scope_id.clone(),
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_loop_indices"))
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Array(vec![])),
@@ -785,12 +785,12 @@ pub fn emit(
                             &__compact_step_id,
                             Some(&__compact_step_name),
                             "AiAgentMemoryCompaction",
-                            (*#scenario_inputs_var.variables).as_object()
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_scope_id"))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            #scenario_inputs_var.parent_scope_id.clone(),
-                            (*#scenario_inputs_var.variables).as_object()
+                            #workflow_inputs_var.parent_scope_id.clone(),
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_loop_indices"))
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Array(vec![])),
@@ -823,12 +823,12 @@ pub fn emit(
                             &__compact_step_id,
                             Some(&__compact_step_name),
                             "AiAgentMemoryCompaction",
-                            (*#scenario_inputs_var.variables).as_object()
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_scope_id"))
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
-                            #scenario_inputs_var.parent_scope_id.clone(),
-                            (*#scenario_inputs_var.variables).as_object()
+                            #workflow_inputs_var.parent_scope_id.clone(),
+                            (*#workflow_inputs_var.variables).as_object()
                                 .and_then(|vars| vars.get("_loop_indices"))
                                 .cloned()
                                 .unwrap_or(serde_json::Value::Array(vec![])),
@@ -861,12 +861,12 @@ pub fn emit(
                     &__mem_save_step_id,
                     Some(&__mem_save_step_name),
                     "AiAgentMemorySave",
-                    (*#scenario_inputs_var.variables).as_object()
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_scope_id"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    #scenario_inputs_var.parent_scope_id.clone(),
-                    (*#scenario_inputs_var.variables).as_object()
+                    #workflow_inputs_var.parent_scope_id.clone(),
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
@@ -954,12 +954,12 @@ pub fn emit(
                     &__mem_save_step_id,
                     Some(&__mem_save_step_name),
                     "AiAgentMemorySave",
-                    (*#scenario_inputs_var.variables).as_object()
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_scope_id"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    #scenario_inputs_var.parent_scope_id.clone(),
-                    (*#scenario_inputs_var.variables).as_object()
+                    #workflow_inputs_var.parent_scope_id.clone(),
+                    (*#workflow_inputs_var.variables).as_object()
                         .and_then(|vars| vars.get("_loop_indices"))
                         .cloned()
                         .unwrap_or(serde_json::Value::Array(vec![])),
@@ -974,7 +974,7 @@ pub fn emit(
     };
 
     Ok(quote! {
-        // Pre-emit child scenario functions for StartScenario tool targets
+        // Pre-emit child workflow functions for EmbedWorkflow tool targets
         #(#child_fn_tokens)*
 
         let #source_var = #build_source;
@@ -1022,13 +1022,13 @@ pub fn emit(
 
             // Build durable cache key base for checkpointing tool calls
             let __ai_cache_key_base = {
-                let prefix = (*#scenario_inputs_var.variables)
+                let prefix = (*#workflow_inputs_var.variables)
                     .as_object()
                     .and_then(|vars| vars.get("_cache_key_prefix"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let base = format!("ai_agent::{}", #step_id);
-                let indices_suffix = (*#scenario_inputs_var.variables)
+                let indices_suffix = (*#workflow_inputs_var.variables)
                     .as_object()
                     .and_then(|vars| vars.get("_loop_indices"))
                     .and_then(|v| v.as_array())
@@ -1039,12 +1039,12 @@ pub fn emit(
                     })
                     .unwrap_or_default();
                 if prefix.is_empty() {
-                    let scenario_id = (*#scenario_inputs_var.variables)
+                    let workflow_id = (*#workflow_inputs_var.variables)
                         .as_object()
-                        .and_then(|vars| vars.get("_scenario_id"))
+                        .and_then(|vars| vars.get("_workflow_id"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("root");
-                    format!("{}::{}{}", scenario_id, base, indices_suffix)
+                    format!("{}::{}{}", workflow_id, base, indices_suffix)
                 } else {
                     format!("{}::{}{}", prefix, base, indices_suffix)
                 }
@@ -1059,7 +1059,7 @@ pub fn emit(
                 capability_id: &str,
                 tool_name: &str,
             ) -> std::result::Result<serde_json::Value, String> {
-                __scenario_dispatch(agent_id, capability_id, inputs)
+                __workflow_dispatch(agent_id, capability_id, inputs)
             }
 
             // Durable wrapper for LLM completion calls.
@@ -1213,12 +1213,12 @@ pub fn emit(
                                     &__tool_step_id,
                                     Some(&__tool_step_name),
                                     "AiAgentToolCall",
-                                    (*#scenario_inputs_var.variables).as_object()
+                                    (*#workflow_inputs_var.variables).as_object()
                                         .and_then(|vars| vars.get("_scope_id"))
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string()),
-                                    #scenario_inputs_var.parent_scope_id.clone(),
-                                    (*#scenario_inputs_var.variables).as_object()
+                                    #workflow_inputs_var.parent_scope_id.clone(),
+                                    (*#workflow_inputs_var.variables).as_object()
                                         .and_then(|vars| vars.get("_loop_indices"))
                                         .cloned()
                                         .unwrap_or(serde_json::Value::Array(vec![])),
@@ -1255,12 +1255,12 @@ pub fn emit(
                                     &__tool_step_id,
                                     Some(&__tool_step_name),
                                     "AiAgentToolCall",
-                                    (*#scenario_inputs_var.variables).as_object()
+                                    (*#workflow_inputs_var.variables).as_object()
                                         .and_then(|vars| vars.get("_scope_id"))
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.to_string()),
-                                    #scenario_inputs_var.parent_scope_id.clone(),
-                                    (*#scenario_inputs_var.variables).as_object()
+                                    #workflow_inputs_var.parent_scope_id.clone(),
+                                    (*#workflow_inputs_var.variables).as_object()
                                         .and_then(|vars| vars.get("_loop_indices"))
                                         .cloned()
                                         .unwrap_or(serde_json::Value::Array(vec![])),
@@ -1451,14 +1451,14 @@ fn get_tool_metadata(
 
             (description, parameters)
         }
-        Step::StartScenario(start_step) => {
+        Step::EmbedWorkflow(start_step) => {
             let description = start_step
                 .name
                 .as_deref()
                 .map(|n| n.to_string())
-                .unwrap_or_else(|| format!("Start scenario: {}", start_step.child_scenario_id));
+                .unwrap_or_else(|| format!("Start workflow: {}", start_step.child_workflow_id));
 
-            // Try to extract input schema from the child scenario graph for richer tool definitions.
+            // Try to extract input schema from the child workflow graph for richer tool definitions.
             // Fall back to input_mapping keys if child graph is unavailable.
             let parameters = if let Some(ref input_mapping) = start_step.input_mapping {
                 let mut properties = serde_json::Map::new();
@@ -1547,7 +1547,7 @@ fn get_tool_metadata(
 /// Each tool call is wrapped with `#[durable]` via `__ai_tool_durable` for checkpoint-based
 /// crash recovery. The cache key includes iteration and call counter for uniqueness.
 ///
-/// StartScenario tool targets are dispatched by calling the pre-emitted child scenario
+/// EmbedWorkflow tool targets are dispatched by calling the pre-emitted child workflow
 /// function directly, with proper scope and cache key isolation.
 #[allow(clippy::too_many_arguments)]
 fn build_tool_dispatch(
@@ -1556,7 +1556,7 @@ fn build_tool_dispatch(
     graph: &ExecutionGraph,
     _ctx: &mut EmitContext,
     child_fn_names: &HashMap<String, proc_macro2::Ident>,
-    scenario_inputs_var: &proc_macro2::Ident,
+    workflow_inputs_var: &proc_macro2::Ident,
 ) -> Result<TokenStream, CodegenError> {
     let step_id = &step.id;
 
@@ -1580,13 +1580,13 @@ fn build_tool_dispatch(
                 Some(Step::Agent(agent_step)) => {
                     emit_agent_tool_arm(label_str, agent_step, step_id)
                 }
-                // StartScenario step: call pre-emitted child scenario function
-                Some(Step::StartScenario(_start_step)) => {
-                    emit_start_scenario_tool_arm(
+                // EmbedWorkflow step: call pre-emitted child workflow function
+                Some(Step::EmbedWorkflow(_start_step)) => {
+                    emit_embed_workflow_tool_arm(
                         label_str,
                         target_step_id,
                         child_fn_names,
-                        scenario_inputs_var,
+                        workflow_inputs_var,
                         step_id,
                     )
                 }
@@ -1595,7 +1595,7 @@ fn build_tool_dispatch(
                     emit_wait_for_signal_tool_arm(
                         label_str,
                         wait_step,
-                        scenario_inputs_var,
+                        workflow_inputs_var,
                         step_id,
                     )
                 }
@@ -1685,19 +1685,19 @@ fn emit_agent_tool_arm(
     }
 }
 
-/// Emit a match arm for a StartScenario tool target (embedded child scenario execution).
-fn emit_start_scenario_tool_arm(
+/// Emit a match arm for a EmbedWorkflow tool target (embedded child workflow execution).
+fn emit_embed_workflow_tool_arm(
     label_str: &str,
     target_step_id: &str,
     child_fn_names: &HashMap<String, proc_macro2::Ident>,
-    scenario_inputs_var: &proc_macro2::Ident,
+    workflow_inputs_var: &proc_macro2::Ident,
     step_id: &str,
 ) -> TokenStream {
     let Some(child_fn) = child_fn_names.get(target_step_id) else {
         return quote! {
             #label_str => {
-                tracing::error!("AI Agent '{}': StartScenario tool '{}' has no compiled child function", #step_id, #label_str);
-                serde_json::json!({"error": format!("StartScenario tool '{}' not compiled", #label_str)})
+                tracing::error!("AI Agent '{}': EmbedWorkflow tool '{}' has no compiled child function", #step_id, #label_str);
+                serde_json::json!({"error": format!("EmbedWorkflow tool '{}' not compiled", #label_str)})
             }
         };
     };
@@ -1706,7 +1706,7 @@ fn emit_start_scenario_tool_arm(
 
     quote! {
         #label_str => {
-            // Build child scenario inputs from LLM tool arguments
+            // Build child workflow inputs from LLM tool arguments
             let __child_data = __tool_args.clone();
 
             // Build isolated variables for child scope
@@ -1714,25 +1714,25 @@ fn emit_start_scenario_tool_arm(
             let __child_scope_id = format!("sc_{}", #target_step_id_str);
             __child_vars.insert("_scope_id".to_string(), serde_json::json!(&__child_scope_id));
 
-            // Build cache key prefix for child scenario checkpointing
+            // Build cache key prefix for child workflow checkpointing
             let __child_cache_prefix = format!(
                 "{}::tool::{}::{}",
                 __ai_cache_key_base, #label_str, __tool_call_counter
             );
             __child_vars.insert("_cache_key_prefix".to_string(), serde_json::json!(&__child_cache_prefix));
 
-            // Propagate _scenario_id for nested identity tracking
-            if let Some(sid) = (*#scenario_inputs_var.variables)
+            // Propagate _workflow_id for nested identity tracking
+            if let Some(sid) = (*#workflow_inputs_var.variables)
                 .as_object()
-                .and_then(|vars| vars.get("_scenario_id"))
+                .and_then(|vars| vars.get("_workflow_id"))
             {
-                __child_vars.insert("_scenario_id".to_string(), sid.clone());
+                __child_vars.insert("_workflow_id".to_string(), sid.clone());
             }
 
-            let __child_inputs = Arc::new(ScenarioInputs {
+            let __child_inputs = Arc::new(WorkflowInputs {
                 data: Arc::new(__child_data),
                 variables: Arc::new(serde_json::Value::Object(__child_vars)),
-                parent_scope_id: (*#scenario_inputs_var.variables)
+                parent_scope_id: (*#workflow_inputs_var.variables)
                     .as_object()
                     .and_then(|vars| vars.get("_scope_id"))
                     .and_then(|v| v.as_str())
@@ -1750,14 +1750,14 @@ fn emit_start_scenario_tool_arm(
 /// Emit a match arm for a WaitForSignal tool target (human-in-the-loop).
 ///
 /// The generated code:
-/// 1. Computes a deterministic signal_id (instance/scenario/step/indices)
+/// 1. Computes a deterministic signal_id (instance/workflow/step/indices)
 /// 2. Emits a debug event with the response_schema so the frontend can render the right UI
 /// 3. Durably polls for the signal (suspends execution until human responds)
 /// 4. Returns the signal payload as the tool result to the LLM conversation
 fn emit_wait_for_signal_tool_arm(
     label_str: &str,
     wait_step: &runtara_dsl::WaitForSignalStep,
-    scenario_inputs_var: &proc_macro2::Ident,
+    workflow_inputs_var: &proc_macro2::Ident,
     step_id: &str,
 ) -> TokenStream {
     let wait_step_id = &wait_step.id;
@@ -1785,13 +1785,13 @@ fn emit_wait_for_signal_tool_arm(
             };
 
             let __wait_signal_id = {
-                let scenario_id = (*#scenario_inputs_var.variables)
+                let workflow_id = (*#workflow_inputs_var.variables)
                     .as_object()
-                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|vars| vars.get("_workflow_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("root");
 
-                let indices_suffix = (*#scenario_inputs_var.variables)
+                let indices_suffix = (*#workflow_inputs_var.variables)
                     .as_object()
                     .and_then(|vars| vars.get("_loop_indices"))
                     .and_then(|v| v.as_array())
@@ -1804,7 +1804,7 @@ fn emit_wait_for_signal_tool_arm(
 
                 format!(
                     "{}/{}/{}.tool.{}.{}{}",
-                    __wait_instance_id, scenario_id, #step_id, #label_str,
+                    __wait_instance_id, workflow_id, #step_id, #label_str,
                     __tool_call_counter, indices_suffix
                 )
             };
@@ -1931,7 +1931,7 @@ mod tests {
     use crate::codegen::ast::context::EmitContext;
     use runtara_dsl::{
         AgentStep, AiAgentConfig, AiAgentStep, ChildVersion, ExecutionGraph, ExecutionPlanEdge,
-        FinishStep, ImmediateValue, MappingValue, StartScenarioStep, Step,
+        FinishStep, ImmediateValue, MappingValue, EmbedWorkflowStep, Step,
     };
     use std::collections::HashMap;
 
@@ -2293,8 +2293,8 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_ai_agent_with_start_scenario_tool() {
-        // Build a child scenario graph (simple: just a finish step)
+    fn test_emit_ai_agent_with_embed_workflow_tool() {
+        // Build a child workflow graph (simple: just a finish step)
         let mut child_steps = HashMap::new();
         child_steps.insert(
             "child_finish".to_string(),
@@ -2306,7 +2306,7 @@ mod tests {
             }),
         );
         let child_graph = ExecutionGraph {
-            name: Some("weather_scenario".to_string()),
+            name: Some("weather_workflow".to_string()),
             description: None,
             entry_point: "child_finish".to_string(),
             steps: child_steps,
@@ -2320,7 +2320,7 @@ mod tests {
             ..Default::default()
         };
 
-        // Build parent graph with AI Agent + StartScenario tool target
+        // Build parent graph with AI Agent + EmbedWorkflow tool target
         let mut steps = HashMap::new();
         steps.insert(
             "ai_agent".to_string(),
@@ -2328,10 +2328,10 @@ mod tests {
         );
         steps.insert(
             "tool_weather".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "tool_weather".to_string(),
                 name: Some("Get Weather Forecast".to_string()),
-                child_scenario_id: "weather-scenario-id".to_string(),
+                child_workflow_id: "weather-workflow-id".to_string(),
                 child_version: ChildVersion::Specific(1),
                 input_mapping: None,
                 max_retries: None,
@@ -2351,7 +2351,7 @@ mod tests {
         );
 
         let graph = ExecutionGraph {
-            name: Some("test_with_start_scenario_tool".to_string()),
+            name: Some("test_with_embed_workflow_tool".to_string()),
             description: None,
             entry_point: "ai_agent".to_string(),
             steps,
@@ -2381,36 +2381,36 @@ mod tests {
         };
 
         let mut ctx = EmitContext::new(false);
-        // Register the child scenario in the context
+        // Register the child workflow in the context
         ctx.step_to_child_ref.insert(
             "tool_weather".to_string(),
-            ("weather-scenario-id".to_string(), 1),
+            ("weather-workflow-id".to_string(), 1),
         );
-        ctx.child_scenarios
-            .insert("weather-scenario-id::1".to_string(), child_graph);
+        ctx.child_workflows
+            .insert("weather-workflow-id::1".to_string(), child_graph);
 
         let step = create_ai_agent_step("ai_agent");
         let tokens = emit(&step, &mut ctx, &graph).unwrap();
         let code = tokens.to_string();
 
-        // Verify StartScenario tool dispatch
+        // Verify EmbedWorkflow tool dispatch
         assert!(code.contains("get_weather"), "Should have get_weather tool");
         assert!(
-            code.contains("ScenarioInputs"),
-            "Should build ScenarioInputs for child scenario"
+            code.contains("WorkflowInputs"),
+            "Should build WorkflowInputs for child workflow"
         );
         assert!(
             code.contains("_scope_id"),
-            "Should set scope_id for child scenario"
+            "Should set scope_id for child workflow"
         );
         assert!(
             code.contains("_cache_key_prefix"),
-            "Should set cache key prefix for child scenario"
+            "Should set cache key prefix for child workflow"
         );
         // The child function should be emitted
         assert!(
-            code.contains("fn child_weather_scenario_id_1"),
-            "Should emit child scenario function"
+            code.contains("fn child_weather_workflow_id_1"),
+            "Should emit child workflow function"
         );
     }
 }

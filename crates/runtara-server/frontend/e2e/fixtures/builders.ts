@@ -4,7 +4,7 @@ import type {
   ConnectionTypeDto,
   Instance,
   InvocationTrigger,
-  ScenarioDto,
+  WorkflowDto,
   Schema,
 } from '@/generated/RuntaraRuntimeApi';
 
@@ -49,13 +49,13 @@ export function buildConnectionType(
   } as ConnectionTypeDto;
 }
 
-export function buildScenario(
-  overrides: DeepPartial<ScenarioDto> = {}
-): ScenarioDto {
+export function buildWorkflow(
+  overrides: DeepPartial<WorkflowDto> = {}
+): WorkflowDto {
   return {
     id: nextId('scn'),
-    name: 'Test Scenario',
-    description: 'Mock scenario',
+    name: 'Test Workflow',
+    description: 'Mock workflow',
     currentVersionNumber: 1,
     lastVersionNumber: 1,
     executionGraph: { steps: [] },
@@ -65,7 +65,7 @@ export function buildScenario(
     updated: nowIso(),
     path: '/',
     ...overrides,
-  } as ScenarioDto;
+  } as WorkflowDto;
 }
 
 export function buildTrigger(
@@ -76,7 +76,7 @@ export function buildTrigger(
     active: true,
     configuration: {},
     created_at: nowIso(),
-    scenario_id: 'scn_000001',
+    workflow_id: 'scn_000001',
     ...overrides,
   } as unknown as InvocationTrigger;
 }

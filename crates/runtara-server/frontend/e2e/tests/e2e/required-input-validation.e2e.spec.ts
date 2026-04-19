@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 /**
- * SYN-110: Required input validation for scenario execution
+ * SYN-110: Required input validation for workflow execution
  *
  * Verifies that:
  * 1. Frontend blocks execution when required fields are not set
@@ -46,9 +46,9 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 test.describe
-  .serial('SYN-110: Required input validation for scenario execution', () => {
-  const scenarioName = `SYN-110 Required Input ${Date.now()}`;
-  let scenarioId: string;
+  .serial('SYN-110: Required input validation for workflow execution', () => {
+  const workflowName = `SYN-110 Required Input ${Date.now()}`;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -56,9 +56,9 @@ test.describe
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -67,21 +67,21 @@ test.describe
     }
   });
 
-  // ── Setup: create scenario with mixed required/optional input schema ──
+  // ── Setup: create workflow with mixed required/optional input schema ──
 
-  test('create scenario with required and optional input fields', async ({
+  test('create workflow with required and optional input fields', async ({
     page,
   }) => {
-    await page.goto('/scenarios/create');
+    await page.goto('/workflows/create');
     await page.waitForLoadState('networkidle');
-    await page.getByLabel('Name').fill(scenarioName);
+    await page.getByLabel('Name').fill(workflowName);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await page.waitForURL(
-      (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
       { timeout: 15000 }
     );
-    scenarioId = page.url().split('/scenarios/').pop()!;
+    workflowId = page.url().split('/workflows/').pop()!;
 
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -120,7 +120,7 @@ test.describe
     // Make it optional by unchecking Required
     await row4.getByRole('checkbox').click();
 
-    // Add a random-double step so the scenario has a valid graph
+    // Add a random-double step so the workflow has a valid graph
     const startNode = page
       .locator('.react-flow__node')
       .filter({ hasText: 'Start' });
@@ -156,11 +156,11 @@ test.describe
   test('frontend blocks execution when required fields are not set', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
-    const playButton = page.getByTitle('Start scenario');
+    const playButton = page.getByTitle('Start workflow');
     await expect(playButton).toBeVisible({ timeout: 10000 });
     await expect(playButton).toBeEnabled({ timeout: 5000 });
     await playButton.click();
@@ -190,11 +190,11 @@ test.describe
   test('required fields accept empty values (empty string, empty array, zero)', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
-    const playButton = page.getByTitle('Start scenario');
+    const playButton = page.getByTitle('Start workflow');
     await expect(playButton).toBeVisible({ timeout: 10000 });
     await expect(playButton).toBeEnabled({ timeout: 5000 });
     await playButton.click();
@@ -217,7 +217,7 @@ test.describe
     // Intercept the request to verify payload
     const executeRequestPromise = page.waitForRequest(
       (req) =>
-        req.url().includes(`/scenarios/${scenarioId}/execute`) &&
+        req.url().includes(`/workflows/${workflowId}/execute`) &&
         req.method() === 'POST'
     );
 
@@ -239,11 +239,11 @@ test.describe
   test('optional field clear button removes field from payload', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
-    const playButton = page.getByTitle('Start scenario');
+    const playButton = page.getByTitle('Start workflow');
     await expect(playButton).toBeVisible({ timeout: 10000 });
     await expect(playButton).toBeEnabled({ timeout: 5000 });
     await playButton.click();
@@ -265,7 +265,7 @@ test.describe
     // Intercept the request
     const executeRequestPromise = page.waitForRequest(
       (req) =>
-        req.url().includes(`/scenarios/${scenarioId}/execute`) &&
+        req.url().includes(`/workflows/${workflowId}/execute`) &&
         req.method() === 'POST'
     );
 
@@ -285,7 +285,7 @@ test.describe
 
   test('backend rejects missing required field via API', async () => {
     const res = await fetch(
-      `${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/execute`,
+      `${GATEWAY_URL}/api/runtime/workflows/${workflowId}/execute`,
       {
         method: 'POST',
         headers: apiHeaders(token),
@@ -309,7 +309,7 @@ test.describe
 
   test('backend accepts empty values for required fields', async () => {
     const res = await fetch(
-      `${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/execute`,
+      `${GATEWAY_URL}/api/runtime/workflows/${workflowId}/execute`,
       {
         method: 'POST',
         headers: apiHeaders(token),
@@ -328,16 +328,16 @@ test.describe
 
   // ── Cleanup ────────────────────────────────────────────────────────────
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: scenarioName });
+    const card = page.locator('article').filter({ hasText: workflowName });
     await expect(card).toBeVisible({ timeout: 10000 });
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
     await expect(card).not.toBeVisible({ timeout: 10000 });
 
-    scenarioId = '';
+    workflowId = '';
   });
 });

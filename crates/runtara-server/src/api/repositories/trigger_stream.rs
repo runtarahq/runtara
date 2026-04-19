@@ -1,6 +1,6 @@
 //! Trigger Stream Publisher
 //!
-//! Publishes trigger events to Redis/Valkey streams for async scenario execution.
+//! Publishes trigger events to Redis/Valkey streams for async workflow execution.
 //! Stream naming: runtara:triggers:{tenant_id}
 
 use redis::AsyncCommands;
@@ -52,7 +52,7 @@ impl TriggerStreamPublisher {
                     ("event_type", "trigger"),
                     ("trigger_type", event.trigger_type()),
                     ("instance_id", &event.instance_id),
-                    ("scenario_id", &event.scenario_id),
+                    ("workflow_id", &event.workflow_id),
                     ("data", &event_json),
                 ],
             )
@@ -63,7 +63,7 @@ impl TriggerStreamPublisher {
             stream_key = %stream_key,
             stream_id = %stream_id,
             instance_id = %event.instance_id,
-            scenario_id = %event.scenario_id,
+            workflow_id = %event.workflow_id,
             trigger_type = %event.trigger_type(),
             "Published trigger event to stream"
         );
@@ -125,7 +125,7 @@ mod tests {
         let event = TriggerEvent::http_api(
             "instance-1".to_string(),
             "tenant-1".to_string(),
-            "scenario-1".to_string(),
+            "workflow-1".to_string(),
             Some(1),
             json!({"input": "value"}),
             false,
@@ -135,6 +135,6 @@ mod tests {
 
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("instance-1"));
-        assert!(json.contains("scenario-1"));
+        assert!(json.contains("workflow-1"));
     }
 }

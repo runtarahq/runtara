@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Runtara SDK - High-level client for instance communication with runtara-core.
 //!
-//! This crate provides an ergonomic API for scenarios/instances to communicate
+//! This crate provides an ergonomic API for workflows/instances to communicate
 //! with the runtara-core durable execution engine. It provides strongly-typed
 //! methods for all instance lifecycle operations.
 //!

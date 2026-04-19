@@ -13,7 +13,7 @@ use super::session::{ChannelRouter, InboundMessage};
 /// Telegram webhook handler.
 ///
 /// Receives Update objects from the Telegram Bot API. The connection_id
-/// in the path identifies which bot/org/scenario this webhook belongs to.
+/// in the path identifies which bot/org/workflow this webhook belongs to.
 /// The `X-Telegram-Bot-Api-Secret-Token` header is validated against the
 /// webhook secret stored in the trigger's configuration.
 ///

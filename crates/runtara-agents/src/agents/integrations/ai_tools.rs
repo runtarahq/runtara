@@ -9,7 +9,7 @@
 //! - Vision to Text (with optional structured output via output_schema)
 //! - Vision to Image (image editing)
 //!
-//! These are agent capabilities that can be used standalone in scenario steps
+//! These are agent capabilities that can be used standalone in workflow steps
 //! or invoked as tools by an AI Agent step.
 
 use crate::connections::RawConnection;
@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use super::{bedrock, openai};
 
 /// Resolve the integration_id for a connection.
-/// In compiled scenario binaries, the connection stub has an empty integration_id.
+/// In compiled workflow binaries, the connection stub has an empty integration_id.
 fn resolve_integration_id(connection: &RawConnection) -> Result<String, AgentError> {
     let integration_id = &connection.integration_id;
     if !integration_id.is_empty() {

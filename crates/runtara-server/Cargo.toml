@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Complete HTTP API server for runtara — scenarios, connections, channels, workers"
+description = "Complete HTTP API server for runtara — workflows, connections, channels, workers"
 keywords = ["durable", "workflow", "server", "runtime"]
 categories = ["web-programming"]
 

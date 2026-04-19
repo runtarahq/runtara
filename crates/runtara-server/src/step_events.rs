@@ -1,6 +1,6 @@
 //! Step event reading for the API.
 //!
-//! Reads step execution events from Redis for debugging scenario executions.
+//! Reads step execution events from Redis for debugging workflow executions.
 
 use redis::{AsyncCommands, Client};
 use serde::{Deserialize, Serialize};

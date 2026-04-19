@@ -106,20 +106,20 @@ fn validate_output_path(
     Ok(())
 }
 
-/// Fetch the latest execution graph for a scenario.
+/// Fetch the latest execution graph for a workflow.
 /// Returns (execution_graph, latest_version, current_version).
 async fn fetch_latest_graph(
     server: &SmoMcpServer,
-    scenario_id: &str,
+    workflow_id: &str,
 ) -> Result<(serde_json::Value, i64, i64), rmcp::ErrorData> {
-    validate_path_param("scenario_id", scenario_id)?;
-    let result = api_get(server, &format!("/api/runtime/scenarios/{}", scenario_id)).await?;
+    validate_path_param("workflow_id", workflow_id)?;
+    let result = api_get(server, &format!("/api/runtime/workflows/{}", workflow_id)).await?;
 
     let graph = result
         .pointer("/data/definition/executionGraph")
         .or_else(|| result.pointer("/data/executionGraph"))
         .cloned()
-        .ok_or_else(|| err("Scenario has no executionGraph"))?;
+        .ok_or_else(|| err("Workflow has no executionGraph"))?;
 
     let latest_version = result
         .pointer("/data/latestVersion")
@@ -146,7 +146,7 @@ async fn fetch_latest_graph(
 /// Returns (version, is_new_version).
 async fn save_graph(
     server: &SmoMcpServer,
-    scenario_id: &str,
+    workflow_id: &str,
     graph: serde_json::Value,
     latest_version: i64,
     current_version: i64,
@@ -165,7 +165,7 @@ async fn save_graph(
         let mutated_body = serde_json::json!({ "executionGraph": graph });
         let result = api_post(
             server,
-            &format!("/api/runtime/scenarios/{}/update", scenario_id),
+            &format!("/api/runtime/workflows/{}/update", workflow_id),
             Some(mutated_body),
         )
         .await;
@@ -183,7 +183,7 @@ async fn save_graph(
             Err(original_err) => {
                 // Mutated graph failed validation — try existing graph + patch
                 let existing_graph =
-                    fetch_latest_graph(server, scenario_id)
+                    fetch_latest_graph(server, workflow_id)
                         .await
                         .ok()
                         .and_then(|(g, _, _)| {
@@ -202,7 +202,7 @@ async fn save_graph(
                 let existing_body = serde_json::json!({ "executionGraph": existing });
                 let res = api_post(
                     server,
-                    &format!("/api/runtime/scenarios/{}/update", scenario_id),
+                    &format!("/api/runtime/workflows/{}/update", workflow_id),
                     Some(existing_body),
                 )
                 .await
@@ -219,8 +219,8 @@ async fn save_graph(
                 api_put(
                     server,
                     &format!(
-                        "/api/runtime/scenarios/{}/versions/{}/graph",
-                        scenario_id, version
+                        "/api/runtime/workflows/{}/versions/{}/graph",
+                        workflow_id, version
                     ),
                     Some(patch_body),
                 )
@@ -235,8 +235,8 @@ async fn save_graph(
         api_put(
             server,
             &format!(
-                "/api/runtime/scenarios/{}/versions/{}/graph",
-                scenario_id, latest_version
+                "/api/runtime/workflows/{}/versions/{}/graph",
+                workflow_id, latest_version
             ),
             Some(body),
         )
@@ -289,8 +289,8 @@ fn resolve_graph_mut<'a>(
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddStepParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Unique step ID within the graph")]
     pub step_id: String,
     #[schemars(
@@ -305,8 +305,8 @@ pub struct AddStepParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveStepParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Step ID to remove")]
     pub step_id: String,
     #[schemars(
@@ -317,8 +317,8 @@ pub struct RemoveStepParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct UpdateStepParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Step ID to update")]
     pub step_id: String,
     #[schemars(description = "New step definition JSON (must include 'stepType')")]
@@ -331,8 +331,8 @@ pub struct UpdateStepParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ConnectStepsParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Source step ID")]
     pub from_step: String,
     #[schemars(description = "Target step ID")]
@@ -351,8 +351,8 @@ pub struct ConnectStepsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DisconnectStepsParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Source step ID")]
     pub from_step: String,
     #[schemars(description = "Target step ID")]
@@ -367,8 +367,8 @@ pub struct DisconnectStepsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetEntryPointParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Step ID to set as entry point")]
     pub step_id: String,
     #[schemars(
@@ -379,8 +379,8 @@ pub struct SetEntryPointParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetMappingParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Step ID to set mapping on")]
     pub step_id: String,
     #[schemars(description = "Input field name to map")]
@@ -394,7 +394,7 @@ pub struct SetMappingParams {
     )]
     pub from_output: Option<String>,
     #[schemars(
-        description = "Reference a scenario input field (e.g., \"orderId\", \"config.mode\"). Supports dot-notation for nested access. Builds: data.<from_input>"
+        description = "Reference a workflow input field (e.g., \"orderId\", \"config.mode\"). Supports dot-notation for nested access. Builds: data.<from_input>"
     )]
     pub from_input: Option<String>,
     #[schemars(
@@ -413,8 +413,8 @@ pub struct SetMappingParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListReferencesParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
     )]
@@ -423,8 +423,8 @@ pub struct ListReferencesParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveMappingParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Step ID to remove mapping from")]
     pub step_id: String,
     #[schemars(description = "Input field name to remove")]
@@ -437,8 +437,8 @@ pub struct RemoveMappingParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetInputSchemaParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(
         description = "Input schema fields in DSL flat-map format (e.g., {\"orderId\": {\"type\": \"string\", \"required\": true}})"
     )]
@@ -451,8 +451,8 @@ pub struct SetInputSchemaParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetOutputSchemaParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(
         description = "Output schema fields in DSL flat-map format (e.g., {\"result\": {\"type\": \"string\", \"required\": true}})"
     )]
@@ -465,8 +465,8 @@ pub struct SetOutputSchemaParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetVariableParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Variable name")]
     pub name: String,
     #[schemars(description = "Variable definition JSON")]
@@ -479,8 +479,8 @@ pub struct SetVariableParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RemoveVariableParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Variable name to remove")]
     pub name: String,
     #[schemars(
@@ -490,12 +490,12 @@ pub struct RemoveVariableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SetScenarioMetadataParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
-    #[schemars(description = "Scenario name")]
+pub struct SetWorkflowMetadataParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Workflow name")]
     pub name: Option<String>,
-    #[schemars(description = "Scenario description")]
+    #[schemars(description = "Workflow description")]
     pub description: Option<String>,
     #[schemars(
         description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
@@ -505,8 +505,8 @@ pub struct SetScenarioMetadataParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddAgentStepParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Unique step ID within the graph")]
     pub step_id: String,
     #[schemars(description = "Human-readable step name")]
@@ -554,7 +554,7 @@ pub async fn add_step(
         return Err(err("Found 'capability' — use 'capabilityId' instead"));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -588,10 +588,10 @@ pub async fn add_step(
     }
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "stepId": params.step_id,
@@ -603,7 +603,7 @@ pub async fn remove_step(
     server: &SmoMcpServer,
     params: RemoveStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -641,10 +641,10 @@ pub async fn remove_step(
         .is_some_and(|ep| ep == params.step_id);
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "removedStepId": params.step_id,
@@ -665,7 +665,7 @@ pub async fn update_step(
         return Err(err("Step definition must include 'stepType' field"));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -682,10 +682,10 @@ pub async fn update_step(
     target["steps"][&params.step_id] = step;
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "stepId": params.step_id,
@@ -707,7 +707,7 @@ pub async fn connect_steps(
         }
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -761,10 +761,10 @@ pub async fn connect_steps(
     target["executionPlan"].as_array_mut().unwrap().push(edge);
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "fromStep": params.from_step,
@@ -776,7 +776,7 @@ pub async fn disconnect_steps(
     server: &SmoMcpServer,
     params: DisconnectStepsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -813,10 +813,10 @@ pub async fn disconnect_steps(
     }
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "removedEdges": removed,
@@ -827,7 +827,7 @@ pub async fn set_entry_point(
     server: &SmoMcpServer,
     params: SetEntryPointParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -842,10 +842,10 @@ pub async fn set_entry_point(
     target["entryPoint"] = serde_json::Value::String(params.step_id.clone());
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "entryPoint": params.step_id,
@@ -887,7 +887,7 @@ pub async fn set_mapping(
         ));
     };
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -974,10 +974,10 @@ pub async fn set_mapping(
     step["inputMapping"][&params.input_name] = mapping_value;
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "stepId": params.step_id,
@@ -989,7 +989,7 @@ pub async fn remove_mapping(
     server: &SmoMcpServer,
     params: RemoveMappingParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1017,10 +1017,10 @@ pub async fn remove_mapping(
     }
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "stepId": params.step_id,
@@ -1032,17 +1032,17 @@ pub async fn set_input_schema(
     server: &SmoMcpServer,
     params: SetInputSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
     target["inputSchema"] = params.fields;
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
     }))
@@ -1052,17 +1052,17 @@ pub async fn set_output_schema(
     server: &SmoMcpServer,
     params: SetOutputSchemaParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
     target["outputSchema"] = params.fields;
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
     }))
@@ -1072,7 +1072,7 @@ pub async fn set_variable(
     server: &SmoMcpServer,
     params: SetVariableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1083,10 +1083,10 @@ pub async fn set_variable(
     target["variables"][&params.name] = params.variable;
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "variable": params.name,
@@ -1097,13 +1097,13 @@ pub async fn list_references(
     server: &SmoMcpServer,
     params: ListReferencesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, _latest, _current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
     let mut references: Vec<serde_json::Value> = Vec::new();
 
-    // 1. Scenario inputs → data.<field>
+    // 1. Workflow inputs → data.<field>
     if let Some(input_schema) = target.get("inputSchema").and_then(|s| s.as_object()) {
         for (field, schema) in input_schema {
             let field_type = schema
@@ -1236,15 +1236,15 @@ pub async fn list_references(
     }
 
     json_result(serde_json::json!({
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "references": references,
         "count": references.len(),
     }))
 }
 
-pub async fn set_scenario_metadata(
+pub async fn set_workflow_metadata(
     server: &SmoMcpServer,
-    params: SetScenarioMetadataParams,
+    params: SetWorkflowMetadataParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     if params.name.is_none() && params.description.is_none() {
         return Err(err(
@@ -1252,7 +1252,7 @@ pub async fn set_scenario_metadata(
         ));
     }
 
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1264,10 +1264,10 @@ pub async fn set_scenario_metadata(
     }
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "name": params.name,
@@ -1279,7 +1279,7 @@ pub async fn add_agent_step(
     server: &SmoMcpServer,
     params: AddAgentStepParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
 
     // Validate agent/capability exist and get capability info
     let cap_result = api_get(
@@ -1307,7 +1307,7 @@ pub async fn add_agent_step(
     });
 
     // Add the step
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.clone().unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1354,7 +1354,7 @@ pub async fn add_agent_step(
     }
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
 
     // Extract expected inputs from capability schema
     let expected_inputs = cap_result
@@ -1365,7 +1365,7 @@ pub async fn add_agent_step(
 
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "stepId": params.step_id,
@@ -1381,7 +1381,7 @@ pub async fn remove_variable(
     server: &SmoMcpServer,
     params: RemoveVariableParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let (mut graph, latest, current) = fetch_latest_graph(server, &params.scenario_id).await?;
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
     let path = params.path.unwrap_or_default();
     let target = resolve_graph_mut(&mut graph, &path)?;
 
@@ -1395,10 +1395,10 @@ pub async fn remove_variable(
     }
 
     let (version, new_version) =
-        save_graph(server, &params.scenario_id, graph, latest, current).await?;
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
-        "scenarioId": params.scenario_id,
+        "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
         "removedVariable": params.name,

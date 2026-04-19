@@ -1,6 +1,6 @@
 //! Input Schema Validation
 //!
-//! Validates scenario execution inputs against the DSL input schema.
+//! Validates workflow execution inputs against the DSL input schema.
 //! Handles conversion from the DSL flat-map schema format to standard
 //! JSON Schema before validation with the `jsonschema` crate.
 

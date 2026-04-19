@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE workflows\n            SET path = $3 || SUBSTRING(path FROM LENGTH($2) + 1),\n                updated_at = NOW()\n            WHERE tenant_id = $1 AND path LIKE $2 || '%' AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7a618086a6b0caa4a4704c467ab39d3f67cf1596e1e5e4abeee36516ccb9fc90"
+}

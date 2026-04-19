@@ -18,7 +18,7 @@ mod native {
     use crate::agent_meta::StepTypeMeta;
     use crate::{
         AgentStep, AiAgentStep, ConditionalStep, ErrorStep, FilterStep, FinishStep, GroupByStep,
-        LogStep, SplitStep, StartScenarioStep, SwitchStep, WaitForSignalStep, WhileStep,
+        LogStep, SplitStep, EmbedWorkflowStep, SwitchStep, WaitForSignalStep, WhileStep,
     };
 
     // ========================================================================
@@ -45,8 +45,8 @@ mod native {
         schemars::schema_for!(SwitchStep)
     }
 
-    fn schema_start_scenario_step() -> schemars::schema::RootSchema {
-        schemars::schema_for!(StartScenarioStep)
+    fn schema_embed_workflow_step() -> schemars::schema::RootSchema {
+        schemars::schema_for!(EmbedWorkflowStep)
     }
 
     fn schema_while_step() -> schemars::schema::RootSchema {
@@ -84,7 +84,7 @@ mod native {
     static FINISH_STEP_META: StepTypeMeta = StepTypeMeta {
         id: "Finish",
         display_name: "Finish",
-        description: "Exit point - defines scenario outputs",
+        description: "Exit point - defines workflow outputs",
         category: "control",
         schema_fn: schema_finish_step,
     };
@@ -121,12 +121,12 @@ mod native {
         schema_fn: schema_switch_step,
     };
 
-    static START_SCENARIO_STEP_META: StepTypeMeta = StepTypeMeta {
-        id: "StartScenario",
-        display_name: "Start Scenario",
-        description: "Executes a nested child scenario",
+    static START_WORKFLOW_STEP_META: StepTypeMeta = StepTypeMeta {
+        id: "EmbedWorkflow",
+        display_name: "Start Workflow",
+        description: "Executes a nested child workflow",
         category: "execution",
-        schema_fn: schema_start_scenario_step,
+        schema_fn: schema_embed_workflow_step,
     };
 
     static WHILE_STEP_META: StepTypeMeta = StepTypeMeta {
@@ -191,7 +191,7 @@ mod native {
     inventory::submit! { &CONDITIONAL_STEP_META }
     inventory::submit! { &SPLIT_STEP_META }
     inventory::submit! { &SWITCH_STEP_META }
-    inventory::submit! { &START_SCENARIO_STEP_META }
+    inventory::submit! { &START_WORKFLOW_STEP_META }
     inventory::submit! { &WHILE_STEP_META }
     inventory::submit! { &LOG_STEP_META }
 

@@ -27,8 +27,8 @@ pub async fn get_system_analytics_handler(
 
     let total_memory = sys.total_memory();
     let available_memory = sys.available_memory();
-    // Reserve 20% for runtime, scenarios get 80%
-    let available_for_scenarios = (available_memory as f64 * 0.8) as u64;
+    // Reserve 20% for runtime, workflows get 80%
+    let available_for_workflows = (available_memory as f64 * 0.8) as u64;
 
     // Get disk information for the data directory
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
@@ -76,7 +76,7 @@ pub async fn get_system_analytics_handler(
     let memory_info = MemoryInfo {
         total_bytes: total_memory,
         available_bytes: available_memory,
-        available_for_scenarios_bytes: available_for_scenarios,
+        available_for_workflows_bytes: available_for_workflows,
     };
 
     let response = SystemAnalyticsResponse {

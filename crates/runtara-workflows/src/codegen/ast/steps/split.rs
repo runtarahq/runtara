@@ -111,8 +111,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         .as_ref()
         .and_then(|c| serde_json::to_string(c).ok());
 
-    // Clone scenario inputs var for debug events (to access _loop_indices)
-    let scenario_inputs_var = inputs_var.clone();
+    // Clone workflow inputs var for debug events (to access _loop_indices)
+    let workflow_inputs_var = inputs_var.clone();
 
     // Split creates a scope - use sc_{step_id} as its scope_id
     let split_scope_id = format!("sc_{}", step_id);
@@ -125,7 +125,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         "Split",
         Some(&split_inputs_var),
         config_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         Some(&split_scope_id),
     );
     let debug_end = emit_step_debug_end(
@@ -134,7 +134,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         step_name,
         "Split",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         Some(&split_scope_id),
     );
 
@@ -148,7 +148,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         quote! {}
     };
 
-    // Static base for cache key - will be combined with prefix/scenario_id at runtime
+    // Static base for cache key - will be combined with prefix/workflow_id at runtime
     let cache_key_base = format!("split::{}", step_id);
 
     // Generate the durable function with configurable retry settings
@@ -164,7 +164,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
         // Build cache key dynamically, including prefix and loop indices
         let __split_cache_key = {
-            // Get prefix from parent context (set by StartScenario)
+            // Get prefix from parent context (set by EmbedWorkflow)
             let prefix = (*#inputs_var.variables)
                 .as_object()
                 .and_then(|vars| vars.get("_cache_key_prefix"))
@@ -186,14 +186,14 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 .unwrap_or_default();
 
             if prefix.is_empty() {
-                // No cache prefix - use _scenario_id to prevent collisions between
-                // independent scenarios running the same split steps
-                let scenario_id = (*#inputs_var.variables)
+                // No cache prefix - use _workflow_id to prevent collisions between
+                // independent workflows running the same split steps
+                let workflow_id = (*#inputs_var.variables)
                     .as_object()
-                    .and_then(|vars| vars.get("_scenario_id"))
+                    .and_then(|vars| vars.get("_workflow_id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("root");
-                format!("{}::{}{}", scenario_id, base, indices_suffix)
+                format!("{}::{}{}", workflow_id, base, indices_suffix)
             } else {
                 format!("{}::{}{}", prefix, base, indices_suffix)
             }
@@ -321,7 +321,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
                 // Inner steps use the Split's scope (sc_{step_id}) as their parent, NOT the iteration scope.
                 let __split_scope_id = format!("sc_{}", step_id);
-                ScenarioInputs {
+                WorkflowInputs {
                     data: Arc::new(item.clone()),
                     variables: Arc::new(serde_json::Value::Object(merged_vars)),
                     parent_scope_id: Some(__split_scope_id),
@@ -789,8 +789,8 @@ mod tests {
             "Should generate subgraph function"
         );
         assert!(
-            code.contains("ScenarioInputs"),
-            "Should use ScenarioInputs for subgraph"
+            code.contains("WorkflowInputs"),
+            "Should use WorkflowInputs for subgraph"
         );
     }
 
@@ -1245,7 +1245,7 @@ mod tests {
     // ==========================================================================
 
     #[test]
-    fn test_emit_split_uses_scenario_id_when_prefix_empty() {
+    fn test_emit_split_uses_workflow_id_when_prefix_empty() {
         let mut ctx = EmitContext::new(false);
         let split_step = SplitStep {
             id: "split-cache-test".to_string(),
@@ -1275,22 +1275,22 @@ mod tests {
         let tokens = emit(&split_step, &mut ctx).unwrap();
         let code = tokens.to_string();
 
-        // Verify the generated code checks for _scenario_id when prefix is empty
+        // Verify the generated code checks for _workflow_id when prefix is empty
         assert!(
-            code.contains("_scenario_id"),
-            "Should check for _scenario_id in variables"
+            code.contains("_workflow_id"),
+            "Should check for _workflow_id in variables"
         );
 
-        // Verify the fallback logic: use scenario_id when prefix is empty
+        // Verify the fallback logic: use workflow_id when prefix is empty
         assert!(
             code.contains("if prefix . is_empty ()"),
             "Should have condition to check if prefix is empty"
         );
 
-        // Verify it uses scenario_id in cache key format
+        // Verify it uses workflow_id in cache key format
         assert!(
             code.contains(r#"unwrap_or ("root")"#),
-            "Should fallback to 'root' if _scenario_id not found"
+            "Should fallback to 'root' if _workflow_id not found"
         );
     }
 
@@ -1375,11 +1375,11 @@ mod tests {
             "Should check for _cache_key_prefix in variables"
         );
 
-        // Verify both prefix and scenario_id paths exist in the format! calls
+        // Verify both prefix and workflow_id paths exist in the format! calls
         // The else branch uses prefix when it's not empty
         assert!(
             code.contains(r#"format ! ("{}::{}{}""#),
-            "Should use format with prefix/scenario_id, base, and indices_suffix"
+            "Should use format with prefix/workflow_id, base, and indices_suffix"
         );
     }
 

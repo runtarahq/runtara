@@ -30,15 +30,15 @@ use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSou
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
-    /// Input data for the scenario
+    /// Input data for the workflow
     #[serde(default)]
     pub data: Value,
 
-    /// Variables for the scenario
+    /// Variables for the workflow
     #[serde(default)]
     pub variables: Value,
 
-    /// Scenario version to execute (defaults to current)
+    /// Workflow version to execute (defaults to current)
     pub version: Option<i32>,
 }
 
@@ -55,7 +55,7 @@ pub struct SubmitEventRequest {
 
 /// Create a new session, start execution, and return an SSE stream.
 ///
-/// POST /api/runtime/scenarios/{id}/sessions
+/// POST /api/runtime/workflows/{id}/sessions
 #[allow(clippy::too_many_arguments)]
 pub async fn create_session(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
@@ -64,7 +64,7 @@ pub async fn create_session(
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     State(engine): State<Arc<ExecutionEngine>>,
-    Path(scenario_id): Path<String>,
+    Path(workflow_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let runtime_client = runtime_client.ok_or_else(|| {
@@ -107,7 +107,7 @@ pub async fn create_session(
     let session_id = Uuid::new_v4().to_string();
 
     // Sign session token (for future public API use)
-    let token = session_token::sign(&tenant_id, &scenario_id, &session_id).map_err(|e| {
+    let token = session_token::sign(&tenant_id, &workflow_id, &session_id).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"success": false, "message": format!("Failed to sign session token: {}", e)})),
@@ -133,7 +133,7 @@ pub async fn create_session(
     let result = engine
         .queue(QueueRequest {
             tenant_id: &tenant_id,
-            scenario_id: &scenario_id,
+            workflow_id: &workflow_id,
             version: request.version,
             inputs,
             debug: false,
@@ -151,7 +151,7 @@ pub async fn create_session(
         &tenant_id,
         &session_id,
         &instance_id,
-        &scenario_id,
+        &workflow_id,
     )
     .await
     {
@@ -168,7 +168,7 @@ pub async fn create_session(
         valkey,
         engine,
         instance_id,
-        scenario_id,
+        workflow_id,
         tenant_id,
         session_id,
         token,
@@ -279,7 +279,7 @@ pub async fn session_event_stream(
         })?;
 
     // Generate token for the response
-    let token = session_token::sign(&tenant_id, &meta.scenario_id, &session_id).unwrap_or_default();
+    let token = session_token::sign(&tenant_id, &meta.workflow_id, &session_id).unwrap_or_default();
 
     // `pool` / `trigger_stream` are kept as configuration probes (presence
     // validated above); queue operations go through the shared engine.
@@ -290,7 +290,7 @@ pub async fn session_event_stream(
         valkey,
         engine,
         instance_id: meta.instance_id,
-        scenario_id: meta.scenario_id,
+        workflow_id: meta.workflow_id,
         tenant_id,
         session_id,
         token,
@@ -504,7 +504,7 @@ struct SessionStreamParams {
     valkey: ConnectionManager,
     engine: Arc<ExecutionEngine>,
     instance_id: String,
-    scenario_id: String,
+    workflow_id: String,
     tenant_id: String,
     session_id: String,
     token: String,
@@ -518,7 +518,7 @@ async fn start_new_instance(
     engine: &Arc<ExecutionEngine>,
     valkey: &mut ConnectionManager,
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     session_id: &str,
 ) -> Option<String> {
     let inputs = json!({
@@ -529,7 +529,7 @@ async fn start_new_instance(
     match engine
         .queue(QueueRequest {
             tenant_id,
-            scenario_id,
+            workflow_id,
             version: None,
             inputs,
             debug: false,
@@ -551,7 +551,7 @@ async fn start_new_instance(
                 tenant_id,
                 session_id,
                 &new_instance_id,
-                scenario_id,
+                workflow_id,
             )
             .await;
             Some(new_instance_id)
@@ -579,7 +579,7 @@ fn build_session_event_stream(
             mut valkey,
             engine,
             instance_id: initial_instance_id,
-            scenario_id,
+            workflow_id,
             tenant_id: org_id,
             session_id,
             token,
@@ -802,7 +802,7 @@ fn build_session_event_stream(
                                 &engine,
                                 &mut valkey,
                                 &org_id,
-                                &scenario_id,
+                                &workflow_id,
                                 &session_id,
                             ).await {
                                 Some(new_id) => {

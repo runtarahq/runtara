@@ -11,7 +11,7 @@ import { NextForm } from '@/shared/components/NextForm';
 
 export type TriggerSchemaType = z.infer<typeof form.schema>;
 
-const EMPTY_SCENARIOS: any[] = [];
+const EMPTY_WORKFLOWS: any[] = [];
 
 type Props = {
   title: string;
@@ -28,7 +28,7 @@ type Props = {
 export function TriggerForm(props: Props) {
   const {
     title,
-    description = 'Map this trigger to a scenario and control how it fires.',
+    description = 'Map this trigger to a workflow and control how it fires.',
     fieldProps,
     initValues,
     isLoading,
@@ -46,14 +46,14 @@ export function TriggerForm(props: Props) {
 
   // Watch for changes to the triggerType field
   const triggerType = entireForm.watch('triggerType');
-  const scenarios = fieldProps?.scenarios || EMPTY_SCENARIOS;
+  const workflows = fieldProps?.workflows || EMPTY_WORKFLOWS;
 
   const connections = useMemo(
     () => fieldProps?.connections || [],
     [fieldProps?.connections]
   );
 
-  // Filter fieldsConfig based on triggerType and inject scenarios/connections
+  // Filter fieldsConfig based on triggerType and inject workflows/connections
   const filteredFieldsConfig = useMemo(() => {
     return form.fieldsConfig
       .filter((field) => {
@@ -68,9 +68,9 @@ export function TriggerForm(props: Props) {
         return true;
       })
       .map((field) => {
-        // Inject scenarios into the ScenarioField config
-        if (field.name === 'scenarioId') {
-          return { ...field, scenarios };
+        // Inject workflows into the WorkflowField config
+        if (field.name === 'workflowId') {
+          return { ...field, workflows };
         }
         // Inject messaging connections into the connectionId select
         if (field.name === 'connectionId') {
@@ -91,7 +91,7 @@ export function TriggerForm(props: Props) {
         }
         return field;
       });
-  }, [triggerType, scenarios, connections]);
+  }, [triggerType, workflows, connections]);
 
   const handleSubmit = (values: TriggerSchemaType) => {
     onSubmit(values);

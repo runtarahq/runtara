@@ -9,9 +9,9 @@ keywords = ["durable", "workflow", "compiler", "dsl"]
 categories = ["development-tools"]
 
 [dependencies]
-runtara-ai = { path = "../runtara-ai", version = "2.0" }
-runtara-agents = { path = "../runtara-agents", version = "2.0" }
-runtara-dsl = { path = "../runtara-dsl", version = "2.0" }
+runtara-ai = { path = "../runtara-ai", version = "3.0" }
+runtara-agents = { path = "../runtara-agents", version = "3.0" }
+runtara-dsl = { path = "../runtara-dsl", version = "3.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

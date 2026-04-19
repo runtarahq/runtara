@@ -1,7 +1,7 @@
 //! Conversions between Runtara SDK types and local DTOs.
 //!
 //! Helpers for translating between `runtara-management-sdk` instance
-//! representations and the server-side `ScenarioInstanceDto`
+//! representations and the server-side `WorkflowInstanceDto`
 //! / `ExecutionWithMetadata` shapes used by HTTP handlers.
 //!
 //! Previously housed inside `api/services/executions.rs`; extracted so the
@@ -14,18 +14,18 @@ use runtara_management_sdk::{
 };
 use serde_json::Value;
 
-use crate::api::dto::scenarios::{InstanceInputs, ScenarioInstanceDto};
+use crate::api::dto::workflows::{InstanceInputs, WorkflowInstanceDto};
 use crate::runtime_client::RuntimeClient;
 use crate::types::ExecutionStatus;
 
-/// Extended execution data with metadata from the scenario record.
+/// Extended execution data with metadata from the workflow record.
 ///
 /// Used when fetching a single execution with full details.
 #[derive(Debug)]
 pub struct ExecutionWithMetadata {
-    pub instance: ScenarioInstanceDto,
-    pub scenario_name: Option<String>,
-    pub scenario_description: Option<String>,
+    pub instance: WorkflowInstanceDto,
+    pub workflow_name: Option<String>,
+    pub workflow_description: Option<String>,
     pub worker_id: Option<String>,
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub retry_count: Option<i32>,
@@ -65,7 +65,7 @@ pub fn execution_status_to_runtara(status: &str) -> Option<RuntaraInstanceStatus
 
 /// Enrich running instances with `has_pending_input` by checking for unresolved
 /// `external_input_requested` events. Only queries events for running instances.
-pub async fn enrich_pending_input(instances: &mut [ScenarioInstanceDto], client: &RuntimeClient) {
+pub async fn enrich_pending_input(instances: &mut [WorkflowInstanceDto], client: &RuntimeClient) {
     for instance in instances.iter_mut() {
         if instance.status != ExecutionStatus::Running {
             continue;
@@ -113,14 +113,14 @@ pub async fn enrich_pending_input(instances: &mut [ScenarioInstanceDto], client:
     }
 }
 
-/// Convert Runtara `InstanceSummary` to `ScenarioInstanceDto` with scenario
+/// Convert Runtara `InstanceSummary` to `WorkflowInstanceDto` with workflow
 /// info from a database lookup.
 pub fn runtara_instance_to_dto_with_info(
     inst: runtara_management_sdk::InstanceSummary,
-    scenario_id: String,
+    workflow_id: String,
     version: i32,
-    scenario_name: Option<String>,
-) -> ScenarioInstanceDto {
+    workflow_name: Option<String>,
+) -> WorkflowInstanceDto {
     // Convert to execution status
     let status = runtara_status_to_execution_status(inst.status);
 
@@ -130,7 +130,7 @@ pub fn runtara_instance_to_dto_with_info(
             .map(|end| (end - start).num_milliseconds() as f64 / 1000.0)
     });
 
-    ScenarioInstanceDto {
+    WorkflowInstanceDto {
         id: inst.instance_id.clone(),
         created: inst.created_at.to_rfc3339(),
         updated: inst
@@ -139,8 +139,8 @@ pub fn runtara_instance_to_dto_with_info(
             .unwrap_or_else(|| inst.created_at.to_rfc3339()),
         status,
         termination_type: None, // Not available from Runtara summary
-        scenario_id,
-        scenario_name,
+        workflow_id,
+        workflow_name,
         inputs: InstanceInputs {
             data: Value::Null,
             variables: Value::Null,
@@ -157,8 +157,8 @@ pub fn runtara_instance_to_dto_with_info(
     }
 }
 
-/// Convert Runtara `InstanceInfo` (detailed) to `ScenarioInstanceDto`.
-pub fn runtara_info_to_dto(info: InstanceInfo) -> ScenarioInstanceDto {
+/// Convert Runtara `InstanceInfo` (detailed) to `WorkflowInstanceDto`.
+pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
     // Convert to execution status
     let status = runtara_status_to_execution_status(info.status);
 
@@ -175,20 +175,20 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> ScenarioInstanceDto {
         .map(|t| t.to_rfc3339())
         .unwrap_or_else(|| created.clone());
 
-    // Extract scenario_id and version from image_name (format: scenario_id:version)
-    let (scenario_id, version) = parse_image_id(&info.image_name);
+    // Extract workflow_id and version from image_name (format: workflow_id:version)
+    let (workflow_id, version) = parse_image_id(&info.image_name);
 
     // Extract data and variables from input to avoid double-wrapping
     let (data, variables) = extract_input_fields(info.input.as_ref());
 
-    ScenarioInstanceDto {
+    WorkflowInstanceDto {
         id: info.instance_id.clone(),
         created,
         updated,
         status,
         termination_type: None,
-        scenario_id,
-        scenario_name: None,
+        workflow_id,
+        workflow_name: None,
         inputs: InstanceInputs { data, variables },
         outputs: info.output,
         tags: vec![],
@@ -204,13 +204,13 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> ScenarioInstanceDto {
 
 /// Convert Runtara `InstanceInfo` to `ExecutionWithMetadata`.
 ///
-/// Used when enriching a single execution with scenario metadata.
+/// Used when enriching a single execution with workflow metadata.
 pub fn runtara_info_to_execution_with_metadata(
     info: InstanceInfo,
-    scenario_name: Option<String>,
-    scenario_description: Option<String>,
+    workflow_name: Option<String>,
+    workflow_description: Option<String>,
 ) -> ExecutionWithMetadata {
-    // Convert to ScenarioInstanceDto first
+    // Convert to WorkflowInstanceDto first
     let status = runtara_status_to_execution_status(info.status);
 
     let execution_duration_seconds = info.started_at.and_then(|start| {
@@ -224,19 +224,19 @@ pub fn runtara_info_to_execution_with_metadata(
         .map(|t| t.to_rfc3339())
         .unwrap_or_else(|| created.clone());
 
-    let (scenario_id, version) = parse_image_id(&info.image_name);
+    let (workflow_id, version) = parse_image_id(&info.image_name);
 
     // Extract data and variables from input to avoid double-wrapping
     let (data, variables) = extract_input_fields(info.input.as_ref());
 
-    let instance = ScenarioInstanceDto {
+    let instance = WorkflowInstanceDto {
         id: info.instance_id.clone(),
         created,
         updated,
         status,
         termination_type: None,
-        scenario_id,
-        scenario_name: scenario_name.clone(),
+        workflow_id,
+        workflow_name: workflow_name.clone(),
         inputs: InstanceInputs { data, variables },
         outputs: info.output,
         tags: vec![],
@@ -251,8 +251,8 @@ pub fn runtara_info_to_execution_with_metadata(
 
     ExecutionWithMetadata {
         instance,
-        scenario_name,
-        scenario_description,
+        workflow_name,
+        workflow_description,
         worker_id: None, // Not tracked by Runtara at server level
         heartbeat_at: info.heartbeat_at,
         retry_count: Some(info.retry_count as i32),
@@ -281,13 +281,13 @@ pub fn extract_input_fields(input: Option<&Value>) -> (Value, Value) {
     }
 }
 
-/// Parse `image_id` (format: `"scenario_id:version"`) into
-/// `(scenario_id, version)`. Returns `(scenario_id, 0)` if no colon is found.
+/// Parse `image_id` (format: `"workflow_id:version"`) into
+/// `(workflow_id, version)`. Returns `(workflow_id, 0)` if no colon is found.
 pub fn parse_image_id(image_id: &str) -> (String, i32) {
     if let Some(pos) = image_id.rfind(':') {
-        let scenario_id = image_id[..pos].to_string();
+        let workflow_id = image_id[..pos].to_string();
         let version = image_id[pos + 1..].parse::<i32>().unwrap_or(0);
-        (scenario_id, version)
+        (workflow_id, version)
     } else {
         (image_id.to_string(), 0)
     }
@@ -304,44 +304,44 @@ mod tests {
 
     #[test]
     fn test_parse_image_id_standard_format() {
-        let (scenario_id, version) = parse_image_id("my-scenario:5");
-        assert_eq!(scenario_id, "my-scenario");
+        let (workflow_id, version) = parse_image_id("my-workflow:5");
+        assert_eq!(workflow_id, "my-workflow");
         assert_eq!(version, 5);
     }
 
     #[test]
     fn test_parse_image_id_uuid_format() {
-        let (scenario_id, version) = parse_image_id("550e8400-e29b-41d4-a716-446655440000:42");
-        assert_eq!(scenario_id, "550e8400-e29b-41d4-a716-446655440000");
+        let (workflow_id, version) = parse_image_id("550e8400-e29b-41d4-a716-446655440000:42");
+        assert_eq!(workflow_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(version, 42);
     }
 
     #[test]
     fn test_parse_image_id_no_version() {
-        let (scenario_id, version) = parse_image_id("scenario-without-version");
-        assert_eq!(scenario_id, "scenario-without-version");
+        let (workflow_id, version) = parse_image_id("workflow-without-version");
+        assert_eq!(workflow_id, "workflow-without-version");
         assert_eq!(version, 0);
     }
 
     #[test]
     fn test_parse_image_id_invalid_version() {
-        let (scenario_id, version) = parse_image_id("my-scenario:invalid");
-        assert_eq!(scenario_id, "my-scenario");
+        let (workflow_id, version) = parse_image_id("my-workflow:invalid");
+        assert_eq!(workflow_id, "my-workflow");
         assert_eq!(version, 0);
     }
 
     #[test]
     fn test_parse_image_id_multiple_colons() {
         // Uses rfind so it should parse from the last colon
-        let (scenario_id, version) = parse_image_id("org:tenant:scenario:10");
-        assert_eq!(scenario_id, "org:tenant:scenario");
+        let (workflow_id, version) = parse_image_id("org:tenant:workflow:10");
+        assert_eq!(workflow_id, "org:tenant:workflow");
         assert_eq!(version, 10);
     }
 
     #[test]
     fn test_parse_image_id_empty_string() {
-        let (scenario_id, version) = parse_image_id("");
-        assert_eq!(scenario_id, "");
+        let (workflow_id, version) = parse_image_id("");
+        assert_eq!(workflow_id, "");
         assert_eq!(version, 0);
     }
 

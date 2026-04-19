@@ -1,7 +1,7 @@
 //! Agent Execution Service
 //!
 //! Executes agent capabilities directly in the host process on behalf of
-//! scenario instances. This is the host-mediated I/O path: scenarios call
+//! workflow instances. This is the host-mediated I/O path: workflows call
 //! this service via HTTP instead of running agents in-process.
 //!
 //! Unlike agent_testing (which uses the OCI dispatcher container), this service
@@ -126,7 +126,7 @@ impl AgentExecutionService {
 
                 // Agent errors are returned as a successful HTTP response with success=false,
                 // not as HTTP errors. This matches the convention used by the dispatcher.
-                // The caller (scenario instance) can then decide how to handle the error
+                // The caller (workflow instance) can then decide how to handle the error
                 // (retry via #[durable], propagate to user, etc.).
                 Ok(ExecutionResult {
                     success: false,

@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 pub struct Config {
     /// Tenant ID for all API operations (required).
     pub tenant_id: String,
-    /// Maximum number of concurrent scenario executions.
+    /// Maximum number of concurrent workflow executions.
     pub max_concurrent_executions: usize,
     /// Checkpoint TTL in hours.
     pub checkpoint_ttl_hours: u64,
@@ -28,13 +28,13 @@ pub struct Config {
     pub object_model_soft_delete: bool,
     /// Internal HTTP port (used to derive default service URLs).
     pub internal_port: u16,
-    /// Name of the stdlib crate compiled into scenarios.
+    /// Name of the stdlib crate compiled into workflows.
     pub stdlib_name: String,
-    /// HTTP proxy URL forwarded to scenario processes for outbound HTTP.
+    /// HTTP proxy URL forwarded to workflow processes for outbound HTTP.
     pub http_proxy_url: String,
-    /// Object-model internal API URL forwarded to scenario processes.
+    /// Object-model internal API URL forwarded to workflow processes.
     pub object_model_url: String,
-    /// Agent service URL forwarded to scenario processes for native-only capabilities.
+    /// Agent service URL forwarded to workflow processes for native-only capabilities.
     pub agent_service_url: String,
 }
 
@@ -190,7 +190,7 @@ pub fn validate_checkpoint_config() -> Result<(), String> {
     if valkey_host.is_none() {
         return Err(
             "VALKEY_HOST environment variable is required for checkpoint storage. \
-            Redis/Valkey is now a required dependency for scenario execution."
+            Redis/Valkey is now a required dependency for workflow execution."
                 .to_string(),
         );
     }

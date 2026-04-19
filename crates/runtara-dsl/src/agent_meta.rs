@@ -398,7 +398,7 @@ pub struct CapabilityInfo {
 }
 
 /// API-compatible capability field info.
-/// Used for agent inputs and scenario input/output schemas.
+/// Used for agent inputs and workflow input/output schemas.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CapabilityField {

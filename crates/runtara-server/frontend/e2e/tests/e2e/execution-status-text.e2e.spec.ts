@@ -11,9 +11,9 @@ import { fileURLToPath } from 'url';
  *
  * The text transition from "Execution in progress" to "Completed" depends
  * on the instance-specific polling API returning updated status. This is
- * verified by the unit test (ScenarioActionsForm.test.tsx) which confirms
+ * verified by the unit test (WorkflowActionsForm.test.tsx) which confirms
  * the text changes based on executionStats.status. The existing
- * scenario-lifecycle-ui.e2e.spec.ts test also exercises execution end-to-end.
+ * workflow-lifecycle-ui.e2e.spec.ts test also exercises execution end-to-end.
  *
  * Requires: full local stack running (gateway, runtime, management, frontend)
  */
@@ -22,7 +22,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
-const SCENARIO_NAME = `E2E Status Text ${Date.now()}`;
+const WORKFLOW_NAME = `E2E Status Text ${Date.now()}`;
 
 function getAccessToken(): string {
   const authFile = path.resolve(__dirnameLocal, '../../.auth/user.json');
@@ -51,7 +51,7 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 test.describe.serial('Execution status text updates (SYN-205)', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
   let compilationWorks = false;
 
@@ -60,9 +60,9 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -71,20 +71,20 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
     }
   });
 
-  test('create scenario with a step and save', async ({ page }) => {
-    await page.goto('/scenarios/create');
+  test('create workflow with a step and save', async ({ page }) => {
+    await page.goto('/workflows/create');
     await page.waitForLoadState('networkidle');
 
-    await page.getByLabel('Name').fill(SCENARIO_NAME);
+    await page.getByLabel('Name').fill(WORKFLOW_NAME);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await page.waitForURL(
-      (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
       { timeout: 15000 }
     );
 
-    scenarioId = page.url().split('/scenarios/').pop()!;
-    expect(scenarioId).toBeTruthy();
+    workflowId = page.url().split('/workflows/').pop()!;
+    expect(workflowId).toBeTruthy();
 
     // Add a Random Double step (quick execution)
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
@@ -106,7 +106,7 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
     await expect(dialog).toBeVisible({ timeout: 5000 });
     await dialog.getByRole('button', { name: 'Save' }).click();
 
-    // Save scenario
+    // Save workflow
     const saveButton = page.getByTitle('Save changes');
     await expect(saveButton).toBeVisible({ timeout: 5000 });
     await saveButton.click();
@@ -118,7 +118,7 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
   test('execution shows status indicator and clear button removes it', async ({
     page,
   }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -127,7 +127,7 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
     await expect(page.getByTitle('Clear execution results')).not.toBeVisible();
 
     // Start execution
-    const playButton = page.getByTitle('Start scenario');
+    const playButton = page.getByTitle('Start workflow');
     await expect(playButton).toBeEnabled({ timeout: 10000 });
     await playButton.click();
 
@@ -138,7 +138,7 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
       });
     } catch {
       console.log('Execution did not start — compilation may be unavailable');
-      test.skip(true, 'Scenario compilation unavailable');
+      test.skip(true, 'Workflow compilation unavailable');
       return;
     }
 
@@ -149,7 +149,7 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
     await expect(page.getByTitle('Clear execution results')).toBeVisible();
 
     // Verify the canvas is locked (Play button disabled, Save disabled)
-    await expect(page.getByTitle('Start scenario')).toBeDisabled();
+    await expect(page.getByTitle('Start workflow')).toBeDisabled();
 
     // Clear execution results
     await page.getByTitle('Clear execution results').click();
@@ -161,23 +161,23 @@ test.describe.serial('Execution status text updates (SYN-205)', () => {
     await expect(page.getByTitle('Clear execution results')).not.toBeVisible();
 
     // Canvas should be unlocked (Play button enabled again)
-    await expect(page.getByTitle('Start scenario')).toBeEnabled({
+    await expect(page.getByTitle('Start workflow')).toBeEnabled({
       timeout: 5000,
     });
   });
 
-  test('delete scenario', async ({ page }) => {
+  test('delete workflow', async ({ page }) => {
     test.skip(!compilationWorks, 'Skipped — compilation unavailable');
 
-    await page.goto('/scenarios');
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: SCENARIO_NAME });
+    const card = page.locator('article').filter({ hasText: WORKFLOW_NAME });
     await expect(card).toBeVisible({ timeout: 10000 });
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
     await expect(card).not.toBeVisible({ timeout: 10000 });
 
-    scenarioId = '';
+    workflowId = '';
   });
 });

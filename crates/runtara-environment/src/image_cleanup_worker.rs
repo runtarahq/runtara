@@ -3,7 +3,7 @@
 //! Background worker for cleaning up unused images.
 //!
 //! Images accumulate over time because:
-//! - Each scenario recompilation registers a new image (new `image_id`)
+//! - Each workflow recompilation registers a new image (new `image_id`)
 //! - The image registry upserts on `(tenant_id, name)`, replacing the old `image_id`
 //! - Neither the registry nor the caller deletes the old image files from disk
 //!

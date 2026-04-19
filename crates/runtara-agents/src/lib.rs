@@ -1,12 +1,12 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Agents Library - Reusable agent implementations for scenarios
+//! Agents Library - Reusable agent implementations for workflows
 //!
 //! This library provides pre-compiled agent implementations that can be
-//! linked against scenario-specific code to speed up compilation.
+//! linked against workflow-specific code to speed up compilation.
 //!
 //! This file is compiled once at startup into `libagents.rlib` and then
-//! reused across all scenario compilations.
+//! reused across all workflow compilations.
 
 // Re-export all agent modules from agents/ subdirectory
 #[cfg(feature = "native")]
@@ -53,6 +53,6 @@ pub mod connections;
 // Re-export shared infrastructure
 pub mod registry;
 
-// Re-export commonly used types for scenario code
+// Re-export commonly used types for workflow code
 pub use serde;
 pub use serde_json;

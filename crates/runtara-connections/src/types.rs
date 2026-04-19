@@ -950,8 +950,8 @@ pub struct RuntimeConnectionQuery {
     pub tag: Option<String>,
     /// Step ID that triggered this connection request
     pub step_id: Option<String>,
-    /// Scenario ID that is executing
-    pub scenario_id: Option<String>,
+    /// Workflow ID that is executing
+    pub workflow_id: Option<String>,
     /// Instance ID of the execution
     pub instance_id: Option<String>,
 }

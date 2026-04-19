@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! DSL Type Definitions - Single Source of Truth
 //!
-//! This crate defines the scenario DSL types used throughout the codebase:
-//! - Runtime deserialization of scenario JSON
-//! - Compiler type-safe access to scenario structure
+//! This crate defines the workflow DSL types used throughout the codebase:
+//! - Runtime deserialization of workflow JSON
+//! - Compiler type-safe access to workflow structure
 //! - Auto-generation of JSON Schema via schemars (in build.rs)
 //!
 //! Changes to these types automatically update `specs/dsl/v{VERSION}/schema.json` on rebuild.
@@ -45,9 +45,9 @@ pub fn parse_execution_graph(json: &serde_json::Value) -> Result<ExecutionGraph,
         .map_err(|e| format!("Failed to parse execution graph: {}", e))
 }
 
-/// Parse a complete scenario from JSON Value
-pub fn parse_scenario(json: &serde_json::Value) -> Result<Scenario, String> {
-    serde_json::from_value(json.clone()).map_err(|e| format!("Failed to parse scenario: {}", e))
+/// Parse a complete workflow from JSON Value
+pub fn parse_workflow(json: &serde_json::Value) -> Result<Workflow, String> {
+    serde_json::from_value(json.clone()).map_err(|e| format!("Failed to parse workflow: {}", e))
 }
 
 /// Metadata about a step type for documentation
@@ -69,7 +69,7 @@ pub fn get_step_types() -> Vec<StepTypeInfo> {
     let mut steps = vec![StepTypeInfo {
         step_type: "Start".to_string(),
         category: "control".to_string(),
-        description: "Entry point - receives scenario inputs".to_string(),
+        description: "Entry point - receives workflow inputs".to_string(),
     }];
 
     // Collect step types registered via inventory
@@ -172,10 +172,10 @@ impl From<&SchemaFieldType> for String {
 }
 
 // ============================================================================
-// Scenario Error Introspection
+// Workflow Error Introspection
 // ============================================================================
 
-/// Information about a terminal error that a scenario can emit.
+/// Information about a terminal error that a workflow can emit.
 /// Terminal errors are Error steps that don't have outgoing edges -
 /// they terminate the workflow and bubble up to the parent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,8 +429,8 @@ mod tests {
         assert!(step_ids.contains(&"Split"), "Missing Split step type");
         assert!(step_ids.contains(&"Switch"), "Missing Switch step type");
         assert!(
-            step_ids.contains(&"StartScenario"),
-            "Missing StartScenario step type"
+            step_ids.contains(&"EmbedWorkflow"),
+            "Missing EmbedWorkflow step type"
         );
         assert!(step_ids.contains(&"While"), "Missing While step type");
         assert!(step_ids.contains(&"Log"), "Missing Log step type");
@@ -443,7 +443,7 @@ mod tests {
 
         for step in &step_types {
             match step.step_type.as_str() {
-                "Agent" | "StartScenario" => {
+                "Agent" | "EmbedWorkflow" => {
                     assert_eq!(
                         step.category, "execution",
                         "{} should be execution category",
@@ -827,10 +827,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_scenario_minimal() {
+    fn test_parse_workflow_minimal() {
         let json = serde_json::json!({
             "executionGraph": {
-                "name": "Test Scenario",
+                "name": "Test Workflow",
                 "description": "A test",
                 "entryPoint": "start",
                 "steps": {},
@@ -841,24 +841,24 @@ mod tests {
             }
         });
 
-        let scenario = parse_scenario(&json).expect("Should parse minimal scenario");
+        let workflow = parse_workflow(&json).expect("Should parse minimal workflow");
         assert_eq!(
-            scenario.execution_graph.name.as_deref(),
-            Some("Test Scenario")
+            workflow.execution_graph.name.as_deref(),
+            Some("Test Workflow")
         );
         assert_eq!(
-            scenario.execution_graph.description.as_deref(),
+            workflow.execution_graph.description.as_deref(),
             Some("A test")
         );
     }
 
     #[test]
-    fn test_parse_scenario_with_metadata() {
+    fn test_parse_workflow_with_metadata() {
         let json = serde_json::json!({
             "memoryTier": "L",
             "trackEvents": true,
             "executionGraph": {
-                "name": "Complete Scenario",
+                "name": "Complete Workflow",
                 "description": "With metadata",
                 "entryPoint": "start",
                 "steps": {},
@@ -869,24 +869,24 @@ mod tests {
             }
         });
 
-        let scenario = parse_scenario(&json).expect("Should parse scenario with metadata");
+        let workflow = parse_workflow(&json).expect("Should parse workflow with metadata");
         assert_eq!(
-            scenario.execution_graph.name.as_deref(),
-            Some("Complete Scenario")
+            workflow.execution_graph.name.as_deref(),
+            Some("Complete Workflow")
         );
-        assert_eq!(scenario.memory_tier, Some(MemoryTier::L));
-        assert_eq!(scenario.track_events, Some(true));
+        assert_eq!(workflow.memory_tier, Some(MemoryTier::L));
+        assert_eq!(workflow.track_events, Some(true));
     }
 
     #[test]
-    fn test_parse_scenario_invalid() {
+    fn test_parse_workflow_invalid() {
         let json = serde_json::json!({
-            "not_a_scenario": true
+            "not_a_workflow": true
         });
 
-        let result = parse_scenario(&json);
+        let result = parse_workflow(&json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse scenario"));
+        assert!(result.unwrap_err().contains("Failed to parse workflow"));
     }
 
     // ========================================================================

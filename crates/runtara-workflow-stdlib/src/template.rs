@@ -9,7 +9,7 @@ use minijinja::Environment;
 /// Render a minijinja template string with the given JSON context.
 ///
 /// The context should be a JSON object containing the execution state
-/// (data, variables, steps, scenario). Template expressions can reference
+/// (data, variables, steps, workflow). Template expressions can reference
 /// any path in this context using dot notation.
 ///
 /// # Examples

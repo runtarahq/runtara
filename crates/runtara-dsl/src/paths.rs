@@ -15,32 +15,32 @@ pub fn get_data_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(".data"))
 }
 
-/// Construct the scenario directory path
+/// Construct the workflow directory path
 ///
 /// # Arguments
 /// * `tenant_id` - The organization/tenant ID
-/// * `scenario_id` - The scenario ID
+/// * `workflow_id` - The workflow ID
 ///
 /// # Returns
-/// Path to the scenario directory: `{data_dir}/{tenant_id}/scenarios/{scenario_id}`
-pub fn get_scenario_dir(tenant_id: &str, scenario_id: &str) -> PathBuf {
+/// Path to the workflow directory: `{data_dir}/{tenant_id}/workflows/{workflow_id}`
+pub fn get_workflow_dir(tenant_id: &str, workflow_id: &str) -> PathBuf {
     get_data_dir()
         .join(tenant_id)
-        .join("scenarios")
-        .join(scenario_id)
+        .join("workflows")
+        .join(workflow_id)
 }
 
 /// Construct the translated crate directory path
 ///
 /// # Arguments
 /// * `tenant_id` - The organization/tenant ID
-/// * `scenario_id` - The scenario ID
+/// * `workflow_id` - The workflow ID
 /// * `version` - The version number
 ///
 /// # Returns
-/// Path to the translated crate: `{data_dir}/{tenant_id}/scenarios/{scenario_id}/translated/version_{version}`
-pub fn get_translated_dir(tenant_id: &str, scenario_id: &str, version: u32) -> PathBuf {
-    get_scenario_dir(tenant_id, scenario_id)
+/// Path to the translated crate: `{data_dir}/{tenant_id}/workflows/{workflow_id}/translated/version_{version}`
+pub fn get_translated_dir(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {
+    get_workflow_dir(tenant_id, workflow_id)
         .join("translated")
         .join(format!("version_{}", version))
 }
@@ -49,28 +49,28 @@ pub fn get_translated_dir(tenant_id: &str, scenario_id: &str, version: u32) -> P
 ///
 /// # Arguments
 /// * `tenant_id` - The organization/tenant ID
-/// * `scenario_id` - The scenario ID
+/// * `workflow_id` - The workflow ID
 /// * `version` - The version number
 ///
 /// # Returns
-/// Path to the compiled binary: `{data_dir}/{tenant_id}/scenarios/{scenario_id}/compiled/version_{version}`
-pub fn get_compiled_binary_path(tenant_id: &str, scenario_id: &str, version: u32) -> PathBuf {
-    get_scenario_dir(tenant_id, scenario_id)
+/// Path to the compiled binary: `{data_dir}/{tenant_id}/workflows/{workflow_id}/compiled/version_{version}`
+pub fn get_compiled_binary_path(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {
+    get_workflow_dir(tenant_id, workflow_id)
         .join("compiled")
         .join(format!("version_{}", version))
 }
 
-/// Construct the scenario JSON file path
+/// Construct the workflow JSON file path
 ///
 /// # Arguments
 /// * `tenant_id` - The organization/tenant ID
-/// * `scenario_id` - The scenario ID
+/// * `workflow_id` - The workflow ID
 /// * `version` - The version number
 ///
 /// # Returns
-/// Path to the scenario JSON: `{data_dir}/{tenant_id}/scenarios/{scenario_id}/{version}.json`
-pub fn get_scenario_json_path(tenant_id: &str, scenario_id: &str, version: u32) -> PathBuf {
-    get_scenario_dir(tenant_id, scenario_id).join(format!("{}.json", version))
+/// Path to the workflow JSON: `{data_dir}/{tenant_id}/workflows/{workflow_id}/{version}.json`
+pub fn get_workflow_json_path(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {
+    get_workflow_dir(tenant_id, workflow_id).join(format!("{}.json", version))
 }
 
 #[cfg(test)]
@@ -99,28 +99,28 @@ mod tests {
             std::env::set_var("DATA_DIR", "/test");
         }
 
-        let scenario_dir = get_scenario_dir("tenant1", "scenario1");
+        let workflow_dir = get_workflow_dir("tenant1", "workflow1");
         assert_eq!(
-            scenario_dir,
-            PathBuf::from("/test/tenant1/scenarios/scenario1")
+            workflow_dir,
+            PathBuf::from("/test/tenant1/workflows/workflow1")
         );
 
-        let translated_dir = get_translated_dir("tenant1", "scenario1", 5);
+        let translated_dir = get_translated_dir("tenant1", "workflow1", 5);
         assert_eq!(
             translated_dir,
-            PathBuf::from("/test/tenant1/scenarios/scenario1/translated/version_5")
+            PathBuf::from("/test/tenant1/workflows/workflow1/translated/version_5")
         );
 
-        let binary_path = get_compiled_binary_path("tenant1", "scenario1", 5);
+        let binary_path = get_compiled_binary_path("tenant1", "workflow1", 5);
         assert_eq!(
             binary_path,
-            PathBuf::from("/test/tenant1/scenarios/scenario1/compiled/version_5")
+            PathBuf::from("/test/tenant1/workflows/workflow1/compiled/version_5")
         );
 
-        let json_path = get_scenario_json_path("tenant1", "scenario1", 5);
+        let json_path = get_workflow_json_path("tenant1", "workflow1", 5);
         assert_eq!(
             json_path,
-            PathBuf::from("/test/tenant1/scenarios/scenario1/5.json")
+            PathBuf::from("/test/tenant1/workflows/workflow1/5.json")
         );
 
         unsafe {

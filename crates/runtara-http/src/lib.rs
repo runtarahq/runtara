@@ -214,7 +214,7 @@ impl RequestBuilder {
 
         // Forward tenant ID header (X-Org-Id)
         // Try from original request headers first, then from RUNTARA_TENANT_ID env var
-        // (cached on first read — env is stable for scenario lifetime).
+        // (cached on first read — env is stable for workflow lifetime).
         static TENANT_ID: OnceLock<Option<String>> = OnceLock::new();
         if let Some(tenant) = self
             .headers

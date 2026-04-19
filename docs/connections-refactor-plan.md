@@ -74,7 +74,7 @@ If the code answers "what business operation do I perform once I have a connecti
 
 - file storage business logic
 - object model business logic
-- scenario business logic
+- workflow business logic
 - trigger/channel lifecycle policy
 - webhook registration policy
 - agent testing/execution orchestration
@@ -271,7 +271,7 @@ pub struct RuntimeResolvedConnection {
 
 ### Validation API
 
-The server still needs scenario validation against existing connection IDs.
+The server still needs workflow validation against existing connection IDs.
 
 Expose a small catalog-oriented helper:
 
@@ -445,7 +445,7 @@ Actions:
   - `webhook_verification.rs`
   - channel files in `crates/runtara-server/src/channels/`
   so they use exported services from `runtara-connections`
-- update scenario services/handlers to use crate `list_existing_ids(...)`
+- update workflow services/handlers to use crate `list_existing_ids(...)`
 
 Output:
 
@@ -569,7 +569,7 @@ Only after consolidation:
 - `crates/runtara-server/src/api/services/webhook_manager.rs`
 - `crates/runtara-server/src/api/services/webhook_verification.rs`
 - `crates/runtara-server/src/channels/*`
-- scenario handlers/services that validate connection existence
+- workflow handlers/services that validate connection existence
 
 ## Risks
 

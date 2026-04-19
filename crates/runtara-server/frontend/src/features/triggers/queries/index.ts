@@ -1,20 +1,20 @@
 import * as RuntimeAPI from '@/generated/RuntaraRuntimeApi.ts';
 import { EnrichedTrigger } from '@/features/triggers/types';
 import { cronToHuman } from '@/features/triggers/utils/cron';
-import { createScenarioNameMap } from '@/features/triggers/utils/scenario-enrichment';
-import { getScenarios } from '@/features/scenarios/queries';
+import { createWorkflowNameMap } from '@/features/triggers/utils/workflow-enrichment';
+import { getWorkflows } from '@/features/workflows/queries';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
 
 // Helper function to convert snake_case API response to camelCase EnrichedTrigger for UI
 function transformTriggerFromAPI(
   trigger: RuntimeAPI.InvocationTrigger & { webhookUrl?: string | null },
-  scenarioName?: string
+  workflowName?: string
 ): EnrichedTrigger {
   return {
     id: trigger.id,
-    scenarioId: trigger.scenario_id,
-    scenarioName: scenarioName || trigger.scenario_id,
+    workflowId: trigger.workflow_id,
+    workflowName: workflowName || trigger.workflow_id,
     triggerType: trigger.trigger_type,
     configuration: trigger.configuration,
     active: trigger.active,
@@ -35,7 +35,7 @@ function transformTriggerToAPI(
   | RuntimeAPI.CreateInvocationTriggerRequest
   | RuntimeAPI.UpdateInvocationTriggerRequest {
   return {
-    scenario_id: trigger.scenarioId,
+    workflow_id: trigger.workflowId,
     trigger_type: trigger.triggerType,
     configuration: trigger.configuration || null,
     active: trigger.active ?? true,
@@ -45,16 +45,16 @@ function transformTriggerToAPI(
 }
 
 export async function getInvocationTriggers(token: string) {
-  // Fetch triggers and scenarios in parallel
-  const [triggersResult, scenariosResult] = await Promise.all([
+  // Fetch triggers and workflows in parallel
+  const [triggersResult, workflowsResult] = await Promise.all([
     RuntimeREST.api.listInvocationTriggers(createAuthHeaders(token)),
-    getScenarios(token),
+    getWorkflows(token),
   ]);
 
-  const scenarioNameMap = createScenarioNameMap(scenariosResult);
+  const workflowNameMap = createWorkflowNameMap(workflowsResult);
 
   return triggersResult.data.data.map((trigger) =>
-    transformTriggerFromAPI(trigger, scenarioNameMap.get(trigger.scenario_id))
+    transformTriggerFromAPI(trigger, workflowNameMap.get(trigger.workflow_id))
   );
 }
 
@@ -62,18 +62,18 @@ export async function getInvocationTriggerById(
   token: string,
   triggerId: string
 ) {
-  // Fetch trigger and scenarios in parallel
-  const [triggerResult, scenariosResult] = await Promise.all([
+  // Fetch trigger and workflows in parallel
+  const [triggerResult, workflowsResult] = await Promise.all([
     RuntimeREST.api.getInvocationTrigger(triggerId, createAuthHeaders(token)),
-    getScenarios(token),
+    getWorkflows(token),
   ]);
 
-  const scenarioNameMap = createScenarioNameMap(scenariosResult);
+  const workflowNameMap = createWorkflowNameMap(workflowsResult);
 
   const triggerData = triggerResult.data.data;
   const trigger = transformTriggerFromAPI(
     triggerData,
-    scenarioNameMap.get(triggerData.scenario_id)
+    workflowNameMap.get(triggerData.workflow_id)
   );
   const { configuration, ...restTrigger } = trigger;
 

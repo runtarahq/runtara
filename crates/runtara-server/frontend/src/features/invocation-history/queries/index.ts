@@ -1,13 +1,13 @@
 import {
   ListAllExecutionsResponse,
-  ScenarioInstanceDto,
+  WorkflowInstanceDto,
 } from '@/generated/RuntaraRuntimeApi';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
 import { ExecutionHistoryItem, ExecutionHistoryFilters } from '../types';
 
 // Extended type for instances that may include additional fields from the API
-type ScenarioInstanceWithTimestamps = ScenarioInstanceDto & {
+type WorkflowInstanceWithTimestamps = WorkflowInstanceDto & {
   started?: string | null;
   finished?: string | null;
 };
@@ -34,7 +34,7 @@ export async function getAllExecutions(
     {
       page: pageIndex,
       size: pageSize,
-      scenarioId: filters.scenarioId || undefined,
+      workflowId: filters.workflowId || undefined,
       status: filters.status || undefined,
       createdFrom: filters.createdFrom || undefined,
       createdTo: filters.createdTo || undefined,
@@ -53,10 +53,10 @@ export async function getAllExecutions(
 
   // Transform the API format to match our ExecutionHistoryItem format
   const executionHistory: ExecutionHistoryItem[] = instances.map(
-    (instance: ScenarioInstanceWithTimestamps) => ({
+    (instance: WorkflowInstanceWithTimestamps) => ({
       instanceId: instance.id,
-      scenarioId: instance.scenarioId,
-      scenarioName: instance.scenarioName ?? undefined,
+      workflowId: instance.workflowId,
+      workflowName: instance.workflowName ?? undefined,
       createdAt: instance.created,
       startedAt: instance.started || null,
       completedAt: instance.finished || instance.updated || null,

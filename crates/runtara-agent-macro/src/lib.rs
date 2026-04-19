@@ -1210,7 +1210,7 @@ pub fn derive_step_meta(input: TokenStream) -> TokenStream {
 
     // Default category based on step type
     let category = args.category.unwrap_or_else(|| match step_id.as_str() {
-        "Agent" | "StartScenario" => "execution".to_string(),
+        "Agent" | "EmbedWorkflow" => "execution".to_string(),
         _ => "control".to_string(),
     });
 

@@ -513,7 +513,7 @@ impl RateLimitService {
 
     /// Record a credential request (increments counters and logs event)
     ///
-    /// Called when a scenario requests connection credentials.
+    /// Called when a workflow requests connection credentials.
     /// This tracks the request in both Redis (counters) and PostgreSQL (timeline).
     pub async fn record_credential_request(
         &self,

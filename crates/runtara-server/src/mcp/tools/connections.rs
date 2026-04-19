@@ -21,8 +21,8 @@ pub struct ValidateGraphParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ValidateMappingsParams {
-    #[schemars(description = "Scenario ID")]
-    pub scenario_id: String,
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
     #[schemars(description = "Version number")]
     pub version: i32,
 }
@@ -55,7 +55,7 @@ pub async fn validate_graph(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let result = api_post(
         server,
-        "/api/runtime/scenarios/graph/validate",
+        "/api/runtime/workflows/graph/validate",
         Some(params.execution_graph),
     )
     .await?;
@@ -66,12 +66,12 @@ pub async fn validate_mappings(
     server: &SmoMcpServer,
     params: ValidateMappingsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    validate_path_param("scenario_id", &params.scenario_id)?;
+    validate_path_param("workflow_id", &params.workflow_id)?;
     let result = api_post(
         server,
         &format!(
-            "/api/runtime/scenarios/{}/validate-mappings?versionNumber={}",
-            params.scenario_id, params.version
+            "/api/runtime/workflows/{}/validate-mappings?versionNumber={}",
+            params.workflow_id, params.version
         ),
         None,
     )

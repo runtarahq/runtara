@@ -1,6 +1,6 @@
 //! Internal Object Model HTTP Handlers
 //!
-//! These endpoints are called by compiled scenario binaries (via ureq from runtara-agents)
+//! These endpoints are called by compiled workflow binaries (via ureq from runtara-agents)
 //! for object model CRUD operations. They have NO authentication middleware —
 //! the tenant_id is passed via the X-Org-Id header without JWT validation.
 //!
@@ -40,7 +40,7 @@ fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<String, (StatusC
 
 #[derive(Debug, Deserialize)]
 pub struct InternalCreateInstanceRequest {
-    /// Schema name (required — scenarios always know the schema name)
+    /// Schema name (required — workflows always know the schema name)
     pub schema_name: String,
     /// Properties to store
     pub properties: Value,

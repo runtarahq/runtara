@@ -13,7 +13,7 @@ use crate::api::dto::executions::{
 use crate::api::handlers::common::execution_error_response;
 use crate::workers::execution_engine::ExecutionEngine;
 
-/// List all executions across all scenarios with filtering, sorting, and pagination
+/// List all executions across all workflows with filtering, sorting, and pagination
 #[utoipa::path(
     get,
     path = "/api/runtime/executions",
@@ -104,10 +104,10 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         "createdAt" => "created_at",
         "completedAt" => "completed_at",
         "status" => "status",
-        "scenarioId" => "scenario_id",
+        "workflowId" => "workflow_id",
         _ => {
             return Err(format!(
-                "Invalid sortBy '{}'. Valid values: createdAt, completedAt, status, scenarioId",
+                "Invalid sortBy '{}'. Valid values: createdAt, completedAt, status, workflowId",
                 sort_by
             ));
         }
@@ -127,7 +127,7 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
     };
 
     Ok(ExecutionFilters {
-        scenario_id: query.scenario_id.clone(),
+        workflow_id: query.workflow_id.clone(),
         statuses,
         created_from: query.created_from,
         created_to: query.created_to,

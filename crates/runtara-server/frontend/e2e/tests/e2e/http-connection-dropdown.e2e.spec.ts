@@ -11,8 +11,8 @@ import { fileURLToPath } from 'url';
  *
  * Flow:
  * 1. Create an http_bearer connection via API
- * 2. Create a scenario via API
- * 3. Navigate to scenario editor, add an HTTP step via UI
+ * 2. Create a workflow via API
+ * 3. Navigate to workflow editor, add an HTTP step via UI
  * 4. Click "Select connection" → ConnectionPickerModal opens
  * 5. Verify the bearer connection is listed in the modal
  * 6. Clean up
@@ -58,7 +58,7 @@ function apiHeaders(token: string): Record<string, string> {
 test.describe.serial('HTTP Agent Connection Dropdown', () => {
   let token: string;
   let connectionId: string;
-  let scenarioId: string;
+  let workflowId: string;
 
   const CONNECTION_TITLE = `E2E Bearer ${Date.now()}`;
 
@@ -70,9 +70,9 @@ test.describe.serial('HTTP Agent Connection Dropdown', () => {
   test.afterAll(async () => {
     const headers = apiHeaders(token);
 
-    if (scenarioId) {
+    if (workflowId) {
       try {
-        await fetch(`${RUNTIME_API}/scenarios/${scenarioId}/delete`, {
+        await fetch(`${RUNTIME_API}/workflows/${workflowId}/delete`, {
           method: 'POST',
           headers,
         });
@@ -93,7 +93,7 @@ test.describe.serial('HTTP Agent Connection Dropdown', () => {
     }
   });
 
-  test('create bearer connection and scenario via API', async ({ request }) => {
+  test('create bearer connection and workflow via API', async ({ request }) => {
     const headers = apiHeaders(token);
 
     // 1. Create an http_bearer connection
@@ -115,25 +115,25 @@ test.describe.serial('HTTP Agent Connection Dropdown', () => {
     connectionId = connBody.connectionId;
     expect(connectionId).toBeTruthy();
 
-    // 2. Create a scenario
-    const scenarioRes = await request.post(`${RUNTIME_API}/scenarios/create`, {
+    // 2. Create a workflow
+    const workflowRes = await request.post(`${RUNTIME_API}/workflows/create`, {
       headers,
       data: {
         name: `E2E HTTP Dropdown ${Date.now()}`,
         description: 'E2E test — safe to delete',
       },
     });
-    expect(scenarioRes.status()).toBe(200);
-    const scenarioBody = await scenarioRes.json();
-    scenarioId = scenarioBody.data?.id;
-    expect(scenarioId).toBeTruthy();
+    expect(workflowRes.status()).toBe(200);
+    const workflowBody = await workflowRes.json();
+    workflowId = workflowBody.data?.id;
+    expect(workflowId).toBeTruthy();
   });
 
   test('connection picker shows bearer connection for HTTP step', async ({
     page,
   }) => {
-    // 1. Navigate to scenario editor
-    await page.goto(`/scenarios/${scenarioId}`);
+    // 1. Navigate to workflow editor
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 

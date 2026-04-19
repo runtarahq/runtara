@@ -9,37 +9,37 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 // ============================================================================
-// StartScenario Dependency Analysis
+// EmbedWorkflow Dependency Analysis
 // ============================================================================
 
-/// Represents a scenario reference (ID + version).
+/// Represents a workflow reference (ID + version).
 ///
 /// Used for dependency tracking and circular dependency detection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ScenarioReference {
-    /// The scenario's unique identifier.
-    pub scenario_id: String,
-    /// The scenario's version number.
+pub struct WorkflowReference {
+    /// The workflow's unique identifier.
+    pub workflow_id: String,
+    /// The workflow's version number.
     pub version: i32,
 }
 
-/// Information about a StartScenario step.
+/// Information about a EmbedWorkflow step.
 ///
 /// Extracted from the execution graph during dependency analysis.
 #[derive(Debug, Clone)]
-pub struct StartScenarioStepInfo {
+pub struct EmbedWorkflowStepInfo {
     /// The step ID in the parent workflow.
     pub step_id: String,
-    /// The scenario ID of the child workflow to start.
-    pub child_scenario_id: String,
+    /// The workflow ID of the child workflow to start.
+    pub child_workflow_id: String,
     /// The version requested ("latest", "current", or explicit number).
     pub child_version_requested: String,
 }
 
-/// Extracts all StartScenario steps from a scenario definition
-pub fn extract_start_scenario_steps(
+/// Extracts all EmbedWorkflow steps from a workflow definition
+pub fn extract_embed_workflow_steps(
     execution_graph: &Value,
-) -> Result<Vec<StartScenarioStepInfo>, String> {
+) -> Result<Vec<EmbedWorkflowStepInfo>, String> {
     let mut steps = Vec::new();
 
     let steps_obj = execution_graph
@@ -48,16 +48,16 @@ pub fn extract_start_scenario_steps(
         .ok_or_else(|| "Missing 'steps' object in execution graph".to_string())?;
 
     for (step_id, step_def) in steps_obj {
-        if step_def.get("stepType").and_then(|v| v.as_str()) == Some("StartScenario") {
-            let child_scenario_id = step_def
-                .get("childScenarioId")
+        if step_def.get("stepType").and_then(|v| v.as_str()) == Some("EmbedWorkflow") {
+            let child_workflow_id = step_def
+                .get("childWorkflowId")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| format!("StartScenario step '{}' missing childScenarioId", step_id))?
+                .ok_or_else(|| format!("EmbedWorkflow step '{}' missing childWorkflowId", step_id))?
                 .to_string();
 
             let child_version_requested = step_def
                 .get("childVersion")
-                .ok_or_else(|| format!("StartScenario step '{}' missing childVersion", step_id))?;
+                .ok_or_else(|| format!("EmbedWorkflow step '{}' missing childVersion", step_id))?;
 
             // Convert childVersion to string (might be number or string)
             let child_version_str = match child_version_requested {
@@ -65,15 +65,15 @@ pub fn extract_start_scenario_steps(
                 Value::Number(n) => n.to_string(),
                 _ => {
                     return Err(format!(
-                        "StartScenario step '{}' has invalid childVersion type",
+                        "EmbedWorkflow step '{}' has invalid childVersion type",
                         step_id
                     ));
                 }
             };
 
-            steps.push(StartScenarioStepInfo {
+            steps.push(EmbedWorkflowStepInfo {
                 step_id: step_id.clone(),
-                child_scenario_id,
+                child_workflow_id,
                 child_version_requested: child_version_str,
             });
         }
@@ -91,7 +91,7 @@ pub fn resolve_version(
     match version_str {
         "latest" => Ok(latest_version),
         "current" => current_version.ok_or_else(|| {
-            "Cannot resolve 'current' version: scenario has no current_version set".to_string()
+            "Cannot resolve 'current' version: workflow has no current_version set".to_string()
         }),
         _ => version_str.parse::<i32>().map_err(|_| {
             format!(
@@ -104,8 +104,8 @@ pub fn resolve_version(
 
 /// Represents the dependency graph for circular dependency detection
 pub struct DependencyGraph {
-    /// Map of (scenario_id, version) -> list of child (scenario_id, version) tuples
-    edges: HashMap<ScenarioReference, Vec<ScenarioReference>>,
+    /// Map of (workflow_id, version) -> list of child (workflow_id, version) tuples
+    edges: HashMap<WorkflowReference, Vec<WorkflowReference>>,
 }
 
 impl DependencyGraph {
@@ -117,13 +117,13 @@ impl DependencyGraph {
     }
 
     /// Add a dependency edge from parent to child
-    pub fn add_edge(&mut self, parent: ScenarioReference, child: ScenarioReference) {
+    pub fn add_edge(&mut self, parent: WorkflowReference, child: WorkflowReference) {
         self.edges.entry(parent).or_default().push(child);
     }
 
     /// Detect circular dependencies using depth-first search
     /// Returns Ok(()) if no cycles, or Err with the cycle path if a cycle is detected
-    pub fn detect_cycles(&self, start: &ScenarioReference) -> Result<(), Vec<ScenarioReference>> {
+    pub fn detect_cycles(&self, start: &WorkflowReference) -> Result<(), Vec<WorkflowReference>> {
         let mut visited = HashSet::new();
         let mut path = Vec::new();
 
@@ -133,10 +133,10 @@ impl DependencyGraph {
     /// Depth-first search helper for cycle detection
     fn dfs(
         &self,
-        node: &ScenarioReference,
-        visited: &mut HashSet<ScenarioReference>,
-        path: &mut Vec<ScenarioReference>,
-    ) -> Result<(), Vec<ScenarioReference>> {
+        node: &WorkflowReference,
+        visited: &mut HashSet<WorkflowReference>,
+        path: &mut Vec<WorkflowReference>,
+    ) -> Result<(), Vec<WorkflowReference>> {
         // Check if this node is already in the current path (cycle detected)
         if path.contains(node) {
             // Build the cycle path from where it starts repeating
@@ -177,7 +177,7 @@ impl DependencyGraph {
     }
 
     /// Format a cycle path as a human-readable error message
-    pub fn format_cycle_error(cycle: &[ScenarioReference]) -> String {
+    pub fn format_cycle_error(cycle: &[WorkflowReference]) -> String {
         let mut msg = String::from("Circular dependency detected:\n\nCycle path:\n");
         for (i, node) in cycle.iter().enumerate() {
             if i > 0 {
@@ -185,13 +185,13 @@ impl DependencyGraph {
             } else {
                 msg.push_str("  ");
             }
-            msg.push_str(&format!("{} (v{})", node.scenario_id, node.version));
+            msg.push_str(&format!("{} (v{})", node.workflow_id, node.version));
             if i == cycle.len() - 1 {
                 msg.push_str("  ← Cycle!");
             }
             msg.push('\n');
         }
-        msg.push_str("\nTo fix: Remove the StartScenario step that creates this cycle.\n");
+        msg.push_str("\nTo fix: Remove the EmbedWorkflow step that creates this cycle.\n");
         msg
     }
 }
@@ -223,7 +223,7 @@ mod tests {
         assert!(
             result
                 .unwrap_err()
-                .contains("scenario has no current_version set")
+                .contains("workflow has no current_version set")
         );
     }
 
@@ -242,16 +242,16 @@ mod tests {
     fn test_no_cycles() {
         // A → B → C (linear, no cycle)
         let mut graph = DependencyGraph::new();
-        let a = ScenarioReference {
-            scenario_id: "a".to_string(),
+        let a = WorkflowReference {
+            workflow_id: "a".to_string(),
             version: 1,
         };
-        let b = ScenarioReference {
-            scenario_id: "b".to_string(),
+        let b = WorkflowReference {
+            workflow_id: "b".to_string(),
             version: 1,
         };
-        let c = ScenarioReference {
-            scenario_id: "c".to_string(),
+        let c = WorkflowReference {
+            workflow_id: "c".to_string(),
             version: 1,
         };
 
@@ -265,12 +265,12 @@ mod tests {
     fn test_simple_cycle() {
         // A → B → A (cycle)
         let mut graph = DependencyGraph::new();
-        let a = ScenarioReference {
-            scenario_id: "a".to_string(),
+        let a = WorkflowReference {
+            workflow_id: "a".to_string(),
             version: 1,
         };
-        let b = ScenarioReference {
-            scenario_id: "b".to_string(),
+        let b = WorkflowReference {
+            workflow_id: "b".to_string(),
             version: 1,
         };
 
@@ -287,8 +287,8 @@ mod tests {
     fn test_self_reference() {
         // A → A (self-reference)
         let mut graph = DependencyGraph::new();
-        let a = ScenarioReference {
-            scenario_id: "a".to_string(),
+        let a = WorkflowReference {
+            workflow_id: "a".to_string(),
             version: 1,
         };
 
@@ -306,20 +306,20 @@ mod tests {
         //    \ /
         //     D
         let mut graph = DependencyGraph::new();
-        let a = ScenarioReference {
-            scenario_id: "a".to_string(),
+        let a = WorkflowReference {
+            workflow_id: "a".to_string(),
             version: 1,
         };
-        let b = ScenarioReference {
-            scenario_id: "b".to_string(),
+        let b = WorkflowReference {
+            workflow_id: "b".to_string(),
             version: 1,
         };
-        let c = ScenarioReference {
-            scenario_id: "c".to_string(),
+        let c = WorkflowReference {
+            workflow_id: "c".to_string(),
             version: 1,
         };
-        let d = ScenarioReference {
-            scenario_id: "d".to_string(),
+        let d = WorkflowReference {
+            workflow_id: "d".to_string(),
             version: 1,
         };
 
@@ -335,16 +335,16 @@ mod tests {
     fn test_different_versions_no_cycle() {
         // A(v1) → B(v2), B(v3) → A(v1) is NOT a cycle (different versions)
         let mut graph = DependencyGraph::new();
-        let a_v1 = ScenarioReference {
-            scenario_id: "a".to_string(),
+        let a_v1 = WorkflowReference {
+            workflow_id: "a".to_string(),
             version: 1,
         };
-        let b_v2 = ScenarioReference {
-            scenario_id: "b".to_string(),
+        let b_v2 = WorkflowReference {
+            workflow_id: "b".to_string(),
             version: 2,
         };
-        let b_v3 = ScenarioReference {
-            scenario_id: "b".to_string(),
+        let b_v3 = WorkflowReference {
+            workflow_id: "b".to_string(),
             version: 3,
         };
 
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_start_scenario_steps() {
+    fn test_extract_embed_workflow_steps() {
         let execution_graph = serde_json::json!({
             "steps": {
                 "step1": {
@@ -364,49 +364,49 @@ mod tests {
                     "operatorId": "utils"
                 },
                 "step2": {
-                    "stepType": "StartScenario",
-                    "childScenarioId": "child-scenario",
+                    "stepType": "EmbedWorkflow",
+                    "childWorkflowId": "child-workflow",
                     "childVersion": "latest"
                 },
                 "step3": {
-                    "stepType": "StartScenario",
-                    "childScenarioId": "another-child",
+                    "stepType": "EmbedWorkflow",
+                    "childWorkflowId": "another-child",
                     "childVersion": 42
                 }
             }
         });
 
-        let steps = extract_start_scenario_steps(&execution_graph).unwrap();
+        let steps = extract_embed_workflow_steps(&execution_graph).unwrap();
         assert_eq!(steps.len(), 2);
 
         // Note: HashMap iteration order is not guaranteed, so we check by finding
         let step2 = steps.iter().find(|s| s.step_id == "step2").unwrap();
-        assert_eq!(step2.child_scenario_id, "child-scenario");
+        assert_eq!(step2.child_workflow_id, "child-workflow");
         assert_eq!(step2.child_version_requested, "latest");
 
         let step3 = steps.iter().find(|s| s.step_id == "step3").unwrap();
-        assert_eq!(step3.child_scenario_id, "another-child");
+        assert_eq!(step3.child_workflow_id, "another-child");
         assert_eq!(step3.child_version_requested, "42");
     }
 
     #[test]
-    fn test_extract_start_scenario_steps_missing_child_id() {
+    fn test_extract_embed_workflow_steps_missing_child_id() {
         let execution_graph = serde_json::json!({
             "steps": {
                 "step1": {
-                    "stepType": "StartScenario",
+                    "stepType": "EmbedWorkflow",
                     "childVersion": "latest"
                 }
             }
         });
 
-        let result = extract_start_scenario_steps(&execution_graph);
+        let result = extract_embed_workflow_steps(&execution_graph);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing childScenarioId"));
+        assert!(result.unwrap_err().contains("missing childWorkflowId"));
     }
 
     #[test]
-    fn test_extract_start_scenario_steps_no_steps() {
+    fn test_extract_embed_workflow_steps_no_steps() {
         let execution_graph = serde_json::json!({
             "steps": {
                 "step1": {
@@ -420,7 +420,7 @@ mod tests {
             }
         });
 
-        let steps = extract_start_scenario_steps(&execution_graph).unwrap();
+        let steps = extract_embed_workflow_steps(&execution_graph).unwrap();
         assert!(steps.is_empty());
     }
 

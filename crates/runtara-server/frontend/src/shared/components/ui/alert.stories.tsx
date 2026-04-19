@@ -210,7 +210,7 @@ export const UseCases: Story = {
         <CheckCircle2 className="h-4 w-4" />
         <AlertTitle>Deployment Complete</AlertTitle>
         <AlertDescription>
-          Your scenario has been deployed successfully and is now running.
+          Your workflow has been deployed successfully and is now running.
         </AlertDescription>
       </Alert>
     </div>

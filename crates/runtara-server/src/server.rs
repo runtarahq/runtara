@@ -39,37 +39,37 @@ use runtime_client::RuntimeClient;
     paths(
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
-        // Scenario endpoints (refactored)
-        api::handlers::scenarios::create_scenario_handler,
-        api::handlers::scenarios::update_scenario_handler,
-        api::handlers::scenarios::toggle_track_events_handler,
-        api::handlers::scenarios::list_scenarios_handler,
-        api::handlers::scenarios::get_scenario_handler,
-        api::handlers::scenarios::list_scenario_versions_handler,
-        api::handlers::scenarios::compile_scenario_handler,
-        api::handlers::scenarios::execute_scenario_handler,
-        api::handlers::scenarios_sync::capture_http_event_sync,
-        api::handlers::scenarios::get_execution_metrics_handler,
-        api::handlers::scenarios::get_instance_handler,
-        api::handlers::scenarios::list_instances_handler,
-        api::handlers::scenarios::list_instance_checkpoints_handler,
-        api::handlers::scenarios::delete_scenario_handler,
-        api::handlers::scenarios::clone_scenario_handler,
-        api::handlers::scenarios::schedule_scenario_handler,
-        api::handlers::scenarios::set_current_version_handler,
-        api::handlers::scenarios::stop_instance_handler,
-        api::handlers::scenarios::pause_instance_handler,
-        api::handlers::scenarios::resume_instance_handler,
-        api::handlers::scenarios::replay_instance_handler,
-        api::handlers::scenarios::validate_graph_handler,
-        api::handlers::scenarios::validate_mappings_handler,
-        api::handlers::scenarios::get_step_subinstances_handler,
-        api::handlers::scenarios::list_step_types_handler,
-        api::handlers::scenarios::get_version_schemas_handler,
+        // Workflow endpoints (refactored)
+        api::handlers::workflows::create_workflow_handler,
+        api::handlers::workflows::update_workflow_handler,
+        api::handlers::workflows::toggle_track_events_handler,
+        api::handlers::workflows::list_workflows_handler,
+        api::handlers::workflows::get_workflow_handler,
+        api::handlers::workflows::list_workflow_versions_handler,
+        api::handlers::workflows::compile_workflow_handler,
+        api::handlers::workflows::execute_workflow_handler,
+        api::handlers::workflows_sync::capture_http_event_sync,
+        api::handlers::workflows::get_execution_metrics_handler,
+        api::handlers::workflows::get_instance_handler,
+        api::handlers::workflows::list_instances_handler,
+        api::handlers::workflows::list_instance_checkpoints_handler,
+        api::handlers::workflows::delete_workflow_handler,
+        api::handlers::workflows::clone_workflow_handler,
+        api::handlers::workflows::schedule_workflow_handler,
+        api::handlers::workflows::set_current_version_handler,
+        api::handlers::workflows::stop_instance_handler,
+        api::handlers::workflows::pause_instance_handler,
+        api::handlers::workflows::resume_instance_handler,
+        api::handlers::workflows::replay_instance_handler,
+        api::handlers::workflows::validate_graph_handler,
+        api::handlers::workflows::validate_mappings_handler,
+        api::handlers::workflows::get_step_subinstances_handler,
+        api::handlers::workflows::list_step_types_handler,
+        api::handlers::workflows::get_version_schemas_handler,
         // Folder management endpoints
-        api::handlers::scenarios::move_scenario_handler,
-        api::handlers::scenarios::list_folders_handler,
-        api::handlers::scenarios::rename_folder_handler,
+        api::handlers::workflows::move_workflow_handler,
+        api::handlers::workflows::list_folders_handler,
+        api::handlers::workflows::rename_folder_handler,
         api::handlers::step_events::get_step_events,
         api::handlers::step_summaries::get_step_summaries,
         // Agent endpoints
@@ -82,7 +82,7 @@ use runtime_client::RuntimeClient;
         // Agent execution endpoint (host-mediated, for WASM transition)
         api::handlers::agent_execution::execute_agent_handler,
         // Metadata endpoints
-        api::metadata::get_scenario_step_types_handler,
+        api::metadata::get_workflow_step_types_handler,
         // Object Model Schema endpoints
         api::handlers::object_model::create_schema,
         api::handlers::object_model::list_schemas,
@@ -114,8 +114,8 @@ use runtime_client::RuntimeClient;
         api::handlers::file_storage::delete_object,
         // NOTE: Connection endpoints are now served by runtara-connections crate
         // Metrics endpoints
-        api::metrics::get_scenario_metrics,
-        api::metrics::get_scenario_stats,
+        api::metrics::get_workflow_metrics,
+        api::metrics::get_workflow_stats,
         api::metrics::get_tenant_metrics,
         // Analytics endpoints
         api::analytics::get_system_analytics_handler,
@@ -154,32 +154,32 @@ use runtime_client::RuntimeClient;
             api::handlers::api_keys::ApiKey,
             api::handlers::api_keys::CreateApiKeyRequest,
             api::handlers::api_keys::CreateApiKeyResponse,
-            // Scenario DTOs (refactored)
-            api::dto::scenarios::ScenarioDto,
-            api::dto::scenarios::ScenarioVersionInfoDto,
-            api::dto::scenarios::ScenarioInstanceDto,
-            api::dto::scenarios::CompileScenarioResponse,
-            api::dto::scenarios::ExecuteScenarioRequest,
-            api::dto::scenarios::UpdateTrackEventsRequest,
-            api::dto::scenarios::ExecuteScenarioResponse,
-            api::dto::scenarios::PageScenarioDto,
-            api::dto::scenarios::PageScenarioInstanceHistoryDto,
-            api::dto::scenarios::CheckpointMetadataDto,
-            api::dto::scenarios::ListCheckpointsQuery,
-            api::dto::scenarios::ListCheckpointsResponse,
-            api::dto::scenarios::StepTypeInfo,
-            api::dto::scenarios::ListStepTypesResponse,
-            api::dto::scenarios::StepSubinstancesResponse,
-            api::dto::scenarios::StepEvent,
-            api::dto::scenarios::StepEventsData,
-            api::dto::scenarios::GetStepEventsResponse,
-            api::dto::scenarios::VersionSchemasResponse,
-            api::dto::scenarios::ValidationErrorDto,
-            api::dto::scenarios::WorkflowValidationErrorResponse,
+            // Workflow DTOs (refactored)
+            api::dto::workflows::WorkflowDto,
+            api::dto::workflows::WorkflowVersionInfoDto,
+            api::dto::workflows::WorkflowInstanceDto,
+            api::dto::workflows::CompileWorkflowResponse,
+            api::dto::workflows::ExecuteWorkflowRequest,
+            api::dto::workflows::UpdateTrackEventsRequest,
+            api::dto::workflows::ExecuteWorkflowResponse,
+            api::dto::workflows::PageWorkflowDto,
+            api::dto::workflows::PageWorkflowInstanceHistoryDto,
+            api::dto::workflows::CheckpointMetadataDto,
+            api::dto::workflows::ListCheckpointsQuery,
+            api::dto::workflows::ListCheckpointsResponse,
+            api::dto::workflows::StepTypeInfo,
+            api::dto::workflows::ListStepTypesResponse,
+            api::dto::workflows::StepSubinstancesResponse,
+            api::dto::workflows::StepEvent,
+            api::dto::workflows::StepEventsData,
+            api::dto::workflows::GetStepEventsResponse,
+            api::dto::workflows::VersionSchemasResponse,
+            api::dto::workflows::ValidationErrorDto,
+            api::dto::workflows::WorkflowValidationErrorResponse,
             api::dto::executions::ListAllExecutionsResponse,
             api::dto::operators::ListAgentsResponse,
             // DSL types from runtara-dsl (with utoipa feature enabled)
-            runtara_dsl::Scenario,
+            runtara_dsl::Workflow,
             runtara_dsl::MemoryTier,
             runtara_dsl::ExecutionGraph,
             runtara_dsl::ExecutionPlanEdge,
@@ -195,7 +195,7 @@ use runtime_client::RuntimeClient;
             runtara_dsl::WhileStep,
             runtara_dsl::LogStep,
 
-            runtara_dsl::StartScenarioStep,
+            runtara_dsl::EmbedWorkflowStep,
             runtara_dsl::ChildVersion,
             runtara_dsl::LogLevel,
             runtara_dsl::MappingValue,
@@ -273,18 +273,18 @@ use runtime_client::RuntimeClient;
             api::dto::triggers::UpdateInvocationTriggerRequest,
             api::metrics::MetricsQuery,
             api::metrics::MetricsResponse,
-            api::metrics::ScenarioMetricsDailyResponse,
-            api::metrics::ScenarioMetricsData,
-            api::metrics::ScenarioMetricsHourlyResponse,
-            api::metrics::ScenarioMetricsHourlyData,
-            api::metrics::ScenarioStatsResponse,
-            api::metrics::ScenarioStatsData,
-            api::metrics::ScenarioStats,
+            api::metrics::WorkflowMetricsDailyResponse,
+            api::metrics::WorkflowMetricsData,
+            api::metrics::WorkflowMetricsHourlyResponse,
+            api::metrics::WorkflowMetricsHourlyData,
+            api::metrics::WorkflowStatsResponse,
+            api::metrics::WorkflowStatsData,
+            api::metrics::WorkflowStats,
             api::metrics::TenantMetricsResponse,
             api::metrics::TenantMetricsData,
             api::metrics::TenantMetricsDataPoint,
-            metrics::ScenarioMetricsDaily,
-            metrics::ScenarioMetricsHourly,
+            metrics::WorkflowMetricsDaily,
+            metrics::WorkflowMetricsHourly,
             // Analytics DTOs
             api::analytics::SystemAnalyticsResponse,
             api::analytics::SystemAnalyticsData,
@@ -296,10 +296,10 @@ use runtime_client::RuntimeClient;
     ),
     tags(
         (name = "executions-controller", description = "Execution history and listing API endpoints"),
-        (name = "scenario-controller", description = "Scenario management API endpoints"),
+        (name = "workflow-controller", description = "Workflow management API endpoints"),
         (name = "steps-controller", description = "Step type discovery API endpoints"),
         (name = "agents-controller", description = "Agent discovery API endpoints"),
-        (name = "scenario-step-type-api", description = "Scenario step type metadata endpoints"),
+        (name = "workflow-step-type-api", description = "Workflow step type metadata endpoints"),
         (name = "object-storage-internal", description = "Internal object storage API endpoints"),
         (name = "object-storage-legacy", description = "Legacy object storage API endpoints"),
         (name = "object-model", description = "Object model schema and instance management API endpoints"),
@@ -314,7 +314,7 @@ use runtime_client::RuntimeClient;
     info(
         title = "Runtara API",
         version = "1",
-        description = "API for managing scenario definitions with versioning support",
+        description = "API for managing workflow definitions with versioning support",
     )
 )]
 struct ApiDoc;
@@ -334,7 +334,7 @@ struct AppState {
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
     valkey_conn: Option<redis::aio::ConnectionManager>,
-    /// Agent execution service for host-mediated agent calls from scenario instances
+    /// Agent execution service for host-mediated agent calls from workflow instances
     agent_execution: api::services::agent_execution::AgentExecutionService,
     /// Connections facade for unified connection operations
     connections: Arc<runtara_connections::ConnectionsFacade>,
@@ -436,7 +436,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Expose stdlib name to workflow compilation, which reads it from the process
     // environment at codegen time (runtara_workflows::agents_library and
     // runtara_workflows::codegen). This is the only env::set_var the server
-    // performs; all other scenario-side values are passed through
+    // performs; all other workflow-side values are passed through
     // LaunchOptions.env at runner launch time.
     // SAFETY: called early in start() before any threads are spawned.
     unsafe {
@@ -590,7 +590,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to connect to object model database");
 
-    // Run server migrations (scenarios, api_keys, etc.) against the main pool
+    // Run server migrations (workflows, api_keys, etc.) against the main pool
     run_server_migrations(&pool).await;
 
     // Create ObjectStoreManager from the pool (single-database mode for now)
@@ -606,8 +606,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // NOTE: Compilation records are now preserved across restarts.
     // Auto-recompilation happens on-demand when:
-    // - Scenario is saved (queued via compilation worker)
-    // - Execution is triggered but scenario is not compiled (auto-queued)
+    // - Workflow is saved (queued via compilation worker)
+    // - Execution is triggered but workflow is not compiled (auto-queued)
 
     // NOTE: Native library pre-compilation is now handled by runtara-workflows.
     // The runtara-environment server manages the compilation pipeline.
@@ -750,7 +750,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         let trigger_running_executions = running_executions.clone();
 
         // Start trigger worker (replaces native_worker for stream-based execution)
-        // NOTE: Trigger worker does NOT compile - it only executes pre-compiled scenarios.
+        // NOTE: Trigger worker does NOT compile - it only executes pre-compiled workflows.
         // Compilation is handled by the compilation worker.
         let trigger_worker_tenant_id = tenant_id.clone();
         let trigger_shutdown = shutdown_signal.clone();
@@ -875,12 +875,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Build the unified execution engine shared by handlers and workers.
     // Handlers use it directly via AppState / FromRef; the trigger worker
     // constructs its own instance (no trigger_stream) for the detached path.
-    let scenario_repo_for_engine = Arc::new(api::repositories::scenarios::ScenarioRepository::new(
+    let workflow_repo_for_engine = Arc::new(api::repositories::workflows::WorkflowRepository::new(
         pool.clone(),
     ));
     let execution_engine = Arc::new(workers::execution_engine::ExecutionEngine::new(
         pool.clone(),
-        scenario_repo_for_engine,
+        workflow_repo_for_engine,
         runtime_client.clone(),
         trigger_stream.clone(),
         Some(running_executions.clone()),
@@ -898,54 +898,54 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/executions",
             get(api::handlers::executions::list_all_executions_handler),
         )
-        // Scenario endpoints (refactored - using 3-layer architecture)
+        // Workflow endpoints (refactored - using 3-layer architecture)
         .route(
-            "/api/runtime/scenarios/create",
-            post(api::handlers::scenarios::create_scenario_handler),
+            "/api/runtime/workflows/create",
+            post(api::handlers::workflows::create_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/update",
-            post(api::handlers::scenarios::update_scenario_handler),
+            "/api/runtime/workflows/{id}/update",
+            post(api::handlers::workflows::update_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/versions/{version}/graph",
-            put(api::handlers::scenarios::patch_version_graph_handler),
+            "/api/runtime/workflows/{id}/versions/{version}/graph",
+            put(api::handlers::workflows::patch_version_graph_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/versions/{version}/track-events",
-            put(api::handlers::scenarios::toggle_track_events_handler),
+            "/api/runtime/workflows/{id}/versions/{version}/track-events",
+            put(api::handlers::workflows::toggle_track_events_handler),
         )
         .route(
-            "/api/runtime/scenarios",
-            get(api::handlers::scenarios::list_scenarios_handler),
+            "/api/runtime/workflows",
+            get(api::handlers::workflows::list_workflows_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}",
-            get(api::handlers::scenarios::get_scenario_handler),
+            "/api/runtime/workflows/{id}",
+            get(api::handlers::workflows::get_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/versions",
-            get(api::handlers::scenarios::list_scenario_versions_handler),
+            "/api/runtime/workflows/{id}/versions",
+            get(api::handlers::workflows::list_workflow_versions_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/versions/{version}/compile",
-            post(api::handlers::scenarios::compile_scenario_handler),
+            "/api/runtime/workflows/{id}/versions/{version}/compile",
+            post(api::handlers::workflows::compile_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/execute",
-            post(api::handlers::scenarios::execute_scenario_handler),
+            "/api/runtime/workflows/{id}/execute",
+            post(api::handlers::workflows::execute_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/chat",
+            "/api/runtime/workflows/{id}/chat",
             post(api::handlers::chat::chat_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/chat/start",
+            "/api/runtime/workflows/{id}/chat/start",
             post(api::handlers::chat::chat_start_handler),
         )
         // Session endpoints (session-based event handling for WaitForSignal)
         .route(
-            "/api/runtime/scenarios/{id}/sessions",
+            "/api/runtime/workflows/{id}/sessions",
             post(api::handlers::sessions::create_session),
         )
         .route(
@@ -958,83 +958,83 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             get(api::handlers::sessions::session_pending_input),
         )
         .route(
-            "/api/runtime/scenarios/{id}/instances",
-            get(api::handlers::scenarios::list_instances_handler),
+            "/api/runtime/workflows/{id}/instances",
+            get(api::handlers::workflows::list_instances_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/instances/{instanceId}",
-            get(api::handlers::scenarios::get_instance_handler),
+            "/api/runtime/workflows/{id}/instances/{instanceId}",
+            get(api::handlers::workflows::get_instance_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/instances/{instanceId}/checkpoints",
-            get(api::handlers::scenarios::list_instance_checkpoints_handler),
+            "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
+            get(api::handlers::workflows::list_instance_checkpoints_handler),
         )
         .route(
-            "/api/runtime/scenarios/instances/{instanceId}",
-            get(api::handlers::scenarios::get_execution_metrics_handler),
+            "/api/runtime/workflows/instances/{instanceId}",
+            get(api::handlers::workflows::get_execution_metrics_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/delete",
-            post(api::handlers::scenarios::delete_scenario_handler),
+            "/api/runtime/workflows/{id}/delete",
+            post(api::handlers::workflows::delete_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/clone",
-            post(api::handlers::scenarios::clone_scenario_handler),
+            "/api/runtime/workflows/{id}/clone",
+            post(api::handlers::workflows::clone_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/schedule",
-            post(api::handlers::scenarios::schedule_scenario_handler),
+            "/api/runtime/workflows/{id}/schedule",
+            post(api::handlers::workflows::schedule_workflow_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/versions/{versionNumber}/set-current",
-            post(api::handlers::scenarios::set_current_version_handler),
+            "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current",
+            post(api::handlers::workflows::set_current_version_handler),
         )
         .route(
-            "/api/runtime/scenarios/instances/{instanceId}/stop",
-            post(api::handlers::scenarios::stop_instance_handler),
+            "/api/runtime/workflows/instances/{instanceId}/stop",
+            post(api::handlers::workflows::stop_instance_handler),
         )
         .route(
-            "/api/runtime/scenarios/instances/{instanceId}/pause",
-            post(api::handlers::scenarios::pause_instance_handler),
+            "/api/runtime/workflows/instances/{instanceId}/pause",
+            post(api::handlers::workflows::pause_instance_handler),
         )
         .route(
-            "/api/runtime/scenarios/instances/{instanceId}/resume",
-            post(api::handlers::scenarios::resume_instance_handler),
+            "/api/runtime/workflows/instances/{instanceId}/resume",
+            post(api::handlers::workflows::resume_instance_handler),
         )
         .route(
-            "/api/runtime/scenarios/instances/{instanceId}/replay",
-            post(api::handlers::scenarios::replay_instance_handler),
+            "/api/runtime/workflows/instances/{instanceId}/replay",
+            post(api::handlers::workflows::replay_instance_handler),
         )
         .route(
-            "/api/runtime/scenarios/graph/validate",
-            post(api::handlers::scenarios::validate_graph_handler),
+            "/api/runtime/workflows/graph/validate",
+            post(api::handlers::workflows::validate_graph_handler),
         )
         .route(
-            "/api/runtime/scenarios/{scenarioId}/validate-mappings",
-            post(api::handlers::scenarios::validate_mappings_handler),
+            "/api/runtime/workflows/{workflowId}/validate-mappings",
+            post(api::handlers::workflows::validate_mappings_handler),
         )
         .route(
-            "/api/runtime/scenarios/instances/{instanceId}/steps/{stepId}/subinstances",
-            get(api::handlers::scenarios::get_step_subinstances_handler),
+            "/api/runtime/workflows/instances/{instanceId}/steps/{stepId}/subinstances",
+            get(api::handlers::workflows::get_step_subinstances_handler),
         )
         // Step Events endpoint (track-events mode - raw events)
         .route(
-            "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/step-events",
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
             get(api::handlers::step_events::get_step_events),
         )
         // Step Summaries endpoint (paired step records)
         .route(
-            "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/steps",
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
             get(api::handlers::step_summaries::get_step_summaries),
         )
         // Scope ancestors endpoint (for hierarchical step execution call stack)
         .route(
-            "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
             get(api::handlers::step_events::get_scope_ancestors),
         )
         // Pending human input endpoint (for AI Agent human-in-the-loop)
         .route(
-            "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/pending-input",
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
             get(api::handlers::step_events::get_pending_input),
         )
         // Signal delivery endpoint (submit human input to waiting AI Agent)
@@ -1044,41 +1044,41 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         // Dependency tracking endpoints
         .route(
-            "/api/runtime/scenarios/{id}/dependencies",
-            get(api::handlers::scenarios::get_scenario_dependencies_handler),
+            "/api/runtime/workflows/{id}/dependencies",
+            get(api::handlers::workflows::get_workflow_dependencies_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/dependents",
-            get(api::handlers::scenarios::get_scenario_dependents_handler),
+            "/api/runtime/workflows/{id}/dependents",
+            get(api::handlers::workflows::get_workflow_dependents_handler),
         )
         // Version-aware schema endpoint (reads from execution_graph)
         .route(
-            "/api/runtime/scenarios/{id}/versions/{version}/schemas",
-            get(api::handlers::scenarios::get_version_schemas_handler),
+            "/api/runtime/workflows/{id}/versions/{version}/schemas",
+            get(api::handlers::workflows::get_version_schemas_handler),
         )
         // Folder management endpoints
         .route(
-            "/api/runtime/scenarios/folders",
-            get(api::handlers::scenarios::list_folders_handler),
+            "/api/runtime/workflows/folders",
+            get(api::handlers::workflows::list_folders_handler),
         )
         .route(
-            "/api/runtime/scenarios/folders/rename",
-            put(api::handlers::scenarios::rename_folder_handler),
+            "/api/runtime/workflows/folders/rename",
+            put(api::handlers::workflows::rename_folder_handler),
         )
         .route(
-            "/api/runtime/scenarios/{id}/move",
-            put(api::handlers::scenarios::move_scenario_handler),
+            "/api/runtime/workflows/{id}/move",
+            put(api::handlers::workflows::move_workflow_handler),
         )
         // NOTE: Connection CRUD, OAuth authorize, and type discovery routes are now
         // served by runtara-connections crate — see connections_tenant_routes below.
         // Metrics endpoints
         .route(
-            "/api/runtime/metrics/scenarios/{scenario_id}",
-            get(api::metrics::get_scenario_metrics),
+            "/api/runtime/metrics/workflows/{workflow_id}",
+            get(api::metrics::get_workflow_metrics),
         )
         .route(
-            "/api/runtime/metrics/scenarios/{scenario_id}/stats",
-            get(api::metrics::get_scenario_stats),
+            "/api/runtime/metrics/workflows/{workflow_id}/stats",
+            get(api::metrics::get_workflow_stats),
         )
         .route(
             "/api/runtime/metrics/tenant",
@@ -1150,12 +1150,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         // Step type endpoints
         .route(
             "/api/runtime/steps",
-            get(api::handlers::scenarios::list_step_types_handler),
+            get(api::handlers::workflows::list_step_types_handler),
         )
         // Metadata endpoints
         .route(
-            "/api/runtime/metadata/scenario/step-types",
-            get(api::metadata::get_scenario_step_types_handler),
+            "/api/runtime/metadata/workflow/step-types",
+            get(api::metadata::get_workflow_step_types_handler),
         )
         // Specification endpoints (serve pre-generated specs)
         .route(
@@ -1358,7 +1358,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Create router for public/global endpoints (no tenant auth required)
     let public_routes = Router::new().route("/health", get(health_handler));
 
-    // Internal API routes (called by scenario binaries, no tenant header required)
+    // Internal API routes (called by workflow binaries, no tenant header required)
     // Runtime connection endpoint now served by runtara-connections crate
     // Path: /api/connections/{tenant_id}/{connection_id}
     let internal_routes = runtara_connections::runtime_router(connections_config.clone());
@@ -1367,9 +1367,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // Crate-owned so the HTTP surface stays colocated with the domain logic.
     let connections_admin_routes = runtara_connections::admin_router(connections_config.clone());
 
-    // Internal Object Model API routes (called by integration agents in scenario binaries)
+    // Internal Object Model API routes (called by integration agents in workflow binaries)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
-    // These are only accessible from localhost (scenario containers use pasta networking).
+    // These are only accessible from localhost (workflow containers use pasta networking).
     let internal_object_model_state = Arc::new(api::handlers::object_model::ObjectModelState {
         manager: object_store_manager.clone(),
         pool: pool.clone(),
@@ -1406,7 +1406,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(internal_object_model_state);
 
-    // Internal HTTP proxy routes (called by WASM scenarios for credential injection)
+    // Internal HTTP proxy routes (called by WASM workflows for credential injection)
     // NO authentication — tenant_id is passed via X-Org-Id header without JWT validation.
     let internal_proxy_state = Arc::new(api::handlers::internal_proxy::ProxyState {
         facade: connections_facade.clone(),
@@ -1420,9 +1420,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(internal_proxy_state);
 
-    // Internal Agent Service routes (called by WASM scenarios for native-only capabilities)
+    // Internal Agent Service routes (called by WASM workflows for native-only capabilities)
     // NO authentication — only accessible from localhost.
-    // Body limit raised to 64 MB: WASM scenarios POST base64-encoded archives
+    // Body limit raised to 64 MB: WASM workflows POST base64-encoded archives
     // (e.g. 4.5 MB ZIP → ~6 MB JSON) which exceed Axum's default 2 MB limit.
     let internal_agent_routes = Router::new()
         .route(
@@ -1436,12 +1436,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // configured TENANT_ID directly (single-tenant runtime).
     let event_routes = Router::new()
         .route(
-            "/api/runtime/events/http-sync/{scenario_id}",
-            post(api::handlers::scenarios_sync::capture_http_event_sync)
-                .get(api::handlers::scenarios_sync::capture_http_event_sync)
-                .put(api::handlers::scenarios_sync::capture_http_event_sync)
-                .delete(api::handlers::scenarios_sync::capture_http_event_sync)
-                .patch(api::handlers::scenarios_sync::capture_http_event_sync),
+            "/api/runtime/events/http-sync/{workflow_id}",
+            post(api::handlers::workflows_sync::capture_http_event_sync)
+                .get(api::handlers::workflows_sync::capture_http_event_sync)
+                .put(api::handlers::workflows_sync::capture_http_event_sync)
+                .delete(api::handlers::workflows_sync::capture_http_event_sync)
+                .patch(api::handlers::workflows_sync::capture_http_event_sync),
         )
         .route(
             "/api/runtime/events/http/{trigger_id}/{action}",
@@ -1608,7 +1608,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware));
 
     // =========================================================================
-    // Internal API server — localhost only, called by scenario binaries / WASM
+    // Internal API server — localhost only, called by workflow binaries / WASM
     // =========================================================================
     let internal_app = Router::new()
         .nest("/api/connections", internal_routes)
@@ -1742,7 +1742,7 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-/// Run server-specific database migrations (scenarios, api_keys, triggers, connections).
+/// Run server-specific database migrations (workflows, api_keys, triggers, connections).
 ///
 /// These run against the main server pool (OBJECT_MODEL_DATABASE_URL) which holds
 /// all server-managed tables. Uses ignore_missing since this pool may share the

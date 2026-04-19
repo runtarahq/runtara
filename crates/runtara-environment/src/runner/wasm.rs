@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! WebAssembly runner using wasmtime.
 //!
-//! Launches WASM scenario binaries via the `wasmtime` CLI with WASI support.
+//! Launches WASM workflow binaries via the `wasmtime` CLI with WASI support.
 //! Output is read from runtara-core persistence (the SDK reports completion/failure
 //! via HTTP). No filesystem I/O is needed for input or output.
 
@@ -95,7 +95,7 @@ impl WasmRunnerConfig {
 
 /// WebAssembly runner.
 ///
-/// Executes WASM scenario binaries via wasmtime with WASI HTTP and network support.
+/// Executes WASM workflow binaries via wasmtime with WASI HTTP and network support.
 /// Output is read from runtara-core persistence after process exit (the SDK reports
 /// completion/failure via HTTP to runtara-core during execution).
 pub struct WasmRunner {
@@ -124,7 +124,7 @@ impl WasmRunner {
         binary_path.to_path_buf()
     }
 
-    /// Build environment variables for the scenario process.
+    /// Build environment variables for the workflow process.
     fn build_env(
         &self,
         instance_id: &str,
@@ -136,7 +136,7 @@ impl WasmRunner {
         let mut env = HashMap::new();
         env.insert("RUNTARA_INSTANCE_ID".to_string(), instance_id.to_string());
         env.insert("RUNTARA_TENANT_ID".to_string(), tenant_id.to_string());
-        // Suppress verbose tracing in WASM scenarios to reduce stderr output.
+        // Suppress verbose tracing in WASM workflows to reduce stderr output.
         env.insert("RUST_LOG".to_string(), "warn".to_string());
         env.insert(
             "RUNTARA_HTTP_URL".to_string(),

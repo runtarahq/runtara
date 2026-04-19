@@ -23,14 +23,14 @@ impl TriggerRepository {
         let trigger = sqlx::query_as::<_, InvocationTrigger>(
             r#"
             INSERT INTO public.invocation_trigger
-                (tenant_id, scenario_id, trigger_type, active, configuration, remote_tenant_id, single_instance)
+                (tenant_id, workflow_id, trigger_type, active, configuration, remote_tenant_id, single_instance)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, tenant_id, scenario_id, trigger_type, active, configuration,
+            RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
                       created_at, last_run, updated_at, remote_tenant_id, single_instance
             "#,
         )
         .bind(tenant_id)
-        .bind(&request.scenario_id)
+        .bind(&request.workflow_id)
         .bind(&request.trigger_type)
         .bind(request.active)
         .bind(&request.configuration)
@@ -50,7 +50,7 @@ impl TriggerRepository {
         let triggers = if let Some(tid) = tenant_id {
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
-                SELECT id, tenant_id, scenario_id, trigger_type, active, configuration,
+                SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                        created_at, last_run, updated_at, remote_tenant_id, single_instance
                 FROM public.invocation_trigger
                 WHERE tenant_id = $1 OR tenant_id IS NULL
@@ -63,7 +63,7 @@ impl TriggerRepository {
         } else {
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
-                SELECT id, tenant_id, scenario_id, trigger_type, active, configuration,
+                SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                        created_at, last_run, updated_at, remote_tenant_id, single_instance
                 FROM public.invocation_trigger
                 ORDER BY created_at DESC
@@ -85,7 +85,7 @@ impl TriggerRepository {
         let trigger = if let Some(tid) = tenant_id {
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
-                SELECT id, tenant_id, scenario_id, trigger_type, active, configuration,
+                SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                        created_at, last_run, updated_at, remote_tenant_id, single_instance
                 FROM public.invocation_trigger
                 WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
@@ -98,7 +98,7 @@ impl TriggerRepository {
         } else {
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
-                SELECT id, tenant_id, scenario_id, trigger_type, active, configuration,
+                SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                        created_at, last_run, updated_at, remote_tenant_id, single_instance
                 FROM public.invocation_trigger
                 WHERE id = $1
@@ -123,19 +123,19 @@ impl TriggerRepository {
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
                 UPDATE public.invocation_trigger
-                SET scenario_id = $2,
+                SET workflow_id = $2,
                     trigger_type = $3,
                     active = $4,
                     configuration = $5,
                     remote_tenant_id = $6,
                     single_instance = $7
                 WHERE id = $1 AND (tenant_id = $8 OR tenant_id IS NULL)
-                RETURNING id, tenant_id, scenario_id, trigger_type, active, configuration,
+                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
                           created_at, last_run, updated_at, remote_tenant_id, single_instance
                 "#,
             )
             .bind(id)
-            .bind(&request.scenario_id)
+            .bind(&request.workflow_id)
             .bind(&request.trigger_type)
             .bind(request.active)
             .bind(&request.configuration)
@@ -148,19 +148,19 @@ impl TriggerRepository {
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
                 UPDATE public.invocation_trigger
-                SET scenario_id = $2,
+                SET workflow_id = $2,
                     trigger_type = $3,
                     active = $4,
                     configuration = $5,
                     remote_tenant_id = $6,
                     single_instance = $7
                 WHERE id = $1
-                RETURNING id, tenant_id, scenario_id, trigger_type, active, configuration,
+                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
                           created_at, last_run, updated_at, remote_tenant_id, single_instance
                 "#,
             )
             .bind(id)
-            .bind(&request.scenario_id)
+            .bind(&request.workflow_id)
             .bind(&request.trigger_type)
             .bind(request.active)
             .bind(&request.configuration)
