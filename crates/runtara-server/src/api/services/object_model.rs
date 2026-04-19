@@ -626,9 +626,10 @@ impl InstanceService {
             .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
 
         let opts = bulk_create_options_from_request(&request)?;
+        let instances = normalize_bulk_create_instances(&request, &schema)?;
 
         store
-            .create_instances_extended(&schema.name, request.instances, opts)
+            .create_instances_extended(&schema.name, instances, opts)
             .await
             .map_err(|e| {
                 if e.to_string().contains("validation") || e.to_string().contains("Invalid") {
@@ -704,6 +705,117 @@ impl InstanceService {
 // Service Errors
 // ============================================================================
 
+/// Normalize the two supported bulk-create shapes (object form vs columnar
+/// form) into a single `Vec<Value>` of record objects that the store accepts.
+///
+/// Object form passes through unchanged. Columnar form pairs each row with
+/// `columns` (length-matched), merges `constants` as defaults, and — if
+/// `nullifyEmptyStrings` is set — replaces `""` in non-string columns with
+/// `null` before type validation runs.
+///
+/// Rules:
+/// - Exactly one of `instances` or (`columns` + `rows`) must be provided.
+/// - Row length must equal `columns.len()`.
+/// - Row values take precedence over `constants` on key overlap.
+pub(crate) fn normalize_bulk_create_instances(
+    request: &BulkCreateRequest,
+    schema: &runtara_object_store::Schema,
+) -> Result<Vec<serde_json::Value>, ServiceError> {
+    normalize_bulk_create_inputs(
+        request.instances.as_deref(),
+        request.columns.as_deref(),
+        request.rows.as_deref(),
+        &request.constants,
+        request.nullify_empty_strings,
+        schema,
+    )
+}
+
+/// Lower-level normalizer used by both the public service path (via
+/// [`normalize_bulk_create_instances`]) and the internal-handler path (which
+/// doesn't construct a `BulkCreateRequest`).
+pub(crate) fn normalize_bulk_create_inputs(
+    instances: Option<&[serde_json::Value]>,
+    columns: Option<&[String]>,
+    rows: Option<&[Vec<serde_json::Value>]>,
+    constants: &serde_json::Map<String, serde_json::Value>,
+    nullify_empty_strings: bool,
+    schema: &runtara_object_store::Schema,
+) -> Result<Vec<serde_json::Value>, ServiceError> {
+    match (instances, columns, rows) {
+        (Some(inst), None, None) => Ok(inst.to_vec()),
+
+        (None, Some(cols), Some(rows)) => {
+            build_columnar_instances(cols, rows, constants, nullify_empty_strings, schema)
+        }
+
+        (None, Some(_), None) | (None, None, Some(_)) => Err(ServiceError::ValidationError(
+            "columnar form requires both `columns` and `rows`".to_string(),
+        )),
+
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(ServiceError::ValidationError(
+            "provide either `instances` or `columns` + `rows`, not both".to_string(),
+        )),
+
+        (None, None, None) => Err(ServiceError::ValidationError(
+            "must provide either `instances` or `columns` + `rows`".to_string(),
+        )),
+    }
+}
+
+fn build_columnar_instances(
+    columns: &[String],
+    rows: &[Vec<serde_json::Value>],
+    constants: &serde_json::Map<String, serde_json::Value>,
+    nullify_empty_strings: bool,
+    schema: &runtara_object_store::Schema,
+) -> Result<Vec<serde_json::Value>, ServiceError> {
+    // Pre-compute which columns should nullify empty strings (non-string,
+    // non-enum columns). Only populated when the flag is on.
+    let nullify_cols: std::collections::HashSet<&str> = if nullify_empty_strings {
+        schema
+            .columns
+            .iter()
+            .filter(|c| {
+                !matches!(
+                    c.column_type,
+                    runtara_object_store::ColumnType::String
+                        | runtara_object_store::ColumnType::Enum { .. }
+                )
+            })
+            .map(|c| c.name.as_str())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let mut result = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        if row.len() != columns.len() {
+            return Err(ServiceError::ValidationError(format!(
+                "row {} has {} cells, expected {} to match `columns`",
+                idx,
+                row.len(),
+                columns.len()
+            )));
+        }
+        let mut obj = constants.clone();
+        for (col, val) in columns.iter().zip(row.iter()) {
+            let val = if nullify_cols.contains(col.as_str()) {
+                match val {
+                    serde_json::Value::String(s) if s.is_empty() => serde_json::Value::Null,
+                    other => other.clone(),
+                }
+            } else {
+                val.clone()
+            };
+            obj.insert(col.clone(), val);
+        }
+        result.push(serde_json::Value::Object(obj));
+    }
+    Ok(result)
+}
+
 /// Build store-side bulk-create options from the DTO request, validating
 /// that `conflict_columns` is provided whenever `onConflict` is `skip` or
 /// `upsert` (the user explicitly chose this over silently defaulting to `id`).
@@ -770,3 +882,204 @@ impl std::fmt::Display for ServiceError {
 }
 
 impl std::error::Error for ServiceError {}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+    use runtara_object_store::{ColumnDefinition, ColumnType, Schema};
+
+    fn schema_with(cols: Vec<ColumnDefinition>) -> Schema {
+        Schema::new("sid", "Test", "test_table", cols)
+    }
+
+    fn cd(name: &str, t: ColumnType) -> ColumnDefinition {
+        ColumnDefinition::new(name, t)
+    }
+
+    #[test]
+    fn object_form_passes_through() {
+        let schema = schema_with(vec![cd("sku", ColumnType::String)]);
+        let instances = vec![
+            serde_json::json!({"sku": "A"}),
+            serde_json::json!({"sku": "B"}),
+        ];
+        let out = normalize_bulk_create_inputs(
+            Some(&instances),
+            None,
+            None,
+            &serde_json::Map::new(),
+            false,
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(out, instances);
+    }
+
+    #[test]
+    fn columnar_form_pairs_with_constants() {
+        let schema = schema_with(vec![
+            cd("sku", ColumnType::String),
+            cd("qty", ColumnType::Integer),
+            cd("snapshot_date", ColumnType::String),
+        ]);
+        let cols = vec!["sku".to_string(), "qty".to_string()];
+        let rows = vec![
+            vec![serde_json::json!("A"), serde_json::json!(1)],
+            vec![serde_json::json!("B"), serde_json::json!(2)],
+        ];
+        let mut constants = serde_json::Map::new();
+        constants.insert("snapshot_date".into(), serde_json::json!("2026-04-18"));
+
+        let out = normalize_bulk_create_inputs(
+            None,
+            Some(&cols),
+            Some(&rows),
+            &constants,
+            false,
+            &schema,
+        )
+        .unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["sku"], serde_json::json!("A"));
+        assert_eq!(out[0]["qty"], serde_json::json!(1));
+        assert_eq!(out[0]["snapshot_date"], serde_json::json!("2026-04-18"));
+    }
+
+    #[test]
+    fn row_cells_win_over_constants_on_overlap() {
+        let schema = schema_with(vec![cd("sku", ColumnType::String)]);
+        let cols = vec!["sku".to_string()];
+        let rows = vec![vec![serde_json::json!("row-value")]];
+        let mut constants = serde_json::Map::new();
+        constants.insert("sku".into(), serde_json::json!("constant-value"));
+
+        let out = normalize_bulk_create_inputs(
+            None,
+            Some(&cols),
+            Some(&rows),
+            &constants,
+            false,
+            &schema,
+        )
+        .unwrap();
+
+        assert_eq!(out[0]["sku"], serde_json::json!("row-value"));
+    }
+
+    #[test]
+    fn nullify_empty_strings_only_hits_non_string_columns() {
+        let schema = schema_with(vec![
+            cd("name", ColumnType::String),
+            cd("qty", ColumnType::Integer),
+            cd("when", ColumnType::Timestamp),
+        ]);
+        let cols = vec!["name".to_string(), "qty".to_string(), "when".to_string()];
+        let rows = vec![vec![
+            serde_json::json!(""),
+            serde_json::json!(""),
+            serde_json::json!(""),
+        ]];
+
+        let out = normalize_bulk_create_inputs(
+            None,
+            Some(&cols),
+            Some(&rows),
+            &serde_json::Map::new(),
+            true, // nullify on
+            &schema,
+        )
+        .unwrap();
+
+        // String column keeps its empty string; Integer + Timestamp become null.
+        assert_eq!(out[0]["name"], serde_json::json!(""));
+        assert!(out[0]["qty"].is_null());
+        assert!(out[0]["when"].is_null());
+    }
+
+    #[test]
+    fn nullify_off_leaves_empty_strings_alone() {
+        let schema = schema_with(vec![cd("qty", ColumnType::Integer)]);
+        let cols = vec!["qty".to_string()];
+        let rows = vec![vec![serde_json::json!("")]];
+        let out = normalize_bulk_create_inputs(
+            None,
+            Some(&cols),
+            Some(&rows),
+            &serde_json::Map::new(),
+            false,
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(out[0]["qty"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn mismatched_row_length_errors() {
+        let schema = schema_with(vec![
+            cd("a", ColumnType::String),
+            cd("b", ColumnType::String),
+        ]);
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let rows = vec![vec![serde_json::json!("x")]]; // 1 cell, expected 2
+        let err = normalize_bulk_create_inputs(
+            None,
+            Some(&cols),
+            Some(&rows),
+            &serde_json::Map::new(),
+            false,
+            &schema,
+        )
+        .unwrap_err();
+        match err {
+            ServiceError::ValidationError(msg) => {
+                assert!(msg.contains("row 0"));
+                assert!(msg.contains("1 cells, expected 2"));
+            }
+            other => panic!("expected validation error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn providing_both_shapes_errors() {
+        let schema = schema_with(vec![cd("sku", ColumnType::String)]);
+        let instances = vec![serde_json::json!({"sku": "A"})];
+        let cols = vec!["sku".to_string()];
+        let rows = vec![vec![serde_json::json!("B")]];
+        let err = normalize_bulk_create_inputs(
+            Some(&instances),
+            Some(&cols),
+            Some(&rows),
+            &serde_json::Map::new(),
+            false,
+            &schema,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::ValidationError(_)));
+    }
+
+    #[test]
+    fn providing_neither_shape_errors() {
+        let schema = schema_with(vec![cd("sku", ColumnType::String)]);
+        let err =
+            normalize_bulk_create_inputs(None, None, None, &serde_json::Map::new(), false, &schema)
+                .unwrap_err();
+        assert!(matches!(err, ServiceError::ValidationError(_)));
+    }
+
+    #[test]
+    fn columnar_without_rows_errors() {
+        let schema = schema_with(vec![cd("sku", ColumnType::String)]);
+        let cols = vec!["sku".to_string()];
+        let err = normalize_bulk_create_inputs(
+            None,
+            Some(&cols),
+            None,
+            &serde_json::Map::new(),
+            false,
+            &schema,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ServiceError::ValidationError(_)));
+    }
+}

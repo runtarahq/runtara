@@ -46,6 +46,10 @@ DELETE /instances/{schema_id}/bulk          → bulk delete by ids (existed; now
 
 #### POST — bulk create
 
+Two accepted shapes — pick whichever fits your caller. Provide exactly one.
+
+**Object form** — one JSON object per record:
+
 ```jsonc
 {
   "instances": [ {...}, {...} ],
@@ -55,7 +59,27 @@ DELETE /instances/{schema_id}/bulk          → bulk delete by ids (existed; now
 }
 ```
 
-Response:
+**Columnar form** — column names once, rows as arrays. Cuts ~2–3× on wire size
+for large uniform payloads (snapshots, CSV-style writes). `constants` are merged
+into every row; row values win on key overlap. `nullifyEmptyStrings` (default
+false) converts `""` in non-string columns to `null` before validation — handy
+when sources (CSV, SFTP) deliver missing cells as empty strings.
+
+```jsonc
+{
+  "columns": ["sku", "warehouse_id", "qty", "available_date"],
+  "rows": [
+    ["ABC", "1818", "5", "2026-04-18T08:00:00+00:00"],
+    ["DEF", "1818", "2", ""]
+  ],
+  "constants":          { "snapshot_date": "2026-04-18" },
+  "nullifyEmptyStrings": true,
+  "onConflict":          "skip",
+  "conflictColumns":     ["sku", "warehouse_id", "snapshot_date"]
+}
+```
+
+Response (same for both forms):
 
 ```jsonc
 {
@@ -69,6 +93,9 @@ Response:
 
 - `onConflict: "skip"` without `conflictColumns` → 400.
 - In `Skip` conflict mode, `skippedCount` includes rows dropped by `ON CONFLICT DO NOTHING`; we know the count but not which rows.
+- Supplying both `instances` and `columns`/`rows` → 400.
+- Row length must equal `columns.len()` → 400 with row index.
+- `conflictColumns` may reference keys provided via `constants` (e.g., `snapshot_date` in the example).
 
 #### PATCH — bulk update
 
@@ -121,7 +148,7 @@ Payloads use `snake_case` keys (`schema_name`, `on_conflict`, `conflict_columns`
 | Capability id | Use |
 | --- | --- |
 | `delete-instance` | Single delete by `instance_id`. |
-| `bulk-create-instances` | Insert many with optional `on_conflict`, `on_error`, `conflict_columns`. |
+| `bulk-create-instances` | Insert many. Accepts either `instances` (object form) or `columns` + `rows` (+ optional `constants`, `nullify_empty_strings`). Supports `on_conflict`, `on_error`, `conflict_columns`. |
 | `bulk-update-instances` | Either `{ condition, properties }` OR `{ updates: [{id, properties}] }`. |
 | `bulk-delete-instances` | Either `{ ids }` OR `{ condition }`. |
 

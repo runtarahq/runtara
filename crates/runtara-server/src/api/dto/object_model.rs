@@ -420,10 +420,51 @@ pub enum BulkValidationMode {
     Skip,
 }
 
+/// Bulk create request supporting two input shapes.
+///
+/// **Object form** — each record as a JSON object:
+/// ```jsonc
+/// { "instances": [ { "sku": "A", "qty": 1 }, ... ] }
+/// ```
+///
+/// **Columnar form** — column names once, rows as arrays of values. Optional
+/// `constants` are merged into every row (row values win on overlap). Use for
+/// large, uniform payloads (snapshots, CSV-style writes) to avoid repeating
+/// column keys.
+/// ```jsonc
+/// {
+///   "columns": ["sku", "qty"],
+///   "rows":    [["A", 1], ["B", 2]],
+///   "constants":          { "snapshot_date": "2026-04-18" },
+///   "nullifyEmptyStrings": true
+/// }
+/// ```
+///
+/// Exactly one of (`instances`) or (`columns` + `rows`) must be provided.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BulkCreateRequest {
-    /// Array of JSON objects, one per record to insert.
-    pub instances: Vec<serde_json::Value>,
+    /// Object form — array of JSON objects, one per record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instances: Option<Vec<serde_json::Value>>,
+
+    /// Columnar form — column names (length N). Must be paired with `rows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+
+    /// Columnar form — each row is an array of values aligned to `columns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<Vec<serde_json::Value>>>,
+
+    /// Columnar form — fields merged into every row. Row cell values take
+    /// precedence over constants when both provide the same column.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub constants: serde_json::Map<String, serde_json::Value>,
+
+    /// Columnar form — when true, empty strings in non-string columns are
+    /// converted to `null` before validation. Useful when ingesting from
+    /// sources (CSV, SFTP) where missing values come through as "".
+    #[serde(default, rename = "nullifyEmptyStrings")]
+    pub nullify_empty_strings: bool,
 
     /// How to handle unique-key conflicts (default `error`).
     #[serde(default, rename = "onConflict")]

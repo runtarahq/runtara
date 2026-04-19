@@ -658,12 +658,46 @@ pub struct BulkCreateInstancesInput {
     )]
     pub schema_name: String,
 
+    /// Object form — one property object per record. Mutually exclusive with
+    /// `columns` + `rows`.
     #[field(
         display_name = "Instances",
-        description = "Array of property objects, one per record to insert",
+        description = "Array of property objects, one per record to insert (object form)",
         example = r#"[{"sku": "A", "quantity": 1}, {"sku": "B", "quantity": 2}]"#
     )]
-    pub instances: Vec<HashMap<String, Value>>,
+    pub instances: Option<Vec<HashMap<String, Value>>>,
+
+    /// Columnar form — column names (paired with `rows`).
+    #[field(
+        display_name = "Columns",
+        description = "Column names for columnar form; paired with `rows`",
+        example = r#"["sku", "quantity"]"#
+    )]
+    pub columns: Option<Vec<String>>,
+
+    /// Columnar form — each row is an array of values aligned with `columns`.
+    #[field(
+        display_name = "Rows",
+        description = "Rows in columnar form — each inner array has the same length as `columns`",
+        example = r#"[["A", 1], ["B", 2]]"#
+    )]
+    pub rows: Option<Vec<Vec<Value>>>,
+
+    /// Columnar form — fields merged into every row (row cells win on overlap).
+    #[field(
+        display_name = "Constants",
+        description = "Column values merged into every columnar row as defaults; row cells override on overlap",
+        example = r#"{"snapshot_date": "2026-04-18"}"#
+    )]
+    pub constants: Option<HashMap<String, Value>>,
+
+    /// Columnar form — nullify empty strings in non-string columns before validation.
+    #[field(
+        display_name = "Nullify Empty Strings",
+        description = "When true, \"\" in non-string columns becomes null before type validation",
+        example = "false"
+    )]
+    pub nullify_empty_strings: Option<bool>,
 
     /// Behavior on unique-key conflict: "error" (default), "skip", or "upsert".
     #[field(
@@ -892,16 +926,29 @@ pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutpu
 pub fn bulk_create_instances(
     input: BulkCreateInstancesInput,
 ) -> Result<BulkCreateInstancesOutput, AgentError> {
-    let instances_json: Vec<Value> = input
-        .instances
-        .into_iter()
-        .map(|m| Value::Object(m.into_iter().collect()))
-        .collect();
+    let mut body = json!({ "schema_name": input.schema_name });
 
-    let mut body = json!({
-        "schema_name": input.schema_name,
-        "instances": instances_json,
-    });
+    // Pass through whichever shape the caller supplied. The server enforces
+    // that exactly one form is present; surface that error verbatim.
+    if let Some(instances) = input.instances {
+        let instances_json: Vec<Value> = instances
+            .into_iter()
+            .map(|m| Value::Object(m.into_iter().collect()))
+            .collect();
+        body["instances"] = json!(instances_json);
+    }
+    if let Some(columns) = input.columns {
+        body["columns"] = json!(columns);
+    }
+    if let Some(rows) = input.rows {
+        body["rows"] = json!(rows);
+    }
+    if let Some(constants) = input.constants {
+        body["constants"] = Value::Object(constants.into_iter().collect());
+    }
+    if let Some(flag) = input.nullify_empty_strings {
+        body["nullify_empty_strings"] = json!(flag);
+    }
     if let Some(mode) = input.on_conflict {
         body["on_conflict"] = json!(mode.to_lowercase());
     }

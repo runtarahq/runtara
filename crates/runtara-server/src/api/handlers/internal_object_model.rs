@@ -166,7 +166,28 @@ pub enum InternalBulkValidationMode {
 #[derive(Debug, Deserialize)]
 pub struct InternalBulkCreateRequest {
     pub schema_name: String,
-    pub instances: Vec<Value>,
+
+    /// Object form — array of JSON objects, one per record.
+    #[serde(default)]
+    pub instances: Option<Vec<Value>>,
+
+    /// Columnar form — column names (paired with `rows`).
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
+
+    /// Columnar form — each row is an array of values aligned to `columns`.
+    #[serde(default)]
+    pub rows: Option<Vec<Vec<Value>>>,
+
+    /// Columnar form — fields merged into every row (row cells override on overlap).
+    #[serde(default)]
+    pub constants: serde_json::Map<String, Value>,
+
+    /// Columnar form — when true, empty strings in non-string columns are
+    /// nullified before validation.
+    #[serde(default)]
+    pub nullify_empty_strings: bool,
+
     #[serde(default)]
     pub on_conflict: InternalBulkConflictMode,
     #[serde(default)]
@@ -692,8 +713,63 @@ pub async fn bulk_create_instances(
         validation_mode,
     };
 
+    // Resolve schema so the normalizer can honor `nullify_empty_strings` per
+    // column type. A missing schema will surface naturally from
+    // `create_instances_extended` too, but catching it here gives a cleaner
+    // error for columnar payloads whose row/column shape is schema-aware.
+    let schema = match store.get_schema(&request.schema_name).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Ok((
+                StatusCode::OK,
+                Json(InternalBulkCreateResponse {
+                    success: false,
+                    created_count: 0,
+                    skipped_count: 0,
+                    errors: vec![],
+                    error: Some(format!("Schema '{}' not found", request.schema_name)),
+                }),
+            ));
+        }
+        Err(e) => {
+            return Ok((
+                StatusCode::OK,
+                Json(InternalBulkCreateResponse {
+                    success: false,
+                    created_count: 0,
+                    skipped_count: 0,
+                    errors: vec![],
+                    error: Some(e.to_string()),
+                }),
+            ));
+        }
+    };
+
+    let instances = match crate::api::services::object_model::normalize_bulk_create_inputs(
+        request.instances.as_deref(),
+        request.columns.as_deref(),
+        request.rows.as_deref(),
+        &request.constants,
+        request.nullify_empty_strings,
+        &schema,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok((
+                StatusCode::OK,
+                Json(InternalBulkCreateResponse {
+                    success: false,
+                    created_count: 0,
+                    skipped_count: 0,
+                    errors: vec![],
+                    error: Some(e.to_string()),
+                }),
+            ));
+        }
+    };
+
     match store
-        .create_instances_extended(&request.schema_name, request.instances, opts)
+        .create_instances_extended(&request.schema_name, instances, opts)
         .await
     {
         Ok(result) => Ok((
