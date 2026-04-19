@@ -1,7 +1,15 @@
 import { useCallback, useMemo, useState, memo, useRef, useEffect } from 'react';
 import { RowSelectionState, SortingState } from '@tanstack/react-table';
 import { Button } from '@/shared/components/ui/button';
-import { Download, Filter, Loader2, Trash2, Upload } from 'lucide-react';
+import {
+  Download,
+  Filter,
+  Loader2,
+  Pencil,
+  Plus,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import {
   Collapsible,
   CollapsibleContent,
@@ -14,12 +22,19 @@ import {
   Condition,
 } from '@/generated/RuntaraRuntimeApi';
 import {
+  useBulkCreateObjectInstances,
   useBulkDeleteObjectInstances,
+  useBulkUpdateObjectInstances,
   useObjectInstanceDtos,
   useUpdateObjectInstanceDto,
   useCreateObjectInstanceDto,
   useExportCsv,
 } from '@/features/objects/hooks/useObjectRecords.ts';
+import type {
+  BulkConflictMode,
+  BulkCreateResult,
+  BulkValidationMode,
+} from '../../queries';
 import { objectInstancesColumns } from './ObjectInstancesColumns';
 import {
   AlertDialog,
@@ -33,6 +48,8 @@ import {
 } from '@/shared/components/ui/alert-dialog';
 import { FilterComposer } from '../FilterComposer';
 import { ImportCsvDialog } from '../ImportCsvDialog';
+import { BulkEditDialog } from './BulkEditDialog';
+import { BulkInsertDialog } from './BulkInsertDialog';
 import { toast } from 'sonner';
 import { Alert, AlertDescription } from '@/shared/components/ui/alert';
 
@@ -82,6 +99,8 @@ export function ObjectInstanceDtosTable({
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+  const [showBulkEditDialog, setShowBulkEditDialog] = useState(false);
+  const [showBulkInsertDialog, setShowBulkInsertDialog] = useState(false);
   const [pendingRecords, setPendingRecords] = useState<Instance[]>([]);
   const [animatingRowId, setAnimatingRowId] = useState<string | null>(null);
 
@@ -181,6 +200,44 @@ export function ObjectInstanceDtosTable({
   const [showImportDialog, setShowImportDialog] = useState(false);
 
   const bulkDeleteMutation = useBulkDeleteObjectInstances();
+  const bulkUpdateMutation = useBulkUpdateObjectInstances();
+  const bulkCreateMutation = useBulkCreateObjectInstances();
+
+  const handleBulkInsert = useCallback(
+    async (
+      instances: unknown[],
+      onConflict: BulkConflictMode,
+      onError: BulkValidationMode,
+      conflictColumns: string[]
+    ): Promise<BulkCreateResult | undefined> => {
+      try {
+        const result = await bulkCreateMutation.mutateAsync({
+          schemaId: objectSchemaDto.id || '',
+          instances,
+          options: { onConflict, onError, conflictColumns },
+        });
+        if (result.errors.length === 0) {
+          toast.success(
+            `Inserted ${result.createdCount}, skipped ${result.skippedCount}`
+          );
+        } else {
+          toast.warning(
+            `Inserted ${result.createdCount}, skipped ${result.skippedCount} (${result.errors.length} error${result.errors.length === 1 ? '' : 's'})`
+          );
+        }
+        return result;
+      } catch (error) {
+        const message =
+          (error as any)?.response?.data?.error ||
+          (error as any)?.response?.data?.message ||
+          (error as Error)?.message ||
+          'Failed to insert records';
+        toast.error('Unable to insert records', { description: message });
+        return undefined;
+      }
+    },
+    [bulkCreateMutation, objectSchemaDto.id]
+  );
   const updateRecord = useUpdateObjectInstanceDto();
   const createRecord = useCreateObjectInstanceDto();
   const exportCsvMutation = useExportCsv();
@@ -438,6 +495,39 @@ export function ObjectInstanceDtosTable({
     }
   }, [bulkDeleteMutation, objectSchemaDto.id, rowSelection]);
 
+  const handleBulkEdit = useCallback(
+    async (properties: Record<string, unknown>) => {
+      const selectedIds = Object.keys(rowSelection).filter(
+        (key) => rowSelection[key]
+      );
+      if (selectedIds.length === 0 || Object.keys(properties).length === 0) {
+        return;
+      }
+      try {
+        const updated = await bulkUpdateMutation.mutateAsync({
+          schemaId: objectSchemaDto.id || '',
+          instanceIds: selectedIds,
+          properties,
+        });
+        toast.success(
+          `Updated ${updated} record${updated === 1 ? '' : 's'}`
+        );
+        setRowSelection({});
+        setShowBulkEditDialog(false);
+      } catch (error) {
+        const message =
+          (error as any)?.response?.data?.error ||
+          (error as any)?.response?.data?.message ||
+          (error as Error)?.message ||
+          'Failed to update records';
+        toast.error('Unable to update selected records', {
+          description: message,
+        });
+      }
+    },
+    [bulkUpdateMutation, objectSchemaDto.id, rowSelection]
+  );
+
   const selectedCount = Object.keys(rowSelection).filter(
     (key) => rowSelection[key]
   ).length;
@@ -560,18 +650,36 @@ export function ObjectInstanceDtosTable({
                   <Upload className="h-4 w-4 mr-2" />
                   Import CSV
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowBulkInsertDialog(true)}
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Bulk Insert
+                </Button>
               </>
             )}
           </div>
           {selectedCount > 0 && (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setShowBulkDeleteDialog(true)}
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete {selectedCount} selected
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowBulkEditDialog(true)}
+              >
+                <Pencil className="h-4 w-4 mr-2" />
+                Edit {selectedCount} selected
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setShowBulkDeleteDialog(true)}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Delete {selectedCount} selected
+              </Button>
+            </div>
           )}
         </div>
 
@@ -623,6 +731,23 @@ export function ObjectInstanceDtosTable({
           beforePaginationSlot={<AddRowButton onClick={handleAddRow} />}
         />
       </div>
+
+      <BulkEditDialog
+        open={showBulkEditDialog}
+        onOpenChange={setShowBulkEditDialog}
+        selectedCount={selectedCount}
+        schema={objectSchemaDto}
+        onSubmit={handleBulkEdit}
+        isSubmitting={bulkUpdateMutation.isPending}
+      />
+
+      <BulkInsertDialog
+        open={showBulkInsertDialog}
+        onOpenChange={setShowBulkInsertDialog}
+        schema={objectSchemaDto}
+        onSubmit={handleBulkInsert}
+        isSubmitting={bulkCreateMutation.isPending}
+      />
 
       <AlertDialog
         open={showBulkDeleteDialog}

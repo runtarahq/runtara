@@ -597,6 +597,438 @@ pub fn update_instance(input: UpdateInstanceInput) -> Result<UpdateInstanceOutpu
     })
 }
 
+// ============================================================================
+// Delete / Bulk I/O Types
+// ============================================================================
+
+/// Input for deleting a single instance
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Delete Instance Input")]
+pub struct DeleteInstanceInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
+
+    #[field(
+        display_name = "Instance ID",
+        description = "The ID of the instance to delete",
+        example = "550e8400-e29b-41d4-a716-446655440000"
+    )]
+    pub instance_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Delete Instance Output",
+    description = "Result of deleting an instance"
+)]
+pub struct DeleteInstanceOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+/// Input for bulk creating instances
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Bulk Create Instances Input")]
+pub struct BulkCreateInstancesInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
+
+    #[field(
+        display_name = "Instances",
+        description = "Array of property objects, one per record to insert",
+        example = r#"[{"sku": "A", "quantity": 1}, {"sku": "B", "quantity": 2}]"#
+    )]
+    pub instances: Vec<HashMap<String, Value>>,
+
+    /// Behavior on unique-key conflict: "error" (default), "skip", or "upsert".
+    #[field(
+        display_name = "On Conflict",
+        description = "Conflict handling mode: 'error' (default) aborts, 'skip' silently skips existing rows, 'upsert' updates them",
+        example = "\"skip\""
+    )]
+    pub on_conflict: Option<String>,
+
+    /// Columns used to detect conflicts — required when `on_conflict` is 'skip' or 'upsert'.
+    #[field(
+        display_name = "Conflict Columns",
+        description = "Columns that uniquely identify a row for conflict detection. Required with on_conflict=skip|upsert",
+        example = r#"["sku"]"#
+    )]
+    pub conflict_columns: Option<Vec<String>>,
+
+    /// Behavior on per-row validation failure: "stop" (default) or "skip".
+    #[field(
+        display_name = "On Error",
+        description = "Validation-failure handling: 'stop' (default) aborts on first failure, 'skip' records the row in errors and continues",
+        example = "\"skip\""
+    )]
+    pub on_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentBulkRowError {
+    pub index: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Bulk Create Instances Output",
+    description = "Result of a bulk insert"
+)]
+pub struct BulkCreateInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Created Count",
+        description = "Number of rows inserted (or updated, in upsert mode)"
+    )]
+    pub created_count: i64,
+
+    #[field(
+        display_name = "Skipped Count",
+        description = "Number of rows skipped (validation failure or ON CONFLICT DO NOTHING)"
+    )]
+    pub skipped_count: i64,
+
+    #[field(
+        display_name = "Errors",
+        description = "Per-row errors when on_error='skip'"
+    )]
+    pub errors: Vec<AgentBulkRowError>,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+/// Single per-row entry for bulk update by IDs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkUpdateByIdEntry {
+    pub id: String,
+    pub properties: HashMap<String, Value>,
+}
+
+/// Input for bulk updating instances. Use either `condition + properties`
+/// (same values applied to every matching row) OR `updates` (per-row values).
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Bulk Update Instances Input")]
+pub struct BulkUpdateInstancesInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
+
+    /// Condition selecting rows to update (used with `properties`).
+    #[field(
+        display_name = "Condition",
+        description = "Optional DSL condition; when set, `properties` is applied to every matching row"
+    )]
+    pub condition: Option<ConditionExpression>,
+
+    /// Property values to apply to every row matching `condition`.
+    #[field(
+        display_name = "Properties",
+        description = "Property values applied to rows matching `condition`",
+        example = r#"{"status": "archived"}"#
+    )]
+    pub properties: Option<HashMap<String, Value>>,
+
+    /// Per-row updates (ignored when `condition` + `properties` are set).
+    #[field(
+        display_name = "Updates",
+        description = "Per-row updates: list of {id, properties}",
+        example = r#"[{"id": "...", "properties": {"quantity": 5}}]"#
+    )]
+    pub updates: Option<Vec<BulkUpdateByIdEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Bulk Update Instances Output",
+    description = "Result of a bulk update"
+)]
+pub struct BulkUpdateInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(display_name = "Updated Count", description = "Number of rows updated")]
+    pub updated_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+/// Input for bulk deleting instances. Use either `ids` or `condition`.
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Bulk Delete Instances Input")]
+pub struct BulkDeleteInstancesInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema",
+        example = "Product"
+    )]
+    pub schema_name: String,
+
+    #[field(
+        display_name = "IDs",
+        description = "List of instance IDs to delete (mutually exclusive with `condition`)"
+    )]
+    pub ids: Option<Vec<String>>,
+
+    #[field(
+        display_name = "Condition",
+        description = "DSL condition to select rows to delete (mutually exclusive with `ids`)"
+    )]
+    pub condition: Option<ConditionExpression>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Bulk Delete Instances Output",
+    description = "Result of a bulk delete"
+)]
+pub struct BulkDeleteInstancesOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(display_name = "Deleted Count", description = "Number of rows deleted")]
+    pub deleted_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+// ============================================================================
+// Delete / Bulk Operations
+// ============================================================================
+
+/// Delete a single instance by ID.
+#[capability(
+    module = "object_model",
+    display_name = "Delete Instance",
+    description = "Delete a single instance from an object model schema",
+    module_supports_connections = true,
+    module_integration_ids = "postgres",
+    side_effects = true
+)]
+pub fn delete_instance(input: DeleteInstanceInput) -> Result<DeleteInstanceOutput, AgentError> {
+    let resp = http_post(
+        "/instances/delete",
+        json!({
+            "schema_name": input.schema_name,
+            "instance_id": input.instance_id,
+        }),
+    )?;
+
+    Ok(DeleteInstanceOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
+/// Bulk-insert many instances in one transaction.
+#[capability(
+    module = "object_model",
+    display_name = "Bulk Create Instances",
+    description = "Insert many instances in a single transaction",
+    module_supports_connections = true,
+    module_integration_ids = "postgres",
+    side_effects = true
+)]
+pub fn bulk_create_instances(
+    input: BulkCreateInstancesInput,
+) -> Result<BulkCreateInstancesOutput, AgentError> {
+    let instances_json: Vec<Value> = input
+        .instances
+        .into_iter()
+        .map(|m| Value::Object(m.into_iter().collect()))
+        .collect();
+
+    let mut body = json!({
+        "schema_name": input.schema_name,
+        "instances": instances_json,
+    });
+    if let Some(mode) = input.on_conflict {
+        body["on_conflict"] = json!(mode.to_lowercase());
+    }
+    if let Some(mode) = input.on_error {
+        body["on_error"] = json!(mode.to_lowercase());
+    }
+    if let Some(cols) = input.conflict_columns {
+        body["conflict_columns"] = json!(cols);
+    }
+
+    let resp = http_post("/instances/bulk-create", body)?;
+
+    let errors: Vec<AgentBulkRowError> = resp
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let index = entry.get("index").and_then(|v| v.as_u64())? as usize;
+                    let reason = entry.get("reason").and_then(|v| v.as_str())?.to_string();
+                    Some(AgentBulkRowError { index, reason })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(BulkCreateInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        created_count: resp["created_count"].as_i64().unwrap_or(0),
+        skipped_count: resp["skipped_count"].as_i64().unwrap_or(0),
+        errors,
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
+/// Bulk-update rows either by condition (same values) or by per-row values.
+#[capability(
+    module = "object_model",
+    display_name = "Bulk Update Instances",
+    description = "Update many instances in one transaction, by condition or by per-row values",
+    module_supports_connections = true,
+    module_integration_ids = "postgres",
+    side_effects = true
+)]
+pub fn bulk_update_instances(
+    input: BulkUpdateInstancesInput,
+) -> Result<BulkUpdateInstancesOutput, AgentError> {
+    let body = if let (Some(cond), Some(props)) = (input.condition.as_ref(), input.properties) {
+        json!({
+            "schema_name": input.schema_name,
+            "mode": "byCondition",
+            "properties": Value::Object(props.into_iter().collect()),
+            "condition": condition_expr_to_json(cond),
+        })
+    } else if let Some(updates) = input.updates {
+        let updates_json: Vec<Value> = updates
+            .into_iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "properties": Value::Object(e.properties.into_iter().collect()),
+                })
+            })
+            .collect();
+        json!({
+            "schema_name": input.schema_name,
+            "mode": "byIds",
+            "updates": updates_json,
+        })
+    } else {
+        return Ok(BulkUpdateInstancesOutput {
+            success: false,
+            updated_count: 0,
+            error: Some(
+                "Either (condition + properties) or `updates` must be provided".to_string(),
+            ),
+        });
+    };
+
+    let resp = http_post("/instances/bulk-update", body)?;
+
+    Ok(BulkUpdateInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        updated_count: resp["updated_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
+/// Bulk-delete instances by list of IDs or by condition.
+#[capability(
+    module = "object_model",
+    display_name = "Bulk Delete Instances",
+    description = "Delete many instances in one transaction, by IDs or by condition",
+    module_supports_connections = true,
+    module_integration_ids = "postgres",
+    side_effects = true
+)]
+pub fn bulk_delete_instances(
+    input: BulkDeleteInstancesInput,
+) -> Result<BulkDeleteInstancesOutput, AgentError> {
+    let body = match (input.ids, input.condition) {
+        (Some(ids), _) if !ids.is_empty() => json!({
+            "schema_name": input.schema_name,
+            "ids": ids,
+        }),
+        (_, Some(cond)) => json!({
+            "schema_name": input.schema_name,
+            "condition": condition_expr_to_json(&cond),
+        }),
+        _ => {
+            return Ok(BulkDeleteInstancesOutput {
+                success: false,
+                deleted_count: 0,
+                error: Some("Either `ids` or `condition` must be provided".to_string()),
+            });
+        }
+    };
+
+    let resp = http_post("/instances/bulk-delete", body)?;
+
+    Ok(BulkDeleteInstancesOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        deleted_count: resp["deleted_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
 /// Convert a `MappingValue` to a JSON value for use in conditions.
 fn mapping_value_to_json(mv: &MappingValue) -> serde_json::Value {
     match mv {

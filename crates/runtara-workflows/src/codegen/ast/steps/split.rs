@@ -83,6 +83,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         let dont_stop_on_failed = config.dont_stop_on_failed.unwrap_or(false);
         let allow_null = config.allow_null.unwrap_or(false);
         let convert_single_value = config.convert_single_value.unwrap_or(false);
+        let batch_size = config.batch_size.unwrap_or(0);
 
         quote! {
             {
@@ -93,6 +94,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                     map.insert("dontStopOnFailed".to_string(), serde_json::json!(#dont_stop_on_failed));
                     map.insert("allowNull".to_string(), serde_json::json!(#allow_null));
                     map.insert("convertSingleValue".to_string(), serde_json::json!(#convert_single_value));
+                    map.insert("batchSize".to_string(), serde_json::json!(#batch_size));
                 }
                 #variables_code
                 inputs
@@ -215,7 +217,7 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let split_array = match #split_inputs_var.get("value") {
+        let mut split_array = match #split_inputs_var.get("value") {
             Some(serde_json::Value::Array(arr)) => arr.clone(),
             Some(serde_json::Value::Null) | None => {
                 if allow_null {
@@ -245,6 +247,19 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 }
             }
         };
+
+        // Apply batching: when batchSize > 0, chunk elements into sub-arrays so
+        // each iteration receives a batch instead of a single element.
+        // [1,2,3,4,5] with batchSize=2 becomes [[1,2],[3,4],[5]].
+        let batch_size = #split_inputs_var.get("batchSize")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+        if batch_size > 0 {
+            split_array = split_array
+                .chunks(batch_size)
+                .map(|chunk| serde_json::Value::Array(chunk.to_vec()))
+                .collect();
+        }
 
         let parallelism = #split_inputs_var.get("parallelism")
             .and_then(|v| v.as_i64())
@@ -556,6 +571,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -624,6 +640,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -680,6 +697,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -719,6 +737,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -821,6 +840,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -932,6 +952,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -986,6 +1007,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1025,6 +1047,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1073,6 +1096,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1112,6 +1136,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1155,6 +1180,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1194,6 +1220,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1237,6 +1264,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1280,6 +1308,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1331,6 +1360,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1376,6 +1406,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1446,6 +1477,7 @@ mod tests {
                 timeout: None,
                 allow_null: Some(true),
                 convert_single_value: None,
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1504,6 +1536,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: Some(true),
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1543,6 +1576,7 @@ mod tests {
                 timeout: None,
                 allow_null: Some(true),
                 convert_single_value: Some(true),
+                batch_size: None,
             }),
             subgraph: Box::new(create_minimal_graph("finish")),
             input_schema: HashMap::new(),
@@ -1562,6 +1596,69 @@ mod tests {
         assert!(
             code.contains(r#""convertSingleValue" . to_string () , serde_json :: json ! (true)"#),
             "Should set convertSingleValue to true"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_batch_size_default_zero() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-batch-default", "data.items");
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // batchSize defaults to 0 (no batching)
+        assert!(
+            code.contains(r#""batchSize""#),
+            "Should include batchSize key in inputs"
+        );
+        assert!(
+            code.contains("batch_size > 0"),
+            "Should have batching guarded by batch_size > 0"
+        );
+        assert!(
+            code.contains("chunks (batch_size)"),
+            "Should chunk split_array when batching is active"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_batch_size_set() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = SplitStep {
+            id: "split-batch-2".to_string(),
+            name: Some("Batched Split".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: None,
+                convert_single_value: None,
+                batch_size: Some(2),
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema: HashMap::new(),
+            output_schema: HashMap::new(),
+            breakpoint: None,
+            durable: None,
+        };
+
+        let tokens = emit(&split_step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+
+        // batchSize immediate value plumbed through
+        assert!(
+            code.contains(r#""batchSize" . to_string () , serde_json :: json ! (2u32)"#),
+            "Should emit batchSize = 2 immediate value"
         );
     }
 

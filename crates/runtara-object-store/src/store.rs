@@ -854,6 +854,14 @@ impl ObjectStore {
             return Ok(0);
         }
 
+        if instances.len() > self.config.bulk_request_limit {
+            return Err(ObjectStoreError::validation(format!(
+                "bulk request size {} exceeds limit of {}",
+                instances.len(),
+                self.config.bulk_request_limit
+            )));
+        }
+
         let schema = self
             .get_schema(schema_name)
             .await?
@@ -987,6 +995,14 @@ impl ObjectStore {
     ) -> Result<i64> {
         if instances.is_empty() {
             return Ok(0);
+        }
+
+        if instances.len() > self.config.bulk_request_limit {
+            return Err(ObjectStoreError::validation(format!(
+                "bulk request size {} exceeds limit of {}",
+                instances.len(),
+                self.config.bulk_request_limit
+            )));
         }
 
         if conflict_columns.is_empty() {
@@ -1132,6 +1148,305 @@ impl ObjectStore {
                         query = query.bind(None::<String>);
                     }
                 }
+            }
+
+            let result = query.execute(&mut *tx).await?;
+            total_affected += result.rows_affected() as i64;
+        }
+
+        tx.commit().await?;
+
+        Ok(total_affected)
+    }
+
+    /// Bulk-create with opt-in conflict and validation handling.
+    ///
+    /// Unlike [`Self::create_instances`], this method accepts:
+    /// - a [`ConflictMode`] choosing between error, skip-on-conflict, or upsert on
+    ///   a user-supplied set of conflict columns, and
+    /// - a [`ValidationMode`] choosing whether a per-row validation failure aborts
+    ///   the whole batch or records the row as skipped and continues.
+    ///
+    /// Returns a [`BulkCreateResult`] with `created_count`, `skipped_count`, and
+    /// per-row `errors` for the rows rejected in `ValidationMode::Skip`.
+    pub async fn create_instances_extended(
+        &self,
+        schema_name: &str,
+        instances: Vec<serde_json::Value>,
+        opts: crate::instance::BulkCreateOptions,
+    ) -> Result<crate::instance::BulkCreateResult> {
+        use crate::instance::{BulkCreateResult, BulkRowError, ConflictMode, ValidationMode};
+
+        let mut result = BulkCreateResult::default();
+        if instances.is_empty() {
+            return Ok(result);
+        }
+
+        if instances.len() > self.config.bulk_request_limit {
+            return Err(ObjectStoreError::validation(format!(
+                "bulk request size {} exceeds limit of {}",
+                instances.len(),
+                self.config.bulk_request_limit
+            )));
+        }
+
+        // Validate conflict_columns up front — required for Skip/Upsert.
+        let conflict_cols: Option<&[String]> = match &opts.conflict_mode {
+            ConflictMode::Error => None,
+            ConflictMode::Skip { conflict_columns } | ConflictMode::Upsert { conflict_columns } => {
+                if conflict_columns.is_empty() {
+                    return Err(ObjectStoreError::validation(
+                        "`conflict_columns` must be non-empty when on_conflict is 'skip' or 'upsert'",
+                    ));
+                }
+                Some(conflict_columns.as_slice())
+            }
+        };
+
+        let schema = self
+            .get_schema(schema_name)
+            .await?
+            .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
+
+        if let Some(cols) = conflict_cols {
+            let known: std::collections::HashSet<&str> =
+                schema.columns.iter().map(|c| c.name.as_str()).collect();
+            for name in cols {
+                if name != "id" && !known.contains(name.as_str()) {
+                    return Err(ObjectStoreError::validation(format!(
+                        "Conflict column '{}' does not exist in schema",
+                        name
+                    )));
+                }
+            }
+        }
+
+        // Per-row validation — separate into valid / invalid.
+        let mut validated: Vec<(String, serde_json::Map<String, serde_json::Value>)> =
+            Vec::with_capacity(instances.len());
+        for (idx, instance) in instances.into_iter().enumerate() {
+            match validate_instance_for_insert(&schema, &instance) {
+                Ok(obj) => {
+                    let instance_id = uuid::Uuid::new_v4().to_string();
+                    validated.push((instance_id, obj));
+                }
+                Err(reason) => match opts.validation_mode {
+                    ValidationMode::Stop => {
+                        return Err(ObjectStoreError::validation(format!(
+                            "Instance at index {}: {}",
+                            idx, reason
+                        )));
+                    }
+                    ValidationMode::Skip => {
+                        result.skipped_count += 1;
+                        result.errors.push(BulkRowError { index: idx, reason });
+                    }
+                },
+            }
+        }
+
+        if validated.is_empty() {
+            return Ok(result);
+        }
+
+        // Compute chunk size under Postgres' ~32k-param limit.
+        let params_per_row = 1 + schema.columns.len();
+        let chunk_size = (32000 / params_per_row.max(1)).max(1);
+
+        // Column list (shared across chunks).
+        let mut column_names = Vec::new();
+        if self.config.auto_columns.id {
+            column_names.push("id".to_string());
+        }
+        for col in &schema.columns {
+            column_names.push(quote_identifier(&col.name));
+        }
+
+        // ON CONFLICT clause (if any). Computed once.
+        let on_conflict_clause = match &opts.conflict_mode {
+            ConflictMode::Error => String::new(),
+            ConflictMode::Skip { conflict_columns } => {
+                let cols: Vec<String> = conflict_columns
+                    .iter()
+                    .map(|c| quote_identifier(c))
+                    .collect();
+                format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "))
+            }
+            ConflictMode::Upsert { conflict_columns } => {
+                let cols: Vec<String> = conflict_columns
+                    .iter()
+                    .map(|c| quote_identifier(c))
+                    .collect();
+                let conflict_set: std::collections::HashSet<&str> =
+                    conflict_columns.iter().map(String::as_str).collect();
+                let mut update_sets: Vec<String> = Vec::new();
+                for col in &schema.columns {
+                    if !conflict_set.contains(col.name.as_str()) {
+                        let q = quote_identifier(&col.name);
+                        update_sets.push(format!("{} = EXCLUDED.{}", q, q));
+                    }
+                }
+                if self.config.auto_columns.updated_at {
+                    update_sets.push("updated_at = NOW()".to_string());
+                }
+                if update_sets.is_empty() {
+                    // All columns are conflict columns — fall back to DO NOTHING.
+                    format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "))
+                } else {
+                    format!(
+                        " ON CONFLICT ({}) DO UPDATE SET {}",
+                        cols.join(", "),
+                        update_sets.join(", ")
+                    )
+                }
+            }
+        };
+
+        let mut tx = self.pool.begin().await?;
+        let mut db_affected: i64 = 0;
+
+        for chunk in validated.chunks(chunk_size) {
+            let mut placeholders = Vec::new();
+            let mut param_idx = 1;
+            for _ in chunk {
+                let mut row_placeholders = Vec::new();
+                if self.config.auto_columns.id {
+                    row_placeholders.push(format!("${}", param_idx));
+                    param_idx += 1;
+                }
+                for _ in &schema.columns {
+                    row_placeholders.push(format!("${}", param_idx));
+                    param_idx += 1;
+                }
+                placeholders.push(format!("({})", row_placeholders.join(", ")));
+            }
+
+            let insert_sql = format!(
+                "INSERT INTO {} ({}) VALUES {}{}",
+                quote_identifier(&schema.table_name),
+                column_names.join(", "),
+                placeholders.join(", "),
+                on_conflict_clause,
+            );
+
+            let mut query = sqlx::query(&insert_sql);
+            for (instance_id, properties_obj) in chunk {
+                if self.config.auto_columns.id {
+                    query = query.bind(instance_id);
+                }
+                for col in &schema.columns {
+                    if let Some(value) = properties_obj.get(&col.name) {
+                        query = Self::bind_value(query, &col.column_type, &col.name, value)?;
+                    } else {
+                        query = query.bind(None::<String>);
+                    }
+                }
+            }
+
+            let executed = query.execute(&mut *tx).await?;
+            db_affected += executed.rows_affected() as i64;
+        }
+
+        tx.commit().await?;
+
+        // Under Skip conflict, `rows_affected` is the inserted count; the rest
+        // were skipped by ON CONFLICT DO NOTHING. Add that delta to skipped.
+        let validated_len = validated.len() as i64;
+        if matches!(opts.conflict_mode, ConflictMode::Skip { .. }) && db_affected < validated_len {
+            result.skipped_count += validated_len - db_affected;
+        }
+        result.created_count = db_affected;
+
+        Ok(result)
+    }
+
+    /// Update multiple instances by ID, each with its own property values.
+    ///
+    /// Every `(id, properties)` pair is validated before any write happens;
+    /// all updates run inside a single transaction so the operation is atomic.
+    ///
+    /// Returns the total number of rows affected.
+    pub async fn update_instances_by_ids(
+        &self,
+        schema_name: &str,
+        updates: Vec<(String, serde_json::Value)>,
+    ) -> Result<i64> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        if updates.len() > self.config.bulk_request_limit {
+            return Err(ObjectStoreError::validation(format!(
+                "bulk request size {} exceeds limit of {}",
+                updates.len(),
+                self.config.bulk_request_limit
+            )));
+        }
+
+        let schema = self
+            .get_schema(schema_name)
+            .await?
+            .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
+
+        // Pre-validate every update payload.
+        let mut validated: Vec<(String, serde_json::Map<String, serde_json::Value>)> =
+            Vec::with_capacity(updates.len());
+        for (idx, (id, properties)) in updates.into_iter().enumerate() {
+            let properties_obj = properties.as_object().ok_or_else(|| {
+                ObjectStoreError::validation(format!(
+                    "Update at index {}: properties must be a JSON object",
+                    idx
+                ))
+            })?;
+            for col in &schema.columns {
+                if let Some(value) = properties_obj.get(&col.name)
+                    && let Err(e) = col.column_type.validate_value(value)
+                {
+                    return Err(ObjectStoreError::validation(format!(
+                        "Update at index {}: Invalid value for column '{}': {}",
+                        idx, col.name, e
+                    )));
+                }
+            }
+            validated.push((id, properties_obj.clone()));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let mut total_affected: i64 = 0;
+
+        for (instance_id, properties_obj) in &validated {
+            let mut set_clauses: Vec<String> = Vec::new();
+            let mut param_idx = 2i32; // $1 = instance_id
+
+            if self.config.auto_columns.updated_at {
+                set_clauses.push("updated_at = NOW()".to_string());
+            }
+
+            let mut bind_cols: Vec<(&ColumnDefinition, &serde_json::Value)> = Vec::new();
+            for col in &schema.columns {
+                if let Some(value) = properties_obj.get(&col.name) {
+                    set_clauses.push(format!("{} = ${}", quote_identifier(&col.name), param_idx));
+                    bind_cols.push((col, value));
+                    param_idx += 1;
+                }
+            }
+
+            // Nothing to update for this row (or only the auto updated_at would change).
+            if set_clauses.is_empty()
+                || (set_clauses.len() == 1 && self.config.auto_columns.updated_at)
+            {
+                continue;
+            }
+
+            let update_sql = format!(
+                "UPDATE {} SET {} WHERE id = $1 AND deleted = FALSE",
+                quote_identifier(&schema.table_name),
+                set_clauses.join(", "),
+            );
+
+            let mut query = sqlx::query(&update_sql).bind(instance_id);
+            for (col, value) in &bind_cols {
+                query = Self::bind_value(query, &col.column_type, &col.name, value)?;
             }
 
             let result = query.execute(&mut *tx).await?;
@@ -1439,4 +1754,33 @@ impl ObjectStore {
             ColumnType::Json => query.bind(value),
         })
     }
+}
+
+/// Validate a single instance payload for an INSERT operation.
+///
+/// Returns the payload's object form on success, or a human-readable reason
+/// string on failure. Used by `create_instances_extended` to partition rows
+/// when `ValidationMode::Skip` is selected.
+fn validate_instance_for_insert(
+    schema: &Schema,
+    instance: &serde_json::Value,
+) -> std::result::Result<serde_json::Map<String, serde_json::Value>, String> {
+    let properties_obj = instance
+        .as_object()
+        .ok_or_else(|| "properties must be a JSON object".to_string())?;
+
+    for col in &schema.columns {
+        if let Some(value) = properties_obj.get(&col.name) {
+            if let Err(e) = col.column_type.validate_value(value) {
+                return Err(format!("Invalid value for column '{}': {}", col.name, e));
+            }
+            if !col.nullable && value.is_null() {
+                return Err(format!("Column '{}' does not allow NULL values", col.name));
+            }
+        } else if !col.nullable && col.default_value.is_none() {
+            return Err(format!("Required column '{}' is missing", col.name));
+        }
+    }
+
+    Ok(properties_obj.clone())
 }

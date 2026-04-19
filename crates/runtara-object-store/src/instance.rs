@@ -103,6 +103,69 @@ impl UpdateInstanceRequest {
 }
 
 // ============================================================================
+// Bulk-create options and result
+// ============================================================================
+
+/// Behavior on unique-key conflict for bulk-create.
+#[derive(Debug, Clone)]
+pub enum ConflictMode {
+    /// Default — any unique conflict aborts the transaction.
+    Error,
+    /// `INSERT ... ON CONFLICT (cols) DO NOTHING` — conflicting rows are silently skipped.
+    Skip { conflict_columns: Vec<String> },
+    /// `INSERT ... ON CONFLICT (cols) DO UPDATE SET ...` — conflicting rows are updated.
+    Upsert { conflict_columns: Vec<String> },
+}
+
+impl Default for ConflictMode {
+    fn default() -> Self {
+        Self::Error
+    }
+}
+
+/// Behavior on per-row validation failure for bulk-create.
+#[derive(Debug, Clone, Copy)]
+pub enum ValidationMode {
+    /// Default — first validation failure aborts the whole bulk.
+    Stop,
+    /// Invalid rows are recorded in `errors` and skipped; valid rows still insert.
+    Skip,
+}
+
+impl Default for ValidationMode {
+    fn default() -> Self {
+        Self::Stop
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BulkCreateOptions {
+    pub conflict_mode: ConflictMode,
+    pub validation_mode: ValidationMode,
+}
+
+/// Per-row failure information for the `Skip` validation mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkRowError {
+    pub index: usize,
+    pub reason: String,
+}
+
+/// Result of `create_instances_extended`.
+///
+/// `created_count` is the number of rows actually inserted (or updated, in
+/// Upsert mode). `skipped_count` is the sum of:
+/// - rows skipped due to validation errors (with entries in `errors`), and
+/// - rows skipped due to `ON CONFLICT DO NOTHING` (no entries in `errors`;
+///   we only know the count, not which specific rows).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BulkCreateResult {
+    pub created_count: i64,
+    pub skipped_count: i64,
+    pub errors: Vec<BulkRowError>,
+}
+
+// ============================================================================
 // Condition-based Filtering
 // ============================================================================
 

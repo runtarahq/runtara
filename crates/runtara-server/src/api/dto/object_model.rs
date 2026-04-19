@@ -396,6 +396,95 @@ pub struct BulkDeleteResponse {
     pub message: String,
 }
 
+/// Behavior on unique-key conflict for bulk-create.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BulkConflictMode {
+    /// Any unique conflict aborts the transaction (default).
+    #[default]
+    Error,
+    /// Conflicting rows are silently skipped (`ON CONFLICT DO NOTHING`).
+    Skip,
+    /// Conflicting rows are updated with the incoming values (`ON CONFLICT DO UPDATE`).
+    Upsert,
+}
+
+/// Behavior on per-row validation failure for bulk-create.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BulkValidationMode {
+    /// First validation failure aborts the whole bulk (default).
+    #[default]
+    Stop,
+    /// Invalid rows are reported in `errors` and skipped; valid rows still insert.
+    Skip,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BulkCreateRequest {
+    /// Array of JSON objects, one per record to insert.
+    pub instances: Vec<serde_json::Value>,
+
+    /// How to handle unique-key conflicts (default `error`).
+    #[serde(default, rename = "onConflict")]
+    pub on_conflict: BulkConflictMode,
+
+    /// How to handle per-row validation failures (default `stop`).
+    #[serde(default, rename = "onError")]
+    pub on_error: BulkValidationMode,
+
+    /// Columns used to detect conflicts. Required when `onConflict` is `skip` or `upsert`.
+    #[serde(default, rename = "conflictColumns")]
+    pub conflict_columns: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BulkRowError {
+    pub index: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BulkCreateResponse {
+    pub success: bool,
+    #[serde(rename = "createdCount")]
+    pub created_count: i64,
+    #[serde(rename = "skippedCount", default)]
+    pub skipped_count: i64,
+    #[serde(default)]
+    pub errors: Vec<BulkRowError>,
+    pub message: String,
+}
+
+/// Bulk update request. The `mode` field selects between two semantics:
+/// - `byCondition` — apply the same `properties` to every row matching `condition`.
+/// - `byIds` — apply per-row `properties` to each listed `id`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum BulkUpdateRequest {
+    ByCondition {
+        properties: serde_json::Value,
+        condition: Condition,
+    },
+    ByIds {
+        updates: Vec<BulkUpdateByIdEntry>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BulkUpdateByIdEntry {
+    pub id: String,
+    pub properties: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BulkUpdateResponse {
+    pub success: bool,
+    #[serde(rename = "updatedCount")]
+    pub updated_count: i64,
+    pub message: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FilterInstancesResponse {
     pub success: bool,

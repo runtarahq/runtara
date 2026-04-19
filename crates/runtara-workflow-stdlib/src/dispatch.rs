@@ -626,6 +626,24 @@ pub fn execute_capability(
         ("object_model", "update-instance") => {
             (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_UPDATE_INSTANCE.execute)(input)
         }
+        ("object_model", "delete-instance") => {
+            (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_DELETE_INSTANCE.execute)(input)
+        }
+        ("object_model", "bulk-create-instances") => {
+            (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_BULK_CREATE_INSTANCES.execute)(
+                input,
+            )
+        }
+        ("object_model", "bulk-update-instances") => {
+            (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_BULK_UPDATE_INSTANCES.execute)(
+                input,
+            )
+        }
+        ("object_model", "bulk-delete-instances") => {
+            (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_BULK_DELETE_INSTANCES.execute)(
+                input,
+            )
+        }
 
         // --- openai ---
         ("openai", "image-generation") => {

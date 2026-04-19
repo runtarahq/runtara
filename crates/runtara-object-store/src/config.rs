@@ -34,6 +34,10 @@ pub struct StoreConfig {
     pub soft_delete: bool,
     /// Auto-managed columns configuration
     pub auto_columns: AutoColumns,
+    /// Maximum number of items accepted per bulk request that carries an
+    /// explicit vector of items (create, upsert, update-by-ids). Condition-based
+    /// bulk update/delete are not capped — the condition decides row count.
+    pub bulk_request_limit: usize,
 }
 
 impl StoreConfig {
@@ -43,6 +47,9 @@ impl StoreConfig {
     }
 }
 
+/// Default cap on the number of items accepted per bulk request.
+pub const DEFAULT_BULK_REQUEST_LIMIT: usize = 10_000;
+
 /// Builder for StoreConfig
 #[derive(Debug)]
 pub struct StoreConfigBuilder {
@@ -50,6 +57,7 @@ pub struct StoreConfigBuilder {
     metadata_table: String,
     soft_delete: bool,
     auto_columns: AutoColumns,
+    bulk_request_limit: usize,
 }
 
 impl StoreConfigBuilder {
@@ -60,7 +68,22 @@ impl StoreConfigBuilder {
             metadata_table: "__schema".to_string(),
             soft_delete: true,
             auto_columns: AutoColumns::default(),
+            bulk_request_limit: DEFAULT_BULK_REQUEST_LIMIT,
         }
+    }
+
+    /// Set the maximum number of items accepted per bulk request.
+    ///
+    /// Applies to methods that take an explicit Vec: `create_instances`,
+    /// `upsert_instances`, `update_instances_by_ids`. A value of 0 is treated
+    /// as the default ([`DEFAULT_BULK_REQUEST_LIMIT`]).
+    pub fn bulk_request_limit(mut self, limit: usize) -> Self {
+        self.bulk_request_limit = if limit == 0 {
+            DEFAULT_BULK_REQUEST_LIMIT
+        } else {
+            limit
+        };
+        self
     }
 
     /// Set the metadata table name (default: "__schema")
@@ -128,6 +151,7 @@ impl StoreConfigBuilder {
             metadata_table: self.metadata_table,
             soft_delete: self.soft_delete,
             auto_columns: self.auto_columns,
+            bulk_request_limit: self.bulk_request_limit,
         }
     }
 }

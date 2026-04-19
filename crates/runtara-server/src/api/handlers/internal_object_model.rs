@@ -133,6 +133,115 @@ pub struct InternalUpdateInstanceResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InternalDeleteInstanceRequest {
+    pub schema_name: String,
+    pub instance_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InternalDeleteInstanceResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum InternalBulkConflictMode {
+    #[default]
+    Error,
+    Skip,
+    Upsert,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum InternalBulkValidationMode {
+    #[default]
+    Stop,
+    Skip,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InternalBulkCreateRequest {
+    pub schema_name: String,
+    pub instances: Vec<Value>,
+    #[serde(default)]
+    pub on_conflict: InternalBulkConflictMode,
+    #[serde(default)]
+    pub on_error: InternalBulkValidationMode,
+    #[serde(default)]
+    pub conflict_columns: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InternalBulkRowError {
+    pub index: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InternalBulkCreateResponse {
+    pub success: bool,
+    pub created_count: i64,
+    pub skipped_count: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<InternalBulkRowError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum InternalBulkUpdateMode {
+    ByCondition {
+        properties: Value,
+        condition: crate::api::dto::object_model::Condition,
+    },
+    ByIds {
+        updates: Vec<InternalBulkUpdateByIdEntry>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InternalBulkUpdateByIdEntry {
+    pub id: String,
+    pub properties: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InternalBulkUpdateRequest {
+    pub schema_name: String,
+    #[serde(flatten)]
+    pub mode: InternalBulkUpdateMode,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InternalBulkUpdateResponse {
+    pub success: bool,
+    pub updated_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InternalBulkDeleteRequest {
+    pub schema_name: String,
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub condition: Option<crate::api::dto::object_model::Condition>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InternalBulkDeleteResponse {
+    pub success: bool,
+    pub deleted_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InternalGetSchemaResponse {
     pub success: bool,
@@ -459,6 +568,273 @@ pub async fn update_instance(
             Json(InternalUpdateInstanceResponse {
                 success: false,
                 instance_id: None,
+                error: Some(e.to_string()),
+            }),
+        )),
+    }
+}
+
+/// POST /api/internal/object-model/instances/delete — delete a single instance by schema name + id.
+///
+/// Uses POST (not DELETE) so the body can carry `schema_name` + `instance_id` in the
+/// same shape as the other internal mutation endpoints.
+pub async fn delete_instance(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalDeleteInstanceRequest>,
+) -> Result<(StatusCode, Json<InternalDeleteInstanceResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+
+    let store =
+        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
+
+    match store
+        .delete_instance(&request.schema_name, &request.instance_id)
+        .await
+    {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(InternalDeleteInstanceResponse {
+                success: true,
+                error: None,
+            }),
+        )),
+        Err(e) => Ok((
+            StatusCode::OK,
+            Json(InternalDeleteInstanceResponse {
+                success: false,
+                error: Some(e.to_string()),
+            }),
+        )),
+    }
+}
+
+/// POST /api/internal/object-model/instances/bulk-create
+pub async fn bulk_create_instances(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalBulkCreateRequest>,
+) -> Result<(StatusCode, Json<InternalBulkCreateResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+
+    let store =
+        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
+
+    use runtara_object_store::{
+        BulkCreateOptions, ConflictMode as StoreConflictMode, ValidationMode,
+    };
+
+    let conflict_mode = match request.on_conflict {
+        InternalBulkConflictMode::Error => StoreConflictMode::Error,
+        InternalBulkConflictMode::Skip => {
+            if request.conflict_columns.is_empty() {
+                return Ok((
+                    StatusCode::OK,
+                    Json(InternalBulkCreateResponse {
+                        success: false,
+                        created_count: 0,
+                        skipped_count: 0,
+                        errors: vec![],
+                        error: Some(
+                            "`conflict_columns` is required when `on_conflict` is 'skip'"
+                                .to_string(),
+                        ),
+                    }),
+                ));
+            }
+            StoreConflictMode::Skip {
+                conflict_columns: request.conflict_columns,
+            }
+        }
+        InternalBulkConflictMode::Upsert => {
+            if request.conflict_columns.is_empty() {
+                return Ok((
+                    StatusCode::OK,
+                    Json(InternalBulkCreateResponse {
+                        success: false,
+                        created_count: 0,
+                        skipped_count: 0,
+                        errors: vec![],
+                        error: Some(
+                            "`conflict_columns` is required when `on_conflict` is 'upsert'"
+                                .to_string(),
+                        ),
+                    }),
+                ));
+            }
+            StoreConflictMode::Upsert {
+                conflict_columns: request.conflict_columns,
+            }
+        }
+    };
+
+    let validation_mode = match request.on_error {
+        InternalBulkValidationMode::Stop => ValidationMode::Stop,
+        InternalBulkValidationMode::Skip => ValidationMode::Skip,
+    };
+
+    let opts = BulkCreateOptions {
+        conflict_mode,
+        validation_mode,
+    };
+
+    match store
+        .create_instances_extended(&request.schema_name, request.instances, opts)
+        .await
+    {
+        Ok(result) => Ok((
+            StatusCode::OK,
+            Json(InternalBulkCreateResponse {
+                success: true,
+                created_count: result.created_count,
+                skipped_count: result.skipped_count,
+                errors: result
+                    .errors
+                    .into_iter()
+                    .map(|e| InternalBulkRowError {
+                        index: e.index,
+                        reason: e.reason,
+                    })
+                    .collect(),
+                error: None,
+            }),
+        )),
+        Err(e) => Ok((
+            StatusCode::OK,
+            Json(InternalBulkCreateResponse {
+                success: false,
+                created_count: 0,
+                skipped_count: 0,
+                errors: vec![],
+                error: Some(e.to_string()),
+            }),
+        )),
+    }
+}
+
+/// POST /api/internal/object-model/instances/bulk-update — supports byCondition and byIds modes.
+pub async fn bulk_update_instances(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalBulkUpdateRequest>,
+) -> Result<(StatusCode, Json<InternalBulkUpdateResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+
+    let store =
+        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
+
+    let result = match request.mode {
+        InternalBulkUpdateMode::ByCondition {
+            properties,
+            condition,
+        } => {
+            store
+                .update_instances(&request.schema_name, properties, condition.into())
+                .await
+        }
+        InternalBulkUpdateMode::ByIds { updates } => {
+            let pairs: Vec<(String, Value)> =
+                updates.into_iter().map(|u| (u.id, u.properties)).collect();
+            store
+                .update_instances_by_ids(&request.schema_name, pairs)
+                .await
+        }
+    };
+
+    match result {
+        Ok(count) => Ok((
+            StatusCode::OK,
+            Json(InternalBulkUpdateResponse {
+                success: true,
+                updated_count: count,
+                error: None,
+            }),
+        )),
+        Err(e) => Ok((
+            StatusCode::OK,
+            Json(InternalBulkUpdateResponse {
+                success: false,
+                updated_count: 0,
+                error: Some(e.to_string()),
+            }),
+        )),
+    }
+}
+
+/// POST /api/internal/object-model/instances/bulk-delete — accepts either ids or condition.
+pub async fn bulk_delete_instances(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalBulkDeleteRequest>,
+) -> Result<(StatusCode, Json<InternalBulkDeleteResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+
+    let store =
+        crate::api::services::object_model::get_store(&state.manager, None, None, &tenant_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
+
+    let condition = match (request.ids, request.condition) {
+        (Some(ids), _) if !ids.is_empty() => {
+            let id_values: Vec<Value> = ids.into_iter().map(Value::String).collect();
+            runtara_object_store::Condition::r#in("id", id_values)
+        }
+        (_, Some(cond)) => cond.into(),
+        _ => {
+            return Ok((
+                StatusCode::OK,
+                Json(InternalBulkDeleteResponse {
+                    success: false,
+                    deleted_count: 0,
+                    error: Some("Either 'ids' or 'condition' must be provided".to_string()),
+                }),
+            ));
+        }
+    };
+
+    match store
+        .delete_instances(&request.schema_name, condition)
+        .await
+    {
+        Ok(count) => Ok((
+            StatusCode::OK,
+            Json(InternalBulkDeleteResponse {
+                success: true,
+                deleted_count: count,
+                error: None,
+            }),
+        )),
+        Err(e) => Ok((
+            StatusCode::OK,
+            Json(InternalBulkDeleteResponse {
+                success: false,
+                deleted_count: 0,
                 error: Some(e.to_string()),
             }),
         )),

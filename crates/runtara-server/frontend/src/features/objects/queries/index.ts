@@ -343,6 +343,76 @@ export async function bulkDeleteInstances(
   return result.data.deletedCount || 0;
 }
 
+export type BulkConflictMode = 'error' | 'skip' | 'upsert';
+export type BulkValidationMode = 'stop' | 'skip';
+
+export interface BulkCreateOptions {
+  onConflict: BulkConflictMode;
+  onError: BulkValidationMode;
+  conflictColumns: string[];
+}
+
+export interface BulkCreateResult {
+  success: boolean;
+  createdCount: number;
+  skippedCount: number;
+  errors: Array<{ index: number; reason: string }>;
+  message?: string;
+}
+
+/**
+ * Bulk-insert records via POST /instances/{schema_id}/bulk with opt-in conflict
+ * and validation handling.
+ */
+export async function bulkCreateInstances(
+  token: string,
+  schemaId: string,
+  instances: unknown[],
+  opts: BulkCreateOptions
+): Promise<BulkCreateResult> {
+  const result = await RuntimeREST.instance.post(
+    `/api/runtime/object-model/instances/${schemaId}/bulk`,
+    {
+      instances,
+      onConflict: opts.onConflict,
+      onError: opts.onError,
+      conflictColumns: opts.conflictColumns,
+    },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  return {
+    success: !!result.data?.success,
+    createdCount: result.data?.createdCount ?? 0,
+    skippedCount: result.data?.skippedCount ?? 0,
+    errors: result.data?.errors ?? [],
+    message: result.data?.message,
+  };
+}
+
+/**
+ * Bulk-update instances by applying the same `properties` to every row whose id
+ * is in `instanceIds`. Uses the generic PATCH /instances/{schema_id}/bulk endpoint
+ * with `mode: "byCondition"` and an IN(id, [...]) condition built from the
+ * selected rows.
+ */
+export async function bulkUpdateInstancesByIds(
+  token: string,
+  schemaId: string,
+  instanceIds: string[],
+  properties: Record<string, unknown>
+): Promise<number> {
+  const result = await RuntimeREST.instance.patch(
+    `/api/runtime/object-model/instances/${schemaId}/bulk`,
+    {
+      mode: 'byCondition',
+      condition: { op: 'IN', arguments: ['id', instanceIds] },
+      properties,
+    },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  return result.data?.updatedCount ?? 0;
+}
+
 // CSV Import/Export functions
 
 export async function exportCsv(

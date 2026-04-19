@@ -95,10 +95,12 @@ pub mod store;
 pub mod types;
 
 // Re-export main types for convenience
-pub use config::{AutoColumns, StoreConfig, StoreConfigBuilder};
+pub use config::{AutoColumns, DEFAULT_BULK_REQUEST_LIMIT, StoreConfig, StoreConfigBuilder};
 pub use error::{ObjectStoreError, Result};
 pub use instance::{
-    Condition, CreateInstanceRequest, FilterRequest, Instance, SimpleFilter, UpdateInstanceRequest,
+    BulkCreateOptions, BulkCreateResult, BulkRowError, Condition, ConflictMode,
+    CreateInstanceRequest, FilterRequest, Instance, SimpleFilter, UpdateInstanceRequest,
+    ValidationMode,
 };
 pub use schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 pub use store::ObjectStore;

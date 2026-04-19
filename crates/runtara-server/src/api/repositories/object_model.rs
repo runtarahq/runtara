@@ -44,6 +44,7 @@ impl ObjectStoreManager {
         // Use builder with empty URL since we're using an existing pool
         let config = StoreConfig::builder("")
             .soft_delete(crate::config::object_model_soft_delete())
+            .bulk_request_limit(crate::config::object_model_bulk_request_limit())
             .build();
         let store = ObjectStore::from_pool(pool, config).await?;
 
@@ -85,6 +86,7 @@ impl ObjectStoreManager {
         let database_url = self.database_url.replace("{tenant_id}", tenant_id);
         let config = StoreConfig::builder(&database_url)
             .soft_delete(crate::config::object_model_soft_delete())
+            .bulk_request_limit(crate::config::object_model_bulk_request_limit())
             .build();
         let store = ObjectStore::new(config).await?;
         let store = Arc::new(store);
@@ -127,6 +129,7 @@ impl ObjectStoreManager {
         // Create new store for this database URL
         let config = StoreConfig::builder(database_url)
             .soft_delete(crate::config::object_model_soft_delete())
+            .bulk_request_limit(crate::config::object_model_bulk_request_limit())
             .build();
         let store = ObjectStore::new(config).await?;
         let store = Arc::new(store);

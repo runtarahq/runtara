@@ -3,7 +3,7 @@ use axum::{
     extract::DefaultBodyLimit,
     middleware::{from_fn, from_fn_with_state},
     response::Json,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use dashmap::DashMap;
 use serde::Serialize;
@@ -99,6 +99,8 @@ use runtime_client::RuntimeClient;
         api::handlers::object_model::update_instance,
         api::handlers::object_model::delete_instance,
         api::handlers::object_model::bulk_delete_instances,
+        api::handlers::object_model::bulk_create_instances,
+        api::handlers::object_model::bulk_update_instances,
         // CSV Import/Export endpoints
         api::handlers::csv_import_export::export_csv,
         api::handlers::csv_import_export::import_csv_preview,
@@ -1344,6 +1346,14 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/object-model/instances/{schema_id}/bulk",
             delete(api::handlers::object_model::bulk_delete_instances),
         )
+        .route(
+            "/api/runtime/object-model/instances/{schema_id}/bulk",
+            post(api::handlers::object_model::bulk_create_instances),
+        )
+        .route(
+            "/api/runtime/object-model/instances/{schema_id}/bulk",
+            patch(api::handlers::object_model::bulk_update_instances),
+        )
         // CSV Import/Export endpoints
         .route(
             "/api/runtime/object-model/instances/schema/{name}/export-csv",
@@ -1446,6 +1456,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/internal/object-model/instances/{schema_name}/{id}",
             put(api::handlers::internal_object_model::update_instance),
+        )
+        .route(
+            "/api/internal/object-model/instances/delete",
+            post(api::handlers::internal_object_model::delete_instance),
+        )
+        .route(
+            "/api/internal/object-model/instances/bulk-create",
+            post(api::handlers::internal_object_model::bulk_create_instances),
+        )
+        .route(
+            "/api/internal/object-model/instances/bulk-update",
+            post(api::handlers::internal_object_model::bulk_update_instances),
+        )
+        .route(
+            "/api/internal/object-model/instances/bulk-delete",
+            post(api::handlers::internal_object_model::bulk_delete_instances),
         )
         .route(
             "/api/internal/object-model/schemas/{name}",

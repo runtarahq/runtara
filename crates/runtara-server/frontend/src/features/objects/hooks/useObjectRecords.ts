@@ -1,6 +1,8 @@
 import { useQueryClient } from '@tanstack/react-query';
 import {
   bulkDeleteInstances,
+  bulkCreateInstances,
+  bulkUpdateInstancesByIds,
   createInstance,
   getInstanceById,
   getInstancesBySchema,
@@ -8,6 +10,8 @@ import {
   exportCsv,
   importCsvPreview,
   importCsv,
+  type BulkCreateOptions,
+  type BulkCreateResult,
 } from '../queries';
 import {
   Instance,
@@ -205,6 +209,55 @@ export function useBulkDeleteObjectInstances() {
       },
     }
   );
+}
+
+/**
+ * Hook to bulk-insert records from a JSON array with opt-in conflict + error
+ * handling.
+ */
+export function useBulkCreateObjectInstances() {
+  const queryClient = useQueryClient();
+
+  return useCustomMutation<
+    BulkCreateResult,
+    {
+      schemaId: string;
+      instances: unknown[];
+      options: BulkCreateOptions;
+    }
+  >({
+    mutationFn: (token, { schemaId, instances, options }) =>
+      bulkCreateInstances(token, schemaId, instances, options),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+      });
+    },
+  });
+}
+
+/**
+ * Hook to bulk-update a set of instances by ID with a shared property payload.
+ */
+export function useBulkUpdateObjectInstances() {
+  const queryClient = useQueryClient();
+
+  return useCustomMutation<
+    number,
+    {
+      schemaId: string;
+      instanceIds: string[];
+      properties: Record<string, unknown>;
+    }
+  >({
+    mutationFn: (token, { schemaId, instanceIds, properties }) =>
+      bulkUpdateInstancesByIds(token, schemaId, instanceIds, properties),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.objects.instances.bySchema(variables.schemaId),
+      });
+    },
+  });
 }
 
 /**

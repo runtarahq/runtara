@@ -569,6 +569,191 @@ pub async fn bulk_delete_instances(
     }
 }
 
+/// Bulk create instances
+///
+/// Creates multiple instances in a single transaction. If any validation fails,
+/// no rows are inserted.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/object-model/instances/{schema_id}/bulk",
+    params(
+        ("schema_id" = String, Path, description = "Schema ID"),
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    request_body(
+        content = BulkCreateRequest,
+        description = "Array of JSON objects to insert",
+        example = json!({
+            "instances": [
+                {"sku": "A", "quantity": 1},
+                {"sku": "B", "quantity": 2}
+            ]
+        })
+    ),
+    responses(
+        (status = 201, description = "Instances created", body = BulkCreateResponse),
+        (status = 400, description = "Validation error", body = Value),
+        (status = 404, description = "Schema not found", body = Value),
+        (status = 500, description = "Internal server error", body = Value),
+    ),
+    tag = "object-model",
+    security(
+        ("tenant_auth" = [])
+    )
+)]
+pub async fn bulk_create_instances(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Path(schema_id): Path<String>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<BulkCreateRequest>,
+) -> Result<(StatusCode, Json<BulkCreateResponse>), (StatusCode, Json<Value>)> {
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    match service
+        .bulk_create_instances(
+            &schema_id,
+            request,
+            &tenant_id,
+            params.connection_id.as_deref(),
+        )
+        .await
+    {
+        Ok(result) => Ok((
+            StatusCode::CREATED,
+            Json(BulkCreateResponse {
+                success: true,
+                created_count: result.created_count,
+                skipped_count: result.skipped_count,
+                errors: result
+                    .errors
+                    .into_iter()
+                    .map(|e| BulkRowError {
+                        index: e.index,
+                        reason: e.reason,
+                    })
+                    .collect(),
+                message: format!(
+                    "{} created, {} skipped",
+                    result.created_count, result.skipped_count
+                ),
+            }),
+        )),
+        Err(ServiceError::NotFound(msg)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::ValidationError(msg)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::Conflict(msg)) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::DatabaseError(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": msg})),
+        )),
+    }
+}
+
+/// Bulk update instances
+///
+/// Updates multiple instances in a single transaction. Supports two modes:
+/// `byCondition` applies the same properties to every row matching the condition;
+/// `byIds` applies per-row properties to each listed id.
+#[utoipa::path(
+    patch,
+    path = "/api/runtime/object-model/instances/{schema_id}/bulk",
+    params(
+        ("schema_id" = String, Path, description = "Schema ID"),
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    request_body(
+        content = BulkUpdateRequest,
+        description = "Bulk update payload (mode=byCondition or byIds)",
+        example = json!({
+            "mode": "byCondition",
+            "properties": {"status": "archived"},
+            "condition": {"op": "IN", "arguments": ["id", ["id1", "id2"]]}
+        })
+    ),
+    responses(
+        (status = 200, description = "Instances updated", body = BulkUpdateResponse),
+        (status = 400, description = "Validation error", body = Value),
+        (status = 404, description = "Schema not found", body = Value),
+        (status = 500, description = "Internal server error", body = Value),
+    ),
+    tag = "object-model",
+    security(
+        ("tenant_auth" = [])
+    )
+)]
+pub async fn bulk_update_instances(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Path(schema_id): Path<String>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<BulkUpdateRequest>,
+) -> Result<(StatusCode, Json<BulkUpdateResponse>), (StatusCode, Json<Value>)> {
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    let result = match request {
+        BulkUpdateRequest::ByCondition {
+            properties,
+            condition,
+        } => {
+            service
+                .bulk_update_instances_by_condition(
+                    &schema_id,
+                    properties,
+                    condition,
+                    &tenant_id,
+                    params.connection_id.as_deref(),
+                )
+                .await
+        }
+        BulkUpdateRequest::ByIds { updates } => {
+            service
+                .bulk_update_instances_by_ids(
+                    &schema_id,
+                    updates,
+                    &tenant_id,
+                    params.connection_id.as_deref(),
+                )
+                .await
+        }
+    };
+
+    match result {
+        Ok(updated_count) => Ok((
+            StatusCode::OK,
+            Json(BulkUpdateResponse {
+                success: true,
+                updated_count,
+                message: format!("{} instances updated successfully", updated_count),
+            }),
+        )),
+        Err(ServiceError::NotFound(msg)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::ValidationError(msg)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::Conflict(msg)) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::DatabaseError(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": msg})),
+        )),
+    }
+}
+
 /// Get a schema by ID
 #[utoipa::path(
     get,

@@ -8,7 +8,7 @@
 //! TEST_DATABASE_URL="postgres://user:pass@localhost:5432/test_db" cargo test -p runtara-object-store --test integration
 //! ```
 
-use runtara_object_store::instance::Condition;
+use runtara_object_store::instance::{BulkCreateOptions, Condition, ConflictMode, ValidationMode};
 use runtara_object_store::types::{ColumnDefinition, ColumnType, IndexDefinition};
 use runtara_object_store::{
     CreateSchemaRequest, FilterRequest, ObjectStore, SimpleFilter, StoreConfig,
@@ -1729,6 +1729,388 @@ async fn test_upsert_instances_empty_conflict_columns() {
         .await;
 
     assert!(result.is_err());
+
+    cleanup_test(&store, &prefix).await;
+}
+
+// ==================== update_instances_by_ids Tests ====================
+
+#[tokio::test]
+async fn test_update_instances_by_ids_mixed_values() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_update_by_ids", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "update_by_ids".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String).not_null(),
+                ColumnDefinition::new("quantity", ColumnType::Integer).not_null(),
+                ColumnDefinition::new("label", ColumnType::String),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    let id_a = store
+        .create_instance(
+            "update_by_ids",
+            serde_json::json!({"sku": "A", "quantity": 1, "label": "orig"}),
+        )
+        .await
+        .expect("create A");
+    let id_b = store
+        .create_instance(
+            "update_by_ids",
+            serde_json::json!({"sku": "B", "quantity": 2, "label": "orig"}),
+        )
+        .await
+        .expect("create B");
+    let id_c = store
+        .create_instance(
+            "update_by_ids",
+            serde_json::json!({"sku": "C", "quantity": 3, "label": "orig"}),
+        )
+        .await
+        .expect("create C");
+
+    // Per-row update with different values.
+    let updates = vec![
+        (
+            id_a.clone(),
+            serde_json::json!({"quantity": 100, "label": "a-new"}),
+        ),
+        (id_b.clone(), serde_json::json!({"quantity": 200})),
+    ];
+    let affected = store
+        .update_instances_by_ids("update_by_ids", updates)
+        .await
+        .expect("bulk update");
+    assert_eq!(affected, 2);
+
+    let fetched_a = store
+        .get_instance("update_by_ids", &id_a)
+        .await
+        .unwrap()
+        .expect("A present");
+    assert_eq!(fetched_a.properties["quantity"], serde_json::json!(100));
+    assert_eq!(fetched_a.properties["label"], serde_json::json!("a-new"));
+
+    let fetched_b = store
+        .get_instance("update_by_ids", &id_b)
+        .await
+        .unwrap()
+        .expect("B present");
+    assert_eq!(fetched_b.properties["quantity"], serde_json::json!(200));
+    // B's label wasn't touched — should still be the original.
+    assert_eq!(fetched_b.properties["label"], serde_json::json!("orig"));
+
+    // C wasn't in the update list — unchanged.
+    let fetched_c = store
+        .get_instance("update_by_ids", &id_c)
+        .await
+        .unwrap()
+        .expect("C present");
+    assert_eq!(fetched_c.properties["quantity"], serde_json::json!(3));
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_update_instances_by_ids_validation_rolls_back() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_update_by_ids_rb", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "update_by_ids_rb".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String).not_null(),
+                ColumnDefinition::new("quantity", ColumnType::Integer).not_null(),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    let id = store
+        .create_instance(
+            "update_by_ids_rb",
+            serde_json::json!({"sku": "A", "quantity": 1}),
+        )
+        .await
+        .expect("create");
+
+    // Second row has a type mismatch (quantity as string).
+    let updates = vec![
+        (id.clone(), serde_json::json!({"quantity": 50})),
+        (
+            "nonexistent".to_string(),
+            serde_json::json!({"quantity": "oops"}),
+        ),
+    ];
+
+    let result = store
+        .update_instances_by_ids("update_by_ids_rb", updates)
+        .await;
+    assert!(result.is_err(), "Should error on invalid row");
+
+    // Confirm nothing was applied (rollback).
+    let fetched = store
+        .get_instance("update_by_ids_rb", &id)
+        .await
+        .unwrap()
+        .expect("still present");
+    assert_eq!(fetched.properties["quantity"], serde_json::json!(1));
+
+    cleanup_test(&store, &prefix).await;
+}
+
+// ==================== create_instances_extended Tests ====================
+
+#[tokio::test]
+async fn test_create_instances_extended_skip_conflict() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_bulk_skip", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "bulk_skip".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("name", ColumnType::String).not_null(),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // Seed one row so the subsequent bulk will hit a conflict on sku=A.
+    store
+        .create_instance(
+            "bulk_skip",
+            serde_json::json!({"sku": "A", "name": "existing"}),
+        )
+        .await
+        .expect("seed");
+
+    let instances = vec![
+        serde_json::json!({"sku": "A", "name": "duplicate"}),
+        serde_json::json!({"sku": "B", "name": "new"}),
+        serde_json::json!({"sku": "C", "name": "new"}),
+    ];
+
+    let result = store
+        .create_instances_extended(
+            "bulk_skip",
+            instances,
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Skip {
+                    conflict_columns: vec!["sku".to_string()],
+                },
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await
+        .expect("bulk insert");
+
+    assert_eq!(result.created_count, 2, "B and C inserted");
+    assert_eq!(result.skipped_count, 1, "A skipped by conflict");
+
+    // Existing row's `name` should still be 'existing' (skip, not upsert).
+    let (found, _) = store
+        .filter_instances(
+            "bulk_skip",
+            FilterRequest {
+                condition: Some(Condition::eq("sku", "A")),
+                offset: 0,
+                limit: 10,
+                sort_by: None,
+                sort_order: None,
+            },
+        )
+        .await
+        .expect("query A");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].properties["name"], serde_json::json!("existing"));
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_create_instances_extended_upsert_conflict() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_bulk_upsert", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "bulk_upsert".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("name", ColumnType::String).not_null(),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    store
+        .create_instance(
+            "bulk_upsert",
+            serde_json::json!({"sku": "A", "name": "old"}),
+        )
+        .await
+        .expect("seed");
+
+    let instances = vec![
+        serde_json::json!({"sku": "A", "name": "updated"}),
+        serde_json::json!({"sku": "B", "name": "new"}),
+    ];
+
+    let result = store
+        .create_instances_extended(
+            "bulk_upsert",
+            instances,
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Upsert {
+                    conflict_columns: vec!["sku".to_string()],
+                },
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await
+        .expect("bulk upsert");
+
+    // Postgres counts both INSERT and UPDATE as "rows affected" for ON CONFLICT DO UPDATE,
+    // so created_count is 2 (one inserted, one updated).
+    assert_eq!(result.created_count, 2);
+
+    let (found_a, _) = store
+        .filter_instances(
+            "bulk_upsert",
+            FilterRequest {
+                condition: Some(Condition::eq("sku", "A")),
+                offset: 0,
+                limit: 10,
+                sort_by: None,
+                sort_order: None,
+            },
+        )
+        .await
+        .expect("query A");
+    assert_eq!(found_a[0].properties["name"], serde_json::json!("updated"));
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_create_instances_extended_skip_validation() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_bulk_skip_invalid", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "bulk_skip_invalid".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String).not_null(),
+                ColumnDefinition::new("quantity", ColumnType::Integer).not_null(),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    let instances = vec![
+        serde_json::json!({"sku": "ok-1", "quantity": 1}),
+        serde_json::json!({"sku": "bad"}), // missing quantity
+        serde_json::json!({"sku": "ok-2", "quantity": 2}),
+    ];
+
+    let result = store
+        .create_instances_extended(
+            "bulk_skip_invalid",
+            instances,
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Error,
+                validation_mode: ValidationMode::Skip,
+            },
+        )
+        .await
+        .expect("bulk with skip");
+
+    assert_eq!(result.created_count, 2);
+    assert_eq!(result.skipped_count, 1);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].index, 1);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_create_instances_extended_requires_conflict_columns() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_bulk_missing_cols", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "bulk_missing_cols".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![ColumnDefinition::new("sku", ColumnType::String).not_null()],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    let result = store
+        .create_instances_extended(
+            "bulk_missing_cols",
+            vec![serde_json::json!({"sku": "x"})],
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Skip {
+                    conflict_columns: vec![],
+                },
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "skip mode with no conflict columns should error"
+    );
 
     cleanup_test(&store, &prefix).await;
 }

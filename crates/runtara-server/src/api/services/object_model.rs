@@ -563,7 +563,9 @@ impl InstanceService {
             })
     }
 
-    /// Bulk delete instances (soft delete)
+    /// Bulk delete instances by ID (soft delete). Delegates to the store's
+    /// transactional `delete_instances(condition)` — all deletes happen in one
+    /// transaction and are rolled back on failure.
     pub async fn bulk_delete_instances(
         &self,
         instance_ids: Vec<String>,
@@ -571,33 +573,181 @@ impl InstanceService {
         tenant_id: &str,
         connection_id: Option<&str>,
     ) -> Result<usize, ServiceError> {
+        if instance_ids.is_empty() {
+            return Ok(0);
+        }
+
         let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
 
-        // Fetch schema first to get its name
+        let limit = store.config().bulk_request_limit;
+        if instance_ids.len() > limit {
+            return Err(ServiceError::ValidationError(format!(
+                "bulk request size {} exceeds limit of {}",
+                instance_ids.len(),
+                limit
+            )));
+        }
+
         let schema = store
             .get_schema_by_id(schema_id)
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
             .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
 
-        let mut deleted = 0u64;
-        for id in &instance_ids {
-            match store.delete_instance(&schema.name, id).await {
-                Ok(()) => deleted += 1,
-                Err(e) if e.to_string().contains("not found") => {
-                    // Instance not found, skip it
-                }
-                Err(e) => return Err(ServiceError::DatabaseError(e.to_string())),
-            }
-        }
+        let id_values: Vec<serde_json::Value> = instance_ids
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect();
+        let condition = runtara_object_store::Condition::r#in("id", id_values);
+
+        let deleted = store
+            .delete_instances(&schema.name, condition)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
 
         Ok(deleted as usize)
+    }
+
+    /// Bulk create multiple instances in one transaction, with opt-in
+    /// conflict and validation handling (see `BulkCreateRequest`).
+    pub async fn bulk_create_instances(
+        &self,
+        schema_id: &str,
+        request: BulkCreateRequest,
+        tenant_id: &str,
+        connection_id: Option<&str>,
+    ) -> Result<runtara_object_store::BulkCreateResult, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+
+        let schema = store
+            .get_schema_by_id(schema_id)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
+
+        let opts = bulk_create_options_from_request(&request)?;
+
+        store
+            .create_instances_extended(&schema.name, request.instances, opts)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("validation") || e.to_string().contains("Invalid") {
+                    ServiceError::ValidationError(e.to_string())
+                } else {
+                    ServiceError::DatabaseError(e.to_string())
+                }
+            })
+    }
+
+    /// Bulk update all rows matching `condition` with the same `properties`.
+    pub async fn bulk_update_instances_by_condition(
+        &self,
+        schema_id: &str,
+        properties: serde_json::Value,
+        condition: Condition,
+        tenant_id: &str,
+        connection_id: Option<&str>,
+    ) -> Result<i64, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+
+        let schema = store
+            .get_schema_by_id(schema_id)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
+
+        store
+            .update_instances(&schema.name, properties, condition.into())
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("validation") || e.to_string().contains("Invalid") {
+                    ServiceError::ValidationError(e.to_string())
+                } else {
+                    ServiceError::DatabaseError(e.to_string())
+                }
+            })
+    }
+
+    /// Bulk update by ID list, each entry with its own `properties`.
+    pub async fn bulk_update_instances_by_ids(
+        &self,
+        schema_id: &str,
+        updates: Vec<BulkUpdateByIdEntry>,
+        tenant_id: &str,
+        connection_id: Option<&str>,
+    ) -> Result<i64, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+
+        let schema = store
+            .get_schema_by_id(schema_id)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| ServiceError::NotFound("Schema not found".to_string()))?;
+
+        let store_updates: Vec<(String, serde_json::Value)> =
+            updates.into_iter().map(|u| (u.id, u.properties)).collect();
+
+        store
+            .update_instances_by_ids(&schema.name, store_updates)
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("validation") || e.to_string().contains("Invalid") {
+                    ServiceError::ValidationError(e.to_string())
+                } else {
+                    ServiceError::DatabaseError(e.to_string())
+                }
+            })
     }
 }
 
 // ============================================================================
 // Service Errors
 // ============================================================================
+
+/// Build store-side bulk-create options from the DTO request, validating
+/// that `conflict_columns` is provided whenever `onConflict` is `skip` or
+/// `upsert` (the user explicitly chose this over silently defaulting to `id`).
+fn bulk_create_options_from_request(
+    request: &BulkCreateRequest,
+) -> Result<runtara_object_store::BulkCreateOptions, ServiceError> {
+    use runtara_object_store::{
+        BulkCreateOptions, ConflictMode as StoreConflictMode, ValidationMode,
+    };
+
+    let conflict_mode = match request.on_conflict {
+        BulkConflictMode::Error => StoreConflictMode::Error,
+        BulkConflictMode::Skip => {
+            if request.conflict_columns.is_empty() {
+                return Err(ServiceError::ValidationError(
+                    "`conflictColumns` is required when `onConflict` is 'skip'".to_string(),
+                ));
+            }
+            StoreConflictMode::Skip {
+                conflict_columns: request.conflict_columns.clone(),
+            }
+        }
+        BulkConflictMode::Upsert => {
+            if request.conflict_columns.is_empty() {
+                return Err(ServiceError::ValidationError(
+                    "`conflictColumns` is required when `onConflict` is 'upsert'".to_string(),
+                ));
+            }
+            StoreConflictMode::Upsert {
+                conflict_columns: request.conflict_columns.clone(),
+            }
+        }
+    };
+
+    let validation_mode = match request.on_error {
+        BulkValidationMode::Stop => ValidationMode::Stop,
+        BulkValidationMode::Skip => ValidationMode::Skip,
+    };
+
+    Ok(BulkCreateOptions {
+        conflict_mode,
+        validation_mode,
+    })
+}
 
 #[derive(Debug)]
 #[allow(dead_code)]

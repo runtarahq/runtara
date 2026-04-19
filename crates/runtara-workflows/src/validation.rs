@@ -5110,6 +5110,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let mut steps = HashMap::new();
@@ -5212,6 +5213,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let mut steps = HashMap::new();
@@ -5326,6 +5328,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let mut steps = HashMap::new();
@@ -5422,6 +5425,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let mut steps = HashMap::new();
@@ -5544,6 +5548,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let mut steps = HashMap::new();

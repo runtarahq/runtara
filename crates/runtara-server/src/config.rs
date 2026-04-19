@@ -26,6 +26,8 @@ pub struct Config {
     pub object_model_max_connections: u32,
     /// Whether the object model uses soft delete.
     pub object_model_soft_delete: bool,
+    /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
+    pub object_model_bulk_request_limit: usize,
     /// Internal HTTP port (used to derive default service URLs).
     pub internal_port: u16,
     /// Name of the stdlib crate compiled into workflows.
@@ -66,6 +68,10 @@ impl Config {
             .map_err(|_| ConfigError::Missing("OBJECT_MODEL_DATABASE_URL"))?;
         let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 5)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
+        let object_model_bulk_request_limit: usize = parse_usize_or(
+            "OBJECT_MODEL_BULK_REQUEST_LIMIT",
+            runtara_object_store::DEFAULT_BULK_REQUEST_LIMIT,
+        )?;
 
         let internal_port: u16 = std::env::var("INTERNAL_PORT")
             .unwrap_or_else(|_| "7002".to_string())
@@ -99,6 +105,7 @@ impl Config {
             object_model_database_url,
             object_model_max_connections,
             object_model_soft_delete,
+            object_model_bulk_request_limit,
             internal_port,
             stdlib_name,
             http_proxy_url,
@@ -148,6 +155,15 @@ fn parse_u32_or(name: &'static str, default: u32) -> Result<u32, ConfigError> {
 }
 
 fn parse_u64_or(name: &'static str, default: u64) -> Result<u64, ConfigError> {
+    match std::env::var(name) {
+        Ok(v) => v
+            .parse()
+            .map_err(|_| ConfigError::Invalid(name, "must be a non-negative integer")),
+        Err(_) => Ok(default),
+    }
+}
+
+fn parse_usize_or(name: &'static str, default: usize) -> Result<usize, ConfigError> {
     match std::env::var(name) {
         Ok(v) => v
             .parse()
@@ -231,6 +247,11 @@ pub fn object_model_max_connections() -> u32 {
 /// Whether the object model uses soft delete.
 pub fn object_model_soft_delete() -> bool {
     get().object_model_soft_delete
+}
+
+/// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
+pub fn object_model_bulk_request_limit() -> usize {
+    get().object_model_bulk_request_limit
 }
 
 #[cfg(test)]

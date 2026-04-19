@@ -636,6 +636,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -662,6 +663,7 @@ mod tests {
             timeout: None,
             allow_null: Some(true),
             convert_single_value: Some(true),
+            batch_size: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -693,6 +695,7 @@ mod tests {
             timeout: None,
             allow_null: None,
             convert_single_value: None,
+            batch_size: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -761,6 +764,7 @@ mod tests {
                 timeout: None,
                 allow_null: None,
                 convert_single_value: None,
+                batch_size: None,
             }),
             input_schema: HashMap::new(),
             output_schema: HashMap::new(),

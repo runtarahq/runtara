@@ -1847,4 +1847,16 @@ pub struct SplitConfig {
     /// Use `transform/ensure-array` agent for explicit conversion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convert_single_value: Option<bool>,
+
+    /// Batch size for grouping array elements into sub-arrays before iteration.
+    ///
+    /// When 0 or unset (the default), the array is split element-by-element —
+    /// `[1,2,3,4,5]` yields five iterations with items `1, 2, 3, 4, 5`.
+    ///
+    /// When > 0, elements are grouped into chunks of `batch_size` (last chunk
+    /// may be shorter). For example with `batch_size: 2`, `[1,2,3,4,5]` yields
+    /// three iterations with items `[1,2]`, `[3,4]`, `[5]`. Each iteration's
+    /// subgraph receives an array value instead of an individual element.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<u32>,
 }
