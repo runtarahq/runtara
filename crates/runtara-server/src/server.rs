@@ -430,33 +430,20 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    // Configure Runtara stdlib for workflow compilation
-    // This enables agents in compiled workflows
-    // SAFETY: This is called early in main() before any threads are spawned,
-    // so there are no data races. The environment variable is only read later
-    // during workflow compilation.
+    // Load all env-derived configuration up front; fails fast on missing/invalid.
+    let server_config = config::Config::from_env()?;
+
+    // Expose stdlib name to workflow compilation, which reads it from the process
+    // environment at codegen time (runtara_workflows::agents_library and
+    // runtara_workflows::codegen). This is the only env::set_var the server
+    // performs; all other scenario-side values are passed through
+    // LaunchOptions.env at runner launch time.
+    // SAFETY: called early in start() before any threads are spawned.
     unsafe {
-        if std::env::var("RUNTARA_STDLIB_NAME").is_err() {
-            std::env::set_var("RUNTARA_STDLIB_NAME", "runtara_workflow_stdlib");
-        }
-
-        // Ensure in-process S3Client (used by Files endpoints) routes through the internal proxy
-        if std::env::var("RUNTARA_HTTP_PROXY_URL").is_err() {
-            let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
-            std::env::set_var(
-                "RUNTARA_HTTP_PROXY_URL",
-                format!("http://127.0.0.1:{}/api/internal/proxy", port),
-            );
-        }
-
-        // Note: RUNTARA_NATIVE_LIBRARY_DIR is optional - runtara-workflows automatically
-        // checks target/native_cache which is where build.rs outputs the compiled stdlib.
-        // Only set this env var if you need to override the default location.
+        std::env::set_var("RUNTARA_STDLIB_NAME", &server_config.stdlib_name);
     }
-    println!(
-        "✓ Runtara stdlib: {}",
-        std::env::var("RUNTARA_STDLIB_NAME").unwrap_or_default()
-    );
+    println!("✓ Runtara stdlib: {}", server_config.stdlib_name);
+
     if let Ok(lib_dir) = std::env::var("RUNTARA_NATIVE_LIBRARY_DIR") {
         println!("✓ Native library dir: {}", lib_dir);
     } else {
@@ -485,62 +472,20 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     runtara_dsl::agent_meta::validate_agent_metadata_or_panic();
     println!("✓ Agent metadata validated");
 
-    // Load and initialize tenant ID from environment (REQUIRED - no default)
-    let tenant_id = std::env::var("TENANT_ID").expect(
-        "TENANT_ID environment variable is required. \
-         Set it to your organization ID (e.g., export TENANT_ID=org_abc123)",
-    );
-    println!("✓ Configured for tenant: {}", tenant_id);
-
-    // Set env vars for scenario binaries (forwarded by OCI/native runners)
-    // SAFETY: Called early in main() before threads are spawned.
-    unsafe {
-        // Object model internal API URL — scenarios use this for CRUD operations
-        if std::env::var("RUNTARA_OBJECT_MODEL_URL").is_err() {
-            let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
-            std::env::set_var(
-                "RUNTARA_OBJECT_MODEL_URL",
-                format!("http://127.0.0.1:{}/api/internal/object-model", port),
-            );
-        }
-        // Tenant ID for internal API authentication (X-Org-Id header)
-        if std::env::var("RUNTARA_TENANT_ID").is_err() {
-            std::env::set_var("RUNTARA_TENANT_ID", &tenant_id);
-        }
-        // Agent service URL — scenario binaries use this to call native-only capabilities
-        if std::env::var("RUNTARA_AGENT_SERVICE_URL").is_err() {
-            let port = std::env::var("INTERNAL_PORT").unwrap_or_else(|_| "7002".to_string());
-            std::env::set_var(
-                "RUNTARA_AGENT_SERVICE_URL",
-                format!("http://127.0.0.1:{}/api/internal/agents", port),
-            );
-        }
-    }
+    println!("✓ Configured for tenant: {}", server_config.tenant_id);
+    println!("✓ Object model URL: {}", server_config.object_model_url);
+    println!("✓ Agent service URL: {}", server_config.agent_service_url);
     println!(
-        "✓ Object model URL: {}",
-        std::env::var("RUNTARA_OBJECT_MODEL_URL").unwrap_or_default()
-    );
-    println!(
-        "✓ Agent service URL: {}",
-        std::env::var("RUNTARA_AGENT_SERVICE_URL").unwrap_or_default()
+        "Max concurrent executions: {} (CPU cores: {})",
+        server_config.max_concurrent_executions,
+        num_cpus::get()
     );
 
     // Get version for logging context
     let version = env!("BUILD_VERSION");
 
-    // Load max concurrent executions from environment (default: num_cpus * 32)
-    let max_concurrent_executions = std::env::var("MAX_CONCURRENT_EXECUTIONS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(|| num_cpus::get() * 32);
-
-    println!(
-        "Max concurrent executions: {} (CPU cores: {})",
-        max_concurrent_executions,
-        num_cpus::get()
-    );
-
-    config::init(tenant_id.clone(), max_concurrent_executions);
+    let tenant_id = server_config.tenant_id.clone();
+    config::init(server_config);
 
     // Create a root span with global context that will be included in all logs
     let root_span = tracing::info_span!(

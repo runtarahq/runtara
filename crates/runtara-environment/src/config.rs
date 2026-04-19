@@ -45,7 +45,8 @@ impl Config {
             PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string()));
 
         let skip_cert_verification = std::env::var("RUNTARA_SKIP_CERT_VERIFICATION")
-            .map(|v| v == "true" || v == "1")
+            .ok()
+            .map(|v| parse_bool_lenient(&v))
             .unwrap_or(false);
 
         let db_pool_size = std::env::var("RUNTARA_DB_POOL_SIZE")
@@ -79,6 +80,15 @@ pub enum ConfigError {
     /// The port number is invalid.
     #[error("Invalid port number")]
     InvalidPort,
+}
+
+/// Parse a boolean env var accepting the common forms: `true/false`, `1/0`,
+/// `yes/no`, `on/off` (case-insensitive). Unknown values are treated as `false`.
+pub(crate) fn parse_bool_lenient(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 #[cfg(test)]
