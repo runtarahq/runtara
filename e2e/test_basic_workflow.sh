@@ -105,7 +105,7 @@ TEMP_BINARY=$(mktemp)
 if ! "${RUNTARA_COMPILE}" \
     --workflow "${WORKFLOW_FILE}" \
     --tenant "${TENANT_ID}" \
-    --workflow "${WORKFLOW_ID}" \
+    --workflow-id "${WORKFLOW_ID}" \
     --output "${TEMP_BINARY}" 2>&1; then
     print_error "Compilation failed"
     exit 1
