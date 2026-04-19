@@ -44,7 +44,7 @@ Three conventions:
 2. **Call `mockApi.bootstrap(page)` first** so the sidebar and health check have data. Then add page-specific mocks.
 3. **End with `runA11y(page)`** and optionally `view.expectMatchesSnapshot('name')` for visual regression.
 
-Mock URL patterns are built by `runtimeUrl()` in `fixtures/mock.fixture.ts` — it handles the optional org_id prefix that the axios interceptor adds and only matches exact paths (not subpaths) so `runtimeUrl('scenarios')` does not accidentally swallow `scenarios/folders`.
+Mock URL patterns are built by `runtimeUrl()` in `fixtures/mock.fixture.ts` — it handles the optional org_id prefix that the axios interceptor adds and only matches exact paths (not subpaths) so `runtimeUrl('workflows')` does not accidentally swallow `workflows/folders`.
 
 Example:
 
@@ -99,11 +99,11 @@ Workflow:
 `utils/seed.ts` wraps API calls that create fixtures for `*.e2e.spec.ts` tests:
 
 ```ts
-import { seededApi, seedScenario, cleanupAllSeeded } from '../../utils/seed';
+import { seededApi, seedWorkflow, cleanupAllSeeded } from '../../utils/seed';
 
 test.beforeAll(async () => {
   api = await seededApi();
-  scenario = await seedScenario(api, { scope: 'my-suite', name: 'My test' });
+  workflow = await seedWorkflow(api, { scope: 'my-suite', name: 'My test' });
 });
 
 test.afterAll(async () => {
@@ -132,7 +132,7 @@ e2e/
 │   ├── api.fixture.ts          # (legacy) generic mock helpers
 │   ├── mock.fixture.ts         # typed, high-level API mocks
 │   ├── a11y.fixture.ts         # runA11y() wrapping @axe-core/playwright
-│   ├── builders.ts             # typed fixture factories (buildScenario, etc.)
+│   ├── builders.ts             # typed fixture factories (buildWorkflow, etc.)
 │   └── index.ts                # merged test + expect entrypoint
 ├── utils/
 │   ├── auth-token.ts           # Auth0 client-credentials flow helper

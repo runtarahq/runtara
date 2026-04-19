@@ -47,10 +47,10 @@ function readAccessToken(): string {
  * Example:
  *   test.beforeAll(async () => {
  *     api = await seededApi();
- *     scenario = await seedScenario(api, { scope: 'scenario-lifecycle' });
+ *     workflow = await seedWorkflow(api, { scope: 'workflow-lifecycle' });
  *   });
  *   test.afterAll(async () => {
- *     await cleanupAllSeeded(api, 'scenario-lifecycle');
+ *     await cleanupAllSeeded(api, 'workflow-lifecycle');
  *     await api.dispose();
  *   });
  */
@@ -91,18 +91,18 @@ async function runtimePath(
   return `/api/runtime${org}/${suffix.replace(/^\//, '')}`;
 }
 
-export interface SeedScenarioOptions {
+export interface SeedWorkflowOptions {
   scope: string;
   name?: string;
   description?: string;
 }
 
-export async function seedScenario(
+export async function seedWorkflow(
   api: APIRequestContext,
-  opts: SeedScenarioOptions
+  opts: SeedWorkflowOptions
 ): Promise<{ id: string; name: string }> {
-  const name = opts.name ?? `Seed Scenario ${SEED_TAG(opts.scope)}`;
-  const response = await api.post(await runtimePath(api, 'scenarios'), {
+  const name = opts.name ?? `Seed Workflow ${SEED_TAG(opts.scope)}`;
+  const response = await api.post(await runtimePath(api, 'workflows'), {
     data: {
       name,
       description: opts.description ?? `Seeded by e2e. ${SEED_TAG(opts.scope)}`,
@@ -110,14 +110,14 @@ export async function seedScenario(
   });
   if (!response.ok()) {
     throw new Error(
-      `seedScenario failed: ${response.status()} ${await response.text()}`
+      `seedWorkflow failed: ${response.status()} ${await response.text()}`
     );
   }
   const body = await response.json();
   const id = body.data?.id ?? body.id;
   if (!id)
     throw new Error(
-      `seedScenario response missing id: ${JSON.stringify(body)}`
+      `seedWorkflow response missing id: ${JSON.stringify(body)}`
     );
   return { id, name };
 }
@@ -157,7 +157,7 @@ export async function seedConnection(
 }
 
 /**
- * Delete every scenario and connection whose name or description contains the
+ * Delete every workflow and connection whose name or description contains the
  * given scope tag. Safe to call even if the test crashed — it only touches
  * entities this suite created.
  */
@@ -177,17 +177,17 @@ export async function cleanupAllSeeded(
     }
   }
 
-  const scenariosResp = await api.get(
-    await runtimePath(api, 'scenarios?pageSize=100&recursive=true')
+  const workflowsResp = await api.get(
+    await runtimePath(api, 'workflows?pageSize=100&recursive=true')
   );
-  if (scenariosResp.ok()) {
-    const body = await scenariosResp.json();
+  if (workflowsResp.ok()) {
+    const body = await workflowsResp.json();
     for (const scn of body.data?.content ?? []) {
       const match =
         (typeof scn.name === 'string' && scn.name.includes(tag)) ||
         (typeof scn.description === 'string' && scn.description.includes(tag));
       if (match) {
-        await api.delete(await runtimePath(api, `scenarios/${scn.id}`));
+        await api.delete(await runtimePath(api, `workflows/${scn.id}`));
       }
     }
   }

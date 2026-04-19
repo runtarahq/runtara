@@ -46,81 +46,81 @@ export const queryKeys = {
     byId: (id: string) => [...queryKeys.triggers.details(), id] as const,
   },
 
-  // Scenarios domain
-  scenarios: {
-    all: ['scenarios'] as const,
-    lists: () => [...queryKeys.scenarios.all, 'list'] as const,
+  // Workflows domain
+  workflows: {
+    all: ['workflows'] as const,
+    lists: () => [...queryKeys.workflows.all, 'list'] as const,
     list: (filters?: Record<string, unknown>) =>
-      [...queryKeys.scenarios.lists(), filters] as const,
-    details: () => [...queryKeys.scenarios.all, 'detail'] as const,
-    byId: (id: string) => [...queryKeys.scenarios.details(), id] as const,
+      [...queryKeys.workflows.lists(), filters] as const,
+    details: () => [...queryKeys.workflows.all, 'detail'] as const,
+    byId: (id: string) => [...queryKeys.workflows.details(), id] as const,
     workflow: (id: string, version?: number) =>
       version !== undefined
-        ? ([...queryKeys.scenarios.byId(id), 'workflow', version] as const)
-        : ([...queryKeys.scenarios.byId(id), 'workflow'] as const),
+        ? ([...queryKeys.workflows.byId(id), 'workflow', version] as const)
+        : ([...queryKeys.workflows.byId(id), 'workflow'] as const),
     versions: (id: string) =>
-      [...queryKeys.scenarios.byId(id), 'versions'] as const,
-    // All instances across all scenarios (for broad invalidation)
-    allInstances: () => [...queryKeys.scenarios.all, 'instance'] as const,
+      [...queryKeys.workflows.byId(id), 'versions'] as const,
+    // All instances across all workflows (for broad invalidation)
+    allInstances: () => [...queryKeys.workflows.all, 'instance'] as const,
     instances: (id: string) =>
-      [...queryKeys.scenarios.byId(id), 'instances'] as const,
-    instance: (scenarioId: string, instanceId: string) =>
-      [...queryKeys.scenarios.instances(scenarioId), instanceId] as const,
-    pendingInput: (scenarioId: string, instanceId: string) =>
+      [...queryKeys.workflows.byId(id), 'instances'] as const,
+    instance: (workflowId: string, instanceId: string) =>
+      [...queryKeys.workflows.instances(workflowId), instanceId] as const,
+    pendingInput: (workflowId: string, instanceId: string) =>
       [
-        ...queryKeys.scenarios.instance(scenarioId, instanceId),
+        ...queryKeys.workflows.instance(workflowId, instanceId),
         'pendingInput',
       ] as const,
-    stepTypes: () => [...queryKeys.scenarios.all, 'stepTypes'] as const,
+    stepTypes: () => [...queryKeys.workflows.all, 'stepTypes'] as const,
     logs: (instanceId: string) =>
-      [...queryKeys.scenarios.all, 'logs', instanceId] as const,
+      [...queryKeys.workflows.all, 'logs', instanceId] as const,
     stepSubinstances: (instanceId: string, stepId: string) =>
       [
-        ...queryKeys.scenarios.all,
+        ...queryKeys.workflows.all,
         'stepSubinstances',
         instanceId,
         stepId,
       ] as const,
     stepEvents: (
-      scenarioId: string | undefined,
+      workflowId: string | undefined,
       instanceId: string | undefined,
       stepId?: string
     ) =>
       [
-        ...queryKeys.scenarios.all,
+        ...queryKeys.workflows.all,
         'stepEvents',
-        scenarioId,
+        workflowId,
         instanceId,
         stepId,
       ] as const,
     stepSummaries: (
-      scenarioId: string,
+      workflowId: string,
       instanceId: string | null,
       filters?: unknown
     ) =>
       [
-        ...queryKeys.scenarios.all,
+        ...queryKeys.workflows.all,
         'stepSummaries',
-        scenarioId,
+        workflowId,
         instanceId,
         filters,
       ] as const,
-    invocationTriggers: (scenarioId: string) =>
-      [...queryKeys.scenarios.byId(scenarioId), 'invocationTriggers'] as const,
+    invocationTriggers: (workflowId: string) =>
+      [...queryKeys.workflows.byId(workflowId), 'invocationTriggers'] as const,
     // Folder operations
-    folders: () => [...queryKeys.scenarios.all, 'folders'] as const,
+    folders: () => [...queryKeys.workflows.all, 'folders'] as const,
     inFolder: (path: string, includeSubfolders?: boolean) =>
       [
-        ...queryKeys.scenarios.all,
+        ...queryKeys.workflows.all,
         'inFolder',
         path,
         includeSubfolders,
       ] as const,
     // Chat operations
-    chat: (scenarioId: string) =>
-      [...queryKeys.scenarios.byId(scenarioId), 'chat'] as const,
-    chatInstance: (scenarioId: string, instanceId: string) =>
-      [...queryKeys.scenarios.chat(scenarioId), instanceId] as const,
+    chat: (workflowId: string) =>
+      [...queryKeys.workflows.byId(workflowId), 'chat'] as const,
+    chatInstance: (workflowId: string, instanceId: string) =>
+      [...queryKeys.workflows.chat(workflowId), instanceId] as const,
   },
 
   // Executions domain (invocation history)
@@ -223,29 +223,29 @@ export const queryKeys = {
     all: ['analytics'] as const,
     tenant: (dateRange: string) =>
       [...queryKeys.analytics.all, 'tenant', dateRange] as const,
-    scenario: (
-      scenarioId: string,
+    workflow: (
+      workflowId: string,
       dateRange: string,
       version?: number,
       granularity?: string
     ) =>
       [
         ...queryKeys.analytics.all,
-        'scenario',
-        scenarioId,
+        'workflow',
+        workflowId,
         dateRange,
         version,
         granularity,
       ] as const,
-    scenarioStats: (scenarioId: string, version?: number) =>
+    workflowStats: (workflowId: string, version?: number) =>
       [
         ...queryKeys.analytics.all,
-        'scenarioStats',
-        scenarioId,
+        'workflowStats',
+        workflowId,
         version,
       ] as const,
-    sideEffects: (scenarioId?: string, version?: number) =>
-      [...queryKeys.analytics.all, 'sideEffects', scenarioId, version] as const,
+    sideEffects: (workflowId?: string, version?: number) =>
+      [...queryKeys.analytics.all, 'sideEffects', workflowId, version] as const,
     system: () => [...queryKeys.analytics.all, 'system'] as const,
     rateLimitTimeline: (connectionId: string, dateRange: string) =>
       [

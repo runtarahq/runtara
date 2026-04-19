@@ -6,8 +6,8 @@
 //! HTTP instance API.
 //!
 //! Used by:
-//! - Native scenarios with `RUNTARA_SDK_BACKEND=http`
-//! - WASM scenarios (future, via wasi-http)
+//! - Native workflows with `RUNTARA_SDK_BACKEND=http`
+//! - WASM workflows (future, via wasi-http)
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

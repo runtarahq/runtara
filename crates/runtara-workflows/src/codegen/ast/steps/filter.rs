@@ -49,8 +49,8 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
     // Serialize condition to JSON for debug events
     let condition_json = serde_json::to_string(&step.config.condition).ok();
 
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Get the workflow inputs variable to access _loop_indices at runtime
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
@@ -60,7 +60,7 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         "Filter",
         Some(&filter_input_var),
         condition_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     let debug_end = emit_step_debug_end(
@@ -69,7 +69,7 @@ pub fn emit(step: &FilterStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         step_name,
         "Filter",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 

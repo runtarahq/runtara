@@ -181,4 +181,4 @@ This report identifies test coverage gaps in the Runtara frontend application. C
 
 The Runtara frontend application has significant test coverage gaps across components, hooks, stores, and utilities. By implementing the recommended testing strategies, the team can improve code quality, reduce bugs, and make the codebase more maintainable.
 
-Starting with simple, high-impact tests for critical components and hooks will provide the most immediate value. Over time, expanding test coverage to include more complex scenarios and integration tests will build a robust testing foundation for the application.
+Starting with simple, high-impact tests for critical components and hooks will provide the most immediate value. Over time, expanding test coverage to include more complex workflows and integration tests will build a robust testing foundation for the application.

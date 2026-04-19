@@ -12,7 +12,7 @@ export function getHttpTriggerUrl(
 export function getEmailTriggerAddress(triggerId: string): string {
   const domain =
     import.meta.env.VITE_EMAIL_EVENTS_DOMAIN || 'events.example.com';
-  return `scenario-${triggerId}@${domain}`;
+  return `workflow-${triggerId}@${domain}`;
 }
 
 export function getChannelWebhookUrl(

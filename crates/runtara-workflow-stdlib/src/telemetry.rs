@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! OpenTelemetry telemetry initialization for workflow scenarios.
+//! OpenTelemetry telemetry initialization for workflow workflows.
 //!
 //! This module provides tracing subscriber initialization with optional
 //! OpenTelemetry integration. When the `telemetry` feature is enabled and
@@ -20,7 +20,7 @@
 //! - `OTEL_SERVICE_NAME`: Service name (default: "runtara-workflow")
 //! - `OTEL_RESOURCE_ATTRIBUTES`: Additional attributes (format: "key1=value1,key2=value2")
 //! - `TRACEPARENT`: W3C trace context for parent span linking
-//! - `SCENARIO_ID`, `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`: Added as resource attributes
+//! - `WORKFLOW_ID`, `RUNTARA_INSTANCE_ID`, `RUNTARA_TENANT_ID`: Added as resource attributes
 
 /// Guard that ensures telemetry is flushed on drop.
 ///
@@ -185,9 +185,9 @@ fn maybe_init_otel() -> Option<(
         }
     }
 
-    // Add scenario/instance/tenant IDs as resource attributes
-    if let Ok(scenario_id) = std::env::var("SCENARIO_ID") {
-        additional_attrs.push(opentelemetry::KeyValue::new("scenario.id", scenario_id));
+    // Add workflow/instance/tenant IDs as resource attributes
+    if let Ok(workflow_id) = std::env::var("WORKFLOW_ID") {
+        additional_attrs.push(opentelemetry::KeyValue::new("workflow.id", workflow_id));
     }
     if let Ok(instance_id) = std::env::var("RUNTARA_INSTANCE_ID") {
         additional_attrs.push(opentelemetry::KeyValue::new("instance.id", instance_id));

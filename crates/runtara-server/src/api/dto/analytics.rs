@@ -14,8 +14,8 @@ pub struct MemoryInfo {
     pub total_bytes: u64,
     /// Currently available memory in bytes
     pub available_bytes: u64,
-    /// Memory available for scenarios (80% of available, 20% reserved for runtime)
-    pub available_for_scenarios_bytes: u64,
+    /// Memory available for workflows (80% of available, 20% reserved for runtime)
+    pub available_for_workflows_bytes: u64,
 }
 
 /// Disk space information for the data directory

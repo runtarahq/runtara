@@ -1,11 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Rustc-based scenario compilation to native binaries
+//! Rustc-based workflow compilation to native binaries
 //!
 //! This module provides compilation without database dependencies.
-//! Child scenarios must be pre-loaded and passed to compilation functions.
+//! Child workflows must be pre-loaded and passed to compilation functions.
 //!
-//! Scenarios are compiled to native binaries for the host platform.
+//! Workflows are compiled to native binaries for the host platform.
 
 use runtara_dsl::ExecutionGraph;
 use serde::Deserialize;
@@ -19,7 +19,7 @@ use std::process::Command;
 use tracing::info;
 
 use crate::codegen::ast;
-use crate::paths::get_scenario_json_path;
+use crate::paths::get_workflow_json_path;
 
 // ============================================================================
 // Rustc Error Parsing
@@ -228,7 +228,7 @@ fn extract_pattern<'a>(text: &'a str, prefix: &str, suffix: &str) -> Option<&'a 
 /// Get the native target triple for the current host platform
 ///
 /// This must match the target used in build.rs when precompiling libraries.
-/// We use musl on Linux for static linking (scenarios run in minimal containers).
+/// We use musl on Linux for static linking (workflows run in minimal containers).
 #[allow(dead_code)]
 fn get_host_target() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -241,12 +241,12 @@ fn get_host_target() -> &'static str {
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        // Use musl for static linking - scenarios run in minimal containers
+        // Use musl for static linking - workflows run in minimal containers
         "x86_64-unknown-linux-musl"
     }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        // Use musl for static linking - scenarios run in minimal containers
+        // Use musl for static linking - workflows run in minimal containers
         "aarch64-unknown-linux-musl"
     }
     #[cfg(not(any(
@@ -256,7 +256,7 @@ fn get_host_target() -> &'static str {
         all(target_os = "linux", target_arch = "aarch64"),
     )))]
     {
-        compile_error!("Unsupported platform for scenario compilation")
+        compile_error!("Unsupported platform for workflow compilation")
     }
 }
 
@@ -326,32 +326,32 @@ pub fn workflow_has_side_effects(workflow: &Value) -> bool {
     false
 }
 
-/// Dependency information for a child scenario.
+/// Dependency information for a child workflow.
 ///
-/// When a workflow contains `StartScenario` steps, each one creates a dependency
+/// When a workflow contains `EmbedWorkflow` steps, each one creates a dependency
 /// on a child workflow. This struct captures the relationship.
 #[derive(Debug, Clone)]
 pub struct ChildDependency {
     /// The step ID in the parent workflow that starts this child.
     pub step_id: String,
-    /// The scenario ID of the child workflow.
-    pub child_scenario_id: String,
+    /// The workflow ID of the child workflow.
+    pub child_workflow_id: String,
     /// The version requested (e.g., "latest", "current", or explicit number).
     pub child_version_requested: String,
     /// The resolved version number that will actually be used.
     pub child_version_resolved: i32,
 }
 
-/// Input for a child scenario (pre-loaded by caller).
+/// Input for a child workflow (pre-loaded by caller).
 ///
-/// This crate has no database dependencies, so child scenarios must be loaded
+/// This crate has no database dependencies, so child workflows must be loaded
 /// by the caller and passed to compilation functions.
 #[derive(Debug, Clone)]
-pub struct ChildScenarioInput {
+pub struct ChildWorkflowInput {
     /// The step ID in the parent workflow that references this child.
     pub step_id: String,
-    /// The scenario ID of the child workflow.
-    pub scenario_id: String,
+    /// The workflow ID of the child workflow.
+    pub workflow_id: String,
     /// The version requested (e.g., "latest", "current", or explicit number).
     pub version_requested: String,
     /// The resolved version number.
@@ -363,22 +363,22 @@ pub struct ChildScenarioInput {
 /// Input for compilation (all data pre-loaded, no DB access needed).
 ///
 /// This struct contains everything needed to compile a workflow to a native binary.
-/// The caller is responsible for loading all required data (including child scenarios)
+/// The caller is responsible for loading all required data (including child workflows)
 /// before calling compilation functions.
 #[derive(Debug)]
 pub struct CompilationInput {
     /// Tenant ID for multi-tenant isolation.
     pub tenant_id: String,
-    /// Unique scenario identifier.
-    pub scenario_id: String,
-    /// Version number for this scenario.
+    /// Unique workflow identifier.
+    pub workflow_id: String,
+    /// Version number for this workflow.
     pub version: u32,
     /// The workflow's execution graph definition.
     pub execution_graph: ExecutionGraph,
     /// Whether to enable debug mode (additional logging).
     pub track_events: bool,
-    /// Pre-loaded child scenarios (empty if none).
-    pub child_scenarios: Vec<ChildScenarioInput>,
+    /// Pre-loaded child workflows (empty if none).
+    pub child_workflows: Vec<ChildWorkflowInput>,
     /// URL for fetching connections at runtime.
     /// If provided, generated code will fetch connections from this service.
     /// Expected endpoint: GET {url}/{tenant_id}/{connection_id}
@@ -402,18 +402,18 @@ pub struct NativeCompilationResult {
     pub has_side_effects: bool,
     /// Child workflow dependencies.
     pub child_dependencies: Vec<ChildDependency>,
-    /// Default variable values from the scenario definition.
+    /// Default variable values from the workflow definition.
     /// Callers should include these in image metadata so the environment
     /// can enrich stored input with defaults at instance start time.
     pub default_variables: serde_json::Value,
 }
 
-/// Get the rustc compilation directory for scenarios
+/// Get the rustc compilation directory for workflows
 fn get_rustc_compile_dir(tenant_id: &str, workflow_id: &str, version: u32) -> PathBuf {
     let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
     let path = PathBuf::from(data_dir)
         .join(tenant_id)
-        .join("scenarios")
+        .join("workflows")
         .join(workflow_id)
         .join("native_build")
         .join(format!("version_{}", version));
@@ -433,24 +433,24 @@ fn get_native_libs(target: Option<&str>) -> io::Result<crate::agents_library::Na
     }
 }
 
-/// Compile a scenario to a native Linux binary
+/// Compile a workflow to a native Linux binary
 ///
-/// This is the main compilation entry point. All required data (including child scenarios)
+/// This is the main compilation entry point. All required data (including child workflows)
 /// must be pre-loaded and passed in the CompilationInput.
 ///
 /// # Arguments
-/// * `input` - All compilation inputs including pre-loaded child scenarios
+/// * `input` - All compilation inputs including pre-loaded child workflows
 ///
 /// # Returns
 /// Result with native binary compilation data
-pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilationResult> {
+pub fn compile_workflow(input: CompilationInput) -> io::Result<NativeCompilationResult> {
     let CompilationInput {
         tenant_id,
-        scenario_id,
+        workflow_id,
         version,
         execution_graph,
         track_events,
-        child_scenarios,
+        child_workflows,
         connection_service_url,
     } = input;
 
@@ -461,7 +461,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     for warning in &validation_result.warnings {
         tracing::warn!(
             tenant_id = %tenant_id,
-            scenario_id = %scenario_id,
+            workflow_id = %workflow_id,
             version = version,
             warning = %warning,
             "Workflow validation warning"
@@ -510,29 +510,29 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 
     // Create build directory
     let setup_start = std::time::Instant::now();
-    let build_dir = get_rustc_compile_dir(&tenant_id, &scenario_id, version);
+    let build_dir = get_rustc_compile_dir(&tenant_id, &workflow_id, version);
     fs::create_dir_all(&build_dir)?;
 
-    // Convert child scenarios to two HashMaps:
-    // 1. child_graphs: "{scenario_id}::{version_resolved}" -> ExecutionGraph
-    // 2. step_to_child_ref: step_id -> (scenario_id, version_resolved)
+    // Convert child workflows to two HashMaps:
+    // 1. child_graphs: "{workflow_id}::{version_resolved}" -> ExecutionGraph
+    // 2. step_to_child_ref: step_id -> (workflow_id, version_resolved)
     //
-    // This prevents collisions when different parent scenarios have StartScenario steps
-    // with the same step_id but referencing different child scenarios.
-    let child_graphs: HashMap<String, ExecutionGraph> = child_scenarios
+    // This prevents collisions when different parent workflows have EmbedWorkflow steps
+    // with the same step_id but referencing different child workflows.
+    let child_graphs: HashMap<String, ExecutionGraph> = child_workflows
         .iter()
         .map(|c| {
-            let scenario_ref_key = format!("{}::{}", c.scenario_id, c.version_resolved);
-            (scenario_ref_key, c.execution_graph.clone())
+            let workflow_ref_key = format!("{}::{}", c.workflow_id, c.version_resolved);
+            (workflow_ref_key, c.execution_graph.clone())
         })
         .collect();
 
-    let step_to_child_ref: HashMap<String, (String, i32)> = child_scenarios
+    let step_to_child_ref: HashMap<String, (String, i32)> = child_workflows
         .iter()
         .map(|c| {
             (
                 c.step_id.clone(),
-                (c.scenario_id.clone(), c.version_resolved),
+                (c.workflow_id.clone(), c.version_resolved),
             )
         })
         .collect();
@@ -561,7 +561,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 
         tracing::error!(
             tenant_id = %tenant_id,
-            scenario_id = %scenario_id,
+            workflow_id = %workflow_id,
             version = version,
             error = %panic_msg,
             "Code generation panicked"
@@ -572,11 +572,11 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
             format!("Code generation failed: {}", panic_msg),
         )
     })?
-    // Handle codegen errors (e.g., missing child scenario)
+    // Handle codegen errors (e.g., missing child workflow)
     .map_err(|codegen_err| {
         tracing::error!(
             tenant_id = %tenant_id,
-            scenario_id = %scenario_id,
+            workflow_id = %workflow_id,
             version = version,
             error = %codegen_err,
             "Code generation failed"
@@ -602,7 +602,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     );
 
     // Determine binary output path (WASM uses .wasm extension)
-    let binary_name = if is_wasm { "scenario.wasm" } else { "scenario" };
+    let binary_name = if is_wasm { "workflow.wasm" } else { "workflow" };
     let binary_output_path = build_dir.join(binary_name);
 
     // Compile with rustc to native binary
@@ -613,13 +613,13 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     let mode = if is_wasm { "wasm" } else { "native" };
     let target = &resolved_target;
     info!(
-        scenario_id = %scenario_id,
+        workflow_id = %workflow_id,
         version = version,
         mode = mode,
         target = %target,
         cwd = %cwd.display(),
         build_dir = %build_dir.display(),
-        "Starting scenario compilation"
+        "Starting workflow compilation"
     );
 
     // Build rustc command
@@ -682,8 +682,8 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         cmd.arg("-L").arg(format!("native={}", deps_dir.display()));
     }
 
-    // Add native library path (parent of scenario lib)
-    if let Some(lib_dir) = native_libs.scenario_lib_path.parent() {
+    // Add native library path (parent of workflow lib)
+    if let Some(lib_dir) = native_libs.workflow_lib_path.parent() {
         cmd.arg("-L").arg(format!("native={}", lib_dir.display()));
     }
 
@@ -710,7 +710,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     cmd.arg("--extern").arg(format!(
         "{}={}",
         stdlib_name,
-        native_libs.scenario_lib_path.display()
+        native_libs.workflow_lib_path.display()
     ));
 
     // Determine the dylib extension for the current host platform
@@ -750,7 +750,7 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
             {
                 // Convert hyphens to underscores for crate names
                 let extern_name = crate_name.replace('-', "_");
-                // Skip stdlib — it's already added explicitly via scenario_lib_path
+                // Skip stdlib — it's already added explicitly via workflow_lib_path
                 if extern_name == stdlib_name {
                     continue;
                 }
@@ -788,11 +788,11 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     let cmd_str = format!("{:?}", cmd);
     tracing::info!(
         tenant_id = %tenant_id,
-        scenario_id = %scenario_id,
+        workflow_id = %workflow_id,
         version = version,
         mode = mode,
         command = %cmd_str,
-        "Invoking rustc for scenario compilation"
+        "Invoking rustc for workflow compilation"
     );
     let rustc_start = std::time::Instant::now();
     let output = cmd.output().map_err(|e| {
@@ -854,14 +854,14 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
         "Checksum calculated"
     );
 
-    // Detect side effects from the scenario JSON file if it exists
-    let scenario_json_path = get_scenario_json_path(&tenant_id, &scenario_id, version);
-    let has_side_effects = if scenario_json_path.exists() {
-        let json_content = fs::read_to_string(&scenario_json_path)?;
+    // Detect side effects from the workflow JSON file if it exists
+    let workflow_json_path = get_workflow_json_path(&tenant_id, &workflow_id, version);
+    let has_side_effects = if workflow_json_path.exists() {
+        let json_content = fs::read_to_string(&workflow_json_path)?;
         let workflow: Value = serde_json::from_str(&json_content).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Failed to parse scenario JSON: {}", e),
+                format!("Failed to parse workflow JSON: {}", e),
             )
         })?;
         workflow_has_side_effects(&workflow)
@@ -872,20 +872,20 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
     let compilation_duration = compilation_start.elapsed();
     info!(
         tenant_id = %tenant_id,
-        scenario_id = %scenario_id,
+        workflow_id = %workflow_id,
         version = version,
         binary_size_bytes = binary_size,
         compilation_duration_ms = compilation_duration.as_millis() as u64,
         has_side_effects = has_side_effects,
-        "Scenario compiled successfully"
+        "Workflow compiled successfully"
     );
 
-    // Convert child scenarios to dependencies
-    let child_dependencies: Vec<ChildDependency> = child_scenarios
+    // Convert child workflows to dependencies
+    let child_dependencies: Vec<ChildDependency> = child_workflows
         .iter()
         .map(|c| ChildDependency {
             step_id: c.step_id.clone(),
-            child_scenario_id: c.scenario_id.clone(),
+            child_workflow_id: c.workflow_id.clone(),
             child_version_requested: c.version_requested.clone(),
             child_version_resolved: c.version_resolved,
         })
@@ -919,22 +919,22 @@ pub fn compile_scenario(input: CompilationInput) -> io::Result<NativeCompilation
 ///
 /// # Arguments
 /// * `tenant_id` - Tenant identifier
-/// * `scenario_id` - Scenario identifier
+/// * `workflow_id` - Workflow identifier
 /// * `version` - Version number
 /// * `execution_graph` - The execution graph
 /// * `track_events` - Whether to include debug instrumentation
 ///
 /// # Returns
 /// Path to the build directory containing generated main.rs
-pub fn translate_scenario(
+pub fn translate_workflow(
     tenant_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     version: u32,
     execution_graph: &ExecutionGraph,
     track_events: bool,
 ) -> io::Result<PathBuf> {
     // Create build directory
-    let build_dir = get_rustc_compile_dir(tenant_id, scenario_id, version);
+    let build_dir = get_rustc_compile_dir(tenant_id, workflow_id, version);
     fs::create_dir_all(&build_dir)?;
 
     // Generate the Rust program using AST-based code generation
@@ -950,8 +950,8 @@ pub fn translate_scenario(
     fs::write(&main_rs_path, &rust_code)?;
 
     info!(
-        "Generated Rust code for scenario {}/{} v{} at {:?}",
-        tenant_id, scenario_id, version, main_rs_path
+        "Generated Rust code for workflow {}/{} v{} at {:?}",
+        tenant_id, workflow_id, version, main_rs_path
     );
 
     Ok(build_dir)

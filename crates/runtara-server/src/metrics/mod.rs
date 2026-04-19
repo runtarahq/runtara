@@ -4,12 +4,12 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
-/// Hourly metrics for a scenario
+/// Hourly metrics for a workflow
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ScenarioMetricsHourly {
+pub struct WorkflowMetricsHourly {
     pub id: i64,
     pub tenant_id: String,
-    pub scenario_id: String,
+    pub workflow_id: String,
     pub version: i32,
     pub hour_bucket: DateTime<Utc>,
     pub invocation_count: i32,
@@ -36,9 +36,9 @@ pub struct ScenarioMetricsHourly {
 /// Daily aggregated metrics
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ScenarioMetricsDaily {
+pub struct WorkflowMetricsDaily {
     pub tenant_id: String,
-    pub scenario_id: String,
+    pub workflow_id: String,
     pub version: i32,
     pub day_bucket: Option<DateTime<Utc>>,
     pub invocation_count: Option<i64>,
@@ -70,36 +70,36 @@ impl MetricsService {
         Self { pool }
     }
 
-    /// Get hourly metrics for a scenario within a time range
-    pub async fn get_scenario_metrics_hourly(
+    /// Get hourly metrics for a workflow within a time range
+    pub async fn get_workflow_metrics_hourly(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: Option<i32>,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
-    ) -> Result<Vec<ScenarioMetricsHourly>, sqlx::Error> {
+    ) -> Result<Vec<WorkflowMetricsHourly>, sqlx::Error> {
         if let Some(v) = version {
             sqlx::query_as!(
-                ScenarioMetricsHourly,
+                WorkflowMetricsHourly,
                 r#"
-                SELECT id, tenant_id, scenario_id, version, hour_bucket,
+                SELECT id, tenant_id, workflow_id, version, hour_bucket,
                        invocation_count, success_count, failure_count, timeout_count,
                        total_duration_seconds, min_duration_seconds, max_duration_seconds,
                        total_memory_mb, min_memory_mb, max_memory_mb,
                        total_queue_duration_seconds, min_queue_duration_seconds, max_queue_duration_seconds,
                        total_processing_overhead_seconds, min_processing_overhead_seconds, max_processing_overhead_seconds,
                        side_effect_counts, created_at, updated_at
-                FROM scenario_metrics_hourly
+                FROM workflow_metrics_hourly
                 WHERE tenant_id = $1
-                  AND scenario_id = $2
+                  AND workflow_id = $2
                   AND version = $3
                   AND hour_bucket >= $4
                   AND hour_bucket < $5
                 ORDER BY hour_bucket ASC
                 "#,
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 v,
                 start_time,
                 end_time
@@ -108,24 +108,24 @@ impl MetricsService {
             .await
         } else {
             sqlx::query_as!(
-                ScenarioMetricsHourly,
+                WorkflowMetricsHourly,
                 r#"
-                SELECT id, tenant_id, scenario_id, version, hour_bucket,
+                SELECT id, tenant_id, workflow_id, version, hour_bucket,
                        invocation_count, success_count, failure_count, timeout_count,
                        total_duration_seconds, min_duration_seconds, max_duration_seconds,
                        total_memory_mb, min_memory_mb, max_memory_mb,
                        total_queue_duration_seconds, min_queue_duration_seconds, max_queue_duration_seconds,
                        total_processing_overhead_seconds, min_processing_overhead_seconds, max_processing_overhead_seconds,
                        side_effect_counts, created_at, updated_at
-                FROM scenario_metrics_hourly
+                FROM workflow_metrics_hourly
                 WHERE tenant_id = $1
-                  AND scenario_id = $2
+                  AND workflow_id = $2
                   AND hour_bucket >= $3
                   AND hour_bucket < $4
                 ORDER BY hour_bucket ASC
                 "#,
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 start_time,
                 end_time
             )
@@ -134,20 +134,20 @@ impl MetricsService {
         }
     }
 
-    /// Get daily metrics for a scenario within a time range
-    pub async fn get_scenario_metrics_daily(
+    /// Get daily metrics for a workflow within a time range
+    pub async fn get_workflow_metrics_daily(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: Option<i32>,
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
-    ) -> Result<Vec<ScenarioMetricsDaily>, sqlx::Error> {
+    ) -> Result<Vec<WorkflowMetricsDaily>, sqlx::Error> {
         if let Some(v) = version {
             sqlx::query_as!(
-                ScenarioMetricsDaily,
+                WorkflowMetricsDaily,
                 r#"
-                SELECT tenant_id as "tenant_id!", scenario_id as "scenario_id!", version as "version!",
+                SELECT tenant_id as "tenant_id!", workflow_id as "workflow_id!", version as "version!",
                        day_bucket,
                        invocation_count,
                        success_count,
@@ -166,16 +166,16 @@ impl MetricsService {
                        min_processing_overhead_seconds,
                        max_processing_overhead_seconds,
                        success_rate_percent::double precision as success_rate_percent
-                FROM scenario_metrics_daily
+                FROM workflow_metrics_daily
                 WHERE tenant_id = $1
-                  AND scenario_id = $2
+                  AND workflow_id = $2
                   AND version = $3
                   AND day_bucket >= $4
                   AND day_bucket < $5
                 ORDER BY day_bucket ASC
                 "#,
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 v,
                 start_time,
                 end_time
@@ -184,9 +184,9 @@ impl MetricsService {
             .await
         } else {
             sqlx::query_as!(
-                ScenarioMetricsDaily,
+                WorkflowMetricsDaily,
                 r#"
-                SELECT tenant_id as "tenant_id!", scenario_id as "scenario_id!", version as "version!",
+                SELECT tenant_id as "tenant_id!", workflow_id as "workflow_id!", version as "version!",
                        day_bucket,
                        invocation_count,
                        success_count,
@@ -205,15 +205,15 @@ impl MetricsService {
                        min_processing_overhead_seconds,
                        max_processing_overhead_seconds,
                        success_rate_percent::double precision as success_rate_percent
-                FROM scenario_metrics_daily
+                FROM workflow_metrics_daily
                 WHERE tenant_id = $1
-                  AND scenario_id = $2
+                  AND workflow_id = $2
                   AND day_bucket >= $3
                   AND day_bucket < $4
                 ORDER BY day_bucket ASC
                 "#,
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 start_time,
                 end_time
             )
@@ -222,7 +222,7 @@ impl MetricsService {
         }
     }
 
-    /// Get tenant-level metrics aggregated across all scenarios (hourly)
+    /// Get tenant-level metrics aggregated across all workflows (hourly)
     pub async fn get_tenant_metrics_hourly(
         &self,
         tenant_id: &str,
@@ -252,7 +252,7 @@ impl MetricsService {
                     THEN ROUND((SUM(success_count)::numeric / SUM(invocation_count)::numeric * 100), 2)::double precision
                     ELSE 0::double precision
                 END as success_rate_percent
-            FROM scenario_metrics_hourly
+            FROM workflow_metrics_hourly
             WHERE tenant_id = $1
               AND hour_bucket >= $2
               AND hour_bucket < $3
@@ -306,11 +306,11 @@ impl MetricsService {
         Ok(result)
     }
 
-    /// Get overall statistics for a scenario (all time)
-    pub async fn get_scenario_overall_stats(
+    /// Get overall statistics for a workflow (all time)
+    pub async fn get_workflow_overall_stats(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: Option<i32>,
     ) -> Result<Option<HashMap<String, serde_json::Value>>, sqlx::Error> {
         // Get aggregated stats from hourly metrics table
@@ -354,13 +354,13 @@ impl MetricsService {
                     THEN ROUND((SUM(success_count)::numeric / SUM(invocation_count)::numeric * 100), 2)::double precision
                     ELSE 0::double precision
                 END as success_rate_percent
-            FROM scenario_metrics_hourly
+            FROM workflow_metrics_hourly
             WHERE tenant_id = $1
-              AND scenario_id = $2
+              AND workflow_id = $2
               AND ($3::integer IS NULL OR version = $3)
             "#,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version
         )
         .fetch_optional(&self.pool)
@@ -443,15 +443,15 @@ impl MetricsService {
         }
     }
 
-    /// Record an execution completion into scenario_metrics_hourly.
+    /// Record an execution completion into workflow_metrics_hourly.
     ///
-    /// This replaces the old PostgreSQL trigger that fired on scenario_executions
+    /// This replaces the old PostgreSQL trigger that fired on workflow_executions
     /// updates. Now that executions go through runtara-environment, we insert
     /// metrics directly after getting the result back.
     pub async fn record_execution_completion(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: i32,
         success: bool,
         duration_seconds: f64,
@@ -470,29 +470,29 @@ impl MetricsService {
 
         sqlx::query!(
             r#"
-            INSERT INTO scenario_metrics_hourly (
-                tenant_id, scenario_id, version, hour_bucket,
+            INSERT INTO workflow_metrics_hourly (
+                tenant_id, workflow_id, version, hour_bucket,
                 invocation_count, success_count, failure_count, timeout_count,
                 total_duration_seconds, min_duration_seconds, max_duration_seconds,
                 total_memory_mb, min_memory_mb, max_memory_mb,
                 updated_at
             )
             VALUES ($1, $2, $3, $4, 1, $5, $6, 0, $7, $7, $7, $8, $9, $9, NOW())
-            ON CONFLICT (tenant_id, scenario_id, version, hour_bucket)
+            ON CONFLICT (tenant_id, workflow_id, version, hour_bucket)
             DO UPDATE SET
-                invocation_count = scenario_metrics_hourly.invocation_count + 1,
-                success_count = scenario_metrics_hourly.success_count + $5,
-                failure_count = scenario_metrics_hourly.failure_count + $6,
-                total_duration_seconds = scenario_metrics_hourly.total_duration_seconds + $7,
-                min_duration_seconds = LEAST(scenario_metrics_hourly.min_duration_seconds, $7),
-                max_duration_seconds = GREATEST(scenario_metrics_hourly.max_duration_seconds, $7),
-                total_memory_mb = scenario_metrics_hourly.total_memory_mb + $8,
-                min_memory_mb = LEAST(scenario_metrics_hourly.min_memory_mb, $9),
-                max_memory_mb = GREATEST(scenario_metrics_hourly.max_memory_mb, $9),
+                invocation_count = workflow_metrics_hourly.invocation_count + 1,
+                success_count = workflow_metrics_hourly.success_count + $5,
+                failure_count = workflow_metrics_hourly.failure_count + $6,
+                total_duration_seconds = workflow_metrics_hourly.total_duration_seconds + $7,
+                min_duration_seconds = LEAST(workflow_metrics_hourly.min_duration_seconds, $7),
+                max_duration_seconds = GREATEST(workflow_metrics_hourly.max_duration_seconds, $7),
+                total_memory_mb = workflow_metrics_hourly.total_memory_mb + $8,
+                min_memory_mb = LEAST(workflow_metrics_hourly.min_memory_mb, $9),
+                max_memory_mb = GREATEST(workflow_metrics_hourly.max_memory_mb, $9),
                 updated_at = NOW()
             "#,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             hour_bucket,
             success_count,

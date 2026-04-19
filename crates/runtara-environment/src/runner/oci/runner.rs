@@ -1012,11 +1012,11 @@ impl Runner for OciRunner {
             // Check for immediate startup failures
             match child.try_wait() {
                 Ok(Some(status)) if !status.success() => {
-                    let scenario_error = self
+                    let workflow_error = self
                         .load_stderr(&options.tenant_id, &options.instance_id)
                         .await;
 
-                    let error_msg = if let Some(err) = scenario_error {
+                    let error_msg = if let Some(err) = workflow_error {
                         err
                     } else {
                         let stderr_msg = read_stderr_log();
@@ -1088,11 +1088,11 @@ impl Runner for OciRunner {
             // Check for immediate startup failures (no delay needed)
             match child.try_wait() {
                 Ok(Some(status)) if !status.success() => {
-                    let scenario_error = self
+                    let workflow_error = self
                         .load_stderr(&options.tenant_id, &options.instance_id)
                         .await;
 
-                    let error_msg = if let Some(err) = scenario_error {
+                    let error_msg = if let Some(err) = workflow_error {
                         err
                     } else {
                         let stderr_msg = read_stderr_log();

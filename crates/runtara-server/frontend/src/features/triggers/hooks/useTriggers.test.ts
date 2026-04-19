@@ -75,8 +75,8 @@ function createWrapper() {
 function createMockTrigger(overrides = {}) {
   return {
     id: 'trigger-1',
-    scenarioId: 'scen-1',
-    scenarioName: 'Scenario 1',
+    workflowId: 'scen-1',
+    workflowName: 'Workflow 1',
     triggerType: 'CRON' as TriggerType,
     configuration: { expression: '0 0 * * *' },
     active: true,
@@ -99,11 +99,11 @@ describe('useTriggers', () => {
   describe('useTriggers', () => {
     it('fetches all triggers', async () => {
       const mockTriggers = [
-        createMockTrigger({ id: 'trigger-1', scenarioName: 'Scenario 1' }),
+        createMockTrigger({ id: 'trigger-1', workflowName: 'Workflow 1' }),
         createMockTrigger({
           id: 'trigger-2',
-          scenarioId: 'scen-2',
-          scenarioName: 'Scenario 2',
+          workflowId: 'scen-2',
+          workflowName: 'Workflow 2',
           triggerType: 'APPLICATION' as TriggerType,
           active: false,
         }),
@@ -142,7 +142,7 @@ describe('useTriggers', () => {
     it('fetches a single trigger by ID', async () => {
       const mockTrigger = createMockTrigger({
         id: 'trigger-123',
-        scenarioName: 'Test Scenario',
+        workflowName: 'Test Workflow',
       });
       mockGetInvocationTriggerById.mockResolvedValue(mockTrigger as any);
 
@@ -180,7 +180,7 @@ describe('useTriggers', () => {
       });
 
       const newTrigger = {
-        scenarioId: 'scen-1',
+        workflowId: 'scen-1',
         triggerType: 'CRON' as TriggerType,
         configuration: { expression: '0 0 * * *' },
         active: true,

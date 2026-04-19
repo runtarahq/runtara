@@ -244,7 +244,7 @@ export const CardGrid: Story = {
   render: () => (
     <div className="grid grid-cols-3 gap-4 max-w-3xl">
       {[
-        'Scenarios',
+        'Workflows',
         'Connections',
         'Objects',
         'Triggers',

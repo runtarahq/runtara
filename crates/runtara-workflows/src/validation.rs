@@ -8,7 +8,7 @@
 //! - Agents and capabilities exist
 //! - Configuration values are reasonable
 //! - Data and variable references are properly defined
-//! - Child scenario inputs match their schemas
+//! - Child workflow inputs match their schemas
 //!
 //! # Validation Phases
 //!
@@ -21,18 +21,18 @@
 //! | 2.5 | Execution order validation |
 //! | 3 | Agent/capability validation |
 //! | 4 | Configuration warnings |
-//! | 5 | Child scenario validation (version format) |
+//! | 5 | Child workflow validation (version format) |
 //! | 7.5 | Data and variable reference validation |
 //! | 8 | Step name validation (duplicates) |
 //! | 9 | Compensation validation (warnings) |
 //! | 10 | Edge condition validation (priorities) |
 //!
-//! # Cross-Scenario Validation
+//! # Cross-Workflow Validation
 //!
 //! Use [`validate_workflow_with_children`] to validate a parent workflow along with
-//! its child scenarios. This enables additional validation:
-//! - Verifying StartScenario inputs match child inputSchema
-//! - Detecting circular dependencies between scenarios
+//! its child workflows. This enables additional validation:
+//! - Verifying EmbedWorkflow inputs match child inputSchema
+//! - Detecting circular dependencies between workflows
 //!
 //! # Error Codes
 //!
@@ -46,13 +46,13 @@
 //! | E020 | UnknownAgent | Agent doesn't exist |
 //! | E021 | UnknownCapability | Capability doesn't exist |
 //! | E022 | MissingRequiredInput | Required agent input missing |
-//! | E043 | InvalidChildVersion | Invalid child scenario version format |
+//! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
 //! | E053 | UndefinedVariableReference | `variables.*` field not in variables |
-//! | E054 | ChildMissingInputSchema | StartScenario provides inputs but child has no schema |
-//! | E055 | MissingChildRequiredInputs | StartScenario missing required child inputs |
-//! | E056 | CircularDependency | Circular dependency between scenarios |
+//! | E054 | ChildMissingInputSchema | EmbedWorkflow provides inputs but child has no schema |
+//! | E055 | MissingChildRequiredInputs | EmbedWorkflow missing required child inputs |
+//! | E056 | CircularDependency | Circular dependency between workflows |
 //! | E060 | StepNotYetExecuted | Reference to step that hasn't executed |
 //! | E070 | UnknownVariable | Variable doesn't exist |
 //! | E080 | TypeMismatch | Value type doesn't match expected |
@@ -61,7 +61,7 @@
 //! | E100 | DuplicateEdgePriority | Edges with duplicate priority |
 //! | E101 | MultipleDefaultEdges | Multiple unconditional edges |
 
-use crate::dependency_analysis::{DependencyGraph, ScenarioReference};
+use crate::dependency_analysis::{DependencyGraph, WorkflowReference};
 use runtara_dsl::{CompositeInner, ExecutionGraph, InputMapping, MappingValue, Step};
 use std::collections::{HashMap, HashSet};
 
@@ -157,11 +157,11 @@ pub enum ValidationError {
         input_name: String,
     },
 
-    // === Child Scenario Errors ===
-    /// Invalid child scenario version format.
+    // === Child Workflow Errors ===
+    /// Invalid child workflow version format.
     InvalidChildVersion {
         step_id: String,
-        child_scenario_id: String,
+        child_workflow_id: String,
         version: String,
         reason: String,
     },
@@ -186,22 +186,22 @@ pub enum ValidationError {
         available_variables: Vec<String>,
     },
 
-    // === StartScenario Input Validation Errors ===
-    /// StartScenario provides inputs but child has no inputSchema.
+    // === EmbedWorkflow Input Validation Errors ===
+    /// EmbedWorkflow provides inputs but child has no inputSchema.
     ChildMissingInputSchema {
         step_id: String,
-        child_scenario_id: String,
+        child_workflow_id: String,
     },
 
-    /// StartScenario is missing required inputs for child scenario.
+    /// EmbedWorkflow is missing required inputs for child workflow.
     MissingChildRequiredInputs {
         step_id: String,
-        child_scenario_id: String,
+        child_workflow_id: String,
         missing_fields: Vec<MissingInputField>,
         provided_fields: Vec<String>,
     },
 
-    /// Circular dependency detected between scenarios.
+    /// Circular dependency detected between workflows.
     CircularDependency { cycle_path: Vec<String> },
 
     // === Execution Order Errors ===
@@ -400,17 +400,17 @@ impl std::fmt::Display for ValidationError {
                 )
             }
 
-            // Child Scenario Errors
+            // Child Workflow Errors
             ValidationError::InvalidChildVersion {
                 step_id,
-                child_scenario_id,
+                child_workflow_id,
                 version,
                 reason,
             } => {
                 write!(
                     f,
-                    "[E050] Step '{}': child scenario '{}' has invalid version '{}': {}",
-                    step_id, child_scenario_id, version, reason
+                    "[E050] Step '{}': child workflow '{}' has invalid version '{}': {}",
+                    step_id, child_workflow_id, version, reason
                 )
             }
 
@@ -472,23 +472,23 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::ChildMissingInputSchema {
                 step_id,
-                child_scenario_id,
+                child_workflow_id,
             } => {
                 write!(
                     f,
-                    "[E054] StartScenario step '{}' provides inputs to child '{}' but child has no inputSchema defined.\n       Add inputSchema to the child scenario or remove inputMapping.",
-                    step_id, child_scenario_id
+                    "[E054] EmbedWorkflow step '{}' provides inputs to child '{}' but child has no inputSchema defined.\n       Add inputSchema to the child workflow or remove inputMapping.",
+                    step_id, child_workflow_id
                 )
             }
             ValidationError::MissingChildRequiredInputs {
                 step_id,
-                child_scenario_id,
+                child_workflow_id,
                 missing_fields,
                 provided_fields,
             } => {
                 let mut msg = format!(
-                    "[E055] StartScenario step '{}' is missing required inputs for child scenario '{}':\n",
-                    step_id, child_scenario_id
+                    "[E055] EmbedWorkflow step '{}' is missing required inputs for child workflow '{}':\n",
+                    step_id, child_workflow_id
                 );
                 msg.push_str("       Missing fields:\n");
                 for field in missing_fields {
@@ -508,17 +508,17 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::CircularDependency { cycle_path } => {
                 let mut msg =
-                    String::from("[E056] Circular dependency detected in scenario graph:\n");
-                for (i, scenario) in cycle_path.iter().enumerate() {
+                    String::from("[E056] Circular dependency detected in workflow graph:\n");
+                for (i, workflow) in cycle_path.iter().enumerate() {
                     if i == 0 {
-                        msg.push_str(&format!("         {}\n", scenario));
+                        msg.push_str(&format!("         {}\n", workflow));
                     } else if i == cycle_path.len() - 1 {
-                        msg.push_str(&format!("       → {} ← cycle\n", scenario));
+                        msg.push_str(&format!("       → {} ← cycle\n", workflow));
                     } else {
-                        msg.push_str(&format!("       → {}\n", scenario));
+                        msg.push_str(&format!("       → {}\n", workflow));
                     }
                 }
-                msg.push_str("\n       Remove the StartScenario step that creates this cycle.");
+                msg.push_str("\n       Remove the EmbedWorkflow step that creates this cycle.");
                 write!(f, "{}", msg)
             }
 
@@ -944,8 +944,8 @@ pub fn validate_workflow(graph: &ExecutionGraph) -> ValidationResult {
     // Phase 4: Configuration warnings
     validate_configuration(graph, &mut result);
 
-    // Phase 5: Child scenario validation
-    validate_child_scenarios(graph, &mut result);
+    // Phase 5: Child workflow validation
+    validate_child_workflows(graph, &mut result);
 
     // Phase 7.5: Reference validation (data.* and variables.* definitions)
     validate_data_and_variable_references(graph, &mut result);
@@ -971,18 +971,18 @@ pub fn validate_workflow_errors(graph: &ExecutionGraph) -> Vec<ValidationError> 
     validate_workflow(graph).errors
 }
 
-/// Validate a workflow with access to child scenario definitions.
+/// Validate a workflow with access to child workflow definitions.
 ///
-/// This extended validation function can check StartScenario input mappings
-/// against child scenario inputSchemas.
+/// This extended validation function can check EmbedWorkflow input mappings
+/// against child workflow inputSchemas.
 pub fn validate_workflow_with_children(
     graph: &ExecutionGraph,
-    child_scenarios: &HashMap<String, ExecutionGraph>,
+    child_workflows: &HashMap<String, ExecutionGraph>,
 ) -> ValidationResult {
     let mut result = validate_workflow(graph);
 
     // Check for circular dependencies first
-    validate_circular_dependencies(graph, child_scenarios, &mut result);
+    validate_circular_dependencies(graph, child_workflows, &mut result);
 
     // Then validate inputs (skip if cycles detected)
     if !result
@@ -990,7 +990,7 @@ pub fn validate_workflow_with_children(
         .iter()
         .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
     {
-        validate_start_scenario_inputs(graph, child_scenarios, &mut result);
+        validate_embed_workflow_inputs(graph, child_workflows, &mut result);
     }
 
     result
@@ -1000,29 +1000,29 @@ pub fn validate_workflow_with_children(
 // Circular Dependency Detection
 // ============================================================================
 
-/// Check for circular dependencies in the scenario graph.
+/// Check for circular dependencies in the workflow graph.
 fn validate_circular_dependencies(
     graph: &ExecutionGraph,
-    child_scenarios: &HashMap<String, ExecutionGraph>,
+    child_workflows: &HashMap<String, ExecutionGraph>,
     result: &mut ValidationResult,
 ) {
     let mut dep_graph = DependencyGraph::new();
     let mut visited = HashSet::new();
 
     // Build dependency graph recursively
-    let root = ScenarioReference {
-        scenario_id: "root".to_string(),
+    let root = WorkflowReference {
+        workflow_id: "root".to_string(),
         version: 1,
     };
 
-    build_dependency_graph(graph, &root, child_scenarios, &mut dep_graph, &mut visited);
+    build_dependency_graph(graph, &root, child_workflows, &mut dep_graph, &mut visited);
 
     // Check for cycles
     if let Err(cycle) = dep_graph.detect_cycles(&root) {
         let cycle_path: Vec<String> = cycle
             .iter()
             .skip(1) // Skip "root" placeholder
-            .map(|r| format!("{} (v{})", r.scenario_id, r.version))
+            .map(|r| format!("{} (v{})", r.workflow_id, r.version))
             .collect();
 
         if !cycle_path.is_empty() {
@@ -1033,31 +1033,31 @@ fn validate_circular_dependencies(
     }
 }
 
-/// Recursively build the dependency graph from a scenario.
+/// Recursively build the dependency graph from a workflow.
 fn build_dependency_graph(
     graph: &ExecutionGraph,
-    parent_ref: &ScenarioReference,
-    child_scenarios: &HashMap<String, ExecutionGraph>,
+    parent_ref: &WorkflowReference,
+    child_workflows: &HashMap<String, ExecutionGraph>,
     dep_graph: &mut DependencyGraph,
     visited: &mut HashSet<String>,
 ) {
     for step in graph.steps.values() {
-        if let Step::StartScenario(start_step) = step {
-            let child_ref = ScenarioReference {
-                scenario_id: start_step.child_scenario_id.clone(),
+        if let Step::EmbedWorkflow(start_step) = step {
+            let child_ref = WorkflowReference {
+                workflow_id: start_step.child_workflow_id.clone(),
                 version: 1, // Simplified - use version 1 for detection
             };
 
             dep_graph.add_edge(parent_ref.clone(), child_ref.clone());
 
             // Recursively add child's dependencies (only if not already visited)
-            if !visited.contains(&start_step.child_scenario_id) {
-                visited.insert(start_step.child_scenario_id.clone());
-                if let Some(child_graph) = child_scenarios.get(&start_step.child_scenario_id) {
+            if !visited.contains(&start_step.child_workflow_id) {
+                visited.insert(start_step.child_workflow_id.clone());
+                if let Some(child_graph) = child_workflows.get(&start_step.child_workflow_id) {
                     build_dependency_graph(
                         child_graph,
                         &child_ref,
-                        child_scenarios,
+                        child_workflows,
                         dep_graph,
                         visited,
                     );
@@ -1071,7 +1071,7 @@ fn build_dependency_graph(
                 build_dependency_graph(
                     &split_step.subgraph,
                     parent_ref,
-                    child_scenarios,
+                    child_workflows,
                     dep_graph,
                     visited,
                 );
@@ -1080,7 +1080,7 @@ fn build_dependency_graph(
                 build_dependency_graph(
                     &while_step.subgraph,
                     parent_ref,
-                    child_scenarios,
+                    child_workflows,
                     dep_graph,
                     visited,
                 );
@@ -1091,21 +1091,21 @@ fn build_dependency_graph(
 }
 
 // ============================================================================
-// StartScenario Input Validation (requires child scenarios)
+// EmbedWorkflow Input Validation (requires child workflows)
 // ============================================================================
 
-/// Validate StartScenario input mappings against child scenario inputSchemas.
-fn validate_start_scenario_inputs(
+/// Validate EmbedWorkflow input mappings against child workflow inputSchemas.
+fn validate_embed_workflow_inputs(
     graph: &ExecutionGraph,
-    child_scenarios: &HashMap<String, ExecutionGraph>,
+    child_workflows: &HashMap<String, ExecutionGraph>,
     result: &mut ValidationResult,
 ) {
     for (step_id, step) in &graph.steps {
-        if let Step::StartScenario(start_step) = step {
-            let child_id = &start_step.child_scenario_id;
+        if let Step::EmbedWorkflow(start_step) = step {
+            let child_id = &start_step.child_workflow_id;
 
-            // Skip if we don't have the child scenario
-            let Some(child_graph) = child_scenarios.get(child_id) else {
+            // Skip if we don't have the child workflow
+            let Some(child_graph) = child_workflows.get(child_id) else {
                 continue;
             };
 
@@ -1128,7 +1128,7 @@ fn validate_start_scenario_inputs(
                     .errors
                     .push(ValidationError::ChildMissingInputSchema {
                         step_id: step_id.clone(),
-                        child_scenario_id: child_id.clone(),
+                        child_workflow_id: child_id.clone(),
                     });
                 continue;
             }
@@ -1157,7 +1157,7 @@ fn validate_start_scenario_inputs(
                         .errors
                         .push(ValidationError::MissingChildRequiredInputs {
                             step_id: step_id.clone(),
-                            child_scenario_id: child_id.clone(),
+                            child_workflow_id: child_id.clone(),
                             missing_fields,
                             provided_fields: provided_keys.into_iter().cloned().collect(),
                         });
@@ -1170,10 +1170,10 @@ fn validate_start_scenario_inputs(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_start_scenario_inputs(&split_step.subgraph, child_scenarios, result);
+                validate_embed_workflow_inputs(&split_step.subgraph, child_workflows, result);
             }
             Step::While(while_step) => {
-                validate_start_scenario_inputs(&while_step.subgraph, child_scenarios, result);
+                validate_embed_workflow_inputs(&while_step.subgraph, child_workflows, result);
             }
             _ => {}
         }
@@ -1307,7 +1307,7 @@ fn validate_references_with_inherited(
     // Merge inherited variables with graph's own variables + built-in runtime variables
     let mut variable_names: HashSet<String> = graph.variables.keys().cloned().collect();
     variable_names.extend(inherited_variables.iter().cloned());
-    variable_names.insert("_scenario_id".to_string());
+    variable_names.insert("_workflow_id".to_string());
     variable_names.insert("_instance_id".to_string());
     variable_names.insert("_tenant_id".to_string());
 
@@ -1475,7 +1475,7 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(m);
             }
         }
-        Step::StartScenario(start_step) => {
+        Step::EmbedWorkflow(start_step) => {
             if let Some(m) = &start_step.input_mapping {
                 mappings.push(m);
             }
@@ -1900,7 +1900,7 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
                 validate_configuration(&while_step.subgraph, result);
             }
 
-            Step::StartScenario(start_step) => {
+            Step::EmbedWorkflow(start_step) => {
                 // Check retry count
                 if let Some(max_retries) = start_step.max_retries
                     && max_retries > MAX_RETRY_RECOMMENDED
@@ -1941,12 +1941,12 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 }
 
 // ============================================================================
-// Phase 5: Child Scenario Validation
+// Phase 5: Child Workflow Validation
 // ============================================================================
 
-fn validate_child_scenarios(graph: &ExecutionGraph, result: &mut ValidationResult) {
+fn validate_child_workflows(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
-        if let Step::StartScenario(start_step) = step {
+        if let Step::EmbedWorkflow(start_step) = step {
             // Validate version format
             match &start_step.child_version {
                 runtara_dsl::ChildVersion::Latest(s) => {
@@ -1954,7 +1954,7 @@ fn validate_child_scenarios(graph: &ExecutionGraph, result: &mut ValidationResul
                     if s_lower != "latest" && s_lower != "current" {
                         result.errors.push(ValidationError::InvalidChildVersion {
                             step_id: step_id.clone(),
-                            child_scenario_id: start_step.child_scenario_id.clone(),
+                            child_workflow_id: start_step.child_workflow_id.clone(),
                             version: s.clone(),
                             reason: "must be 'latest', 'current', or a version number".to_string(),
                         });
@@ -1964,7 +1964,7 @@ fn validate_child_scenarios(graph: &ExecutionGraph, result: &mut ValidationResul
                     if *n < 1 {
                         result.errors.push(ValidationError::InvalidChildVersion {
                             step_id: step_id.clone(),
-                            child_scenario_id: start_step.child_scenario_id.clone(),
+                            child_workflow_id: start_step.child_workflow_id.clone(),
                             version: n.to_string(),
                             reason: "version number must be positive".to_string(),
                         });
@@ -1978,10 +1978,10 @@ fn validate_child_scenarios(graph: &ExecutionGraph, result: &mut ValidationResul
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_child_scenarios(&split_step.subgraph, result);
+                validate_child_workflows(&split_step.subgraph, result);
             }
             Step::While(while_step) => {
-                validate_child_scenarios(&while_step.subgraph, result);
+                validate_child_workflows(&while_step.subgraph, result);
             }
             _ => {}
         }
@@ -2010,7 +2010,7 @@ fn validate_step_names(graph: &ExecutionGraph, result: &mut ValidationResult) {
 }
 
 /// Recursively collect step names into the map.
-/// Skips StartScenario subgraphs as they have their own namespace.
+/// Skips EmbedWorkflow subgraphs as they have their own namespace.
 fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<String, Vec<String>>) {
     for (step_id, step) in &graph.steps {
         // Get the step name (if any)
@@ -2020,7 +2020,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::Conditional(s) => s.name.as_ref(),
             Step::Split(s) => s.name.as_ref(),
             Step::Switch(s) => s.name.as_ref(),
-            Step::StartScenario(s) => s.name.as_ref(),
+            Step::EmbedWorkflow(s) => s.name.as_ref(),
             Step::While(s) => s.name.as_ref(),
             Step::Log(s) => s.name.as_ref(),
             Step::Error(s) => s.name.as_ref(),
@@ -2039,8 +2039,8 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
         }
 
         // Recursively collect from subgraphs
-        // NOTE: StartScenario steps do NOT have subgraphs in runtara_dsl,
-        // they reference child scenarios by ID. So we only recurse into Split/While.
+        // NOTE: EmbedWorkflow steps do NOT have subgraphs in runtara_dsl,
+        // they reference child workflows by ID. So we only recurse into Split/While.
         match step {
             Step::Split(split_step) => {
                 collect_step_names(&split_step.subgraph, name_to_step_ids);
@@ -2369,7 +2369,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::Conditional(_) => "Conditional",
         Step::Split(_) => "Split",
         Step::Switch(_) => "Switch",
-        Step::StartScenario(_) => "StartScenario",
+        Step::EmbedWorkflow(_) => "EmbedWorkflow",
         Step::While(_) => "While",
         Step::Log(_) => "Log",
         Step::Error(_) => "Error",
@@ -2537,10 +2537,10 @@ fn validate_data_and_variable_references_with_context(
 
     // Merge inherited variables with graph's own variables + built-in runtime variables.
     // Built-in variables are injected at runtime by the codegen (program.rs) and propagated
-    // through all subgraphs (Split, While, StartScenario, WaitForSignal).
+    // through all subgraphs (Split, While, EmbedWorkflow, WaitForSignal).
     let mut all_variables: HashSet<String> = graph.variables.keys().cloned().collect();
     all_variables.extend(inherited_variables.iter().cloned());
-    all_variables.insert("_scenario_id".to_string());
+    all_variables.insert("_workflow_id".to_string());
     all_variables.insert("_instance_id".to_string());
     all_variables.insert("_tenant_id".to_string());
     let available_variables: Vec<String> = all_variables.iter().cloned().collect();
@@ -2647,7 +2647,7 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_input_mapping(inputs, &mut refs);
             }
         }
-        Step::StartScenario(start_step) => {
+        Step::EmbedWorkflow(start_step) => {
             if let Some(ref mapping) = start_step.input_mapping {
                 extract_references_from_input_mapping(mapping, &mut refs);
             }
@@ -2884,7 +2884,7 @@ fn validate_template_syntax(template_str: &str) -> Option<String> {
 mod tests {
     use super::*;
     use runtara_dsl::{
-        AgentStep, FinishStep, LogLevel, LogStep, ReferenceValue, StartScenarioStep,
+        AgentStep, EmbedWorkflowStep, FinishStep, LogLevel, LogStep, ReferenceValue,
     };
 
     // Link runtara-agents so that the inventory crate can find registered capabilities
@@ -3101,17 +3101,17 @@ mod tests {
         )));
     }
 
-    // === Child Scenario Tests ===
+    // === Child Workflow Tests ===
 
     #[test]
     fn test_invalid_child_version() {
         let mut steps = HashMap::new();
         steps.insert(
             "start_child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "start_child".to_string(),
                 name: None,
-                child_scenario_id: "child-workflow".to_string(),
+                child_workflow_id: "child-workflow".to_string(),
                 child_version: runtara_dsl::ChildVersion::Latest("invalid".to_string()),
                 input_mapping: None,
                 max_retries: None,
@@ -3146,10 +3146,10 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "start_child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "start_child".to_string(),
                 name: None,
-                child_scenario_id: "child-workflow".to_string(),
+                child_workflow_id: "child-workflow".to_string(),
                 child_version: runtara_dsl::ChildVersion::Latest("latest".to_string()),
                 input_mapping: None,
                 max_retries: None,
@@ -3559,17 +3559,17 @@ mod tests {
         assert!(!config_warnings);
     }
 
-    // === Child Scenario Version Tests ===
+    // === Child Workflow Version Tests ===
 
     #[test]
     fn test_child_version_current_valid() {
         let mut steps = HashMap::new();
         steps.insert(
             "child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "child".to_string(),
                 name: None,
-                child_scenario_id: "other-workflow".to_string(),
+                child_workflow_id: "other-workflow".to_string(),
                 child_version: runtara_dsl::ChildVersion::Latest("current".to_string()),
                 input_mapping: None,
                 max_retries: None,
@@ -3603,10 +3603,10 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "child".to_string(),
                 name: None,
-                child_scenario_id: "other-workflow".to_string(),
+                child_workflow_id: "other-workflow".to_string(),
                 child_version: runtara_dsl::ChildVersion::Specific(5),
                 input_mapping: None,
                 max_retries: None,
@@ -3640,10 +3640,10 @@ mod tests {
         let mut steps = HashMap::new();
         steps.insert(
             "child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "child".to_string(),
                 name: None,
-                child_scenario_id: "other-workflow".to_string(),
+                child_workflow_id: "other-workflow".to_string(),
                 child_version: runtara_dsl::ChildVersion::Specific(0),
                 input_mapping: None,
                 max_retries: None,
@@ -5453,7 +5453,7 @@ mod tests {
         use runtara_dsl::{ImmediateValue, SplitConfig, SplitStep};
 
         // Create a subgraph that references BOTH data.* (iteration item) AND config.variables
-        // This tests the exact scenario from the user's bug report
+        // This tests the exact workflow from the user's bug report
         let mut subgraph_steps = HashMap::new();
         let mut mapping = HashMap::new();
         mapping.insert("item".to_string(), ref_value("data.node"));
@@ -6148,13 +6148,13 @@ mod tests {
 
     #[test]
     fn test_validate_with_children_detects_missing_inputs() {
-        // Parent scenario with StartScenario step
+        // Parent workflow with EmbedWorkflow step
         let parent_json = r#"{
             "steps": {
                 "start": {
-                    "stepType": "StartScenario",
+                    "stepType": "EmbedWorkflow",
                     "id": "start",
-                    "childScenarioId": "child-1",
+                    "childWorkflowId": "child-1",
                     "childVersion": "latest",
                     "inputMapping": {
                         "provided_field": { "valueType": "immediate", "value": "test" }
@@ -6166,7 +6166,7 @@ mod tests {
             "executionPlan": [{ "fromStep": "start", "toStep": "finish" }]
         }"#;
 
-        // Child scenario with required fields
+        // Child workflow with required fields
         let child_json = r#"{
             "steps": {
                 "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
@@ -6196,13 +6196,13 @@ mod tests {
 
     #[test]
     fn test_validate_with_children_detects_cycles() {
-        // Scenario A calls B, B calls A
-        let scenario_a_json = r#"{
+        // Workflow A calls B, B calls A
+        let workflow_a_json = r#"{
             "steps": {
                 "call_b": {
-                    "stepType": "StartScenario",
+                    "stepType": "EmbedWorkflow",
                     "id": "call_b",
-                    "childScenarioId": "scenario-b",
+                    "childWorkflowId": "workflow-b",
                     "childVersion": "latest"
                 },
                 "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
@@ -6211,12 +6211,12 @@ mod tests {
             "executionPlan": [{ "fromStep": "call_b", "toStep": "finish" }]
         }"#;
 
-        let scenario_b_json = r#"{
+        let workflow_b_json = r#"{
             "steps": {
                 "call_a": {
-                    "stepType": "StartScenario",
+                    "stepType": "EmbedWorkflow",
                     "id": "call_a",
-                    "childScenarioId": "scenario-a",
+                    "childWorkflowId": "workflow-a",
                     "childVersion": "latest"
                 },
                 "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
@@ -6225,14 +6225,14 @@ mod tests {
             "executionPlan": [{ "fromStep": "call_a", "toStep": "finish" }]
         }"#;
 
-        let scenario_a: ExecutionGraph = serde_json::from_str(scenario_a_json).unwrap();
-        let scenario_b: ExecutionGraph = serde_json::from_str(scenario_b_json).unwrap();
+        let workflow_a: ExecutionGraph = serde_json::from_str(workflow_a_json).unwrap();
+        let workflow_b: ExecutionGraph = serde_json::from_str(workflow_b_json).unwrap();
 
         let mut children = HashMap::new();
-        children.insert("scenario-a".to_string(), scenario_a.clone());
-        children.insert("scenario-b".to_string(), scenario_b);
+        children.insert("workflow-a".to_string(), workflow_a.clone());
+        children.insert("workflow-b".to_string(), workflow_b);
 
-        let result = validate_workflow_with_children(&scenario_a, &children);
+        let result = validate_workflow_with_children(&workflow_a, &children);
 
         assert!(result.has_errors());
         assert!(

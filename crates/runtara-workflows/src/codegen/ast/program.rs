@@ -32,7 +32,7 @@ fn get_stdlib_crate_name() -> String {
 /// This traverses:
 /// - AgentStep: extracts agent_id
 /// - SplitStep: recursively traverses subgraph
-/// - StartScenario: recursively traverses child graphs from EmitContext
+/// - EmbedWorkflow: recursively traverses child graphs from EmitContext
 fn collect_used_agents(graph: &ExecutionGraph, ctx: &EmitContext) -> HashSet<String> {
     let mut agents = HashSet::new();
     collect_used_agents_recursive(graph, ctx, &mut agents);
@@ -53,9 +53,9 @@ fn collect_used_agents_recursive(
                 // Recursively collect from subgraph
                 collect_used_agents_recursive(&split_step.subgraph, ctx, agents);
             }
-            Step::StartScenario(start_step) => {
-                // Recursively collect from child scenario if available
-                if let Some(child_graph) = ctx.get_child_scenario_by_step_id(&start_step.id) {
+            Step::EmbedWorkflow(start_step) => {
+                // Recursively collect from child workflow if available
+                if let Some(child_graph) = ctx.get_child_workflow_by_step_id(&start_step.id) {
                     collect_used_agents_recursive(child_graph, ctx, agents);
                 }
             }
@@ -81,7 +81,7 @@ fn collect_used_agents_recursive(
 /// Collect all (agent_id, capability_id) pairs used in an ExecutionGraph, recursively.
 ///
 /// This is more granular than `collect_used_agents` — it collects specific capabilities
-/// so the codegen can generate a scenario-specific dispatch function that only references
+/// so the codegen can generate a workflow-specific dispatch function that only references
 /// the exact capabilities used, dramatically reducing WASM binary size through dead code
 /// elimination.
 ///
@@ -90,7 +90,7 @@ fn collect_used_agents_recursive(
 /// - AiAgentStep: collects memory capabilities (load-memory, save-memory) from memory edge targets,
 ///   and capabilities from tool edge targets (Agent steps used as AI tools)
 /// - SplitStep/WhileStep: recursively traverses subgraph
-/// - StartScenario: recursively traverses child graphs from EmitContext
+/// - EmbedWorkflow: recursively traverses child graphs from EmitContext
 fn collect_used_capabilities(
     graph: &ExecutionGraph,
     ctx: &EmitContext,
@@ -140,8 +140,8 @@ fn collect_used_capabilities_recursive(
                                     tool_agent.capability_id.clone(),
                                 ));
                             }
-                            // StartScenario tool targets don't use dispatch — they call
-                            // child scenario functions directly, so no capability to collect.
+                            // EmbedWorkflow tool targets don't use dispatch — they call
+                            // child workflow functions directly, so no capability to collect.
                         }
                     }
                 }
@@ -149,8 +149,8 @@ fn collect_used_capabilities_recursive(
             Step::Split(split_step) => {
                 collect_used_capabilities_recursive(&split_step.subgraph, ctx, caps);
             }
-            Step::StartScenario(start_step) => {
-                if let Some(child_graph) = ctx.get_child_scenario_by_step_id(&start_step.id) {
+            Step::EmbedWorkflow(start_step) => {
+                if let Some(child_graph) = ctx.get_child_workflow_by_step_id(&start_step.id) {
                     collect_used_capabilities_recursive(child_graph, ctx, caps);
                 }
             }
@@ -214,13 +214,13 @@ fn executor_static_name(capability_id: &str) -> String {
     format!("__CAPABILITY_EXECUTOR_{}", upper)
 }
 
-/// Emit a scenario-specific dispatch function that only references capabilities
-/// actually used by this scenario.
+/// Emit a workflow-specific dispatch function that only references capabilities
+/// actually used by this workflow.
 ///
 /// Instead of calling `dispatch::execute_capability()` which pulls ALL 230+ capabilities
-/// into the binary, each scenario gets a `__scenario_dispatch()` that matches only on
+/// into the binary, each workflow gets a `__workflow_dispatch()` that matches only on
 /// the capabilities it uses and calls executor statics directly.
-fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
+fn emit_workflow_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
     let stdlib_name = get_stdlib_crate_name();
     let stdlib_ident = Ident::new(&stdlib_name, Span::call_site());
 
@@ -230,7 +230,7 @@ fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStr
         // No capabilities used — generate a simple always-error function
         return quote! {
             #[allow(dead_code)]
-            fn __scenario_dispatch(
+            fn __workflow_dispatch(
                 module: &str,
                 capability_id: &str,
                 input: serde_json::Value,
@@ -283,11 +283,11 @@ fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStr
         .collect();
 
     quote! {
-        /// Scenario-specific dispatch function.
-        /// Only references capabilities actually used by this scenario, enabling
+        /// Workflow-specific dispatch function.
+        /// Only references capabilities actually used by this workflow, enabling
         /// dead code elimination to dramatically reduce binary size.
         #[allow(dead_code)]
-        fn __scenario_dispatch(
+        fn __workflow_dispatch(
             module: &str,
             capability_id: &str,
             input: serde_json::Value,
@@ -305,7 +305,7 @@ fn emit_scenario_dispatch(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStr
 ///
 /// # Errors
 ///
-/// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+/// Returns `CodegenError` if code generation fails (e.g., missing child workflow).
 pub fn emit_program(
     graph: &ExecutionGraph,
     ctx: &mut EmitContext,
@@ -313,7 +313,7 @@ pub fn emit_program(
     let imports = emit_imports(graph, ctx);
     let constants = emit_constants(ctx);
     let input_structs = emit_input_structs();
-    let scenario_dispatch = emit_scenario_dispatch(graph, ctx);
+    let workflow_dispatch = emit_workflow_dispatch(graph, ctx);
     let main_fn = emit_main(graph);
     let execute_workflow = emit_execute_workflow(graph, ctx)?;
 
@@ -321,7 +321,7 @@ pub fn emit_program(
         #imports
         #constants
         #input_structs
-        #scenario_dispatch
+        #workflow_dispatch
         #main_fn
         #execute_workflow
     })
@@ -414,7 +414,7 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
                 "xml" => ("xml", "xml_ops"),
                 "text" => ("text", "text_ops"),
                 // Native-only agents (sftp, xlsx, compression) are dispatched via
-                // __scenario_dispatch() — no module import needed.
+                // __workflow_dispatch() — no module import needed.
                 // They run either natively or via HTTP stub on the server.
                 _ => return None, // Unknown or native-only agent, skip
             };
@@ -446,11 +446,11 @@ fn emit_imports(graph: &ExecutionGraph, ctx: &EmitContext) -> TokenStream {
 fn emit_input_structs() -> TokenStream {
     quote! {
         #[derive(Clone)]
-        struct ScenarioInputs {
+        struct WorkflowInputs {
             data: Arc<serde_json::Value>,
             variables: Arc<serde_json::Value>,
-            /// Parent scope ID for hierarchy tracking. Set when entering Split/While/StartScenario scopes.
-            /// This is separate from variables to preserve variable isolation in StartScenario.
+            /// Parent scope ID for hierarchy tracking. Set when entering Split/While/EmbedWorkflow scopes.
+            /// This is separate from variables to preserve variable isolation in EmbedWorkflow.
             parent_scope_id: Option<String>,
         }
 
@@ -519,8 +519,8 @@ fn emit_input_structs() -> TokenStream {
     }
 }
 
-/// Emit the scenario variables as a compile-time constant JSON object.
-fn emit_scenario_variables(graph: &ExecutionGraph) -> TokenStream {
+/// Emit the workflow variables as a compile-time constant JSON object.
+fn emit_workflow_variables(graph: &ExecutionGraph) -> TokenStream {
     use super::json_to_tokens;
 
     if graph.variables.is_empty() {
@@ -560,7 +560,7 @@ fn emit_scenario_variables(graph: &ExecutionGraph) -> TokenStream {
 /// 6. Environment reads output from Core persistence after process exit
 fn emit_main(graph: &ExecutionGraph) -> TokenStream {
     // Generate variables as compile-time constants from graph.variables
-    let variables_init = emit_scenario_variables(graph);
+    let variables_init = emit_workflow_variables(graph);
 
     quote! {
         fn main() -> ExitCode {
@@ -628,23 +628,23 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 }
             }
 
-            // Create root span for entire scenario execution
-            let scenario_id = std::env::var("SCENARIO_ID").unwrap_or_else(|_| "unknown".to_string());
+            // Create root span for entire workflow execution
+            let workflow_id = std::env::var("WORKFLOW_ID").unwrap_or_else(|_| "unknown".to_string());
             let instance_id = std::env::var("RUNTARA_INSTANCE_ID").unwrap_or_else(|_| "unknown".to_string());
 
             // Inject built-in variables into the variables namespace.
-            // These are available as `variables._scenario_id`, `variables._instance_id`, etc.
+            // These are available as `variables._workflow_id`, `variables._instance_id`, etc.
             // in all input mappings, conditions, and memory conversation IDs.
             //
-            // - _scenario_id: "scenario_id::instance_id" — unique per execution, used for
-            //   cache key prefix uniqueness across independent top-level scenarios.
+            // - _workflow_id: "workflow_id::instance_id" — unique per execution, used for
+            //   cache key prefix uniqueness across independent top-level workflows.
             // - _instance_id: execution instance UUID — useful for conversation memory keys,
             //   correlation, and debugging.
             // - _tenant_id: tenant identifier — useful for multi-tenant context in mappings.
             if let Some(vars_obj) = variables.as_object_mut() {
                 vars_obj.insert(
-                    "_scenario_id".to_string(),
-                    serde_json::json!(format!("{}::{}", scenario_id, instance_id))
+                    "_workflow_id".to_string(),
+                    serde_json::json!(format!("{}::{}", workflow_id, instance_id))
                 );
                 vars_obj.insert(
                     "_instance_id".to_string(),
@@ -657,20 +657,20 @@ fn emit_main(graph: &ExecutionGraph) -> TokenStream {
                 );
             }
 
-            let scenario_inputs = ScenarioInputs {
+            let workflow_inputs = WorkflowInputs {
                 data: Arc::new(data),
                 variables: Arc::new(variables),
                 parent_scope_id: None, // Top-level has no parent scope
             };
 
             let __root_span = tracing::info_span!(
-                "scenario.execute",
-                scenario.id = %scenario_id,
+                "workflow.execute",
+                workflow.id = %workflow_id,
                 otel.kind = "INTERNAL"
             );
 
             // Execute the workflow within the root span
-            match __root_span.in_scope(|| execute_workflow(Arc::new(scenario_inputs))) {
+            match __root_span.in_scope(|| execute_workflow(Arc::new(workflow_inputs))) {
                 Ok(output) => {
                     // Report completion to runtara-core via SDK
                     let sdk_guard = sdk().lock().unwrap();
@@ -735,7 +735,7 @@ fn emit_execute_workflow(
     let finish_output = emit_finish_output(graph, ctx);
 
     Ok(quote! {
-        fn execute_workflow(#inputs_var: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
+        fn execute_workflow(#inputs_var: Arc<WorkflowInputs>) -> std::result::Result<serde_json::Value, String> {
             let mut #steps_context_var = serde_json::Map::new();
 
             #(#step_code)*
@@ -770,7 +770,7 @@ fn emit_step_execution(
     // Steps that cannot have onError handling (they don't fail or handle errors differently)
     let can_have_on_error = matches!(
         step,
-        Step::Agent(_) | Step::Split(_) | Step::StartScenario(_) | Step::While(_)
+        Step::Agent(_) | Step::Split(_) | Step::EmbedWorkflow(_) | Step::While(_)
     );
 
     if can_have_on_error && !on_error_edges.is_empty() {
@@ -1024,8 +1024,8 @@ fn emit_step_debug_start(
 /// Emit the final output fallback.
 ///
 /// Since Finish steps now return directly via `return Ok(...)`, this function
-/// only provides a fallback for scenarios without a Finish step or if somehow
-/// no Finish step is reached (which shouldn't happen in valid scenarios).
+/// only provides a fallback for workflows without a Finish step or if somehow
+/// no Finish step is reached (which shouldn't happen in valid workflows).
 fn emit_finish_output(_graph: &ExecutionGraph, _ctx: &EmitContext) -> TokenStream {
     // Finish steps now return directly, so this is just a fallback
     // that should only be reached if there's no Finish step in the graph.
@@ -1041,10 +1041,10 @@ fn emit_finish_output(_graph: &ExecutionGraph, _ctx: &EmitContext) -> TokenStrea
 ///
 /// This is the core recursive function used by:
 /// - Split steps (for subgraph execution)
-/// - StartScenario steps (for child scenario execution)
+/// - EmbedWorkflow steps (for child workflow execution)
 ///
 /// The generated function has the signature:
-/// `async fn <fn_name>(inputs: Arc<ScenarioInputs>) -> Result<serde_json::Value, String>`
+/// `async fn <fn_name>(inputs: Arc<WorkflowInputs>) -> Result<serde_json::Value, String>`
 ///
 /// # Arguments
 ///
@@ -1060,9 +1060,9 @@ pub fn emit_graph_as_function(
     let mut ctx = EmitContext::new(parent_ctx.track_events);
     ctx.connection_service_url = parent_ctx.connection_service_url.clone();
     ctx.tenant_id = parent_ctx.tenant_id.clone();
-    ctx.child_scenarios = parent_ctx.child_scenarios.clone();
+    ctx.child_workflows = parent_ctx.child_workflows.clone();
     ctx.step_to_child_ref = parent_ctx.step_to_child_ref.clone();
-    // Inherit emitted child functions for deduplication across nested scenarios
+    // Inherit emitted child functions for deduplication across nested workflows
     ctx.emitted_child_functions = parent_ctx.emitted_child_functions.clone();
     // Use this graph's rate_limit_budget_ms, or inherit from parent
     ctx.rate_limit_budget_ms = graph.rate_limit_budget_ms;
@@ -1081,7 +1081,7 @@ pub fn emit_graph_as_function(
     let finish_output = emit_finish_output(graph, &ctx);
 
     Ok(quote! {
-        fn #fn_name(inputs: Arc<ScenarioInputs>) -> std::result::Result<serde_json::Value, String> {
+        fn #fn_name(inputs: Arc<WorkflowInputs>) -> std::result::Result<serde_json::Value, String> {
             let mut steps_context = serde_json::Map::new();
 
             #(#step_code)*
@@ -1365,18 +1365,18 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_used_agents_in_start_scenario() {
-        // Create child scenario with an agent
+    fn test_collect_used_agents_in_embed_workflow() {
+        // Create child workflow with an agent
         let child_graph = create_agent_graph("child-step", "text", "format");
 
-        // Create parent with StartScenario step
+        // Create parent with EmbedWorkflow step
         let mut steps = HashMap::new();
         steps.insert(
             "start1".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "start1".to_string(),
                 name: None,
-                child_scenario_id: "child".to_string(),
+                child_workflow_id: "child".to_string(),
                 child_version: ChildVersion::Latest("latest".to_string()),
                 input_mapping: None,
                 max_retries: None,
@@ -1401,18 +1401,18 @@ mod tests {
             ..Default::default()
         };
 
-        // Create context with child scenario registered
-        // Key format: "scenario_id::version"
-        let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("child-scenario::1".to_string(), child_graph);
+        // Create context with child workflow registered
+        // Key format: "workflow_id::version"
+        let mut child_workflows = HashMap::new();
+        child_workflows.insert("child-workflow::1".to_string(), child_graph);
 
-        // step_to_child_ref maps step_id -> (scenario_id, version)
+        // step_to_child_ref maps step_id -> (workflow_id, version)
         let mut step_to_child_ref = HashMap::new();
-        step_to_child_ref.insert("start1".to_string(), ("child-scenario".to_string(), 1));
+        step_to_child_ref.insert("start1".to_string(), ("child-workflow".to_string(), 1));
 
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
-            child_scenarios,
+            child_workflows,
             step_to_child_ref,
             None,
             None,
@@ -1421,7 +1421,7 @@ mod tests {
         let agents = collect_used_agents(&graph, &ctx);
         assert!(
             agents.contains("text"),
-            "Should find agent in child scenario"
+            "Should find agent in child workflow"
         );
     }
 
@@ -1451,7 +1451,7 @@ mod tests {
 
     #[test]
     fn test_emit_constants_with_connection_url() {
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
             HashMap::new(),
             HashMap::new(),
@@ -1470,7 +1470,7 @@ mod tests {
 
     #[test]
     fn test_emit_constants_with_tenant_id() {
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
             HashMap::new(),
             HashMap::new(),
@@ -1485,7 +1485,7 @@ mod tests {
 
     #[test]
     fn test_emit_constants_with_both_url_and_tenant() {
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
             HashMap::new(),
             HashMap::new(),
@@ -1504,7 +1504,7 @@ mod tests {
 
     #[test]
     fn test_emit_constants_generates_runtime_env_fallback() {
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
             HashMap::new(),
             HashMap::new(),
@@ -1661,13 +1661,13 @@ mod tests {
     }
 
     // ==========================================
-    // Tests for emit_scenario_variables
+    // Tests for emit_workflow_variables
     // ==========================================
 
     #[test]
-    fn test_emit_scenario_variables_empty() {
+    fn test_emit_workflow_variables_empty() {
         let graph = create_minimal_finish_graph("finish");
-        let tokens = emit_scenario_variables(&graph);
+        let tokens = emit_workflow_variables(&graph);
         let code = tokens.to_string();
 
         assert!(
@@ -1681,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_scenario_variables_with_variables() {
+    fn test_emit_workflow_variables_with_variables() {
         let mut variables = HashMap::new();
         variables.insert(
             "myVar".to_string(),
@@ -1719,7 +1719,7 @@ mod tests {
             ..Default::default()
         };
 
-        let tokens = emit_scenario_variables(&graph);
+        let tokens = emit_workflow_variables(&graph);
         let code = tokens.to_string();
 
         assert!(
@@ -1880,8 +1880,8 @@ mod tests {
         let code = tokens.to_string();
 
         assert!(
-            code.contains("ScenarioInputs"),
-            "Should define ScenarioInputs struct"
+            code.contains("WorkflowInputs"),
+            "Should define WorkflowInputs struct"
         );
         assert!(code.contains("data"), "Should have data field");
         assert!(code.contains("variables"), "Should have variables field");
@@ -1920,7 +1920,7 @@ mod tests {
         );
         assert!(
             code.contains("__root_span"),
-            "Should create root span for scenario execution"
+            "Should create root span for workflow execution"
         );
     }
 
@@ -2022,8 +2022,8 @@ mod tests {
             "Should define execute_workflow function"
         );
         assert!(
-            code.contains("Arc < ScenarioInputs >"),
-            "Should take Arc<ScenarioInputs> as input"
+            code.contains("Arc < WorkflowInputs >"),
+            "Should take Arc<WorkflowInputs> as input"
         );
         assert!(code.contains("Result"), "Should return Result");
         assert!(
@@ -2044,17 +2044,17 @@ mod tests {
     fn test_emit_graph_as_function() {
         let graph = create_minimal_finish_graph("finish");
         let ctx = EmitContext::new(false);
-        let fn_name = Ident::new("execute_child_scenario", Span::call_site());
+        let fn_name = Ident::new("execute_child_workflow", Span::call_site());
         let tokens = emit_graph_as_function(&fn_name, &graph, &ctx).unwrap();
         let code = tokens.to_string();
 
         assert!(
-            code.contains("execute_child_scenario"),
+            code.contains("execute_child_workflow"),
             "Should use provided function name"
         );
         assert!(code.contains("fn "), "Should be a function");
         assert!(
-            code.contains("inputs : Arc < ScenarioInputs >"),
+            code.contains("inputs : Arc < WorkflowInputs >"),
             "Should take inputs parameter"
         );
         assert!(code.contains("steps_context"), "Should have steps_context");
@@ -2063,7 +2063,7 @@ mod tests {
     #[test]
     fn test_emit_graph_as_function_inherits_connection_config() {
         let graph = create_minimal_finish_graph("finish");
-        let parent_ctx = EmitContext::with_child_scenarios(
+        let parent_ctx = EmitContext::with_child_workflows(
             false,
             HashMap::new(),
             HashMap::new(),
@@ -2084,18 +2084,18 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_graph_as_function_inherits_child_scenarios() {
-        // Create child scenario graph that will be looked up
+    fn test_emit_graph_as_function_inherits_child_workflows() {
+        // Create child workflow graph that will be looked up
         let child_graph = create_minimal_finish_graph("child-finish");
 
-        // Create a graph with StartScenario step referencing the child
+        // Create a graph with EmbedWorkflow step referencing the child
         let mut steps = HashMap::new();
         steps.insert(
             "start-child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "start-child".to_string(),
                 name: None,
-                child_scenario_id: "my-child-scenario".to_string(),
+                child_workflow_id: "my-child-workflow".to_string(),
                 child_version: ChildVersion::Latest("latest".to_string()),
                 input_mapping: None,
                 max_retries: None,
@@ -2120,21 +2120,21 @@ mod tests {
             ..Default::default()
         };
 
-        // Create parent context with child_scenarios populated
-        // Key format: "scenario_id::version"
-        let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("my-child-scenario::1".to_string(), child_graph);
+        // Create parent context with child_workflows populated
+        // Key format: "workflow_id::version"
+        let mut child_workflows = HashMap::new();
+        child_workflows.insert("my-child-workflow::1".to_string(), child_graph);
 
-        // step_to_child_ref maps step_id -> (scenario_id, version)
+        // step_to_child_ref maps step_id -> (workflow_id, version)
         let mut step_to_child_ref = HashMap::new();
         step_to_child_ref.insert(
             "start-child".to_string(),
-            ("my-child-scenario".to_string(), 1),
+            ("my-child-workflow".to_string(), 1),
         );
 
-        let parent_ctx = EmitContext::with_child_scenarios(
+        let parent_ctx = EmitContext::with_child_workflows(
             false,
-            child_scenarios,
+            child_workflows,
             step_to_child_ref,
             None,
             None,
@@ -2142,24 +2142,24 @@ mod tests {
 
         let fn_name = Ident::new("nested_fn", Span::call_site());
 
-        // This should succeed because child_scenarios is inherited
+        // This should succeed because child_workflows is inherited
         let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
         assert!(
             result.is_ok(),
-            "Should successfully emit when child_scenarios is inherited"
+            "Should successfully emit when child_workflows is inherited"
         );
     }
 
     #[test]
-    fn test_emit_graph_as_function_fails_without_child_scenarios() {
-        // Create a graph with StartScenario step referencing a child
+    fn test_emit_graph_as_function_fails_without_child_workflows() {
+        // Create a graph with EmbedWorkflow step referencing a child
         let mut steps = HashMap::new();
         steps.insert(
             "start-child".to_string(),
-            Step::StartScenario(StartScenarioStep {
+            Step::EmbedWorkflow(EmbedWorkflowStep {
                 id: "start-child".to_string(),
                 name: None,
-                child_scenario_id: "my-child-scenario".to_string(),
+                child_workflow_id: "my-child-workflow".to_string(),
                 child_version: ChildVersion::Latest("latest".to_string()),
                 input_mapping: None,
                 max_retries: None,
@@ -2184,26 +2184,26 @@ mod tests {
             ..Default::default()
         };
 
-        // Create parent context WITHOUT child_scenarios
+        // Create parent context WITHOUT child_workflows
         let parent_ctx = EmitContext::new(false);
         let fn_name = Ident::new("nested_fn", Span::call_site());
 
-        // This should fail because child scenario is not found
+        // This should fail because child workflow is not found
         let result = emit_graph_as_function(&fn_name, &graph, &parent_ctx);
         assert!(
             result.is_err(),
-            "Should fail when child scenario is missing"
+            "Should fail when child workflow is missing"
         );
 
-        if let Err(CodegenError::MissingChildScenario {
+        if let Err(CodegenError::MissingChildWorkflow {
             step_id,
-            child_scenario_id,
+            child_workflow_id,
         }) = result
         {
             assert_eq!(step_id, "start-child");
-            assert_eq!(child_scenario_id, "my-child-scenario");
+            assert_eq!(child_workflow_id, "my-child-workflow");
         } else {
-            panic!("Expected MissingChildScenario error");
+            panic!("Expected MissingChildWorkflow error");
         }
     }
 
@@ -2250,7 +2250,7 @@ mod tests {
         );
 
         // Should include input structs
-        assert!(code.contains("ScenarioInputs"), "Should have input structs");
+        assert!(code.contains("WorkflowInputs"), "Should have input structs");
 
         // Should include main function
         assert!(code.contains("fn main"), "Should have main function");

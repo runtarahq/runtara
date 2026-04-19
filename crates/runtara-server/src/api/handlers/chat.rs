@@ -30,15 +30,15 @@ pub struct ChatRequest {
     /// User message to send to the AI agent
     pub message: String,
 
-    /// Input data for the scenario (merged with message)
+    /// Input data for the workflow (merged with message)
     #[serde(default)]
     pub data: Value,
 
-    /// Variables for the scenario
+    /// Variables for the workflow
     #[serde(default)]
     pub variables: Value,
 
-    /// Scenario version to execute (defaults to current)
+    /// Workflow version to execute (defaults to current)
     pub version: Option<i32>,
 }
 
@@ -46,15 +46,15 @@ pub struct ChatRequest {
 #[derive(Debug, Deserialize, ToSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatStartRequest {
-    /// Input data for the scenario
+    /// Input data for the workflow
     #[serde(default)]
     pub data: Value,
 
-    /// Variables for the scenario
+    /// Variables for the workflow
     #[serde(default)]
     pub variables: Value,
 
-    /// Scenario version to execute (defaults to current)
+    /// Workflow version to execute (defaults to current)
     pub version: Option<i32>,
 }
 
@@ -110,7 +110,7 @@ pub(crate) enum ChatEvent {
     },
     /// Memory saved after conversation
     MemorySaved { message_count: i64, success: bool },
-    /// Generic step event (for non-AI-agent steps in the scenario)
+    /// Generic step event (for non-AI-agent steps in the workflow)
     StepStart {
         step_id: String,
         step_name: Option<String>,
@@ -135,23 +135,23 @@ pub(crate) enum ChatEvent {
 
 /// Start a chat session with an initial message and stream events via SSE.
 ///
-/// The scenario executes asynchronously while this endpoint streams execution events
+/// The workflow executes asynchronously while this endpoint streams execution events
 /// (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events.
 ///
-/// For scenarios with WaitForSignal steps (human-in-the-loop), the stream emits a
+/// For workflows with WaitForSignal steps (human-in-the-loop), the stream emits a
 /// `waiting_for_input` event with a `signal_id`. Use `POST /api/runtime/signals/{instanceId}`
 /// to submit the response and resume execution.
 #[utoipa::path(
     post,
-    path = "/api/runtime/scenarios/{id}/chat",
+    path = "/api/runtime/workflows/{id}/chat",
     params(
-        ("id" = String, Path, description = "Scenario ID"),
+        ("id" = String, Path, description = "Workflow ID"),
     ),
     request_body = ChatRequest,
     responses(
         (status = 200, description = "SSE stream of chat events", content_type = "text/event-stream"),
         (status = 400, description = "Invalid request"),
-        (status = 404, description = "Scenario not found"),
+        (status = 404, description = "Workflow not found"),
     ),
     tag = "Chat"
 )]
@@ -162,7 +162,7 @@ pub async fn chat_handler(
     State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(engine): State<Arc<ExecutionEngine>>,
-    Path(scenario_id): Path<String>,
+    Path(workflow_id): Path<String>,
     Json(request): Json<ChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     // Build data with userMessage
@@ -182,7 +182,7 @@ pub async fn chat_handler(
         runtime_client,
         engine,
         ChatStreamParams {
-            scenario_id,
+            workflow_id,
             data,
             variables: request.variables,
             version: request.version,
@@ -193,19 +193,19 @@ pub async fn chat_handler(
 
 /// Start a chat session without an initial message and stream events via SSE.
 ///
-/// Use this when the scenario doesn't require an initial user message to begin
+/// Use this when the workflow doesn't require an initial user message to begin
 /// (e.g., the AI agent starts the conversation proactively).
 #[utoipa::path(
     post,
-    path = "/api/runtime/scenarios/{id}/chat/start",
+    path = "/api/runtime/workflows/{id}/chat/start",
     params(
-        ("id" = String, Path, description = "Scenario ID"),
+        ("id" = String, Path, description = "Workflow ID"),
     ),
     request_body(content = ChatStartRequest, content_type = "application/json"),
     responses(
         (status = 200, description = "SSE stream of chat events", content_type = "text/event-stream"),
         (status = 400, description = "Invalid request"),
-        (status = 404, description = "Scenario not found"),
+        (status = 404, description = "Workflow not found"),
     ),
     tag = "Chat"
 )]
@@ -216,7 +216,7 @@ pub async fn chat_start_handler(
     State(trigger_stream): State<Option<Arc<TriggerStreamPublisher>>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(engine): State<Arc<ExecutionEngine>>,
-    Path(scenario_id): Path<String>,
+    Path(workflow_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     let request: ChatStartRequest = if body.is_empty() {
@@ -238,7 +238,7 @@ pub async fn chat_start_handler(
         runtime_client,
         engine,
         ChatStreamParams {
-            scenario_id,
+            workflow_id,
             data,
             variables: request.variables,
             version: request.version,
@@ -249,7 +249,7 @@ pub async fn chat_start_handler(
 
 /// Parameters for starting a chat stream execution.
 struct ChatStreamParams {
-    scenario_id: String,
+    workflow_id: String,
     data: Value,
     variables: Value,
     version: Option<i32>,
@@ -290,7 +290,7 @@ async fn start_chat_stream(
     let result = engine
         .queue(QueueRequest {
             tenant_id: &tenant_id,
-            scenario_id: &params.scenario_id,
+            workflow_id: &params.workflow_id,
             version: params.version,
             inputs,
             debug: false,
@@ -303,7 +303,7 @@ async fn start_chat_stream(
     let instance_id = result.instance_id.to_string();
 
     // Build the SSE stream that polls for events
-    let stream = build_event_stream(runtime_client, instance_id, params.scenario_id);
+    let stream = build_event_stream(runtime_client, instance_id, params.workflow_id);
 
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
 
@@ -319,7 +319,7 @@ async fn start_chat_stream(
 pub(crate) fn build_event_stream(
     client: Arc<RuntimeClient>,
     instance_id: String,
-    _scenario_id: String,
+    _workflow_id: String,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
         // Emit started event immediately

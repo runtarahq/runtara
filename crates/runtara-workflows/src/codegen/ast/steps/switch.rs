@@ -100,8 +100,8 @@ fn emit_value_switch(
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    // Clone scenario inputs var for debug events
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Clone workflow inputs var for debug events
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
@@ -111,7 +111,7 @@ fn emit_value_switch(
         "Switch",
         Some(&inputs_var),
         config_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     let debug_end = emit_step_debug_end(
@@ -120,7 +120,7 @@ fn emit_value_switch(
         step_name,
         "Switch",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 
@@ -269,8 +269,8 @@ fn emit_routing_switch(
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    // Clone scenario inputs var for debug events
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Clone workflow inputs var for debug events
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Generate debug event emissions
     let debug_start = emit_step_debug_start(
@@ -280,7 +280,7 @@ fn emit_routing_switch(
         "Switch",
         Some(&inputs_var),
         config_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     let debug_end = emit_step_debug_end(
@@ -289,7 +289,7 @@ fn emit_routing_switch(
         step_name,
         "Switch",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 

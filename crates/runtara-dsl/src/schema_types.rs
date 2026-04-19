@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // DSL Type Definitions - Single Source of Truth
 //
-// These types define the scenario DSL structure and are used by:
-// 1. Runtime - for deserializing scenario JSON
-// 2. Compiler - for type-safe access to scenario structure
+// These types define the workflow DSL structure and are used by:
+// 1. Runtime - for deserializing workflow JSON
+// 2. Compiler - for type-safe access to workflow structure
 // 3. build.rs - for auto-generating JSON Schema via schemars
 //
 // IMPORTANT: Changes to these types automatically update the JSON Schema.
@@ -21,15 +21,15 @@ pub const DSL_VERSION: &str = "3.0.0";
 // Root Types
 // ============================================================================
 
-/// Complete scenario definition
+/// Complete workflow definition
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct Scenario {
+pub struct Workflow {
     /// The execution graph containing all steps
     pub execution_graph: ExecutionGraph,
 
-    /// Memory allocation tier for scenario execution
+    /// Memory allocation tier for workflow execution
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_tier: Option<MemoryTier>,
 
@@ -38,7 +38,7 @@ pub struct Scenario {
     pub track_events: Option<bool>,
 }
 
-/// Memory allocation tier for scenario execution
+/// Memory allocation tier for workflow execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum MemoryTier {
@@ -58,11 +58,11 @@ pub enum MemoryTier {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionGraph {
-    /// Human-readable name for the scenario
+    /// Human-readable name for the workflow
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Detailed description of what the scenario does
+    /// Detailed description of what the workflow does
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
@@ -83,12 +83,12 @@ pub struct ExecutionGraph {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, Variable>,
 
-    /// Schema defining expected input data structure for this scenario.
+    /// Schema defining expected input data structure for this workflow.
     /// Keys are field names, values define the field type and constraints.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub input_schema: HashMap<String, SchemaField>,
 
-    /// Schema defining output data structure for this scenario.
+    /// Schema defining output data structure for this workflow.
     /// Keys are field names, values define the field type and constraints.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_schema: HashMap<String, SchemaField>,
@@ -97,14 +97,14 @@ pub struct ExecutionGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<Vec<Note>>,
 
-    /// UI node positions for the visual scenario editor.
+    /// UI node positions for the visual workflow editor.
     /// This is opaque data managed by the UI - the runtime does not interpret this field.
     /// Typically contains an array of node objects with position coordinates.
     /// Not used in compilation or execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nodes: Option<serde_json::Value>,
 
-    /// UI edge positions for the visual scenario editor.
+    /// UI edge positions for the visual workflow editor.
     /// This is opaque data managed by the UI - the runtime does not interpret this field.
     /// Typically contains an array of edge objects connecting nodes.
     /// Not used in compilation or execution.
@@ -112,8 +112,8 @@ pub struct ExecutionGraph {
     pub edges: Option<serde_json::Value>,
 
     /// Maximum cumulative time (in milliseconds) that rate-limited retries may
-    /// durable-sleep before giving up.  Applies to all steps in this scenario.
-    /// Default: 60 000 (1 minute).  Set higher for scenarios that make many
+    /// durable-sleep before giving up.  Applies to all steps in this workflow.
+    /// Default: 60 000 (1 minute).  Set higher for workflows that make many
     /// calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
     #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
     pub rate_limit_budget_ms: u64,
@@ -224,7 +224,7 @@ pub struct ExecutionPlanEdge {
     pub priority: Option<i32>,
 }
 
-/// Visual annotation for scenario editor UI
+/// Visual annotation for workflow editor UI
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Note {
@@ -255,7 +255,7 @@ pub struct Position {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "stepType")]
 pub enum Step {
-    /// Exit point - defines scenario outputs
+    /// Exit point - defines workflow outputs
     Finish(FinishStep),
 
     /// Executes an agent capability
@@ -270,8 +270,8 @@ pub enum Step {
     /// Multi-way branch based on value matching
     Switch(SwitchStep),
 
-    /// Executes a nested child scenario
-    StartScenario(StartScenarioStep),
+    /// Executes a nested child workflow
+    EmbedWorkflow(EmbedWorkflowStep),
 
     /// Conditional loop - repeat until condition is false
     While(WhileStep),
@@ -311,7 +311,7 @@ pub struct StepCommon {
     pub name: Option<String>,
 }
 
-/// Exit point step - defines scenario outputs
+/// Exit point step - defines workflow outputs
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -323,7 +323,7 @@ pub struct FinishStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Maps scenario data to output values
+    /// Maps workflow data to output values
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
@@ -482,11 +482,11 @@ pub struct SwitchStep {
     pub breakpoint: Option<bool>,
 }
 
-/// Executes a nested child scenario
+/// Executes a nested child workflow
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct StartScenarioStep {
+pub struct EmbedWorkflowStep {
     /// Unique step identifier
     pub id: String,
 
@@ -494,13 +494,13 @@ pub struct StartScenarioStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// ID of the child scenario to execute
-    pub child_scenario_id: String,
+    /// ID of the child workflow to execute
+    pub child_workflow_id: String,
 
-    /// Version of child scenario ("latest" or specific version number)
+    /// Version of child workflow ("latest" or specific version number)
     pub child_version: ChildVersion,
 
-    /// Maps parent data to child scenario inputs
+    /// Maps parent data to child workflow inputs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
@@ -521,7 +521,7 @@ pub struct StartScenarioStep {
     pub breakpoint: Option<bool>,
 }
 
-/// Child scenario version specification
+/// Child workflow version specification
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
@@ -898,7 +898,7 @@ pub struct DelayStep {
 ///
 /// This step pauses workflow execution until an external system sends a signal
 /// with the matching signal_id. The signal_id is auto-generated based on the
-/// step's position in the workflow (instance_id + scenario context + step_id + loop indices).
+/// step's position in the workflow (instance_id + workflow context + step_id + loop indices).
 ///
 /// The `on_wait` subgraph executes immediately when the step starts waiting,
 /// allowing the workflow to notify external systems of the signal_id they should
@@ -968,7 +968,7 @@ pub struct WaitForSignalStep {
     pub poll_interval_ms: Option<u64>,
 
     /// Schema describing the expected response from the human/external system.
-    /// Uses the same flat-map format as scenario `inputSchema`.
+    /// Uses the same flat-map format as workflow `inputSchema`.
     ///
     /// Examples:
     /// - Confirm: `{"approved": {"type": "boolean", "required": true}}`
@@ -990,7 +990,7 @@ pub struct WaitForSignalStep {
 ///
 /// The AI Agent step uses an LLM to autonomously decide which tools to call.
 /// Tools are defined as labeled edges in the execution plan, each pointing to
-/// a concrete step (Agent, StartScenario, WaitForSignal). The LLM picks which
+/// a concrete step (Agent, EmbedWorkflow, WaitForSignal). The LLM picks which
 /// tool/branch to execute, collects the result, and loops until it produces a
 /// final text response or reaches max_iterations.
 ///
@@ -1074,7 +1074,7 @@ pub struct AiAgentConfig {
     /// via the provider's structured output feature (e.g., OpenAI `response_format`,
     /// Anthropic `response_format`).
     ///
-    /// Uses the same `SchemaField` format as scenario `inputSchema`/`outputSchema`.
+    /// Uses the same `SchemaField` format as workflow `inputSchema`/`outputSchema`.
     ///
     /// Example:
     /// ```json
@@ -1194,13 +1194,13 @@ pub enum MappingValue {
 /// Paths use dot notation: "data.user.name", "steps.step1.outputs.items", "variables.counter"
 ///
 /// Available root contexts:
-/// - `data` - Current iteration data (in Split) or scenario input data
-/// - `variables` - Scenario variables (user-defined + built-in)
+/// - `data` - Current iteration data (in Split) or workflow input data
+/// - `variables` - Workflow variables (user-defined + built-in)
 /// - `steps.<stepId>.outputs` - Outputs from a previous step
-/// - `scenario.inputs` - Original scenario inputs
+/// - `workflow.inputs` - Original workflow inputs
 ///
 /// Built-in variables (available in all steps, including subgraphs):
-/// - `variables._scenario_id` - Unique per execution: "{scenario_id}::{instance_id}"
+/// - `variables._workflow_id` - Unique per execution: "{workflow_id}::{instance_id}"
 /// - `variables._instance_id` - Execution instance UUID
 /// - `variables._tenant_id` - Tenant identifier
 ///
@@ -1293,10 +1293,10 @@ pub enum CompositeInner {
 /// Templates support full minijinja syntax: variable interpolation, filters, conditionals, loops.
 ///
 /// Available context variables (same as reference resolution):
-/// - `data.*` — scenario input data
-/// - `variables.*` — scenario variables
+/// - `data.*` — workflow input data
+/// - `variables.*` — workflow variables
 /// - `steps.<id>.outputs.*` — previous step outputs
-/// - `scenario.inputs.*` — original scenario inputs
+/// - `workflow.inputs.*` — original workflow inputs
 ///
 /// Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
 /// With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
@@ -1336,7 +1336,7 @@ pub enum ValueType {
 }
 
 /// Base64-encoded file data structure.
-/// Used for file inputs/outputs in scenarios and operators.
+/// Used for file inputs/outputs in workflows and operators.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -1405,7 +1405,7 @@ pub enum SchemaFieldType {
 
 /// A typed variable definition with its value.
 ///
-/// Variables are static values available during scenario execution
+/// Variables are static values available during workflow execution
 /// via the `variables.*` path in mappings.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1425,7 +1425,7 @@ pub struct Variable {
 
 /// A field definition for input/output schemas.
 ///
-/// Used to define the structure of scenario inputs and outputs.
+/// Used to define the structure of workflow inputs and outputs.
 /// The field name is the key in the HashMap.
 ///
 /// ## Form rendering extensions

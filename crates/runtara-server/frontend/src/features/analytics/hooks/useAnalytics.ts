@@ -41,7 +41,7 @@ function getDateRangeParams(range: DateRangeOption) {
 }
 
 /**
- * Fetch tenant-level metrics aggregated across all scenarios
+ * Fetch tenant-level metrics aggregated across all workflows
  * @param dateRange - Date range option
  */
 export function useTenantMetrics(dateRange: DateRangeOption) {

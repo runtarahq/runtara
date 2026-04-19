@@ -27,7 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKFLOW_FILE="${SCRIPT_DIR}/workflows/delay_workflow.json"
 TENANT_ID="e2e-test"
-SCENARIO_ID="delay-workflow"
+WORKFLOW_ID="delay-workflow"
 IMAGE_NAME="e2e-delay-workflow-$(date +%s)"
 
 # Binary paths
@@ -108,7 +108,7 @@ TEMP_BINARY=$(mktemp)
 if ! "${RUNTARA_COMPILE}" \
     --workflow "${WORKFLOW_FILE}" \
     --tenant "${TENANT_ID}" \
-    --scenario "${SCENARIO_ID}" \
+    --workflow-id "${WORKFLOW_ID}" \
     --output "${TEMP_BINARY}" 2>&1; then
     print_error "Compilation failed"
     exit 1

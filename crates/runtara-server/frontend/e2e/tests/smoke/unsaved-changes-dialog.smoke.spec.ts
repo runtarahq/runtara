@@ -8,8 +8,8 @@ test.describe('Unsaved changes dialog', () => {
   test('unsaved changes dialog should stay visible when navigating away', async ({
     page,
   }) => {
-    // Go to scenarios list page
-    await page.goto('/scenarios');
+    // Go to workflows list page
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
     // Wait for loading to complete
@@ -18,13 +18,13 @@ test.describe('Unsaved changes dialog', () => {
       .catch(() => {});
     await page.waitForTimeout(1000);
 
-    // Find and click Edit button to open a scenario
+    // Find and click Edit button to open a workflow
     const editButton = page.getByRole('button', { name: 'Edit' }).first();
     const hasEditButton = await editButton
       .isVisible({ timeout: 5000 })
       .catch(() => false);
     if (!hasEditButton) {
-      test.skip(true, 'No scenarios available to test');
+      test.skip(true, 'No workflows available to test');
       return;
     }
 
@@ -88,13 +88,13 @@ test.describe('Unsaved changes dialog', () => {
       // Dialog should close
       await expect(dialog).not.toBeVisible();
 
-      // Should still be on the scenario page
-      await expect(page).toHaveURL(/\/scenarios\//);
+      // Should still be on the workflow page
+      await expect(page).toHaveURL(/\/workflows\//);
     } else {
-      // If no dialog appeared, the scenario might not have had unsaved changes
+      // If no dialog appeared, the workflow might not have had unsaved changes
       // This is acceptable - the test verifies the happy path
       console.log(
-        'No unsaved changes dialog appeared - scenario may not have been modified'
+        'No unsaved changes dialog appeared - workflow may not have been modified'
       );
     }
   });
@@ -102,7 +102,7 @@ test.describe('Unsaved changes dialog', () => {
   test('unsaved changes dialog cancel button keeps user on page', async ({
     page,
   }) => {
-    await page.goto('/scenarios');
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
     await page
       .waitForSelector('.animate-pulse', { state: 'hidden', timeout: 15000 })
@@ -114,7 +114,7 @@ test.describe('Unsaved changes dialog', () => {
       .isVisible({ timeout: 5000 })
       .catch(() => false);
     if (!hasEditButton) {
-      test.skip(true, 'No scenarios available to test');
+      test.skip(true, 'No workflows available to test');
       return;
     }
 
@@ -135,8 +135,8 @@ test.describe('Unsaved changes dialog', () => {
       await page.keyboard.press('Escape');
       await expect(dialog).not.toBeVisible();
 
-      // Should still be on scenario page
-      expect(page.url()).toContain('/scenarios/');
+      // Should still be on workflow page
+      expect(page.url()).toContain('/workflows/');
     }
   });
 });

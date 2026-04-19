@@ -1,7 +1,7 @@
 #!/bin/bash
 # E2E Latency Measurement Script
 #
-# Measures the end-to-end latency of launching and running a single scenario.
+# Measures the end-to-end latency of launching and running a single workflow.
 # This includes: API call → instance start → execution → completion → response
 #
 # Usage:

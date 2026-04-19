@@ -1,6 +1,6 @@
 //! Metadata API endpoints
 //!
-//! Provides endpoints for scenario metadata including step types and step-specific metadata
+//! Provides endpoints for workflow metadata including step types and step-specific metadata
 
 use axum::{http::StatusCode, response::Json};
 use serde_json::{Value, json};
@@ -14,33 +14,33 @@ pub struct NotImplementedResponse {
     pub status: u16,
 }
 
-/// Get all available scenario step types
+/// Get all available workflow step types
 #[utoipa::path(
     get,
-    path = "/api/runtime/metadata/scenario/step-types",
-    tag = "scenario-step-type-api",
+    path = "/api/runtime/metadata/workflow/step-types",
+    tag = "workflow-step-type-api",
     responses(
         (status = 200, description = "Step types retrieved successfully"),
     )
 )]
-pub async fn get_scenario_step_types_handler() -> (StatusCode, Json<Value>) {
+pub async fn get_workflow_step_types_handler() -> (StatusCode, Json<Value>) {
     // Return available step types based on the compiler's supported types
     let step_types = vec![
         json!({
             "type": "Start",
             "name": "Start",
-            "description": "Entry point that initializes scenario with input data",
+            "description": "Entry point that initializes workflow with input data",
             "category": "control",
             "icon": "play-circle",
             "inputSchema": {
                 "data": {
                     "type": "json",
-                    "description": "Initial data for scenario (optional, defaults to scenario.inputs.data)",
+                    "description": "Initial data for workflow (optional, defaults to workflow.inputs.data)",
                     "required": false
                 },
                 "variables": {
                     "type": "json",
-                    "description": "Initial variables for scenario (optional, defaults to scenario.inputs.variables)",
+                    "description": "Initial variables for workflow (optional, defaults to workflow.inputs.variables)",
                     "required": false
                 }
             },
@@ -62,7 +62,7 @@ pub async fn get_scenario_step_types_handler() -> (StatusCode, Json<Value>) {
         json!({
             "type": "Finish",
             "name": "Finish",
-            "description": "Final step that returns scenario outputs",
+            "description": "Final step that returns workflow outputs",
             "category": "control",
             "icon": "stop-circle",
             "inputSchema": {
@@ -206,19 +206,19 @@ pub async fn get_scenario_step_types_handler() -> (StatusCode, Json<Value>) {
             }
         }),
         json!({
-            "type": "StartScenario",
-            "name": "Start Scenario",
-            "description": "Start a sub-scenario execution",
+            "type": "EmbedWorkflow",
+            "name": "Start Workflow",
+            "description": "Start a sub-workflow execution",
             "category": "control",
             "icon": "play",
             "inputSchema": {
-                "description": "Inputs for the sub-scenario (mapped from parent scenario)",
+                "description": "Inputs for the sub-workflow (mapped from parent workflow)",
                 "dynamic": true
             },
             "outputSchema": {
                 "result": {
                     "type": "text",
-                    "description": "Result from sub-scenario execution"
+                    "description": "Result from sub-workflow execution"
                 }
             }
         }),

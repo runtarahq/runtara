@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO workflow_metrics_hourly (\n                tenant_id, workflow_id, version, hour_bucket,\n                invocation_count, success_count, failure_count, timeout_count,\n                total_duration_seconds, min_duration_seconds, max_duration_seconds,\n                total_memory_mb, min_memory_mb, max_memory_mb,\n                updated_at\n            )\n            VALUES ($1, $2, $3, $4, 1, $5, $6, 0, $7, $7, $7, $8, $9, $9, NOW())\n            ON CONFLICT (tenant_id, workflow_id, version, hour_bucket)\n            DO UPDATE SET\n                invocation_count = workflow_metrics_hourly.invocation_count + 1,\n                success_count = workflow_metrics_hourly.success_count + $5,\n                failure_count = workflow_metrics_hourly.failure_count + $6,\n                total_duration_seconds = workflow_metrics_hourly.total_duration_seconds + $7,\n                min_duration_seconds = LEAST(workflow_metrics_hourly.min_duration_seconds, $7),\n                max_duration_seconds = GREATEST(workflow_metrics_hourly.max_duration_seconds, $7),\n                total_memory_mb = workflow_metrics_hourly.total_memory_mb + $8,\n                min_memory_mb = LEAST(workflow_metrics_hourly.min_memory_mb, $9),\n                max_memory_mb = GREATEST(workflow_metrics_hourly.max_memory_mb, $9),\n                updated_at = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Float8",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af95e8557e602928bf3787f28a2f347113452d0296784a7bbaf519821a4913f8"
+}

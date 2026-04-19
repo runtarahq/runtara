@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT definition\n        FROM workflow_definitions\n        WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "definition",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f2310419430b68b68ff81da65ada304dd800d726fcf4fad24a84d8fb6a9d0a6e"
+}

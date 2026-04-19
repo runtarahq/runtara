@@ -3,7 +3,7 @@
 //! Image Registry
 //!
 //! Manages "images" - runnable units that can be launched as instances.
-//! An image represents a compiled scenario or other executable that can be run.
+//! An image represents a compiled workflow or other executable that can be run.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

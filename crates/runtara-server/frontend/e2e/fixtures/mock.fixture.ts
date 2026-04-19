@@ -6,7 +6,7 @@ import type {
   ConnectionTypeDto,
   Instance,
   InvocationTrigger,
-  ScenarioDto,
+  WorkflowDto,
   Schema,
 } from '@/generated/RuntaraRuntimeApi';
 import { paginated } from './builders';
@@ -18,7 +18,7 @@ type JsonBody = Record<string, unknown> | Array<unknown>;
  * interceptor (see src/shared/queries/index.ts:35-41) so tests must tolerate both.
  * Only the query string is allowed as a trailing slot; subpaths do NOT match, so
  * `runtimeUrl('connections')` does not swallow `connections/types` or
- * `scenarios` does not swallow `scenarios/folders`.
+ * `workflows` does not swallow `workflows/folders`.
  */
 function runtimeUrl(suffix: string): RegExp {
   const escaped = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -59,27 +59,27 @@ export interface MockApi {
     create: (page: Page, created: ConnectionDto) => Promise<void>;
     delete: (page: Page) => Promise<void>;
   };
-  scenarios: {
+  workflows: {
     list: (
       page: Page,
-      items: ScenarioDto[],
+      items: WorkflowDto[],
       opts?: { total?: number }
     ) => Promise<void>;
-    get: (page: Page, id: string, scenario: ScenarioDto) => Promise<void>;
+    get: (page: Page, id: string, workflow: WorkflowDto) => Promise<void>;
     history: (
       page: Page,
-      scenarioId: string,
+      workflowId: string,
       instances: unknown[]
     ) => Promise<void>;
     instance: (
       page: Page,
-      scenarioId: string,
+      workflowId: string,
       instanceId: string,
       body: unknown
     ) => Promise<void>;
     logs: (
       page: Page,
-      scenarioId: string,
+      workflowId: string,
       instanceId: string,
       body: unknown
     ) => Promise<void>;
@@ -191,9 +191,9 @@ const factory: MockApi = {
         return route.fallback();
       }),
   },
-  scenarios: {
+  workflows: {
     list: (page, items, opts) =>
-      page.route(runtimeUrl('scenarios'), (route) =>
+      page.route(runtimeUrl('workflows'), (route) =>
         fulfill(route, {
           data: {
             content: items,
@@ -207,22 +207,22 @@ const factory: MockApi = {
           success: true,
         })
       ),
-    get: (page, id, scenario) =>
-      page.route(runtimeUrl(`scenarios/${id}`), (route) =>
-        fulfill(route, { data: scenario, success: true })
+    get: (page, id, workflow) =>
+      page.route(runtimeUrl(`workflows/${id}`), (route) =>
+        fulfill(route, { data: workflow, success: true })
       ),
-    history: (page, scenarioId, instances) =>
-      page.route(runtimeUrl(`scenarios/${scenarioId}/history`), (route) =>
+    history: (page, workflowId, instances) =>
+      page.route(runtimeUrl(`workflows/${workflowId}/history`), (route) =>
         fulfill(route, paginated(instances))
       ),
-    instance: (page, scenarioId, instanceId, body) =>
+    instance: (page, workflowId, instanceId, body) =>
       page.route(
-        runtimeUrl(`scenarios/${scenarioId}/history/${instanceId}`),
+        runtimeUrl(`workflows/${workflowId}/history/${instanceId}`),
         (route) => fulfill(route, body as JsonBody)
       ),
-    logs: (page, scenarioId, instanceId, body) =>
+    logs: (page, workflowId, instanceId, body) =>
       page.route(
-        runtimeUrl(`scenarios/${scenarioId}/history/${instanceId}/logs`),
+        runtimeUrl(`workflows/${workflowId}/history/${instanceId}/logs`),
         (route) => fulfill(route, body as JsonBody)
       ),
   },
@@ -340,7 +340,7 @@ const factory: MockApi = {
         )
       ),
     metadata: (page, body = { stepTypes: [] }) =>
-      page.route(runtimeUrl('metadata/scenario/step-types'), (route) =>
+      page.route(runtimeUrl('metadata/workflow/step-types'), (route) =>
         fulfill(route, body as JsonBody)
       ),
   },
@@ -370,7 +370,7 @@ const factory: MockApi = {
     await page.route(/\/api\/runtime\//, (route) => fulfill(route, {}));
     await page.route(/\/api\/management\//, (route) => fulfill(route, {}));
     // Sidebar → useFolders; Sidebar → menu
-    await page.route(runtimeUrl('scenarios/folders'), (route) =>
+    await page.route(runtimeUrl('workflows/folders'), (route) =>
       fulfill(route, { folders: [] })
     );
     // Health check hits ManagementAPI /health (no /api/runtime prefix)
@@ -379,7 +379,7 @@ const factory: MockApi = {
     );
     // User groups hook reads profile; some layouts may poll tenant info
     await page.route(runtimeUrl('metrics/tenant'), (route) =>
-      fulfill(route, { scenariosCount: 0, connectionsCount: 0 })
+      fulfill(route, { workflowsCount: 0, connectionsCount: 0 })
     );
     // Connection categories/types are fetched by several pages
     await page.route(runtimeUrl('connections/categories'), (route) =>

@@ -447,7 +447,7 @@ pub async fn get_connection_for_runtime_handler(
     Path((tenant_id, connection_id)): Path<(String, String)>,
     Query(query): Query<RuntimeConnectionQuery>,
 ) -> Result<Json<RuntimeConnectionResponse>, (StatusCode, Json<Value>)> {
-    // Build metadata from query params (tag, stepId, scenarioId, instanceId)
+    // Build metadata from query params (tag, stepId, workflowId, instanceId)
     let metadata = {
         let mut map = serde_json::Map::new();
         if let Some(ref tag) = query.tag {
@@ -456,8 +456,8 @@ pub async fn get_connection_for_runtime_handler(
         if let Some(ref step_id) = query.step_id {
             map.insert("stepId".to_string(), json!(step_id));
         }
-        if let Some(ref scenario_id) = query.scenario_id {
-            map.insert("scenarioId".to_string(), json!(scenario_id));
+        if let Some(ref workflow_id) = query.workflow_id {
+            map.insert("workflowId".to_string(), json!(workflow_id));
         }
         if let Some(ref instance_id) = query.instance_id {
             map.insert("instanceId".to_string(), json!(instance_id));

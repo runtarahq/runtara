@@ -14,7 +14,7 @@ use tracing::info;
 #[derive(Debug, Clone)]
 pub struct NativeLibraryInfo {
     /// Path to the runtara_workflow_stdlib .rlib file (unified library)
-    pub scenario_lib_path: PathBuf,
+    pub workflow_lib_path: PathBuf,
     /// Path to the directory containing dependency .rlib files
     pub deps_dir: PathBuf,
 }
@@ -154,12 +154,12 @@ fn load_wasm_library() -> io::Result<NativeLibraryInfo> {
 
     // Find the unified workflow stdlib library .rlib file
     let stdlib_name = get_stdlib_name();
-    let scenario_lib_path = lib_dir.join(format!("lib{}.rlib", stdlib_name));
+    let workflow_lib_path = lib_dir.join(format!("lib{}.rlib", stdlib_name));
 
-    if !scenario_lib_path.exists() {
+    if !workflow_lib_path.exists() {
         return Err(io::Error::other(format!(
             "{} WASM library not found at: {:?}",
-            stdlib_name, scenario_lib_path
+            stdlib_name, workflow_lib_path
         )));
     }
 
@@ -174,13 +174,13 @@ fn load_wasm_library() -> io::Result<NativeLibraryInfo> {
     }
 
     tracing::debug!(
-        scenario_lib = %scenario_lib_path.display(),
+        workflow_lib = %workflow_lib_path.display(),
         deps_dir = %deps_dir.display(),
         "Loaded pre-compiled WASM library"
     );
 
     Ok(NativeLibraryInfo {
-        scenario_lib_path,
+        workflow_lib_path,
         deps_dir,
     })
 }
@@ -205,7 +205,7 @@ pub fn get_wasm_native_library() -> io::Result<NativeLibraryInfo> {
     let _ = WASM_LIBRARY.set(info.clone());
 
     info!(
-        scenario_lib = %info.scenario_lib_path.display(),
+        workflow_lib = %info.workflow_lib_path.display(),
         deps_dir = %info.deps_dir.display(),
         "WASM library ready (pre-compiled for wasm32-wasip2)"
     );
@@ -226,12 +226,12 @@ fn load_native_library() -> io::Result<NativeLibraryInfo> {
 
     // Find the unified workflow stdlib library .rlib file
     let stdlib_name = get_stdlib_name();
-    let scenario_lib_path = lib_dir.join(format!("lib{}.rlib", stdlib_name));
+    let workflow_lib_path = lib_dir.join(format!("lib{}.rlib", stdlib_name));
 
-    if !scenario_lib_path.exists() {
+    if !workflow_lib_path.exists() {
         return Err(io::Error::other(format!(
             "{} library not found at: {:?}",
-            stdlib_name, scenario_lib_path
+            stdlib_name, workflow_lib_path
         )));
     }
 
@@ -246,13 +246,13 @@ fn load_native_library() -> io::Result<NativeLibraryInfo> {
     }
 
     tracing::debug!(
-        scenario_lib = %scenario_lib_path.display(),
+        workflow_lib = %workflow_lib_path.display(),
         deps_dir = %deps_dir.display(),
         "Loaded pre-compiled native library"
     );
 
     Ok(NativeLibraryInfo {
-        scenario_lib_path,
+        workflow_lib_path,
         deps_dir,
     })
 }
@@ -277,7 +277,7 @@ pub fn get_native_library() -> io::Result<NativeLibraryInfo> {
     let _ = NATIVE_LIBRARY.set(info.clone());
 
     info!(
-        scenario_lib = %info.scenario_lib_path.display(),
+        workflow_lib = %info.workflow_lib_path.display(),
         deps_dir = %info.deps_dir.display(),
         "Native library ready (pre-compiled during build)"
     );
@@ -340,38 +340,38 @@ mod tests {
     #[test]
     fn test_native_library_info_debug() {
         let info = NativeLibraryInfo {
-            scenario_lib_path: PathBuf::from("/usr/lib/libruntara_workflow_stdlib.rlib"),
+            workflow_lib_path: PathBuf::from("/usr/lib/libruntara_workflow_stdlib.rlib"),
             deps_dir: PathBuf::from("/usr/lib/deps"),
         };
 
         let debug_str = format!("{:?}", info);
         assert!(debug_str.contains("NativeLibraryInfo"));
-        assert!(debug_str.contains("scenario_lib_path"));
+        assert!(debug_str.contains("workflow_lib_path"));
         assert!(debug_str.contains("deps_dir"));
     }
 
     #[test]
     fn test_native_library_info_clone() {
         let info = NativeLibraryInfo {
-            scenario_lib_path: PathBuf::from("/path/to/lib.rlib"),
+            workflow_lib_path: PathBuf::from("/path/to/lib.rlib"),
             deps_dir: PathBuf::from("/path/to/deps"),
         };
 
         let cloned = info.clone();
 
-        assert_eq!(info.scenario_lib_path, cloned.scenario_lib_path);
+        assert_eq!(info.workflow_lib_path, cloned.workflow_lib_path);
         assert_eq!(info.deps_dir, cloned.deps_dir);
     }
 
     #[test]
     fn test_native_library_info_paths() {
         let info = NativeLibraryInfo {
-            scenario_lib_path: PathBuf::from("/custom/path/libworkflow.rlib"),
+            workflow_lib_path: PathBuf::from("/custom/path/libworkflow.rlib"),
             deps_dir: PathBuf::from("/custom/path/deps"),
         };
 
         assert_eq!(
-            info.scenario_lib_path,
+            info.workflow_lib_path,
             PathBuf::from("/custom/path/libworkflow.rlib")
         );
         assert_eq!(info.deps_dir, PathBuf::from("/custom/path/deps"));
@@ -576,7 +576,7 @@ mod tests {
 
         let info = result.unwrap();
         assert_eq!(
-            info.scenario_lib_path,
+            info.workflow_lib_path,
             temp_dir.path().join("libruntara_workflow_stdlib.rlib")
         );
         assert_eq!(info.deps_dir, deps_dir);
@@ -604,7 +604,7 @@ mod tests {
 
         let info = result.unwrap();
         assert_eq!(
-            info.scenario_lib_path,
+            info.workflow_lib_path,
             temp_dir.path().join("libcustom_stdlib.rlib")
         );
     }

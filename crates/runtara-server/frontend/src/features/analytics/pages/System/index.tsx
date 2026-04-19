@@ -116,7 +116,7 @@ export function System() {
                   </div>
                   <div className="text-2xl font-semibold text-slate-900/90 dark:text-slate-100">
                     {formatBytes(
-                      systemAnalytics.data.memory.availableForScenariosBytes
+                      systemAnalytics.data.memory.availableForWorkflowsBytes
                     )}{' '}
                     available
                   </div>

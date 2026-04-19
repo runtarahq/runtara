@@ -270,7 +270,7 @@ interface VariableSuggestion {
   label: string;
   value: string;
   description?: string;
-  group: 'Scenario Inputs' | 'Step Outputs' | 'Current Item' | 'Loop Context';
+  group: 'Workflow Inputs' | 'Step Outputs' | 'Current Item' | 'Loop Context';
   type?: string;
   stepName?: string; // Step name for display
   stepId?: string; // Step ID for reference
@@ -283,19 +283,19 @@ function composeVariableSuggestions(
 ): VariableSuggestion[] {
   const suggestions: VariableSuggestion[] = [];
 
-  // Add hardcoded scenario input suggestions
+  // Add hardcoded workflow input suggestions
   suggestions.push({
-    label: 'scenario.inputs.data',
-    value: 'scenario.inputs.data',
-    description: 'Scenario input data',
-    group: 'Scenario Inputs',
+    label: 'workflow.inputs.data',
+    value: 'workflow.inputs.data',
+    description: 'Workflow input data',
+    group: 'Workflow Inputs',
   });
 
   suggestions.push({
-    label: 'scenario.inputs.variables',
-    value: 'scenario.inputs.variables',
-    description: 'Scenario input variables',
-    group: 'Scenario Inputs',
+    label: 'workflow.inputs.variables',
+    value: 'workflow.inputs.variables',
+    description: 'Workflow input variables',
+    group: 'Workflow Inputs',
   });
 
   // Add current item references (used in Filter/Split step conditions)
@@ -415,7 +415,7 @@ function groupSuggestions(
   const grouped: Record<string, VariableSuggestion[]> = {
     'Loop Context': [],
     'Current Item': [],
-    'Scenario Inputs': [],
+    'Workflow Inputs': [],
     'Step Outputs': [],
   };
   for (const suggestion of suggestions) {
@@ -474,7 +474,7 @@ const ConditionVariablePickerModal = ({
         <DialogHeader>
           <DialogTitle>Select Variable</DialogTitle>
           <DialogDescription>
-            Choose a variable from scenario inputs or previous step outputs
+            Choose a variable from workflow inputs or previous step outputs
           </DialogDescription>
         </DialogHeader>
 
@@ -500,14 +500,14 @@ const ConditionVariablePickerModal = ({
               </div>
             ) : (
               <>
-                {/* Scenario Inputs */}
-                {groupedSuggestions['Scenario Inputs'].length > 0 && (
+                {/* Workflow Inputs */}
+                {groupedSuggestions['Workflow Inputs'].length > 0 && (
                   <div>
                     <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                      Scenario Inputs
+                      Workflow Inputs
                     </h4>
                     <div className="space-y-0.5">
-                      {groupedSuggestions['Scenario Inputs'].map(
+                      {groupedSuggestions['Workflow Inputs'].map(
                         (suggestion) => (
                           <button
                             key={suggestion.value}
@@ -625,7 +625,7 @@ const formatReferenceForDisplay = (
     const stepName = step?.name || `Step ${stepId.slice(0, 8)}...`;
     return fieldPath ? `${stepName} → ${fieldPath}` : stepName;
   }
-  // For scenario inputs, just return the value as-is
+  // For workflow inputs, just return the value as-is
   return value;
 };
 

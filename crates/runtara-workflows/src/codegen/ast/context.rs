@@ -26,20 +26,20 @@ pub struct EmitContext {
     /// Inputs variable name
     pub inputs_var: Ident,
 
-    /// Child scenarios mapped by scenario reference -> ExecutionGraph.
-    /// Key format: "{scenario_id}::{version_resolved}" (e.g., "child-scenario::3").
+    /// Child workflows mapped by workflow reference -> ExecutionGraph.
+    /// Key format: "{workflow_id}::{version_resolved}" (e.g., "child-workflow::3").
     ///
-    /// This mapping is used by StartScenario steps to look up their child's
+    /// This mapping is used by EmbedWorkflow steps to look up their child's
     /// ExecutionGraph for inline embedding during code generation.
-    pub(crate) child_scenarios: HashMap<String, ExecutionGraph>,
+    pub(crate) child_workflows: HashMap<String, ExecutionGraph>,
 
-    /// Maps StartScenario step_id -> (scenario_id, version_resolved).
-    /// Used by StartScenario emitter to find the child scenario's resolved version.
+    /// Maps EmbedWorkflow step_id -> (workflow_id, version_resolved).
+    /// Used by EmbedWorkflow emitter to find the child workflow's resolved version.
     pub(crate) step_to_child_ref: HashMap<String, (String, i32)>,
 
-    /// Tracks which child scenarios have been emitted as shared functions.
-    /// Key format: "{scenario_id}::{version}", Value: generated function Ident.
-    /// This enables deduplication - same child scenario emitted once, called many times.
+    /// Tracks which child workflows have been emitted as shared functions.
+    /// Key format: "{workflow_id}::{version}", Value: generated function Ident.
+    /// This enables deduplication - same child workflow emitted once, called many times.
     pub(crate) emitted_child_functions: HashMap<String, Ident>,
 
     /// URL for fetching connections at runtime (None = no connection support)
@@ -62,7 +62,7 @@ impl EmitContext {
             track_events,
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
-            child_scenarios: HashMap::new(),
+            child_workflows: HashMap::new(),
             step_to_child_ref: HashMap::new(),
             emitted_child_functions: HashMap::new(),
             connection_service_url: None,
@@ -71,17 +71,17 @@ impl EmitContext {
         }
     }
 
-    /// Create a new emission context with child scenarios and connection configuration.
+    /// Create a new emission context with child workflows and connection configuration.
     ///
     /// # Arguments
     /// * `track_events` - Enable debug logging in generated code
-    /// * `child_scenarios` - Map of scenario reference key -> ExecutionGraph
-    /// * `step_to_child_ref` - Map of step_id -> (scenario_id, version_resolved)
+    /// * `child_workflows` - Map of workflow reference key -> ExecutionGraph
+    /// * `step_to_child_ref` - Map of step_id -> (workflow_id, version_resolved)
     /// * `connection_service_url` - Optional URL for fetching connections at runtime
     /// * `tenant_id` - Optional tenant ID for connection service requests
-    pub fn with_child_scenarios(
+    pub fn with_child_workflows(
         track_events: bool,
-        child_scenarios: HashMap<String, ExecutionGraph>,
+        child_workflows: HashMap<String, ExecutionGraph>,
         step_to_child_ref: HashMap<String, (String, i32)>,
         connection_service_url: Option<String>,
         tenant_id: Option<String>,
@@ -92,7 +92,7 @@ impl EmitContext {
             track_events,
             steps_context_var: Ident::new("steps_context", Span::call_site()),
             inputs_var: Ident::new("inputs", Span::call_site()),
-            child_scenarios,
+            child_workflows,
             step_to_child_ref,
             emitted_child_functions: HashMap::new(),
             connection_service_url,
@@ -101,36 +101,36 @@ impl EmitContext {
         }
     }
 
-    /// Get a child scenario by scenario ID and resolved version.
+    /// Get a child workflow by workflow ID and resolved version.
     ///
-    /// The key is formatted as "{scenario_id}::{version}" to uniquely identify
-    /// each child scenario version.
-    pub fn get_child_scenario(&self, scenario_id: &str, version: i32) -> Option<&ExecutionGraph> {
-        let key = format!("{}::{}", scenario_id, version);
-        self.child_scenarios.get(&key)
+    /// The key is formatted as "{workflow_id}::{version}" to uniquely identify
+    /// each child workflow version.
+    pub fn get_child_workflow(&self, workflow_id: &str, version: i32) -> Option<&ExecutionGraph> {
+        let key = format!("{}::{}", workflow_id, version);
+        self.child_workflows.get(&key)
     }
 
-    /// Get a child scenario by the StartScenario step ID.
+    /// Get a child workflow by the EmbedWorkflow step ID.
     ///
-    /// Uses the step_to_child_ref mapping to find the scenario reference,
+    /// Uses the step_to_child_ref mapping to find the workflow reference,
     /// then looks up the ExecutionGraph.
-    pub fn get_child_scenario_by_step_id(&self, step_id: &str) -> Option<&ExecutionGraph> {
-        let (scenario_id, version) = self.step_to_child_ref.get(step_id)?;
-        self.get_child_scenario(scenario_id, *version)
+    pub fn get_child_workflow_by_step_id(&self, step_id: &str) -> Option<&ExecutionGraph> {
+        let (workflow_id, version) = self.step_to_child_ref.get(step_id)?;
+        self.get_child_workflow(workflow_id, *version)
     }
 
-    /// Get the shared function name for a child scenario, creating it if needed.
+    /// Get the shared function name for a child workflow, creating it if needed.
     ///
     /// Returns `(function_ident, already_emitted)`:
     /// - `already_emitted = false`: First reference, caller should emit the function
     /// - `already_emitted = true`: Already emitted, caller should only call it
-    pub fn get_or_create_child_fn(&mut self, scenario_id: &str, version: i32) -> (Ident, bool) {
-        let key = format!("{}::{}", scenario_id, version);
+    pub fn get_or_create_child_fn(&mut self, workflow_id: &str, version: i32) -> (Ident, bool) {
+        let key = format!("{}::{}", workflow_id, version);
         if let Some(ident) = self.emitted_child_functions.get(&key) {
             (ident.clone(), true)
         } else {
-            // Generate deterministic name based on scenario_id and version
-            let sanitized = Self::sanitize_ident(&format!("child_{}_{}", scenario_id, version));
+            // Generate deterministic name based on workflow_id and version
+            let sanitized = Self::sanitize_ident(&format!("child_{}_{}", workflow_id, version));
             let ident = Ident::new(&sanitized, Span::call_site());
             self.emitted_child_functions.insert(key, ident.clone());
             (ident, false)
@@ -208,17 +208,17 @@ mod tests {
     }
 
     #[test]
-    fn test_with_child_scenarios_empty() {
+    fn test_with_child_workflows_empty() {
         let ctx =
-            EmitContext::with_child_scenarios(true, HashMap::new(), HashMap::new(), None, None);
+            EmitContext::with_child_workflows(true, HashMap::new(), HashMap::new(), None, None);
         assert!(ctx.track_events);
         assert!(ctx.connection_service_url.is_none());
         assert!(ctx.tenant_id.is_none());
     }
 
     #[test]
-    fn test_with_child_scenarios_with_connection_config() {
-        let ctx = EmitContext::with_child_scenarios(
+    fn test_with_child_workflows_with_connection_config() {
+        let ctx = EmitContext::with_child_workflows(
             false,
             HashMap::new(),
             HashMap::new(),
@@ -234,8 +234,8 @@ mod tests {
     }
 
     #[test]
-    fn test_with_child_scenarios_only_connection_url() {
-        let ctx = EmitContext::with_child_scenarios(
+    fn test_with_child_workflows_only_connection_url() {
+        let ctx = EmitContext::with_child_workflows(
             true,
             HashMap::new(),
             HashMap::new(),
@@ -415,7 +415,7 @@ mod tests {
     }
 
     // =============================================================================
-    // Child scenario tests
+    // Child workflow tests
     // =============================================================================
 
     fn create_simple_graph(name: &str) -> ExecutionGraph {
@@ -446,59 +446,59 @@ mod tests {
     }
 
     #[test]
-    fn test_get_child_scenario_not_found() {
+    fn test_get_child_workflow_not_found() {
         let ctx = EmitContext::new(false);
-        assert!(ctx.get_child_scenario("nonexistent", 1).is_none());
+        assert!(ctx.get_child_workflow("nonexistent", 1).is_none());
     }
 
     #[test]
-    fn test_get_child_scenario_found() {
-        // Key format: "scenario_id::version"
-        let mut child_scenarios = HashMap::new();
+    fn test_get_child_workflow_found() {
+        // Key format: "workflow_id::version"
+        let mut child_workflows = HashMap::new();
         let graph = create_simple_graph("child-1");
-        child_scenarios.insert("child-scenario::1".to_string(), graph);
+        child_workflows.insert("child-workflow::1".to_string(), graph);
 
-        // step_to_child_ref maps step_id -> (scenario_id, version)
+        // step_to_child_ref maps step_id -> (workflow_id, version)
         let mut step_to_child_ref = HashMap::new();
         step_to_child_ref.insert(
             "start-child-step".to_string(),
-            ("child-scenario".to_string(), 1),
+            ("child-workflow".to_string(), 1),
         );
 
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
-            child_scenarios,
+            child_workflows,
             step_to_child_ref,
             None,
             None,
         );
 
         // Test lookup by step_id
-        let found = ctx.get_child_scenario_by_step_id("start-child-step");
+        let found = ctx.get_child_workflow_by_step_id("start-child-step");
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, Some("child-1".to_string()));
 
-        // Test direct lookup by scenario_id + version
-        let direct = ctx.get_child_scenario("child-scenario", 1);
+        // Test direct lookup by workflow_id + version
+        let direct = ctx.get_child_workflow("child-workflow", 1);
         assert!(direct.is_some());
         assert_eq!(direct.unwrap().name, Some("child-1".to_string()));
     }
 
     #[test]
-    fn test_get_child_scenario_multiple_children() {
-        let mut child_scenarios = HashMap::new();
-        child_scenarios.insert("scenario-a::1".to_string(), create_simple_graph("graph-a"));
-        child_scenarios.insert("scenario-b::2".to_string(), create_simple_graph("graph-b"));
-        child_scenarios.insert("scenario-c::1".to_string(), create_simple_graph("graph-c"));
+    fn test_get_child_workflow_multiple_children() {
+        let mut child_workflows = HashMap::new();
+        child_workflows.insert("workflow-a::1".to_string(), create_simple_graph("graph-a"));
+        child_workflows.insert("workflow-b::2".to_string(), create_simple_graph("graph-b"));
+        child_workflows.insert("workflow-c::1".to_string(), create_simple_graph("graph-c"));
 
         let mut step_to_child_ref = HashMap::new();
-        step_to_child_ref.insert("step-a".to_string(), ("scenario-a".to_string(), 1));
-        step_to_child_ref.insert("step-b".to_string(), ("scenario-b".to_string(), 2));
-        step_to_child_ref.insert("step-c".to_string(), ("scenario-c".to_string(), 1));
+        step_to_child_ref.insert("step-a".to_string(), ("workflow-a".to_string(), 1));
+        step_to_child_ref.insert("step-b".to_string(), ("workflow-b".to_string(), 2));
+        step_to_child_ref.insert("step-c".to_string(), ("workflow-c".to_string(), 1));
 
-        let ctx = EmitContext::with_child_scenarios(
+        let ctx = EmitContext::with_child_workflows(
             false,
-            child_scenarios,
+            child_workflows,
             step_to_child_ref,
             None,
             None,
@@ -506,25 +506,25 @@ mod tests {
 
         // Test lookup by step_id
         assert_eq!(
-            ctx.get_child_scenario_by_step_id("step-a").unwrap().name,
+            ctx.get_child_workflow_by_step_id("step-a").unwrap().name,
             Some("graph-a".to_string())
         );
         assert_eq!(
-            ctx.get_child_scenario_by_step_id("step-b").unwrap().name,
+            ctx.get_child_workflow_by_step_id("step-b").unwrap().name,
             Some("graph-b".to_string())
         );
         assert_eq!(
-            ctx.get_child_scenario_by_step_id("step-c").unwrap().name,
+            ctx.get_child_workflow_by_step_id("step-c").unwrap().name,
             Some("graph-c".to_string())
         );
-        assert!(ctx.get_child_scenario_by_step_id("step-d").is_none());
+        assert!(ctx.get_child_workflow_by_step_id("step-d").is_none());
 
-        // Test direct lookup by scenario_id + version
+        // Test direct lookup by workflow_id + version
         assert_eq!(
-            ctx.get_child_scenario("scenario-a", 1).unwrap().name,
+            ctx.get_child_workflow("workflow-a", 1).unwrap().name,
             Some("graph-a".to_string())
         );
-        assert!(ctx.get_child_scenario("scenario-d", 1).is_none());
+        assert!(ctx.get_child_workflow("workflow-d", 1).is_none());
     }
 
     // =============================================================================
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_context_preserves_state_across_operations() {
-        let mut ctx = EmitContext::with_child_scenarios(
+        let mut ctx = EmitContext::with_child_workflows(
             true,
             HashMap::new(),
             HashMap::new(),
@@ -592,21 +592,21 @@ mod tests {
     #[test]
     fn test_get_or_create_child_fn_first_call() {
         let mut ctx = EmitContext::new(false);
-        let (ident, already_emitted) = ctx.get_or_create_child_fn("my-scenario", 1);
+        let (ident, already_emitted) = ctx.get_or_create_child_fn("my-workflow", 1);
 
         assert!(
             !already_emitted,
             "First call should return already_emitted=false"
         );
-        assert_eq!(ident.to_string(), "child_my_scenario_1");
+        assert_eq!(ident.to_string(), "child_my_workflow_1");
     }
 
     #[test]
-    fn test_get_or_create_child_fn_second_call_same_scenario() {
+    fn test_get_or_create_child_fn_second_call_same_workflow() {
         let mut ctx = EmitContext::new(false);
 
-        let (ident1, emitted1) = ctx.get_or_create_child_fn("my-scenario", 1);
-        let (ident2, emitted2) = ctx.get_or_create_child_fn("my-scenario", 1);
+        let (ident1, emitted1) = ctx.get_or_create_child_fn("my-workflow", 1);
+        let (ident2, emitted2) = ctx.get_or_create_child_fn("my-workflow", 1);
 
         assert!(!emitted1, "First call should return already_emitted=false");
         assert!(emitted2, "Second call should return already_emitted=true");
@@ -621,22 +621,22 @@ mod tests {
     fn test_get_or_create_child_fn_different_versions() {
         let mut ctx = EmitContext::new(false);
 
-        let (ident_v1, emitted_v1) = ctx.get_or_create_child_fn("my-scenario", 1);
-        let (ident_v2, emitted_v2) = ctx.get_or_create_child_fn("my-scenario", 2);
+        let (ident_v1, emitted_v1) = ctx.get_or_create_child_fn("my-workflow", 1);
+        let (ident_v2, emitted_v2) = ctx.get_or_create_child_fn("my-workflow", 2);
 
         assert!(!emitted_v1);
         assert!(!emitted_v2, "Different version should be separate function");
         assert_ne!(ident_v1.to_string(), ident_v2.to_string());
-        assert_eq!(ident_v1.to_string(), "child_my_scenario_1");
-        assert_eq!(ident_v2.to_string(), "child_my_scenario_2");
+        assert_eq!(ident_v1.to_string(), "child_my_workflow_1");
+        assert_eq!(ident_v2.to_string(), "child_my_workflow_2");
     }
 
     #[test]
-    fn test_get_or_create_child_fn_different_scenarios() {
+    fn test_get_or_create_child_fn_different_workflows() {
         let mut ctx = EmitContext::new(false);
 
-        let (ident_a, _) = ctx.get_or_create_child_fn("scenario-a", 1);
-        let (ident_b, _) = ctx.get_or_create_child_fn("scenario-b", 1);
+        let (ident_a, _) = ctx.get_or_create_child_fn("workflow-a", 1);
+        let (ident_b, _) = ctx.get_or_create_child_fn("workflow-b", 1);
 
         assert_ne!(ident_a.to_string(), ident_b.to_string());
     }
@@ -645,7 +645,7 @@ mod tests {
     fn test_get_or_create_child_fn_sanitizes_name() {
         let mut ctx = EmitContext::new(false);
 
-        let (ident, _) = ctx.get_or_create_child_fn("my-scenario.with.dots", 3);
-        assert_eq!(ident.to_string(), "child_my_scenario_with_dots_3");
+        let (ident, _) = ctx.get_or_create_child_fn("my-workflow.with.dots", 3);
+        assert_eq!(ident.to_string(), "child_my_workflow_with_dots_3");
     }
 }

@@ -34,14 +34,14 @@ use urlencoding::encode;
 /// Context for connection request tracking.
 ///
 /// When provided to `fetch_connection`, these fields are sent as query parameters
-/// so the connection service can record which agent/step/scenario is using the connection.
+/// so the connection service can record which agent/step/workflow is using the connection.
 pub struct ConnectionRequestContext<'a> {
     /// Agent or capability identifier (e.g. `shopify_graphql`, `http_request`)
     pub tag: Option<&'a str>,
-    /// Step ID within the scenario
+    /// Step ID within the workflow
     pub step_id: Option<&'a str>,
-    /// Scenario ID
-    pub scenario_id: Option<&'a str>,
+    /// Workflow ID
+    pub workflow_id: Option<&'a str>,
     /// Execution instance ID
     pub instance_id: Option<&'a str>,
 }
@@ -151,8 +151,8 @@ pub fn fetch_connection(
         if let Some(step_id) = ctx.step_id {
             params.push(format!("stepId={}", encode(step_id)));
         }
-        if let Some(scenario_id) = ctx.scenario_id {
-            params.push(format!("scenarioId={}", encode(scenario_id)));
+        if let Some(workflow_id) = ctx.workflow_id {
+            params.push(format!("workflowId={}", encode(workflow_id)));
         }
         if let Some(instance_id) = ctx.instance_id {
             params.push(format!("instanceId={}", encode(instance_id)));

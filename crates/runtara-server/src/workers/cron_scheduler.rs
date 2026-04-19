@@ -35,7 +35,7 @@ impl Default for CronSchedulerConfig {
     }
 }
 
-/// Background worker that schedules cron-triggered scenario executions
+/// Background worker that schedules cron-triggered workflow executions
 #[instrument(skip(pool, redis_url, shutdown))]
 pub async fn run(
     pool: PgPool,
@@ -102,7 +102,7 @@ pub async fn run(
                 Ok(true) => {
                     info!(
                         trigger_id = %trigger.id,
-                        scenario_id = %trigger.scenario_id,
+                        workflow_id = %trigger.workflow_id,
                         "Cron trigger is due, publishing event"
                     );
 
@@ -153,7 +153,7 @@ async fn get_active_cron_triggers(
 ) -> Result<Vec<InvocationTrigger>, sqlx::Error> {
     sqlx::query_as::<_, InvocationTrigger>(
         r#"
-        SELECT id, tenant_id, scenario_id, trigger_type, active, configuration,
+        SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                created_at, last_run, updated_at, remote_tenant_id, single_instance
         FROM invocation_trigger
         WHERE (tenant_id = $1 OR tenant_id IS NULL)
@@ -229,7 +229,7 @@ async fn publish_cron_trigger(
     let event = TriggerEvent::cron(
         instance_id.to_string(),
         tenant_id.to_string(),
-        trigger.scenario_id.clone(),
+        trigger.workflow_id.clone(),
         None, // use current version
         inputs,
         false, // track_events
@@ -247,7 +247,7 @@ async fn publish_cron_trigger(
     info!(
         instance_id = %instance_id,
         trigger_id = %trigger.id,
-        scenario_id = %trigger.scenario_id,
+        workflow_id = %trigger.workflow_id,
         cron_expr = %cron_expr,
         "Published cron trigger event"
     );

@@ -58,8 +58,8 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Serialize condition to JSON for debug events
     let condition_json = serde_json::to_string(&step.condition).ok();
 
-    // Clone scenario inputs var for debug events (to access _loop_indices)
-    let scenario_inputs_var = inputs_var.clone();
+    // Clone workflow inputs var for debug events (to access _loop_indices)
+    let workflow_inputs_var = inputs_var.clone();
 
     // While creates a scope - use sc_{step_id} as its scope_id
     let while_scope_id = format!("sc_{}", step_id);
@@ -72,7 +72,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         "While",
         Some(&loop_inputs_var),
         condition_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         Some(&while_scope_id),
     );
     let debug_end = emit_step_debug_end(
@@ -81,7 +81,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         step_name,
         "While",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         Some(&while_scope_id),
     );
 
@@ -207,7 +207,7 @@ pub fn emit(step: &WhileStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
                         // Inner steps use the While's scope (sc_{step_id}) as their parent, NOT the iteration scope.
                         let __while_scope_id = format!("sc_{}", #step_id);
-                        let __subgraph_inputs = ScenarioInputs {
+                        let __subgraph_inputs = WorkflowInputs {
                             data: #inputs_var.data.clone(),
                             variables: Arc::new(serde_json::Value::Object(__loop_vars)),
                             parent_scope_id: Some(__while_scope_id),
@@ -526,8 +526,8 @@ mod tests {
             "Should generate subgraph function"
         );
         assert!(
-            code.contains("ScenarioInputs"),
-            "Should use ScenarioInputs for subgraph"
+            code.contains("WorkflowInputs"),
+            "Should use WorkflowInputs for subgraph"
         );
     }
 

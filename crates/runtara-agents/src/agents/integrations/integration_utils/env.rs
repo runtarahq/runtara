@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Scenario-runtime environment lookups for integration capabilities.
+//! Workflow-runtime environment lookups for integration capabilities.
 //!
-//! These env vars are stable for the lifetime of a scenario process — set
+//! These env vars are stable for the lifetime of a workflow process — set
 //! once by the runner at launch time and never mutated. Caching the values in
 //! `OnceLock`s replaces the per-call `env::var` reads that capabilities used
 //! to perform.

@@ -1,4 +1,4 @@
-//! Validation types for scenario validation.
+//! Validation types for workflow validation.
 //!
 //! These types are used by connection validation and the validation API responses.
 

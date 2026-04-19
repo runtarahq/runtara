@@ -43,8 +43,8 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
     // Emit code to resolve the array value
     let array_value_code = mapping::emit_mapping_value(&step.config.value, ctx, &source_var);
 
-    // Get scenario inputs for debug events
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Get workflow inputs for debug events
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Convert key path to JSON pointer format for nested access
     let key_pointer = mapping::path_to_json_pointer(key_path);
@@ -57,7 +57,7 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
         "GroupBy",
         Some(&group_input_var),
         None,
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     let debug_end = emit_step_debug_end(
@@ -66,7 +66,7 @@ pub fn emit(step: &GroupByStep, ctx: &mut EmitContext) -> Result<TokenStream, Co
         step_name,
         "GroupBy",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 

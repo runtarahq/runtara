@@ -71,7 +71,7 @@ impl NativeRunnerConfig {
 
 /// Native process runner.
 ///
-/// Launches scenario binaries as direct child processes. No container isolation,
+/// Launches workflow binaries as direct child processes. No container isolation,
 /// no network namespaces, no filesystem restrictions. The binary runs with the
 /// same permissions as the smo-runtime process.
 ///
@@ -96,7 +96,7 @@ impl NativeRunner {
         &self.config.data_dir
     }
 
-    /// Build environment variables for the scenario process.
+    /// Build environment variables for the workflow process.
     fn build_env(
         &self,
         instance_id: &str,
@@ -130,7 +130,7 @@ impl NativeRunner {
         }
 
         // Forward SDK backend selection and HTTP URL if set in host environment.
-        // This allows scenarios to select the HTTP backend when configured.
+        // This allows workflows to select the HTTP backend when configured.
         if let Ok(backend) = std::env::var("RUNTARA_SDK_BACKEND") {
             env.insert("RUNTARA_SDK_BACKEND".to_string(), backend);
         }

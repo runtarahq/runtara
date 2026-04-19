@@ -37,7 +37,7 @@ export function TriggerCard({ trigger, onDelete, loading }: TriggerCardProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const {
     id,
-    scenarioName,
+    workflowName,
     triggerType,
     configurationPreview,
     active,
@@ -115,7 +115,7 @@ export function TriggerCard({ trigger, onDelete, loading }: TriggerCardProps) {
             to={`/invocation-triggers/${id}`}
             className="hover:underline hover:text-primary"
           >
-            {scenarioName}
+            {workflowName}
           </Link>
         }
         description={configurationPreview}
@@ -180,12 +180,12 @@ export function TriggerCard({ trigger, onDelete, loading }: TriggerCardProps) {
         <DialogHeader>
           <DialogTitle>Delete Trigger</DialogTitle>
           <DialogDescription>
-            Are you sure you want to delete this trigger for "{scenarioName}"?
+            Are you sure you want to delete this trigger for "{workflowName}"?
           </DialogDescription>
         </DialogHeader>
         <div className="py-2">
           This action cannot be undone and will stop the trigger from invoking
-          the scenario.
+          the workflow.
         </div>
         <DialogFooter className="gap-2 sm:gap-0">
           <DialogClose asChild>

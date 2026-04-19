@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT DISTINCT path\n            FROM workflows\n            WHERE tenant_id = $1 AND deleted_at IS NULL\n            ORDER BY path\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9acf26a1262f71935c7918f4c0f80449af7e36cf5278804ed4f192985c21e434"
+}

@@ -48,8 +48,8 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     // Clone immutable references
     let steps_context = ctx.steps_context_var.clone();
 
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Get the workflow inputs variable to access _loop_indices at runtime
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Build the source for input mapping
     let build_source = mapping::emit_build_source(ctx);
@@ -74,7 +74,7 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         "Error",
         None, // no pre-computed inputs var
         None, // no input mapping JSON
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None, // no scope override
     );
     let debug_end = emit_step_debug_end(
@@ -83,7 +83,7 @@ pub fn emit(step: &ErrorStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
         step_name,
         "Error",
         Some(&error_output_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 

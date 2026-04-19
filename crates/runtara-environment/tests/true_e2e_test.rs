@@ -3,7 +3,7 @@
 //! True end-to-end tests for runtara-environment.
 //!
 //! These tests use the full production path:
-//! 1. DSL JSON → compile_scenario() → native binary
+//! 1. DSL JSON → compile_workflow() → native binary
 //! 2. Binary → OCI bundle via BundleManager
 //! 3. OCI bundle → crun container execution
 //!
@@ -32,7 +32,7 @@ use runtara_environment::runner::oci::{
     BundleConfig, BundleManager, NetworkMode, OciRunner, OciRunnerConfig,
 };
 use runtara_environment::runner::{LaunchOptions, Runner};
-use runtara_workflows::compile::{CompilationInput, compile_scenario};
+use runtara_workflows::compile::{CompilationInput, compile_workflow};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -234,9 +234,9 @@ fn create_transform_graph() -> ExecutionGraph {
 // DSL Compilation Tests
 // ============================================================================
 
-/// Tests that a minimal DSL scenario compiles to a native binary.
+/// Tests that a minimal DSL workflow compiles to a native binary.
 #[test]
-fn test_compile_minimal_scenario() {
+fn test_compile_minimal_workflow() {
     skip_if_no_prereqs!();
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -246,19 +246,19 @@ fn test_compile_minimal_scenario() {
     }
 
     let tenant_id = format!("e2e-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-workflow-{}", Uuid::new_v4());
 
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input);
+    let result = compile_workflow(input);
 
     match result {
         Ok(compilation_result) => {
@@ -286,9 +286,9 @@ fn test_compile_minimal_scenario() {
     }
 }
 
-/// Tests that a transform agent scenario compiles correctly.
+/// Tests that a transform agent workflow compiles correctly.
 #[test]
-fn test_compile_transform_scenario() {
+fn test_compile_transform_workflow() {
     skip_if_no_prereqs!();
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -298,19 +298,19 @@ fn test_compile_transform_scenario() {
     }
 
     let tenant_id = format!("e2e-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-transform-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-transform-{}", Uuid::new_v4());
 
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_transform_graph(),
         track_events: true, // Enable debug mode for visibility
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let result = compile_scenario(input);
+    let result = compile_workflow(input);
 
     match result {
         Ok(compilation_result) => {
@@ -321,7 +321,7 @@ fn test_compile_transform_scenario() {
             );
         }
         Err(e) => {
-            panic!("Transform scenario compilation failed: {}", e);
+            panic!("Transform workflow compilation failed: {}", e);
         }
     }
 }
@@ -342,20 +342,20 @@ fn test_create_oci_bundle() {
     }
 
     let tenant_id = format!("e2e-bundle-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-bundle-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-bundle-workflow-{}", Uuid::new_v4());
 
-    // First compile the scenario
+    // First compile the workflow
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
 
     // Read binary content
     let binary_content =
@@ -378,7 +378,7 @@ fn test_create_oci_bundle() {
             );
             assert!(
                 bundle_path.join("rootfs/binary").exists(),
-                "Bundle should contain scenario binary"
+                "Bundle should contain workflow binary"
             );
             assert!(
                 bundle_path.join("config.json").exists(),
@@ -404,20 +404,20 @@ fn test_bundle_network_modes() {
     }
 
     let tenant_id = format!("e2e-netmode-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-netmode-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-netmode-workflow-{}", Uuid::new_v4());
 
-    // Compile scenario
+    // Compile workflow
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
     let binary_content =
         std::fs::read(&compilation_result.binary_path).expect("Failed to read binary");
 
@@ -464,22 +464,22 @@ async fn test_full_container_execution() {
     }
 
     let tenant_id = format!("e2e-run-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-run-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-run-workflow-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
 
-    // 1. Compile scenario
-    println!("Step 1: Compiling DSL scenario...");
+    // 1. Compile workflow
+    println!("Step 1: Compiling DSL workflow...");
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: true,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
     println!(
         "  ✓ Compiled binary: {} bytes",
         compilation_result.binary_size
@@ -586,22 +586,22 @@ async fn test_transform_workflow_e2e() {
     }
 
     let tenant_id = format!("e2e-transform-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-transform-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-transform-workflow-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
 
-    // 1. Compile transform scenario
-    println!("Compiling transform scenario...");
+    // 1. Compile transform workflow
+    println!("Compiling transform workflow...");
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_transform_graph(),
         track_events: true,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
     println!("  Binary size: {} bytes", compilation_result.binary_size);
 
     // 2. Create OCI bundle
@@ -680,21 +680,21 @@ async fn test_container_timeout() {
     }
 
     let tenant_id = format!("e2e-timeout-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-timeout-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-timeout-workflow-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
 
-    // Compile a simple scenario
+    // Compile a simple workflow
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
     let binary_content =
         std::fs::read(&compilation_result.binary_path).expect("Failed to read binary");
 
@@ -754,21 +754,21 @@ async fn test_container_metrics_collection() {
     }
 
     let tenant_id = format!("e2e-metrics-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("e2e-metrics-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("e2e-metrics-workflow-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
 
-    // Compile scenario
+    // Compile workflow
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
     let binary_content =
         std::fs::read(&compilation_result.binary_path).expect("Failed to read binary");
 

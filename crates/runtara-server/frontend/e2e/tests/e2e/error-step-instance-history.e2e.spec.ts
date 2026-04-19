@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 /**
  * Error Step Instance History E2E Test (SYN-236)
  *
- * Verifies that a scenario containing an Error step can be executed and its
+ * Verifies that a workflow containing an Error step can be executed and its
  * instance history page renders correctly — the Error step appears in the
  * timeline with the correct name, type, and status.
  *
@@ -14,9 +14,9 @@ import { fileURLToPath } from 'url';
  * summaries endpoint returned an empty array and the history page showed
  * "This page does not exist or is unavailable."
  *
- * Flow: create scenario → update with Error step → enable debug mode →
+ * Flow: create workflow → update with Error step → enable debug mode →
  *       compile → activate → execute → navigate to instance history →
- *       verify Error step in timeline → delete scenario
+ *       verify Error step in timeline → delete workflow
  *
  * Requires: full local stack running (gateway, runtime, management, frontend)
  */
@@ -25,8 +25,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
-const API_BASE = `${GATEWAY_URL}/api/runtime/scenarios`;
-const SCENARIO_NAME = `E2E Error History ${Date.now()}`;
+const API_BASE = `${GATEWAY_URL}/api/runtime/workflows`;
+const WORKFLOW_NAME = `E2E Error History ${Date.now()}`;
 
 /** Read the access token from the Playwright auth state file. */
 function getAccessToken(): string {
@@ -60,7 +60,7 @@ function apiHeaders(token: string): Record<string, string> {
 function errorStepGraph() {
   return {
     executionGraph: {
-      name: SCENARIO_NAME,
+      name: WORKFLOW_NAME,
       description: 'Single Error step for SYN-236 verification',
       entryPoint: 'error-step',
       steps: {
@@ -78,7 +78,7 @@ function errorStepGraph() {
 }
 
 test.describe.serial('Error Step Instance History (SYN-236)', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let instanceId: string;
   let token: string;
   let compilationWorks = false;
@@ -87,11 +87,11 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     token = getAccessToken();
   });
 
-  // Safety-net cleanup: delete scenario via API if UI deletion fails
+  // Safety-net cleanup: delete workflow via API if UI deletion fails
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${API_BASE}/${scenarioId}/delete`, {
+      await fetch(`${API_BASE}/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -100,12 +100,12 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     }
   });
 
-  test('create scenario with Error step', async ({ request }) => {
-    // Create scenario
+  test('create workflow with Error step', async ({ request }) => {
+    // Create workflow
     const createRes = await request.post(`${API_BASE}/create`, {
       headers: apiHeaders(token),
       data: {
-        name: SCENARIO_NAME,
+        name: WORKFLOW_NAME,
         description: 'SYN-236 E2E test — safe to delete',
       },
     });
@@ -113,10 +113,10 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     expect(createRes.status()).toBe(200);
     const createBody = await createRes.json();
     expect(createBody.success).toBe(true);
-    scenarioId = createBody.data.id;
+    workflowId = createBody.data.id;
 
     // Update with Error step graph
-    const updateRes = await request.post(`${API_BASE}/${scenarioId}/update`, {
+    const updateRes = await request.post(`${API_BASE}/${workflowId}/update`, {
       headers: apiHeaders(token),
       data: errorStepGraph(),
     });
@@ -133,7 +133,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
   test('compile, activate, and execute', async ({ request }) => {
     // Enable debug mode BEFORE compiling (toggleing invalidates compilation)
     const debugRes = await request.put(
-      `${API_BASE}/${scenarioId}/versions/2/debug`,
+      `${API_BASE}/${workflowId}/versions/2/debug`,
       {
         headers: apiHeaders(token),
         data: { debugMode: true },
@@ -143,7 +143,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
 
     // Compile version 2 (with debug mode enabled)
     const compileRes = await request.post(
-      `${API_BASE}/${scenarioId}/versions/2/compile`,
+      `${API_BASE}/${workflowId}/versions/2/compile`,
       { headers: apiHeaders(token) }
     );
 
@@ -154,7 +154,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
       );
       test.skip(
         true,
-        'Scenario compilation unavailable (native cache may be stale)'
+        'Workflow compilation unavailable (native cache may be stale)'
       );
       return;
     }
@@ -164,13 +164,13 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
 
     // Activate version 2
     const activateRes = await request.post(
-      `${API_BASE}/${scenarioId}/versions/2/set-current`,
+      `${API_BASE}/${workflowId}/versions/2/set-current`,
       { headers: apiHeaders(token) }
     );
     expect(activateRes.status()).toBe(200);
 
-    // Execute scenario (async — returns instanceId)
-    const executeRes = await request.post(`${API_BASE}/${scenarioId}/execute`, {
+    // Execute workflow (async — returns instanceId)
+    const executeRes = await request.post(`${API_BASE}/${workflowId}/execute`, {
       headers: apiHeaders(token),
       data: { inputs: { data: {} } },
     });
@@ -186,7 +186,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     // Wait for execution to complete (poll instance status)
     for (let i = 0; i < 30; i++) {
       const instanceRes = await request.get(
-        `${API_BASE}/${scenarioId}/instances/${instanceId}`,
+        `${API_BASE}/${workflowId}/instances/${instanceId}`,
         { headers: apiHeaders(token) }
       );
 
@@ -210,7 +210,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
 
     // First confirm via API that step summaries contain the Error step
     const stepsRes = await request.get(
-      `${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/instances/${instanceId}/steps`,
+      `${GATEWAY_URL}/api/runtime/workflows/${workflowId}/instances/${instanceId}/steps`,
       { headers: apiHeaders(token) }
     );
     expect(stepsRes.status()).toBe(200);
@@ -223,7 +223,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     ).toBe(true);
 
     // Navigate to instance history page
-    await page.goto(`/scenarios/${scenarioId}/history/${instanceId}`);
+    await page.goto(`/workflows/${workflowId}/history/${instanceId}`);
     await page.waitForLoadState('networkidle');
 
     // Wait for the "Loading Timeline..." spinner to disappear
@@ -254,7 +254,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     // Navigate to instance history — the instance has errorMessage metadata
     // with `context` field (not `attributes`), which previously crashed
     // StructuredErrorDisplay with "Cannot convert undefined or null to object"
-    await page.goto(`/scenarios/${scenarioId}/history/${instanceId}`);
+    await page.goto(`/workflows/${workflowId}/history/${instanceId}`);
     await page.waitForLoadState('networkidle');
 
     // The error boundary must NOT appear — this was the SYN-236 crash
@@ -262,7 +262,7 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
       timeout: 5000,
     });
 
-    // The "Error Message" section header should be visible (from ScenarioHistory)
+    // The "Error Message" section header should be visible (from WorkflowHistory)
     await expect(page.getByText('Error Message')).toBeVisible({
       timeout: 10000,
     });
@@ -279,14 +279,14 @@ test.describe.serial('Error Step Instance History (SYN-236)', () => {
     ).toBeVisible();
   });
 
-  test('delete scenario', async ({ request }) => {
-    const res = await request.post(`${API_BASE}/${scenarioId}/delete`, {
+  test('delete workflow', async ({ request }) => {
+    const res = await request.post(`${API_BASE}/${workflowId}/delete`, {
       headers: apiHeaders(token),
     });
 
     expect(res.status()).toBe(200);
     const body = await res.json();
     expect(body.success).toBe(true);
-    scenarioId = '';
+    workflowId = '';
   });
 });

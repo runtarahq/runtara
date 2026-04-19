@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Filter, X, ChevronDown } from 'lucide-react';
 import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
-import { ScenarioDto } from '@/generated/RuntaraRuntimeApi';
+import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { ExecutionHistoryFilters } from '../types';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
@@ -19,7 +19,7 @@ import {
 } from '@/shared/components/ui/collapsible';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { getScenarios } from '@/features/scenarios/queries';
+import { getWorkflows } from '@/features/workflows/queries';
 
 interface Props {
   filters: ExecutionHistoryFilters;
@@ -65,20 +65,20 @@ const STATUS_OPTIONS: {
 export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
   const [isOpen, setIsOpen] = useState(false);
 
-  // Fetch scenarios for the dropdown
-  const { data: scenariosResponse } = useCustomQuery({
-    queryKey: queryKeys.scenarios.all,
-    queryFn: getScenarios,
+  // Fetch workflows for the dropdown
+  const { data: workflowsResponse } = useCustomQuery({
+    queryKey: queryKeys.workflows.all,
+    queryFn: getWorkflows,
   });
 
-  // Extract from paginated response: { data: { content: ScenarioDto[], ... } }
-  const scenarios = ((scenariosResponse as any)?.data?.content ||
-    []) as ScenarioDto[];
+  // Extract from paginated response: { data: { content: WorkflowDto[], ... } }
+  const workflows = ((workflowsResponse as any)?.data?.content ||
+    []) as WorkflowDto[];
 
-  const handleScenarioChange = (value: string) => {
+  const handleWorkflowChange = (value: string) => {
     onFiltersChange({
       ...filters,
-      scenarioId: value === ALL_VALUE ? undefined : value,
+      workflowId: value === ALL_VALUE ? undefined : value,
     });
   };
 
@@ -103,7 +103,7 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
     onFiltersChange({
       ...filters,
       status: undefined,
-      scenarioId: undefined,
+      workflowId: undefined,
       createdFrom: undefined,
       createdTo: undefined,
       completedFrom: undefined,
@@ -118,32 +118,32 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
     filters.completedTo;
 
   const hasActiveFilters =
-    filters.status || filters.scenarioId || hasDateFilters;
+    filters.status || filters.workflowId || hasDateFilters;
 
   return (
     <div className="mb-6 space-y-4">
       {/* Primary filters row */}
       <div className="flex flex-wrap items-center gap-3">
-        {/* Scenario filter */}
+        {/* Workflow filter */}
         <div className="flex items-center gap-2">
           <span className="text-sm text-slate-500 dark:text-slate-400">
-            Scenario:
+            Workflow:
           </span>
           <Select
-            value={filters.scenarioId || ALL_VALUE}
-            onValueChange={handleScenarioChange}
+            value={filters.workflowId || ALL_VALUE}
+            onValueChange={handleWorkflowChange}
           >
             <SelectTrigger className="h-10 min-w-[160px] bg-white border-slate-200 rounded-lg text-sm text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300">
-              <SelectValue placeholder="All scenarios" />
+              <SelectValue placeholder="All workflows" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ALL_VALUE}>All scenarios</SelectItem>
-              {scenarios.map((scenario) => (
+              <SelectItem value={ALL_VALUE}>All workflows</SelectItem>
+              {workflows.map((workflow) => (
                 <SelectItem
-                  key={scenario.id}
-                  value={scenario.id || `scenario-${scenario.name}`}
+                  key={workflow.id}
+                  value={workflow.id || `workflow-${workflow.name}`}
                 >
-                  {scenario.name}
+                  {workflow.name}
                 </SelectItem>
               ))}
             </SelectContent>

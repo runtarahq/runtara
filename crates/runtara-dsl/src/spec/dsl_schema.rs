@@ -8,12 +8,12 @@
 use schemars::schema_for;
 use serde_json::{Value, json};
 
-use crate::{ConditionOperator, DSL_VERSION, Scenario, SwitchMatchType, agent_meta};
+use crate::{ConditionOperator, DSL_VERSION, SwitchMatchType, Workflow, agent_meta};
 
 /// Generate the complete DSL schema with step type metadata
 pub fn generate_dsl_schema() -> Value {
     // Generate main schema using schemars
-    let schema = schema_for!(Scenario);
+    let schema = schema_for!(Workflow);
     let mut schema_json: Value = serde_json::to_value(&schema).expect("Failed to serialize schema");
 
     // Add ConditionOperator and SwitchMatchType enums to definitions
@@ -53,7 +53,7 @@ pub fn generate_dsl_schema() -> Value {
     let mut all_step_types = vec![json!({
         "type": "Start",
         "displayName": "Start",
-        "description": "Entry point - receives scenario inputs",
+        "description": "Entry point - receives workflow inputs",
         "category": "control",
         "schema": null
     })];
@@ -85,7 +85,7 @@ pub fn get_step_type_schema(step_type_id: &str) -> Option<Value> {
         return Some(json!({
             "type": "Start",
             "displayName": "Start",
-            "description": "Entry point - receives scenario inputs",
+            "description": "Entry point - receives workflow inputs",
             "category": "control",
             "schema": null
         }));

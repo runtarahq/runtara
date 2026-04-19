@@ -13,7 +13,7 @@ Valkey/Redis-backed channel system behind a single `axum` router with an
 The server also embeds an `rmcp`-based MCP endpoint, an OpenTelemetry exporter
 (traces, metrics, logs via OTLP), and the background workers that drive
 scheduling, dispatch, and agent-test execution. Everything an operator needs to
-accept scenario definitions, compile them, execute instances, and observe
+accept workflow definitions, compile them, execute instances, and observe
 results lives here. The public surface is the HTTP API — the crate also exposes
 a thin library (`runtara_server::start`) plus a few re-exports for host
 applications that want to embed the server inside a larger binary.

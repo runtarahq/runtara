@@ -1,10 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
-//! Static capability dispatch table for scenario binaries.
+//! Static capability dispatch table for workflow binaries.
 //!
 //! This module provides a compile-time dispatch table that maps (module, capability_id)
 //! pairs directly to executor functions. It replaces `inventory::iter()` at runtime
-//! for scenario binaries, eliminating the `inventory` crate dependency from compiled
-//! scenarios.
+//! for workflow binaries, eliminating the `inventory` crate dependency from compiled
+//! workflows.
 //!
 //! The server-side code (runtime HTTP server) continues to use inventory-based
 //! dispatch via `registry::execute_capability()` for metadata APIs and dynamic
@@ -16,7 +16,7 @@
 
 /// Execute a native-only capability via the agent service HTTP endpoint.
 ///
-/// Used by WASM scenario binaries that cannot link native C libraries (sftp, xlsx,
+/// Used by WASM workflow binaries that cannot link native C libraries (sftp, xlsx,
 /// compression). The stub POSTs the input to the runtime's internal agent service,
 /// which executes the capability in the server process and returns the result.
 #[cfg(not(feature = "native"))]
@@ -25,7 +25,7 @@ pub fn native_agent_stub(
     capability_id: &str,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    // Env vars are stable for the lifetime of a scenario process — cache on first read.
+    // Env vars are stable for the lifetime of a workflow process — cache on first read.
     use std::sync::OnceLock;
     static AGENT_SERVICE_URL: OnceLock<String> = OnceLock::new();
     static TENANT_ID: OnceLock<String> = OnceLock::new();
@@ -78,7 +78,7 @@ pub fn native_agent_stub(
 
 /// Execute a capability by module and capability_id using static dispatch.
 ///
-/// This is the scenario-binary equivalent of `registry::execute_capability()`.
+/// This is the workflow-binary equivalent of `registry::execute_capability()`.
 /// Instead of iterating over inventory-registered executors at runtime, it uses
 /// a compile-time match table for direct dispatch.
 pub fn execute_capability(

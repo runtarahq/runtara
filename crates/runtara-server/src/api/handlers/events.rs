@@ -1,6 +1,6 @@
 //! Event API Handlers
 //!
-//! HTTP handlers for trigger-based scenario execution.
+//! HTTP handlers for trigger-based workflow execution.
 //! When a trigger is found for the given trigger_id, publishes to the trigger stream
 //! for async execution. Returns 404 if trigger is not found.
 
@@ -198,7 +198,7 @@ pub async fn capture_http_event(
         let event = TriggerEvent::http_event(
             instance_id.to_string(),
             tenant_id.clone(),
-            trigger.scenario_id.clone(),
+            trigger.workflow_id.clone(),
             None, // use current version
             inputs,
             false, // track_events - could be from trigger config
@@ -220,7 +220,7 @@ pub async fn capture_http_event(
                     "status": "queued",
                     "instance_id": instance_id.to_string(),
                     "stream_id": stream_id,
-                    "scenario_id": trigger.scenario_id,
+                    "workflow_id": trigger.workflow_id,
                 });
                 Ok((StatusCode::OK, Json(response)))
             }
@@ -330,7 +330,7 @@ fn parse_body_as_json(body: &Bytes) -> Value {
     })
 }
 
-/// Build scenario inputs from HTTP request data with pre-parsed body
+/// Build workflow inputs from HTTP request data with pre-parsed body
 ///
 /// Returns the canonical Runtara format: `{"data": {...}, "variables": {}}`
 fn build_inputs_from_http_parsed(

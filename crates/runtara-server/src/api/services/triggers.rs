@@ -21,10 +21,10 @@ impl TriggerService {
         request: CreateInvocationTriggerRequest,
         tenant_id: Option<&str>,
     ) -> Result<InvocationTrigger, ServiceError> {
-        // Validation: scenario_id should not be empty
-        if request.scenario_id.trim().is_empty() {
+        // Validation: workflow_id should not be empty
+        if request.workflow_id.trim().is_empty() {
             return Err(ServiceError::ValidationError(
-                "Scenario ID cannot be empty".to_string(),
+                "Workflow ID cannot be empty".to_string(),
             ));
         }
 
@@ -70,10 +70,10 @@ impl TriggerService {
         request: UpdateInvocationTriggerRequest,
         tenant_id: Option<&str>,
     ) -> Result<Option<InvocationTrigger>, ServiceError> {
-        // Validation: scenario_id should not be empty
-        if request.scenario_id.trim().is_empty() {
+        // Validation: workflow_id should not be empty
+        if request.workflow_id.trim().is_empty() {
             return Err(ServiceError::ValidationError(
-                "Scenario ID cannot be empty".to_string(),
+                "Workflow ID cannot be empty".to_string(),
             ));
         }
 

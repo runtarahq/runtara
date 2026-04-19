@@ -1,11 +1,11 @@
 //! Compilation Queue
 //!
-//! A Valkey-based queue for scenario compilation requests.
-//! Uses a Redis SET for deduplication (only one entry per scenario:version)
+//! A Valkey-based queue for workflow compilation requests.
+//! Uses a Redis SET for deduplication (only one entry per workflow:version)
 //! and a LIST for ordered processing.
 //!
 //! Key features:
-//! - Unique entries: same scenario/version won't be queued twice
+//! - Unique entries: same workflow/version won't be queued twice
 //! - Ordered processing: FIFO queue semantics
 //! - Atomic operations: uses Lua scripts for thread safety
 //! - Polling support: for waiting until compilation completes
@@ -18,22 +18,22 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CompilationRequest {
     pub tenant_id: String,
-    pub scenario_id: String,
+    pub workflow_id: String,
     pub version: i32,
 }
 
 impl CompilationRequest {
-    pub fn new(tenant_id: String, scenario_id: String, version: i32) -> Self {
+    pub fn new(tenant_id: String, workflow_id: String, version: i32) -> Self {
         Self {
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
         }
     }
 
     /// Create a unique key for this request (used for deduplication)
     pub fn unique_key(&self) -> String {
-        format!("{}:{}:{}", self.tenant_id, self.scenario_id, self.version)
+        format!("{}:{}:{}", self.tenant_id, self.workflow_id, self.version)
     }
 
     /// Parse from unique key
@@ -42,7 +42,7 @@ impl CompilationRequest {
         if parts.len() == 3 {
             Some(Self {
                 tenant_id: parts[0].to_string(),
-                scenario_id: parts[1].to_string(),
+                workflow_id: parts[1].to_string(),
                 version: parts[2].parse().ok()?,
             })
         } else {
@@ -132,7 +132,7 @@ impl CompilationQueue {
         if added == 1 {
             info!(
                 tenant_id = %request.tenant_id,
-                scenario_id = %request.scenario_id,
+                workflow_id = %request.workflow_id,
                 version = request.version,
                 "Enqueued compilation request"
             );
@@ -140,7 +140,7 @@ impl CompilationQueue {
         } else {
             debug!(
                 tenant_id = %request.tenant_id,
-                scenario_id = %request.scenario_id,
+                workflow_id = %request.workflow_id,
                 version = request.version,
                 "Compilation request already pending (deduped)"
             );
@@ -172,7 +172,7 @@ impl CompilationQueue {
 
                 debug!(
                     tenant_id = %request.tenant_id,
-                    scenario_id = %request.scenario_id,
+                    workflow_id = %request.workflow_id,
                     version = request.version,
                     "Dequeued compilation request"
                 );
@@ -202,7 +202,7 @@ impl CompilationQueue {
 
         info!(
             tenant_id = %request.tenant_id,
-            scenario_id = %request.scenario_id,
+            workflow_id = %request.workflow_id,
             version = request.version,
             "Marked compilation as complete"
         );
@@ -260,7 +260,7 @@ impl CompilationQueue {
 
         warn!(
             tenant_id = %request.tenant_id,
-            scenario_id = %request.scenario_id,
+            workflow_id = %request.workflow_id,
             version = request.version,
             timeout_secs = timeout.as_secs(),
             "Timed out waiting for compilation"
@@ -358,20 +358,20 @@ mod tests {
     #[test]
     fn test_unique_key_roundtrip() {
         let request =
-            CompilationRequest::new("tenant-1".to_string(), "scenario-123".to_string(), 42);
+            CompilationRequest::new("tenant-1".to_string(), "workflow-123".to_string(), 42);
 
         let key = request.unique_key();
-        assert_eq!(key, "tenant-1:scenario-123:42");
+        assert_eq!(key, "tenant-1:workflow-123:42");
 
         let parsed = CompilationRequest::from_unique_key(&key).unwrap();
         assert_eq!(parsed.tenant_id, "tenant-1");
-        assert_eq!(parsed.scenario_id, "scenario-123");
+        assert_eq!(parsed.workflow_id, "workflow-123");
         assert_eq!(parsed.version, 42);
     }
 
     #[test]
     fn test_unique_key_with_special_chars() {
-        // Scenario IDs are UUIDs, so no special chars, but test tenant_id edge cases
+        // Workflow IDs are UUIDs, so no special chars, but test tenant_id edge cases
         let request = CompilationRequest::new(
             "org_abc123".to_string(),
             "d93b2a2f-d4a9-427f-ad1a-3dae942ffb9a".to_string(),
@@ -381,7 +381,7 @@ mod tests {
         let key = request.unique_key();
         let parsed = CompilationRequest::from_unique_key(&key).unwrap();
         assert_eq!(parsed.tenant_id, "org_abc123");
-        assert_eq!(parsed.scenario_id, "d93b2a2f-d4a9-427f-ad1a-3dae942ffb9a");
+        assert_eq!(parsed.workflow_id, "d93b2a2f-d4a9-427f-ad1a-3dae942ffb9a");
         assert_eq!(parsed.version, 1);
     }
 
@@ -481,14 +481,14 @@ mod tests {
     #[test]
     fn test_from_unique_key_invalid_format() {
         // Missing version
-        let result = CompilationRequest::from_unique_key("tenant:scenario");
+        let result = CompilationRequest::from_unique_key("tenant:workflow");
         assert!(result.is_none());
     }
 
     #[test]
     fn test_from_unique_key_invalid_version() {
         // Version is not a number
-        let result = CompilationRequest::from_unique_key("tenant:scenario:abc");
+        let result = CompilationRequest::from_unique_key("tenant:workflow:abc");
         assert!(result.is_none());
     }
 
@@ -505,12 +505,12 @@ mod tests {
     }
 
     #[test]
-    fn test_from_unique_key_with_colons_in_scenario_id() {
+    fn test_from_unique_key_with_colons_in_workflow_id() {
         // splitn(3, ':') means third part captures everything after second colon
-        // So "tenant:scenario:with:colons:1" would parse scenario_id as "with:colons:1"
+        // So "tenant:workflow:with:colons:1" would parse workflow_id as "with:colons:1"
         // This tests the actual behavior of splitn
-        let result = CompilationRequest::from_unique_key("tenant:scenario:1:extra:parts");
-        // With splitn(3), this becomes ["tenant", "scenario", "1:extra:parts"]
+        let result = CompilationRequest::from_unique_key("tenant:workflow:1:extra:parts");
+        // With splitn(3), this becomes ["tenant", "workflow", "1:extra:parts"]
         // "1:extra:parts" won't parse as i32, so should be None
         assert!(result.is_none());
     }
@@ -527,11 +527,11 @@ mod tests {
 
     #[test]
     fn test_compilation_request_clone() {
-        let original = CompilationRequest::new("tenant".to_string(), "scenario".to_string(), 5);
+        let original = CompilationRequest::new("tenant".to_string(), "workflow".to_string(), 5);
         let cloned = original.clone();
 
         assert_eq!(original.tenant_id, cloned.tenant_id);
-        assert_eq!(original.scenario_id, cloned.scenario_id);
+        assert_eq!(original.workflow_id, cloned.workflow_id);
         assert_eq!(original.version, cloned.version);
     }
 
@@ -542,7 +542,7 @@ mod tests {
 
         assert!(debug_str.contains("CompilationRequest"));
         assert!(debug_str.contains("tenant_id"));
-        assert!(debug_str.contains("scenario_id"));
+        assert!(debug_str.contains("workflow_id"));
         assert!(debug_str.contains("version"));
     }
 }

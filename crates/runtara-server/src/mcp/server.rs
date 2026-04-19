@@ -49,123 +49,123 @@ impl SmoMcpServer {
         }
     }
 
-    // ===== Scenario Lifecycle Tools =====
+    // ===== Workflow Lifecycle Tools =====
 
-    #[tool(description = "List all scenarios with pagination. Optional folder path filter.")]
-    async fn list_scenarios(
+    #[tool(description = "List all workflows with pagination. Optional folder path filter.")]
+    async fn list_workflows(
         &self,
-        params: Parameters<tools::scenarios::ListScenariosParams>,
+        params: Parameters<tools::workflows::ListWorkflowsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::list_scenarios(self, params.0).await
+        tools::workflows::list_workflows(self, params.0).await
     }
 
-    #[tool(description = "Get a scenario by ID including its execution graph definition.")]
-    async fn get_scenario(
+    #[tool(description = "Get a workflow by ID including its execution graph definition.")]
+    async fn get_workflow(
         &self,
-        params: Parameters<tools::scenarios::GetScenarioParams>,
+        params: Parameters<tools::workflows::GetWorkflowParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::get_scenario(self, params.0).await
+        tools::workflows::get_workflow(self, params.0).await
     }
 
-    #[tool(description = "Create a new empty scenario with a name and description.")]
-    async fn create_scenario(
+    #[tool(description = "Create a new empty workflow with a name and description.")]
+    async fn create_workflow(
         &self,
-        params: Parameters<tools::scenarios::CreateScenarioParams>,
+        params: Parameters<tools::workflows::CreateWorkflowParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::create_scenario(self, params.0).await
-    }
-
-    #[tool(
-        description = "Update a scenario's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, inputMapping?, ...}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}. Note: steps is a map keyed by step ID, not an array."
-    )]
-    async fn update_scenario(
-        &self,
-        params: Parameters<tools::scenarios::UpdateScenarioParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::update_scenario(self, params.0).await
+        tools::workflows::create_workflow(self, params.0).await
     }
 
     #[tool(
-        description = "Compile a scenario version to a native binary. Required after updates before execution. May take 20-60s for large scenarios."
+        description = "Update a workflow's execution graph. Creates a new version. Pass full execution_graph JSON: {name, description?, entryPoint, steps: {stepId: {id, stepType, name, inputMapping?, ...}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}. Note: steps is a map keyed by step ID, not an array."
     )]
-    async fn compile_scenario(
+    async fn update_workflow(
         &self,
-        params: Parameters<tools::scenarios::CompileScenarioParams>,
+        params: Parameters<tools::workflows::UpdateWorkflowParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::compile_scenario(self, params.0).await
+        tools::workflows::update_workflow(self, params.0).await
     }
 
     #[tool(
-        description = "Execute a scenario asynchronously. Returns an instance_id for tracking. Use get_execution to check results."
+        description = "Compile a workflow version to a native binary. Required after updates before execution. May take 20-60s for large workflows."
     )]
-    async fn execute_scenario(
+    async fn compile_workflow(
         &self,
-        params: Parameters<tools::scenarios::ExecuteScenarioParams>,
+        params: Parameters<tools::workflows::CompileWorkflowParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::execute_scenario(self, params.0).await
+        tools::workflows::compile_workflow(self, params.0).await
     }
 
     #[tool(
-        description = "Execute a scenario synchronously with low latency. Returns results directly. No database records."
+        description = "Execute a workflow asynchronously. Returns an instance_id for tracking. Use get_execution to check results."
     )]
-    async fn execute_scenario_sync(
+    async fn execute_workflow(
         &self,
-        params: Parameters<tools::scenarios::ExecuteScenarioSyncParams>,
+        params: Parameters<tools::workflows::ExecuteWorkflowParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::execute_scenario_sync(self, params.0).await
+        tools::workflows::execute_workflow(self, params.0).await
     }
 
-    #[tool(description = "Set the active (current) version for a scenario. Use for rollback.")]
+    #[tool(
+        description = "Execute a workflow synchronously with low latency. Returns results directly. No database records."
+    )]
+    async fn execute_workflow_sync(
+        &self,
+        params: Parameters<tools::workflows::ExecuteWorkflowSyncParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::execute_workflow_sync(self, params.0).await
+    }
+
+    #[tool(description = "Set the active (current) version for a workflow. Use for rollback.")]
     async fn set_current_version(
         &self,
-        params: Parameters<tools::scenarios::SetCurrentVersionParams>,
+        params: Parameters<tools::workflows::SetCurrentVersionParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::set_current_version(self, params.0).await
+        tools::workflows::set_current_version(self, params.0).await
     }
 
     #[tool(
-        description = "Deploy a scenario in one step: update graph → compile → set as current version. Automatically detects StartScenario steps and compiles child scenarios first (cascading). Returns version, binary size, child compilation info, and any warnings."
+        description = "Deploy a workflow in one step: update graph → compile → set as current version. Automatically detects EmbedWorkflow steps and compiles child workflows first (cascading). Returns version, binary size, child compilation info, and any warnings."
     )]
-    async fn deploy_scenario(
+    async fn deploy_workflow(
         &self,
-        params: Parameters<tools::scenarios::DeployScenarioParams>,
+        params: Parameters<tools::workflows::DeployWorkflowParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::deploy_scenario(self, params.0).await
+        tools::workflows::deploy_workflow(self, params.0).await
     }
 
     #[tool(
-        description = "Compile and deploy the latest (or specified) version of a scenario. Validates graph and mappings, cascade-compiles child scenarios, then compiles and sets as current. Use after building the graph with mutation tools (add_agent_step, set_mapping, etc.)."
+        description = "Compile and deploy the latest (or specified) version of a workflow. Validates graph and mappings, cascade-compiles child workflows, then compiles and sets as current. Use after building the graph with mutation tools (add_agent_step, set_mapping, etc.)."
     )]
     async fn deploy_latest(
         &self,
-        params: Parameters<tools::scenarios::DeployLatestParams>,
+        params: Parameters<tools::workflows::DeployLatestParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::deploy_latest(self, params.0).await
+        tools::workflows::deploy_latest(self, params.0).await
     }
 
     #[tool(
-        description = "Pre-check a scenario for compilation readiness. Reports validation errors, child scenario dependencies, and blockers without compiling."
+        description = "Pre-check a workflow for compilation readiness. Reports validation errors, child workflow dependencies, and blockers without compiling."
     )]
     async fn preflight_compile(
         &self,
-        params: Parameters<tools::scenarios::PreflightCompileParams>,
+        params: Parameters<tools::workflows::PreflightCompileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::preflight_compile(self, params.0).await
+        tools::workflows::preflight_compile(self, params.0).await
     }
 
     #[tool(
-        description = "Compare two versions of a scenario. Shows added, removed, and changed steps."
+        description = "Compare two versions of a workflow. Shows added, removed, and changed steps."
     )]
-    async fn diff_scenario_versions(
+    async fn diff_workflow_versions(
         &self,
-        params: Parameters<tools::scenarios::DiffScenarioVersionsParams>,
+        params: Parameters<tools::workflows::DiffWorkflowVersionsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::scenarios::diff_scenario_versions(self, params.0).await
+        tools::workflows::diff_workflow_versions(self, params.0).await
     }
 
     // ===== Execution Monitoring Tools =====
 
-    #[tool(description = "List execution instances with filtering by scenario, status, and date.")]
+    #[tool(description = "List execution instances with filtering by workflow, status, and date.")]
     async fn list_executions(
         &self,
         params: Parameters<tools::executions::ListExecutionsParams>,
@@ -182,7 +182,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Get step-level events for a scenario execution. Shows inputs, outputs, and timings per step. Requires track-events mode enabled."
+        description = "Get step-level events for a workflow execution. Shows inputs, outputs, and timings per step. Requires track-events mode enabled."
     )]
     async fn get_step_events(
         &self,
@@ -192,7 +192,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Get paired step summary records for a scenario execution. Compact by default (omits inputs/outputs). Pass compact=false for full data."
+        description = "Get paired step summary records for a workflow execution. Compact by default (omits inputs/outputs). Pass compact=false for full data."
     )]
     async fn get_step_summaries(
         &self,
@@ -226,13 +226,13 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Execute a scenario and wait for completion. Records execution in database (unlike execute_scenario_sync). Polls until done or timeout."
+        description = "Execute a workflow and wait for completion. Records execution in database (unlike execute_workflow_sync). Polls until done or timeout."
     )]
-    async fn execute_scenario_wait(
+    async fn execute_workflow_wait(
         &self,
-        params: Parameters<tools::executions::ExecuteScenarioWaitParams>,
+        params: Parameters<tools::executions::ExecuteWorkflowWaitParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::executions::execute_scenario_wait(self, params.0).await
+        tools::executions::execute_workflow_wait(self, params.0).await
     }
 
     // ===== Debugging Tools =====
@@ -378,16 +378,16 @@ impl SmoMcpServer {
 
     // ===== Graph Mutation Tools =====
     // Each mutation: fetches latest graph → mutates → saves in-place via PUT .../versions/{v}/graph.
-    // First mutation on a scenario creates a new version; subsequent mutations update that same version.
+    // First mutation on a workflow creates a new version; subsequent mutations update that same version.
 
     #[tool(
-        description = "Set scenario name and/or description on the execution graph. Use this with mutation tools so you don't need to pass a raw execution graph."
+        description = "Set workflow name and/or description on the execution graph. Use this with mutation tools so you don't need to pass a raw execution graph."
     )]
-    async fn set_scenario_metadata(
+    async fn set_workflow_metadata(
         &self,
-        params: Parameters<tools::graph_mutations::SetScenarioMetadataParams>,
+        params: Parameters<tools::graph_mutations::SetWorkflowMetadataParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::graph_mutations::set_scenario_metadata(self, params.0).await
+        tools::graph_mutations::set_workflow_metadata(self, params.0).await
     }
 
     #[tool(
@@ -401,7 +401,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Add a step to a scenario's execution graph. First call creates a new version; subsequent calls update it in-place."
+        description = "Add a step to a workflow's execution graph. First call creates a new version; subsequent calls update it in-place."
     )]
     async fn add_step(
         &self,
@@ -459,7 +459,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Set an input mapping on a step. Use exactly one of: from_step+from_output (step output reference), from_input (scenario input), from_variable (variable), or immediate_value (literal). Validates that referenced steps/inputs/variables exist."
+        description = "Set an input mapping on a step. Use exactly one of: from_step+from_output (step output reference), from_input (workflow input), from_variable (variable), or immediate_value (literal). Validates that referenced steps/inputs/variables exist."
     )]
     async fn set_mapping(
         &self,
@@ -515,7 +515,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "List all available references for mapping in a scenario: step outputs (steps.<id>.outputs.<field>), scenario inputs (data.<field>), and variables (variables.<name>). Use before set_mapping to discover what can be referenced."
+        description = "List all available references for mapping in a workflow: step outputs (steps.<id>.outputs.<field>), workflow inputs (data.<field>), and variables (variables.<name>). Use before set_mapping to discover what can be referenced."
     )]
     async fn list_references(
         &self,
@@ -576,7 +576,7 @@ impl SmoMcpServer {
         tools::connections::validate_graph(self, params.0).await
     }
 
-    #[tool(description = "Validate input mappings for a scenario version.")]
+    #[tool(description = "Validate input mappings for a workflow version.")]
     async fn validate_mappings(
         &self,
         params: Parameters<tools::connections::ValidateMappingsParams>,
@@ -594,28 +594,28 @@ impl ServerHandler for SmoMcpServer {
                 Implementation::new("runtara-server", env!("BUILD_VERSION"))
                     .with_title("Runtara Runtime")
                     .with_description(
-                        "Scenario management, execution, object model, and agent discovery",
+                        "Workflow management, execution, object model, and agent discovery",
                     ),
             )
             .with_instructions(
                 "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
-                **Scenarios**: list_scenarios, get_scenario, create_scenario, update_scenario, compile_scenario, deploy_scenario (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_scenario_versions, validate_graph, validate_mappings\n\
-                **Execution**: execute_scenario, execute_scenario_sync, execute_scenario_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
+                **Workflows**: list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_workflow_versions, validate_graph, validate_mappings\n\
+                **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
-                **Graph Mutations**: set_scenario_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
+                **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals**: list_pending_signals, get_signal_schema, submit_signal_response — interact with WaitForSignal / human-in-the-loop steps in running executions\n\
                 **Connections**: list_connections (supports integration_id filter)\n\n\
                 ## DSL Reference Quick Guide\n\n\
-                **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for scenario inputs. Use `variables.<name>` for variables.\n\
+                **References**: Use `steps.<stepId>.outputs.<field>` to reference step outputs (PLURAL `outputs`, not `output`). Use `data.<field>` for workflow inputs. Use `variables.<name>` for variables.\n\
                 **inputMapping** (SINGULAR, not inputMappings): `{\"fieldName\": {\"valueType\": \"reference\", \"value\": \"steps.myStep.outputs.items\"}}` or `{\"fieldName\": {\"valueType\": \"immediate\", \"value\": \"literal\"}}`.\n\
                 **Condition expressions**: `{\"type\": \"operation\", \"op\": \"LT\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"steps.rng.outputs.value\"}, {\"valueType\": \"immediate\", \"value\": 0.5}]}`.\n\
                 **Edge fields**: Use `fromStep` and `toStep` (not `fromStepId`/`toStepId`) in executionPlan edges.\n\
                 **Agent steps**: Must have `agentId` and `capabilityId` (not `agent`/`capability`). Use get_agent to discover IDs. capabilityId uses the hyphenated `id` (e.g., 'http-request'), NOT the underscored `name`.\n\
-                **Step types**: Finish, Agent, Conditional, Split, Switch, StartScenario, While, Log, Connection, Error, Filter, GroupBy, Delay, WaitForSignal (no Start type).\n\
-                **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `__error.code`, `__error.message`, `__error.category`, `__error.attributes`. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the scenario.\n\n\
+                **Step types**: Finish, Agent, Conditional, Split, Switch, EmbedWorkflow, While, Log, Connection, Error, Filter, GroupBy, Delay, WaitForSignal (no Start type).\n\
+                **Error handling**: Add `onError` edges to handle step errors: `{\"fromStep\": \"stepId\", \"toStep\": \"handlerId\", \"label\": \"onError\"}`. Filter by error code with a condition: `{\"condition\": {\"type\": \"operation\", \"op\": \"EQ\", \"arguments\": [{\"valueType\": \"reference\", \"value\": \"__error.code\"}, {\"valueType\": \"immediate\", \"value\": \"ERROR_CODE\"}]}}`. Available error fields: `__error.code`, `__error.message`, `__error.category`, `__error.attributes`. Use `get_capability` to discover `knownErrors` for a capability. Without an `onError` edge, step errors propagate up and fail the workflow.\n\n\
                 ## Execution Graph Shape\n\n\
                 `{name, description?, entryPoint: \"stepId\", steps: {stepId: {id, stepType, name, inputMapping?, ...}}, executionPlan: [{fromStep, toStep}], inputSchema?, outputSchema?}`. Note: `steps` is a map keyed by step ID (not an array), edges go in `executionPlan` (not `edges`).",
             )

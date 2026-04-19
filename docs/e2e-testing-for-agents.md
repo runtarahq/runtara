@@ -78,7 +78,7 @@ The embedded runtara-environment binds to `127.0.0.1:8004` and uses the
 # Disable LTO for faster dev builds (release stdlib already has bitcode)
 RUNTARA_LTO=off target/debug/runtara-compile \
   --workflow e2e/workflows/simple_passthrough.json \
-  --tenant test --scenario passthrough \
+  --tenant test --workflow passthrough \
   --output /tmp/test_binary
 ```
 
@@ -128,7 +128,7 @@ kill -TERM $(pgrep -x runtara-server | head -1)
 
 ### Expected behavior
 
-| Scenario | Grace vs delay | Server exit time | Instance final state |
+| Workflow | Grace vs delay | Server exit time | Instance final state |
 |----------|---------------|------------------|---------------------|
 | Instance finishes within grace | grace >= delay | ~delay seconds | `completed` |
 | Grace expires before instance | grace < delay | ~grace seconds | `suspended`, `termination_reason=shutdown_requested` |

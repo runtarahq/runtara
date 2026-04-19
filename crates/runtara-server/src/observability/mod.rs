@@ -54,24 +54,24 @@ impl Metrics {
         // Worker metrics
         let worker_executions_total = meter
             .u64_counter("runtara.worker.executions.total")
-            .with_description("Total number of scenario executions")
+            .with_description("Total number of workflow executions")
             .build();
 
         let worker_executions_active = meter
             .i64_up_down_counter("runtara.worker.executions.active")
-            .with_description("Currently active scenario executions")
+            .with_description("Currently active workflow executions")
             .build();
 
         let worker_execution_duration = meter
             .f64_histogram("runtara.worker.execution.duration")
-            .with_description("Scenario execution duration in seconds")
+            .with_description("Workflow execution duration in seconds")
             .with_unit("s")
             .build();
 
         // Compilation metrics
         let compilations_total = meter
             .u64_counter("runtara.compilation.total")
-            .with_description("Total number of scenario compilations")
+            .with_description("Total number of workflow compilations")
             .build();
 
         let compilations_active = meter

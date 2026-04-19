@@ -25,27 +25,27 @@ use runtara_dsl::ExecutionGraph;
 /// Errors that can occur during code generation.
 #[derive(Debug, Clone)]
 pub enum CodegenError {
-    /// A StartScenario step references a child scenario that was not provided.
-    MissingChildScenario {
-        /// The step ID of the StartScenario step.
+    /// A EmbedWorkflow step references a child workflow that was not provided.
+    MissingChildWorkflow {
+        /// The step ID of the EmbedWorkflow step.
         step_id: String,
-        /// The child scenario ID that was not found.
-        child_scenario_id: String,
+        /// The child workflow ID that was not found.
+        child_workflow_id: String,
     },
 }
 
 impl std::fmt::Display for CodegenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CodegenError::MissingChildScenario {
+            CodegenError::MissingChildWorkflow {
                 step_id,
-                child_scenario_id,
+                child_workflow_id,
             } => {
                 write!(
                     f,
-                    "Missing child scenario '{}' for step '{}'. \
-                    Ensure the child scenario exists and is passed to compilation.",
-                    child_scenario_id, step_id
+                    "Missing child workflow '{}' for step '{}'. \
+                    Ensure the child workflow exists and is passed to compilation.",
+                    child_workflow_id, step_id
                 )
             }
         }
@@ -60,7 +60,7 @@ impl std::error::Error for CodegenError {}
 ///
 /// # Errors
 ///
-/// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+/// Returns `CodegenError` if code generation fails (e.g., missing child workflow).
 pub fn compile(graph: &ExecutionGraph, track_events: bool) -> Result<String, CodegenError> {
     compile_with_children(
         graph,
@@ -72,14 +72,14 @@ pub fn compile(graph: &ExecutionGraph, track_events: bool) -> Result<String, Cod
     )
 }
 
-/// Compile an execution graph with child scenarios.
+/// Compile an execution graph with child workflows.
 ///
 /// # Arguments
 /// * `graph` - The main execution graph
 /// * `track_events` - Whether to include debug instrumentation
-/// * `child_scenarios` - Map of scenario reference key -> child ExecutionGraph
-///   (key format: "{scenario_id}::{version_resolved}")
-/// * `step_to_child_ref` - Map of step_id -> (scenario_id, version_resolved)
+/// * `child_workflows` - Map of workflow reference key -> child ExecutionGraph
+///   (key format: "{workflow_id}::{version_resolved}")
+/// * `step_to_child_ref` - Map of step_id -> (workflow_id, version_resolved)
 /// * `connection_service_url` - Optional URL for fetching connections at runtime
 /// * `tenant_id` - Optional tenant ID for connection service requests
 ///
@@ -88,18 +88,18 @@ pub fn compile(graph: &ExecutionGraph, track_events: bool) -> Result<String, Cod
 ///
 /// # Errors
 ///
-/// Returns `CodegenError` if code generation fails (e.g., missing child scenario).
+/// Returns `CodegenError` if code generation fails (e.g., missing child workflow).
 pub fn compile_with_children(
     graph: &ExecutionGraph,
     track_events: bool,
-    child_scenarios: HashMap<String, ExecutionGraph>,
+    child_workflows: HashMap<String, ExecutionGraph>,
     step_to_child_ref: HashMap<String, (String, i32)>,
     connection_service_url: Option<String>,
     tenant_id: Option<String>,
 ) -> Result<String, CodegenError> {
-    let mut ctx = EmitContext::with_child_scenarios(
+    let mut ctx = EmitContext::with_child_workflows(
         track_events,
-        child_scenarios,
+        child_workflows,
         step_to_child_ref,
         connection_service_url,
         tenant_id,

@@ -172,7 +172,7 @@ pub struct ListInstancesOptions {
     pub status: Option<String>,
     /// Filter by image ID (exact match).
     pub image_id: Option<String>,
-    /// Filter by image name prefix (e.g., "scenario_id:" matches "scenario_id:1", "scenario_id:2").
+    /// Filter by image name prefix (e.g., "workflow_id:" matches "workflow_id:1", "workflow_id:2").
     pub image_name_prefix: Option<String>,
     /// Filter by created_at >= value.
     pub created_after: Option<DateTime<Utc>>,
@@ -563,12 +563,12 @@ mod tests {
     fn test_list_instances_options_with_image_filters() {
         let options = ListInstancesOptions {
             image_id: Some("img-123".to_string()),
-            image_name_prefix: Some("scenario:".to_string()),
+            image_name_prefix: Some("workflow:".to_string()),
             ..Default::default()
         };
 
         assert_eq!(options.image_id, Some("img-123".to_string()));
-        assert_eq!(options.image_name_prefix, Some("scenario:".to_string()));
+        assert_eq!(options.image_name_prefix, Some("workflow:".to_string()));
     }
 
     #[test]

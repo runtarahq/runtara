@@ -3,15 +3,15 @@
 [![Crates.io](https://img.shields.io/crates/v/runtara-dsl.svg)](https://crates.io/crates/runtara-dsl)
 [![Documentation](https://docs.rs/runtara-dsl/badge.svg)](https://docs.rs/runtara-dsl)
 
-Single source of truth for Runtara's scenario DSL types — the Rust structs that define workflows, steps, and value mappings.
+Single source of truth for Runtara's workflow DSL types — the Rust structs that define workflows, steps, and value mappings.
 
 ## What it is
 
-A typed representation of a scenario execution graph: `Scenario`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (pinned to `DSL_VERSION`, currently `3.0.0`), and step metadata is collected via `inventory` so the schema stays in sync with the step structs themselves. The public entry points are `parse_scenario`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
+A typed representation of a workflow execution graph: `Workflow`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (pinned to `DSL_VERSION`, currently `3.0.0`), and step metadata is collected via `inventory` so the schema stays in sync with the step structs themselves. The public entry points are `parse_workflow`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
 
 ## Using it standalone
 
-Add it to a crate that needs to read, validate, or emit scenario JSON:
+Add it to a crate that needs to read, validate, or emit workflow JSON:
 
 ```toml
 [dependencies]
@@ -20,11 +20,11 @@ serde_json = "1"
 ```
 
 ```rust
-use runtara_dsl::{parse_scenario, MemoryTier};
+use runtara_dsl::{parse_workflow, MemoryTier};
 
 let json = serde_json::from_str(r#"{"executionGraph":{"entryPoint":"start","steps":{},"executionPlan":[],"variables":{},"inputSchema":{},"outputSchema":{}}}"#)?;
-let scenario = parse_scenario(&json)?;
-assert_eq!(scenario.memory_tier.unwrap_or(MemoryTier::XL).total_memory_bytes(), 256 * 1024 * 1024);
+let workflow = parse_workflow(&json)?;
+assert_eq!(workflow.memory_tier.unwrap_or(MemoryTier::XL).total_memory_bytes(), 256 * 1024 * 1024);
 ```
 
 Enable the `utoipa` feature if you need `ToSchema` derives for OpenAPI generation.

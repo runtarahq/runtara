@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT registered_image_id\n            FROM workflow_compilations\n            WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3\n                AND compilation_status = 'success'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registered_image_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "71aba64b8355b871c78efc23574d135c86c66b730cad8546aa7037b0adfb9513"
+}

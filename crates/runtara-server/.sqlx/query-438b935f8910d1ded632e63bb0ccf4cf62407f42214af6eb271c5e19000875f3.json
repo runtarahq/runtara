@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT parent_version, child_workflow_id, child_version_requested, child_version_resolved, step_id\n            FROM workflow_dependencies\n            WHERE parent_tenant_id = $1\n                AND parent_workflow_id = $2\n                AND ($3::INTEGER IS NULL OR parent_version = $3)\n            ORDER BY CASE WHEN $3 IS NULL THEN parent_version ELSE 0 END DESC, step_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "parent_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "child_workflow_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "child_version_requested",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "child_version_resolved",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "step_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "69ac661c5835d207d4ee53b1f609838d8a6d14aada18c81f9470706f6195a6b3"
+}

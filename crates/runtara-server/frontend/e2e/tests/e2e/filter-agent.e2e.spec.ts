@@ -10,8 +10,8 @@ import { fileURLToPath } from 'url';
  * the filter actually filters according to the condition expression.
  *
  * Each test:
- * 1. Creates & compiles a scenario via API (hardcoded array in step config)
- * 2. Navigates to the scenario page — canvas shows the workflow
+ * 1. Creates & compiles a workflow via API (hardcoded array in step config)
+ * 2. Navigates to the workflow page — canvas shows the workflow
  * 3. Clicks Play → execution completes → "Completed" badge visible
  * 4. History tab shows step events (Source Array → Filter → Finish)
  * 5. Expands Filter step row to show inputs/outputs in the panel
@@ -33,7 +33,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
-const API_BASE = `${GATEWAY_URL}/api/runtime/scenarios`;
+const API_BASE = `${GATEWAY_URL}/api/runtime/workflows`;
 
 // ── Auth helpers ──────────────────────────────────────────────────
 
@@ -165,10 +165,10 @@ function buildFilterGraph(
   };
 }
 
-// ── Scenario lifecycle helpers ────────────────────────────────────
+// ── Workflow lifecycle helpers ────────────────────────────────────
 
-/** Create → update → compile → activate via API. Returns scenarioId. */
-async function setupScenario(
+/** Create → update → compile → activate via API. Returns workflowId. */
+async function setupWorkflow(
   request: APIRequestContext,
   token: string,
   name: string,
@@ -180,9 +180,9 @@ async function setupScenario(
     data: { name, description: 'SYN-180 E2E — safe to delete' },
   });
   expect(createRes.status()).toBe(200);
-  const scenarioId = (await createRes.json()).data.id;
+  const workflowId = (await createRes.json()).data.id;
 
-  const updateRes = await request.post(`${API_BASE}/${scenarioId}/update`, {
+  const updateRes = await request.post(`${API_BASE}/${workflowId}/update`, {
     headers: apiHeaders(token),
     data: buildFilterGraph(name, items, condition),
   });
@@ -192,7 +192,7 @@ async function setupScenario(
   ).toBe(200);
 
   const compileRes = await request.post(
-    `${API_BASE}/${scenarioId}/versions/2/compile`,
+    `${API_BASE}/${workflowId}/versions/2/compile`,
     { headers: apiHeaders(token) }
   );
   if (compileRes.status() !== 200) {
@@ -201,12 +201,12 @@ async function setupScenario(
   }
 
   const activateRes = await request.post(
-    `${API_BASE}/${scenarioId}/versions/2/set-current`,
+    `${API_BASE}/${workflowId}/versions/2/set-current`,
     { headers: apiHeaders(token) }
   );
   expect(activateRes.status()).toBe(200);
 
-  return scenarioId;
+  return workflowId;
 }
 
 /**
@@ -219,15 +219,15 @@ async function executeViaUI(
   page: Page,
   request: APIRequestContext,
   token: string,
-  scenarioId: string
+  workflowId: string
 ): Promise<Record<string, unknown>> {
-  // 1. Navigate to scenario page — canvas shows the workflow
-  await page.goto(`/scenarios/${scenarioId}`);
+  // 1. Navigate to workflow page — canvas shows the workflow
+  await page.goto(`/workflows/${workflowId}`);
   await page.waitForLoadState('networkidle');
   await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
   // 2. Click Play (no input schema → executes immediately)
-  const playButton = page.getByTitle('Start scenario');
+  const playButton = page.getByTitle('Start workflow');
   await expect(playButton).toBeVisible({ timeout: 10000 });
   await expect(playButton).toBeEnabled({ timeout: 5000 });
   await playButton.click();
@@ -272,7 +272,7 @@ async function executeViaUI(
 
   // 6. Fetch latest instance via API for assertions
   const instancesRes = await request.get(
-    `${API_BASE}/${scenarioId}/instances`,
+    `${API_BASE}/${workflowId}/instances`,
     { headers: apiHeaders(token) }
   );
   expect(instancesRes.status()).toBe(200);
@@ -283,16 +283,16 @@ async function executeViaUI(
 
   const instanceId = latest.instanceId ?? latest.id;
   const instanceRes = await request.get(
-    `${API_BASE}/${scenarioId}/instances/${instanceId}`,
+    `${API_BASE}/${workflowId}/instances/${instanceId}`,
     { headers: apiHeaders(token) }
   );
   expect(instanceRes.status()).toBe(200);
   const instanceBody = await instanceRes.json();
 
   // 7. Navigate to instance history page for detailed view
-  await page.goto(`/scenarios/${scenarioId}/history/${instanceId}`);
+  await page.goto(`/workflows/${workflowId}/history/${instanceId}`);
   await page.waitForLoadState('networkidle');
-  await expect(page.getByText('Scenario Execution Details')).toBeVisible({
+  await expect(page.getByText('Workflow Execution Details')).toBeVisible({
     timeout: 15000,
   });
 
@@ -328,14 +328,14 @@ const ITEMS_NESTED = [
 
 test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
   let token: string;
-  const scenarioIds: string[] = [];
+  const workflowIds: string[] = [];
 
   test.beforeAll(() => {
     token = getAccessToken();
   });
 
   test.afterAll(async () => {
-    for (const id of scenarioIds) {
+    for (const id of workflowIds) {
       try {
         await fetch(`${API_BASE}/${id}/delete`, {
           method: 'POST',
@@ -351,14 +351,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
     request,
     page,
   }) => {
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 EQ ${Date.now()}`,
       ITEMS_MIXED,
       eq('item.name', 'alpha')
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 
@@ -374,14 +374,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
     request,
     page,
   }) => {
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 NoMatch ${Date.now()}`,
       ITEMS_MIXED,
       eq('item.name', 'nonexistent')
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 
@@ -399,14 +399,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
       { name: 'three', status: 'active' },
     ];
 
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 AllMatch ${Date.now()}`,
       allActive,
       eq('item.status', 'active')
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 
@@ -419,14 +419,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
     request,
     page,
   }) => {
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 AND ${Date.now()}`,
       ITEMS_MIXED,
       and(eq('item.status', 'active'), gt('item.value', 2))
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 
@@ -442,14 +442,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
     request,
     page,
   }) => {
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 NOT ${Date.now()}`,
       ITEMS_MIXED,
       not(eq('item.name', 'beta'))
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 
@@ -466,14 +466,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
     request,
     page,
   }) => {
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 Nested ${Date.now()}`,
       ITEMS_NESTED,
       eq('item.meta.category', 'A')
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 
@@ -489,14 +489,14 @@ test.describe.serial('Filter Agent Edge Cases (SYN-180)', () => {
     request,
     page,
   }) => {
-    const id = await setupScenario(
+    const id = await setupWorkflow(
       request,
       token,
       `SYN-180 Empty ${Date.now()}`,
       [],
       eq('item.name', 'anything')
     );
-    scenarioIds.push(id);
+    workflowIds.push(id);
 
     const outputs = await executeViaUI(page, request, token, id);
 

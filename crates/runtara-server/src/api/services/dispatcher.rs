@@ -2,7 +2,7 @@
 //!
 //! Compiles and manages the universal agent dispatcher binary.
 //! The dispatcher allows testing individual agents in isolation without
-//! creating a full scenario.
+//! creating a full workflow.
 
 use runtara_management_sdk::{RegisterImageStreamOptions, RunnerType};
 use sha2::{Digest, Sha256};
@@ -19,7 +19,7 @@ use crate::runtime_client::RuntimeClient;
 /// The dispatcher source code template
 ///
 /// This is a minimal binary that:
-/// 1. Loads input from runtara-core via SDK (same as compiled scenarios)
+/// 1. Loads input from runtara-core via SDK (same as compiled workflows)
 /// 2. Optionally injects connection as _connection field (same as test harness)
 /// 3. Executes the requested agent capability via the registry
 /// 4. Reports the result via SDK protocol
@@ -29,7 +29,7 @@ const DISPATCHER_SOURCE: &str = r#"//! Universal Agent Dispatcher
 //! to the appropriate agent via the static dispatch table.
 //!
 //! Uses the runtara SDK protocol to report completion/failure back to
-//! runtara-core (same as compiled scenarios).
+//! runtara-core (same as compiled workflows).
 //!
 //! Connection is injected as `_connection` field in the input, which agents
 //! extract directly during execution (no thread-local storage needed).
@@ -81,7 +81,7 @@ fn main() -> ExitCode {
     // Register SDK globally
     register_sdk(sdk_instance);
 
-    // Load input from runtara-core via SDK (same as compiled scenarios)
+    // Load input from runtara-core via SDK (same as compiled workflows)
     let raw_input: serde_json::Value = {
         let sdk_guard = sdk().lock().unwrap();
         match sdk_guard.load_input() {
@@ -152,7 +152,7 @@ fn main() -> ExitCode {
         }),
     };
 
-    // Report completion via SDK (same as compiled scenarios)
+    // Report completion via SDK (same as compiled workflows)
     let output_bytes = serde_json::to_vec(&output).unwrap_or_default();
     let sdk_guard = sdk().lock().unwrap();
     match sdk_guard.completed(&output_bytes) {
@@ -165,8 +165,8 @@ fn main() -> ExitCode {
 }
 "#;
 
-/// Special scenario ID used for the dispatcher
-pub const DISPATCHER_SCENARIO_ID: &str = "__agent_dispatcher__";
+/// Special workflow ID used for the dispatcher
+pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 
 /// Dispatcher version - increment when changing DISPATCHER_SOURCE
 /// v10: Fixed bundle_path to use absolute paths for OCI runner
@@ -176,7 +176,7 @@ pub const DISPATCHER_SCENARIO_ID: &str = "__agent_dispatcher__";
 /// v17: Added compression and file agents from runtara-agents 1.3.1
 /// v19: Added fallback connection injection for object_model agent from OBJECT_STORE_DATABASE_URL
 /// v21: Switched from write_completed/output.json to SDK protocol (QUIC to runtara-core)
-/// v22: Compile to WASM (same mechanism as scenarios) instead of native host binary
+/// v22: Compile to WASM (same mechanism as workflows) instead of native host binary
 /// v23: Load input from runtara-core via SDK instead of /data/input.json (WASM has no filesystem)
 /// v24: Use static dispatch table instead of inventory registry (inventory unavailable in WASM)
 pub const DISPATCHER_VERSION: u32 = 24;
@@ -203,7 +203,7 @@ impl DispatcherService {
     ///
     /// Returns the image ID that can be used to execute the dispatcher.
     pub async fn initialize(&self, tenant_id: &str) -> Result<String, DispatcherError> {
-        let image_name = format!("{}:{}", DISPATCHER_SCENARIO_ID, DISPATCHER_VERSION);
+        let image_name = format!("{}:{}", DISPATCHER_WORKFLOW_ID, DISPATCHER_VERSION);
 
         // Check if image already exists in runtara-environment by listing and searching by name
         let existing_image = self.find_image_by_name(tenant_id, &image_name).await?;
@@ -321,9 +321,9 @@ impl DispatcherService {
         Ok(image_id)
     }
 
-    /// Compile the dispatcher to a WASM binary (same mechanism as scenarios)
+    /// Compile the dispatcher to a WASM binary (same mechanism as workflows)
     fn compile_dispatcher(&self, tenant_id: &str) -> Result<CompilationResult, DispatcherError> {
-        // Use WASM library paths (same as scenario compilation)
+        // Use WASM library paths (same as workflow compilation)
         let native_libs = runtara_workflows::get_wasm_native_library().map_err(|e| {
             DispatcherError::CompilationError(format!("Failed to get WASM libraries: {}", e))
         })?;
@@ -343,11 +343,11 @@ impl DispatcherService {
         // Determine binary output path (.wasm extension for WASM target)
         let binary_path = build_dir.join("dispatcher.wasm");
 
-        // Use WASM target (same as scenarios)
+        // Use WASM target (same as workflows)
         let target =
             std::env::var("RUNTARA_COMPILE_TARGET").unwrap_or_else(|_| "wasm32-wasip2".to_string());
 
-        // Build rustc command (same approach as runtara-workflows::compile_scenario for WASM)
+        // Build rustc command (same approach as runtara-workflows::compile_workflow for WASM)
         let mut cmd = Command::new("rustc");
         cmd.arg(format!("--target={}", target))
             .arg("--crate-type=bin")
@@ -368,8 +368,8 @@ impl DispatcherService {
             cmd.arg("-L").arg(format!("native={}", deps_dir.display()));
         }
 
-        // Add native library path (parent of scenario lib)
-        if let Some(lib_dir) = native_libs.scenario_lib_path.parent() {
+        // Add native library path (parent of workflow lib)
+        if let Some(lib_dir) = native_libs.workflow_lib_path.parent() {
             cmd.arg("-L").arg(format!("native={}", lib_dir.display()));
         }
 
@@ -378,7 +378,7 @@ impl DispatcherService {
         cmd.arg("--extern").arg(format!(
             "{}={}",
             stdlib_name,
-            native_libs.scenario_lib_path.display()
+            native_libs.workflow_lib_path.display()
         ));
 
         // Dylib extension for proc-macros (compiled for the host, not WASM)
@@ -414,7 +414,7 @@ impl DispatcherService {
                     && let Some(crate_name) = crate_name_part.split('-').next()
                 {
                     let extern_name = crate_name.replace('-', "_");
-                    // Skip stdlib — it's already added explicitly via scenario_lib_path
+                    // Skip stdlib — it's already added explicitly via workflow_lib_path
                     if extern_name == stdlib_name {
                         continue;
                     }
@@ -503,7 +503,7 @@ impl DispatcherService {
         tenant_id: &str,
         compile_result: &CompilationResult,
     ) -> Result<String, DispatcherError> {
-        let image_name = format!("{}:{}", DISPATCHER_SCENARIO_ID, DISPATCHER_VERSION);
+        let image_name = format!("{}:{}", DISPATCHER_WORKFLOW_ID, DISPATCHER_VERSION);
 
         let options = RegisterImageStreamOptions::new(
             tenant_id,

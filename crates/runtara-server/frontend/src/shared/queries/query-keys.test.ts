@@ -59,49 +59,49 @@ describe('queryKeys', () => {
     });
   });
 
-  describe('scenarios', () => {
-    it('returns correct base key for all scenarios', () => {
-      expect(queryKeys.scenarios.all).toEqual(['scenarios']);
+  describe('workflows', () => {
+    it('returns correct base key for all workflows', () => {
+      expect(queryKeys.workflows.all).toEqual(['workflows']);
     });
 
-    it('returns correct key for scenario by ID', () => {
-      expect(queryKeys.scenarios.byId('scen-123')).toEqual([
-        'scenarios',
+    it('returns correct key for workflow by ID', () => {
+      expect(queryKeys.workflows.byId('scen-123')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
       ]);
     });
 
-    it('returns correct key for scenario workflow', () => {
-      expect(queryKeys.scenarios.workflow('scen-123')).toEqual([
-        'scenarios',
+    it('returns correct key for workflow workflow', () => {
+      expect(queryKeys.workflows.workflow('scen-123')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'workflow',
       ]);
     });
 
-    it('returns correct key for scenario versions', () => {
-      expect(queryKeys.scenarios.versions('scen-123')).toEqual([
-        'scenarios',
+    it('returns correct key for workflow versions', () => {
+      expect(queryKeys.workflows.versions('scen-123')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'versions',
       ]);
     });
 
-    it('returns correct key for scenario instances', () => {
-      expect(queryKeys.scenarios.instances('scen-123')).toEqual([
-        'scenarios',
+    it('returns correct key for workflow instances', () => {
+      expect(queryKeys.workflows.instances('scen-123')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'instances',
       ]);
     });
 
-    it('returns correct key for specific scenario instance', () => {
-      expect(queryKeys.scenarios.instance('scen-123', 'inst-456')).toEqual([
-        'scenarios',
+    it('returns correct key for specific workflow instance', () => {
+      expect(queryKeys.workflows.instance('scen-123', 'inst-456')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'instances',
@@ -110,15 +110,15 @@ describe('queryKeys', () => {
     });
 
     it('returns correct key for step types', () => {
-      expect(queryKeys.scenarios.stepTypes()).toEqual([
-        'scenarios',
+      expect(queryKeys.workflows.stepTypes()).toEqual([
+        'workflows',
         'stepTypes',
       ]);
     });
 
-    it('returns correct key for scenario logs', () => {
-      expect(queryKeys.scenarios.logs('inst-123')).toEqual([
-        'scenarios',
+    it('returns correct key for workflow logs', () => {
+      expect(queryKeys.workflows.logs('inst-123')).toEqual([
+        'workflows',
         'logs',
         'inst-123',
       ]);
@@ -126,19 +126,19 @@ describe('queryKeys', () => {
 
     it('returns correct key for step subinstances', () => {
       expect(
-        queryKeys.scenarios.stepSubinstances('inst-123', 'step-456')
-      ).toEqual(['scenarios', 'stepSubinstances', 'inst-123', 'step-456']);
+        queryKeys.workflows.stepSubinstances('inst-123', 'step-456')
+      ).toEqual(['workflows', 'stepSubinstances', 'inst-123', 'step-456']);
     });
 
     it('returns correct key for step events', () => {
       expect(
-        queryKeys.scenarios.stepEvents('scen-1', 'inst-123', 'step-456')
-      ).toEqual(['scenarios', 'stepEvents', 'scen-1', 'inst-123', 'step-456']);
+        queryKeys.workflows.stepEvents('scen-1', 'inst-123', 'step-456')
+      ).toEqual(['workflows', 'stepEvents', 'scen-1', 'inst-123', 'step-456']);
     });
 
     it('returns correct key for workflow without version', () => {
-      expect(queryKeys.scenarios.workflow('scen-123')).toEqual([
-        'scenarios',
+      expect(queryKeys.workflows.workflow('scen-123')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'workflow',
@@ -146,8 +146,8 @@ describe('queryKeys', () => {
     });
 
     it('returns correct key for workflow with version', () => {
-      expect(queryKeys.scenarios.workflow('scen-123', 5)).toEqual([
-        'scenarios',
+      expect(queryKeys.workflows.workflow('scen-123', 5)).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'workflow',
@@ -156,8 +156,8 @@ describe('queryKeys', () => {
     });
 
     it('returns correct key for pending input', () => {
-      expect(queryKeys.scenarios.pendingInput('scen-123', 'inst-456')).toEqual([
-        'scenarios',
+      expect(queryKeys.workflows.pendingInput('scen-123', 'inst-456')).toEqual([
+        'workflows',
         'detail',
         'scen-123',
         'instances',
@@ -169,9 +169,9 @@ describe('queryKeys', () => {
     it('returns correct key for step summaries', () => {
       const filters = { limit: 100 };
       expect(
-        queryKeys.scenarios.stepSummaries('scen-123', 'inst-456', filters)
+        queryKeys.workflows.stepSummaries('scen-123', 'inst-456', filters)
       ).toEqual([
-        'scenarios',
+        'workflows',
         'stepSummaries',
         'scen-123',
         'inst-456',
@@ -333,16 +333,16 @@ describe('queryKeys', () => {
       ]);
     });
 
-    it('returns correct key for scenario analytics', () => {
+    it('returns correct key for workflow analytics', () => {
       expect(
-        queryKeys.analytics.scenario('scen-123', '7d', 1, 'hourly')
-      ).toEqual(['analytics', 'scenario', 'scen-123', '7d', 1, 'hourly']);
+        queryKeys.analytics.workflow('scen-123', '7d', 1, 'hourly')
+      ).toEqual(['analytics', 'workflow', 'scen-123', '7d', 1, 'hourly']);
     });
 
-    it('returns correct key for scenario stats', () => {
-      expect(queryKeys.analytics.scenarioStats('scen-123', 2)).toEqual([
+    it('returns correct key for workflow stats', () => {
+      expect(queryKeys.analytics.workflowStats('scen-123', 2)).toEqual([
         'analytics',
-        'scenarioStats',
+        'workflowStats',
         'scen-123',
         2,
       ]);

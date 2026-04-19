@@ -1,6 +1,6 @@
 //! Execution Engine
 //!
-//! Single source of truth for scenario execution. Responsible for:
+//! Single source of truth for workflow execution. Responsible for:
 //! - Queuing async executions onto the Valkey trigger stream.
 //! - Running synchronous executions end-to-end via the Runtime client.
 //! - Proxying execution status / list / stop / pause / resume calls through
@@ -25,12 +25,12 @@ use uuid::Uuid;
 use runtara_management_sdk::{InstanceStatus, ListInstancesOptions, ListInstancesOrder};
 
 use crate::api::dto::executions::ExecutionFilters;
-use crate::api::dto::scenarios::{
-    PageScenarioInstanceHistoryDto, ScenarioInstanceDto, ValidationErrorDto,
-};
 use crate::api::dto::trigger_event::TriggerEvent;
-use crate::api::repositories::scenarios::{CompilationStatus, ScenarioRepository};
+use crate::api::dto::workflows::{
+    PageWorkflowInstanceHistoryDto, ValidationErrorDto, WorkflowInstanceDto,
+};
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
+use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository};
 use crate::api::services::input_validation::{is_empty_schema, validate_inputs};
 use crate::metrics::MetricsService;
 use crate::runtime_client::RuntimeClient;
@@ -40,7 +40,7 @@ use crate::workers::runtara_dto::{
     runtara_info_to_execution_with_metadata, runtara_instance_to_dto_with_info,
 };
 
-/// Result of scenario execution (native path; currently unused by the server).
+/// Result of workflow execution (native path; currently unused by the server).
 #[derive(Debug)]
 pub struct ExecutionResult {
     pub success: bool,
@@ -57,7 +57,7 @@ pub struct ExecutionResult {
 ///
 /// This is a superset of the previous `ExecutionError` (engine), the
 /// `ServiceError` in `api/services/executions.rs`, and the `ServiceError`
-/// from `api/services/scenarios.rs` that was reused by the sync path.
+/// from `api/services/workflows.rs` that was reused by the sync path.
 #[derive(Debug)]
 #[allow(dead_code)] // A few variants are reserved for handler migrations.
 pub enum ExecutionError {
@@ -67,12 +67,12 @@ pub enum ExecutionError {
         errors: Vec<ValidationErrorDto>,
     },
     NotFound(String),
-    ScenarioNotFound(String),
+    WorkflowNotFound(String),
     BinaryNotFound(String),
     CompilationFailed(String),
     CompilationTimeout(String),
     NotCompiled {
-        scenario_id: String,
+        workflow_id: String,
         version: i32,
         compilation_queued: bool,
     },
@@ -90,19 +90,19 @@ impl std::fmt::Display for ExecutionError {
                 write!(f, "Workflow validation failed: {}", message)
             }
             ExecutionError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            ExecutionError::ScenarioNotFound(msg) => write!(f, "Scenario not found: {}", msg),
+            ExecutionError::WorkflowNotFound(msg) => write!(f, "Workflow not found: {}", msg),
             ExecutionError::BinaryNotFound(msg) => write!(f, "Binary not found: {}", msg),
             ExecutionError::CompilationFailed(msg) => write!(f, "Compilation failed: {}", msg),
             ExecutionError::CompilationTimeout(msg) => write!(f, "Compilation timeout: {}", msg),
             ExecutionError::NotCompiled {
-                scenario_id,
+                workflow_id,
                 version,
                 compilation_queued,
             } => {
                 write!(
                     f,
-                    "Scenario '{}' version {} not compiled (compilation queued: {})",
-                    scenario_id, version, compilation_queued
+                    "Workflow '{}' version {} not compiled (compilation queued: {})",
+                    workflow_id, version, compilation_queued
                 )
             }
             ExecutionError::BundlePreparationFailed(msg) => {
@@ -128,7 +128,7 @@ impl ExecutionError {
             ExecutionError::ValidationError(_) => StatusCode::BAD_REQUEST,
             ExecutionError::WorkflowValidationError { .. } => StatusCode::BAD_REQUEST,
             ExecutionError::NotFound(_) => StatusCode::NOT_FOUND,
-            ExecutionError::ScenarioNotFound(_) => StatusCode::NOT_FOUND,
+            ExecutionError::WorkflowNotFound(_) => StatusCode::NOT_FOUND,
             ExecutionError::BinaryNotFound(_) => StatusCode::NOT_FOUND,
             ExecutionError::CompilationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::CompilationTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
@@ -153,10 +153,10 @@ pub enum TriggerSource {
     Cron,
 }
 
-/// Request to queue an async scenario execution onto the trigger stream.
+/// Request to queue an async workflow execution onto the trigger stream.
 pub struct QueueRequest<'a> {
     pub tenant_id: &'a str,
-    pub scenario_id: &'a str,
+    pub workflow_id: &'a str,
     pub version: Option<i32>,
     pub inputs: Value,
     pub debug: bool,
@@ -174,7 +174,7 @@ pub struct QueuedExecution {
 /// Request for synchronous execution via `ExecutionEngine::run_sync`.
 pub struct SyncRequest<'a> {
     pub tenant_id: &'a str,
-    pub scenario_id: &'a str,
+    pub workflow_id: &'a str,
     pub version: Option<i32>,
     pub inputs: Value,
 }
@@ -224,12 +224,12 @@ pub enum ResumeOutcome {
     NotResumable { status: String },
 }
 
-/// Inject `_scenario_id` into the inputs' variables to ensure cache key isolation.
+/// Inject `_workflow_id` into the inputs' variables to ensure cache key isolation.
 ///
-/// This prevents cache key collisions when different scenarios have StartScenario steps
-/// with the same step_id calling the same child scenario. The scenario_id becomes part
-/// of the cache key prefix, ensuring each scenario's child executions are isolated.
-fn inject_scenario_id(inputs: Value, scenario_id: &str) -> Value {
+/// This prevents cache key collisions when different workflows have EmbedWorkflow steps
+/// with the same step_id calling the same child workflow. The workflow_id becomes part
+/// of the cache key prefix, ensuring each workflow's child executions are isolated.
+fn inject_workflow_id(inputs: Value, workflow_id: &str) -> Value {
     let mut inputs = inputs;
     if let Some(obj) = inputs.as_object_mut() {
         // Get or create variables object
@@ -239,42 +239,42 @@ fn inject_scenario_id(inputs: Value, scenario_id: &str) -> Value {
 
         if let Some(vars_obj) = variables.as_object_mut() {
             vars_obj.insert(
-                "_scenario_id".to_string(),
-                serde_json::Value::String(scenario_id.to_string()),
+                "_workflow_id".to_string(),
+                serde_json::Value::String(workflow_id.to_string()),
             );
         }
     }
     inputs
 }
 
-/// Execution engine — the single orchestrator for scenario execution.
+/// Execution engine — the single orchestrator for workflow execution.
 pub struct ExecutionEngine {
     pool: PgPool,
-    scenario_repo: Arc<ScenarioRepository>,
+    workflow_repo: Arc<WorkflowRepository>,
     runtime_client: Option<Arc<RuntimeClient>>,
     trigger_stream: Option<Arc<TriggerStreamPublisher>>,
     #[allow(dead_code)] // Reserved for future in-memory cancellation tracking.
     running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
-    /// Tracks scenarios currently starting (prevents single_instance races).
-    starting_scenarios: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, scenario_id)
+    /// Tracks workflows currently starting (prevents single_instance races).
+    starting_workflows: Arc<Mutex<HashSet<(String, String)>>>, // (tenant_id, workflow_id)
 }
 
 impl ExecutionEngine {
     /// Create a new execution engine.
     pub fn new(
         pool: PgPool,
-        scenario_repo: Arc<ScenarioRepository>,
+        workflow_repo: Arc<WorkflowRepository>,
         runtime_client: Option<Arc<RuntimeClient>>,
         trigger_stream: Option<Arc<TriggerStreamPublisher>>,
         running_executions: Option<Arc<DashMap<Uuid, CancellationHandle>>>,
     ) -> Self {
         Self {
             pool,
-            scenario_repo,
+            workflow_repo,
             runtime_client,
             trigger_stream,
             running_executions,
-            starting_scenarios: Arc::new(Mutex::new(HashSet::new())),
+            starting_workflows: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -288,44 +288,44 @@ impl ExecutionEngine {
     // Async queuing
     // =========================================================================
 
-    /// Queue a scenario execution onto the Valkey trigger stream.
+    /// Queue a workflow execution onto the Valkey trigger stream.
     ///
-    /// Validates the scenario exists, validates inputs against the scenario's
+    /// Validates the workflow exists, validates inputs against the workflow's
     /// input schema (if non-empty), then publishes a `TriggerEvent` for the
     /// trigger worker to pick up.
     pub async fn queue(&self, req: QueueRequest<'_>) -> Result<QueuedExecution, ExecutionError> {
         // 1. Resolve version
         let version = self
-            .resolve_version(req.tenant_id, req.scenario_id, req.version)
+            .resolve_version(req.tenant_id, req.workflow_id, req.version)
             .await?;
 
-        // 2. Get scenario for input schema
-        let scenario = self
-            .scenario_repo
-            .get_by_id(req.tenant_id, req.scenario_id, Some(version))
+        // 2. Get workflow for input schema
+        let workflow = self
+            .workflow_repo
+            .get_by_id(req.tenant_id, req.workflow_id, Some(version))
             .await
-            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get scenario: {}", e)))?
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get workflow: {}", e)))?
             .ok_or_else(|| {
                 ExecutionError::NotFound(format!(
-                    "Scenario '{}' version {} not found",
-                    req.scenario_id, version
+                    "Workflow '{}' version {} not found",
+                    req.workflow_id, version
                 ))
             })?;
 
         // 3. Validate inputs.data against input schema
-        if !is_empty_schema(&scenario.input_schema) {
+        if !is_empty_schema(&workflow.input_schema) {
             let data_to_validate = req
                 .inputs
                 .get("data")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            validate_inputs(&data_to_validate, &scenario.input_schema).map_err(|e| {
+            validate_inputs(&data_to_validate, &workflow.input_schema).map_err(|e| {
                 ExecutionError::ValidationError(format!("Input validation failed: {}", e))
             })?;
         }
 
-        // 4. Get track_events (already have it from scenario)
-        let track_events = scenario.track_events;
+        // 4. Get track_events (already have it from workflow)
+        let track_events = workflow.track_events;
 
         // 5. Require trigger stream
         let trigger_stream = self.trigger_stream.as_ref().ok_or_else(|| {
@@ -352,7 +352,7 @@ impl ExecutionEngine {
             | TriggerSource::Cron => TriggerEvent::http_api(
                 instance_id.to_string(),
                 req.tenant_id.to_string(),
-                req.scenario_id.to_string(),
+                req.workflow_id.to_string(),
                 Some(version),
                 req.inputs,
                 track_events,
@@ -371,7 +371,7 @@ impl ExecutionEngine {
 
         info!(
             instance_id = %instance_id,
-            scenario_id = %req.scenario_id,
+            workflow_id = %req.workflow_id,
             version = version,
             "Published execution to trigger stream"
         );
@@ -386,54 +386,54 @@ impl ExecutionEngine {
     // Synchronous execution (http-sync path)
     // =========================================================================
 
-    /// Run a scenario synchronously, returning the full execution output.
+    /// Run a workflow synchronously, returning the full execution output.
     ///
     /// Blocks on compilation via `compilation_worker::wait_for_compilation`
     /// (max 5 minutes). Then starts an instance and waits for completion
     /// via `RuntimeClient::execute_sync`. Records metrics (including
     /// failures) before returning.
-    #[instrument(skip(self, req), fields(tenant_id = %req.tenant_id, scenario_id = %req.scenario_id))]
+    #[instrument(skip(self, req), fields(tenant_id = %req.tenant_id, workflow_id = %req.workflow_id))]
     pub async fn run_sync(&self, req: SyncRequest<'_>) -> Result<SyncExecution, ExecutionError> {
         let total_start = Instant::now();
         let runtime_client = self.runtime_client.as_ref().ok_or_else(|| {
             ExecutionError::NotConnected("Runtime client not configured".to_string())
         })?;
 
-        // 1. Resolve + 2. validate + cache scenario for track_events / schema
+        // 1. Resolve + 2. validate + cache workflow for track_events / schema
         let version = self
-            .resolve_version(req.tenant_id, req.scenario_id, req.version)
+            .resolve_version(req.tenant_id, req.workflow_id, req.version)
             .await?;
-        let scenario = self
-            .scenario_repo
-            .get_by_id(req.tenant_id, req.scenario_id, Some(version))
+        let workflow = self
+            .workflow_repo
+            .get_by_id(req.tenant_id, req.workflow_id, Some(version))
             .await
-            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get scenario: {}", e)))?
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get workflow: {}", e)))?
             .ok_or_else(|| {
                 ExecutionError::NotFound(format!(
-                    "Scenario '{}' version {} not found",
-                    req.scenario_id, version
+                    "Workflow '{}' version {} not found",
+                    req.workflow_id, version
                 ))
             })?;
 
-        if !is_empty_schema(&scenario.input_schema) {
+        if !is_empty_schema(&workflow.input_schema) {
             let data_to_validate = req
                 .inputs
                 .get("data")
                 .cloned()
                 .unwrap_or(serde_json::json!({}));
-            validate_inputs(&data_to_validate, &scenario.input_schema).map_err(|e| {
+            validate_inputs(&data_to_validate, &workflow.input_schema).map_err(|e| {
                 ExecutionError::ValidationError(format!("Input validation failed: {}", e))
             })?;
         }
 
         // 3. Block on compilation readiness (delegated to compilation worker)
-        self.wait_for_compilation_blocking(req.tenant_id, req.scenario_id, version)
+        self.wait_for_compilation_blocking(req.tenant_id, req.workflow_id, version)
             .await?;
 
         // 4. Execution timeout
         let execution_timeout = self
-            .scenario_repo
-            .get_execution_timeout(req.tenant_id, req.scenario_id, version)
+            .workflow_repo
+            .get_execution_timeout(req.tenant_id, req.workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
@@ -441,16 +441,16 @@ impl ExecutionEngine {
 
         // 5. Image ID
         let image_id = self
-            .scenario_repo
-            .get_registered_image_id(req.tenant_id, req.scenario_id, version)
+            .workflow_repo
+            .get_registered_image_id(req.tenant_id, req.workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
             })?
             .ok_or_else(|| {
                 ExecutionError::NotFound(format!(
-                    "Scenario '{}' version {} not registered with runtara-environment. Recompile it.",
-                    req.scenario_id, version
+                    "Workflow '{}' version {} not registered with runtara-environment. Recompile it.",
+                    req.workflow_id, version
                 ))
             })?;
 
@@ -459,7 +459,7 @@ impl ExecutionEngine {
             .execute_sync(
                 &image_id,
                 req.tenant_id,
-                req.scenario_id,
+                req.workflow_id,
                 None, // auto-generate instance id
                 Some(req.inputs),
                 execution_timeout.map(|s| s as u32),
@@ -470,7 +470,7 @@ impl ExecutionEngine {
         let total_duration = total_start.elapsed().as_secs_f64();
 
         // 7. Metrics + result shaping
-        let metrics_service = MetricsService::new(self.scenario_repo.pool().clone());
+        let metrics_service = MetricsService::new(self.workflow_repo.pool().clone());
 
         match execution_result {
             Ok(result) => {
@@ -482,7 +482,7 @@ impl ExecutionEngine {
                 let _ = metrics_service
                     .record_execution_completion(
                         req.tenant_id,
-                        req.scenario_id,
+                        req.workflow_id,
                         version,
                         result.success,
                         execution_duration_secs,
@@ -492,7 +492,7 @@ impl ExecutionEngine {
 
                 info!(
                     tenant_id = req.tenant_id,
-                    scenario_id = req.scenario_id,
+                    workflow_id = req.workflow_id,
                     version = version,
                     execution_duration_seconds = execution_duration_secs,
                     total_duration_seconds = total_duration,
@@ -517,7 +517,7 @@ impl ExecutionEngine {
                 let _ = metrics_service
                     .record_execution_completion(
                         req.tenant_id,
-                        req.scenario_id,
+                        req.workflow_id,
                         version,
                         false,
                         total_duration,
@@ -527,7 +527,7 @@ impl ExecutionEngine {
 
                 info!(
                     tenant_id = req.tenant_id,
-                    scenario_id = req.scenario_id,
+                    workflow_id = req.workflow_id,
                     version = version,
                     error = error_message.as_str(),
                     total_duration_seconds = total_duration,
@@ -553,34 +553,34 @@ impl ExecutionEngine {
     // Async detached execution (trigger worker path)
     // =========================================================================
 
-    /// Execute a scenario in fire-and-forget mode for distributed execution.
+    /// Execute a workflow in fire-and-forget mode for distributed execution.
     ///
-    /// 1. Ensures the scenario is compiled
+    /// 1. Ensures the workflow is compiled
     /// 2. Starts an instance via the Management SDK (non-blocking)
     /// 3. Returns immediately without waiting for completion
     ///
     /// The instance will run on the runtara-environment server.
     /// Use `get_instance_status` to poll for completion.
-    #[instrument(skip(self, event), fields(instance_id = %event.instance_id, scenario_id = %event.scenario_id))]
+    #[instrument(skip(self, event), fields(instance_id = %event.instance_id, workflow_id = %event.workflow_id))]
     pub async fn execute_detached(&self, event: &TriggerEvent) -> Result<String, ExecutionError> {
-        // Mark scenario as starting (for single_instance race condition prevention)
-        let scenario_key = (event.tenant_id.clone(), event.scenario_id.clone());
+        // Mark workflow as starting (for single_instance race condition prevention)
+        let workflow_key = (event.tenant_id.clone(), event.workflow_id.clone());
         {
-            let mut starting = self.starting_scenarios.lock().await;
-            starting.insert(scenario_key.clone());
+            let mut starting = self.starting_workflows.lock().await;
+            starting.insert(workflow_key.clone());
         }
 
-        // Execute and clean up starting_scenarios on completion (success or error)
+        // Execute and clean up starting_workflows on completion (success or error)
         let result = self.execute_detached_inner(event).await;
 
-        // Keep the scenario in starting_scenarios for a grace period to prevent race conditions
+        // Keep the workflow in starting_workflows for a grace period to prevent race conditions
         // This ensures the database record has time to be created before we allow another instance
-        let starting_scenarios = self.starting_scenarios.clone();
-        let key = scenario_key.clone();
+        let starting_workflows = self.starting_workflows.clone();
+        let key = workflow_key.clone();
         tokio::spawn(async move {
             // Wait for DB record creation (execution typically takes 100-500ms to register)
             tokio::time::sleep(Duration::from_millis(1000)).await;
-            let mut starting = starting_scenarios.lock().await;
+            let mut starting = starting_workflows.lock().await;
             starting.remove(&key);
         });
 
@@ -597,15 +597,15 @@ impl ExecutionEngine {
         let version = match event.version {
             Some(v) => v,
             None => {
-                self.resolve_version(&event.tenant_id, &event.scenario_id, None)
+                self.resolve_version(&event.tenant_id, &event.workflow_id, None)
                     .await?
             }
         };
 
         // Fetch execution timeout from executionGraph (if set)
         let execution_timeout_secs = self
-            .scenario_repo
-            .get_execution_timeout(&event.tenant_id, &event.scenario_id, version)
+            .workflow_repo
+            .get_execution_timeout(&event.tenant_id, &event.workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to get execution timeout: {}", e))
@@ -613,17 +613,17 @@ impl ExecutionEngine {
             .map(|secs| secs as u32)
             .unwrap_or(3600); // Default 1 hour timeout
 
-        // Ensure scenario is compiled (non-blocking: returns NotCompiled for retry)
-        self.ensure_compiled(&event.tenant_id, &event.scenario_id, version)
+        // Ensure workflow is compiled (non-blocking: returns NotCompiled for retry)
+        self.ensure_compiled(&event.tenant_id, &event.workflow_id, version)
             .await?;
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
-        // from the API layer - inject _scenario_id for cache key isolation
-        let scenario_input = inject_scenario_id(event.inputs.clone(), &event.scenario_id);
+        // from the API layer - inject _workflow_id for cache key isolation
+        let workflow_input = inject_workflow_id(event.inputs.clone(), &event.workflow_id);
 
         // Get the registered image ID (UUID returned from runtara-environment)
         let image_id = self
-            .get_registered_image_id(&event.tenant_id, &event.scenario_id, version)
+            .get_registered_image_id(&event.tenant_id, &event.workflow_id, version)
             .await?;
 
         // Start instance (non-blocking)
@@ -631,9 +631,9 @@ impl ExecutionEngine {
             .start_instance(
                 &image_id,
                 &event.tenant_id,
-                &event.scenario_id,
+                &event.workflow_id,
                 Some(event.instance_id.clone()),
-                Some(scenario_input),
+                Some(workflow_input),
                 Some(execution_timeout_secs),
                 event.debug,
             )
@@ -648,7 +648,7 @@ impl ExecutionEngine {
                 {
                     tracing::warn!(
                         tenant_id = %event.tenant_id,
-                        scenario_id = %event.scenario_id,
+                        workflow_id = %event.workflow_id,
                         version = version,
                         image_id = %image_id,
                         "Image not found in runtara-environment - deleting stale compilation record for recompilation"
@@ -656,9 +656,9 @@ impl ExecutionEngine {
 
                     // Delete the stale compilation record so it will be recompiled
                     let _ = sqlx::query!(
-                        "DELETE FROM scenario_compilations WHERE tenant_id = $1 AND scenario_id = $2 AND version = $3",
+                        "DELETE FROM workflow_compilations WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3",
                         &event.tenant_id,
-                        &event.scenario_id,
+                        &event.workflow_id,
                         version
                     )
                     .execute(&self.pool)
@@ -666,7 +666,7 @@ impl ExecutionEngine {
 
                     // Return NotCompiled to trigger recompilation queue
                     return Err(ExecutionError::NotCompiled {
-                        scenario_id: event.scenario_id.clone(),
+                        workflow_id: event.workflow_id.clone(),
                         version,
                         compilation_queued: false,
                     });
@@ -677,7 +677,7 @@ impl ExecutionEngine {
 
         info!(
             instance_id = %started_id,
-            scenario_id = %event.scenario_id,
+            workflow_id = %event.workflow_id,
             version = version,
             "Started instance in detached mode"
         );
@@ -712,22 +712,22 @@ impl ExecutionEngine {
         Ok(result.map(|r| r.single_instance))
     }
 
-    /// Check if there's a running instance of a scenario.
+    /// Check if there's a running instance of a workflow.
     ///
-    /// Returns `true` if at least one running instance exists for the scenario.
+    /// Returns `true` if at least one running instance exists for the workflow.
     /// Used for `single_instance` trigger enforcement.
     ///
     /// Checks both:
-    /// 1. In-memory `starting_scenarios` set (for instances being launched)
+    /// 1. In-memory `starting_workflows` set (for instances being launched)
     /// 2. Runtara Management SDK for running instances
     pub async fn has_running_instance(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
     ) -> Result<bool, ExecutionError> {
         {
-            let starting = self.starting_scenarios.lock().await;
-            if starting.contains(&(tenant_id.to_string(), scenario_id.to_string())) {
+            let starting = self.starting_workflows.lock().await;
+            if starting.contains(&(tenant_id.to_string(), workflow_id.to_string())) {
                 return Ok(true);
             }
         }
@@ -743,7 +743,7 @@ impl ExecutionEngine {
         let result = runtime_client
             .list_instances_with_options(
                 ListInstancesOptions::new()
-                    .with_image_name_prefix(format!("{}:", scenario_id))
+                    .with_image_name_prefix(format!("{}:", workflow_id))
                     .with_status(InstanceStatus::Running)
                     .with_limit(1),
             )
@@ -763,7 +763,7 @@ impl ExecutionEngine {
     pub async fn get_execution(
         &self,
         instance_id: &str,
-    ) -> Result<ScenarioInstanceDto, ExecutionError> {
+    ) -> Result<WorkflowInstanceDto, ExecutionError> {
         let client = self.require_runtime_client()?;
 
         let info = client.get_instance_info(instance_id).await.map_err(|e| {
@@ -777,10 +777,10 @@ impl ExecutionEngine {
         Ok(runtara_info_to_dto(info))
     }
 
-    /// Get an execution enriched with scenario metadata.
+    /// Get an execution enriched with workflow metadata.
     pub async fn get_execution_with_metadata(
         &self,
-        scenario_id: &str,
+        workflow_id: &str,
         instance_id: &str,
         tenant_id: &str,
     ) -> Result<ExecutionWithMetadata, ExecutionError> {
@@ -796,75 +796,75 @@ impl ExecutionEngine {
             let error_str = e.to_string();
             warn!(
                 instance_id = %instance_id,
-                scenario_id = %scenario_id,
+                workflow_id = %workflow_id,
                 error = %error_str,
                 "Failed to get instance info from Runtara"
             );
             if error_str.contains("not found") || error_str.contains("InstanceNotFound") {
                 ExecutionError::NotFound(format!(
-                    "Instance '{}' not found for scenario '{}'",
-                    instance_id, scenario_id
+                    "Instance '{}' not found for workflow '{}'",
+                    instance_id, workflow_id
                 ))
             } else {
                 ExecutionError::DatabaseError(format!("Failed to get instance from Runtara: {}", e))
             }
         })?;
 
-        // Verify the instance belongs to the expected scenario by checking image_name
-        let expected_prefix = format!("{}:", scenario_id);
+        // Verify the instance belongs to the expected workflow by checking image_name
+        let expected_prefix = format!("{}:", workflow_id);
         debug!(
             instance_id = %instance_id,
             image_name = %info.image_name,
             image_id = %info.image_id,
             expected_prefix = %expected_prefix,
-            "Checking instance scenario match"
+            "Checking instance workflow match"
         );
         if !info.image_name.starts_with(&expected_prefix) {
             warn!(
                 instance_id = %instance_id,
                 image_name = %info.image_name,
                 expected_prefix = %expected_prefix,
-                "Instance image_name does not match expected scenario prefix"
+                "Instance image_name does not match expected workflow prefix"
             );
             return Err(ExecutionError::NotFound(format!(
-                "Instance '{}' not found for scenario '{}'",
-                instance_id, scenario_id
+                "Instance '{}' not found for workflow '{}'",
+                instance_id, workflow_id
             )));
         }
 
-        let scenario = self
-            .scenario_repo
-            .get_by_id(tenant_id, scenario_id, None)
+        let workflow = self
+            .workflow_repo
+            .get_by_id(tenant_id, workflow_id, None)
             .await
-            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get scenario: {}", e)))?;
+            .map_err(|e| ExecutionError::DatabaseError(format!("Failed to get workflow: {}", e)))?;
 
-        let (scenario_name, scenario_description) = match scenario {
+        let (workflow_name, workflow_description) = match workflow {
             Some(s) => (Some(s.name), Some(s.description)),
             None => (None, None),
         };
 
         let mut result =
-            runtara_info_to_execution_with_metadata(info, scenario_name, scenario_description);
+            runtara_info_to_execution_with_metadata(info, workflow_name, workflow_description);
         enrich_pending_input(std::slice::from_mut(&mut result.instance), client).await;
 
         Ok(result)
     }
 
-    /// List executions for a specific scenario (with pagination).
+    /// List executions for a specific workflow (with pagination).
     pub async fn list_executions(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         page: Option<i32>,
         size: Option<i32>,
-    ) -> Result<PageScenarioInstanceHistoryDto, ExecutionError> {
+    ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
         let page = page.unwrap_or(0).max(0);
         let size = size.unwrap_or(10).clamp(1, 100);
 
         let client = self.require_runtime_client()?;
 
-        // Image names follow pattern: {scenario_id}:{version}
-        let image_name_prefix = format!("{}:", scenario_id);
+        // Image names follow pattern: {workflow_id}:{version}
+        let image_name_prefix = format!("{}:", workflow_id);
 
         let options = ListInstancesOptions::new()
             .with_tenant_id(tenant_id)
@@ -874,7 +874,7 @@ impl ExecutionEngine {
 
         debug!(
             tenant_id = %tenant_id,
-            scenario_id = %scenario_id,
+            workflow_id = %workflow_id,
             image_name_prefix = %image_name_prefix,
             page = page,
             size = size,
@@ -888,22 +888,22 @@ impl ExecutionEngine {
                 ExecutionError::DatabaseError(format!("Failed to query Runtara: {}", e))
             })?;
 
-        // Fetch the scenario name directly (we already know the scenario id)
-        let scenario_name = match self
-            .scenario_repo
-            .get_scenario_names_bulk(tenant_id, &[scenario_id.to_string()])
+        // Fetch the workflow name directly (we already know the workflow id)
+        let workflow_name = match self
+            .workflow_repo
+            .get_workflow_names_bulk(tenant_id, &[workflow_id.to_string()])
             .await
         {
             Ok(names) => names
-                .get(scenario_id)
+                .get(workflow_id)
                 .map(|(name, _)| name.clone())
                 .filter(|n| !n.is_empty()),
             Err(e) => {
                 warn!(
                     tenant_id = %tenant_id,
-                    scenario_id = %scenario_id,
+                    workflow_id = %workflow_id,
                     error = %e,
-                    "Failed to fetch scenario name"
+                    "Failed to fetch workflow name"
                 );
                 None
             }
@@ -920,15 +920,15 @@ impl ExecutionEngine {
 
         let version_info: std::collections::HashMap<String, i32> = if !image_ids.is_empty() {
             match self
-                .scenario_repo
-                .get_scenario_info_by_image_ids(tenant_id, &image_ids)
+                .workflow_repo
+                .get_workflow_info_by_image_ids(tenant_id, &image_ids)
                 .await
             {
                 Ok(info) => info.into_iter().map(|(k, (_, ver, _))| (k, ver)).collect(),
                 Err(e) => {
                     warn!(
                         tenant_id = %tenant_id,
-                        scenario_id = %scenario_id,
+                        workflow_id = %workflow_id,
                         error = %e,
                         "Failed to fetch version info for executions list"
                     );
@@ -939,16 +939,16 @@ impl ExecutionEngine {
             std::collections::HashMap::new()
         };
 
-        let mut instances: Vec<ScenarioInstanceDto> = result
+        let mut instances: Vec<WorkflowInstanceDto> = result
             .instances
             .into_iter()
             .map(|inst| {
                 let version = version_info.get(&inst.image_id).copied().unwrap_or(0);
                 runtara_instance_to_dto_with_info(
                     inst,
-                    scenario_id.to_string(),
+                    workflow_id.to_string(),
                     version,
-                    scenario_name.clone(),
+                    workflow_name.clone(),
                 )
             })
             .collect();
@@ -963,7 +963,7 @@ impl ExecutionEngine {
         };
         let number_of_elements = instances.len() as i32;
 
-        Ok(PageScenarioInstanceHistoryDto {
+        Ok(PageWorkflowInstanceHistoryDto {
             content: instances,
             total_pages,
             total_elements,
@@ -975,14 +975,14 @@ impl ExecutionEngine {
         })
     }
 
-    /// List all executions across all scenarios with filtering, sorting, and pagination.
+    /// List all executions across all workflows with filtering, sorting, and pagination.
     pub async fn list_all_executions(
         &self,
         tenant_id: &str,
         page: Option<i32>,
         size: Option<i32>,
         filters: ExecutionFilters,
-    ) -> Result<PageScenarioInstanceHistoryDto, ExecutionError> {
+    ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
         let page = page.unwrap_or(0).max(0);
         let size = size.unwrap_or(20).clamp(1, 100);
 
@@ -993,8 +993,8 @@ impl ExecutionEngine {
             .with_limit(size as u32)
             .with_offset((page * size) as u32);
 
-        if let Some(ref scenario_id) = filters.scenario_id {
-            let image_name_prefix = format!("{}:", scenario_id);
+        if let Some(ref workflow_id) = filters.workflow_id {
+            let image_name_prefix = format!("{}:", workflow_id);
             options = options.with_image_name_prefix(&image_name_prefix);
         }
 
@@ -1032,7 +1032,7 @@ impl ExecutionEngine {
             tenant_id = %tenant_id,
             page = page,
             size = size,
-            scenario_id_filter = ?filters.scenario_id,
+            workflow_id_filter = ?filters.workflow_id,
             status_filter = ?filters.statuses,
             created_from = ?filters.created_from,
             created_to = ?filters.created_to,
@@ -1056,11 +1056,11 @@ impl ExecutionEngine {
             .into_iter()
             .collect();
 
-        let scenario_info: std::collections::HashMap<String, (String, i32, String)> =
+        let workflow_info: std::collections::HashMap<String, (String, i32, String)> =
             if !image_ids.is_empty() {
                 match self
-                    .scenario_repo
-                    .get_scenario_info_by_image_ids(tenant_id, &image_ids)
+                    .workflow_repo
+                    .get_workflow_info_by_image_ids(tenant_id, &image_ids)
                     .await
                 {
                     Ok(info) => info,
@@ -1068,7 +1068,7 @@ impl ExecutionEngine {
                         warn!(
                             tenant_id = %tenant_id,
                             error = %e,
-                            "Failed to fetch scenario info for executions list"
+                            "Failed to fetch workflow info for executions list"
                         );
                         std::collections::HashMap::new()
                     }
@@ -1077,7 +1077,7 @@ impl ExecutionEngine {
                 std::collections::HashMap::new()
             };
 
-        let scenario_ids_needing_names: Vec<String> = scenario_info
+        let workflow_ids_needing_names: Vec<String> = workflow_info
             .values()
             .filter(|(_, _, name)| name.is_empty())
             .map(|(sid, _, _)| sid.clone())
@@ -1086,11 +1086,11 @@ impl ExecutionEngine {
             .into_iter()
             .collect();
 
-        let scenario_names: std::collections::HashMap<String, String> =
-            if !scenario_ids_needing_names.is_empty() {
+        let workflow_names: std::collections::HashMap<String, String> =
+            if !workflow_ids_needing_names.is_empty() {
                 match self
-                    .scenario_repo
-                    .get_scenario_names_bulk(tenant_id, &scenario_ids_needing_names)
+                    .workflow_repo
+                    .get_workflow_names_bulk(tenant_id, &workflow_ids_needing_names)
                     .await
                 {
                     Ok(names) => names
@@ -1102,7 +1102,7 @@ impl ExecutionEngine {
                         warn!(
                             tenant_id = %tenant_id,
                             error = %e,
-                            "Failed to fetch scenario names"
+                            "Failed to fetch workflow names"
                         );
                         std::collections::HashMap::new()
                     }
@@ -1111,15 +1111,15 @@ impl ExecutionEngine {
                 std::collections::HashMap::new()
             };
 
-        let mut instances: Vec<ScenarioInstanceDto> = result
+        let mut instances: Vec<WorkflowInstanceDto> = result
             .instances
             .into_iter()
             .map(|inst| {
-                let (scenario_id, version, scenario_name) = scenario_info
+                let (workflow_id, version, workflow_name) = workflow_info
                     .get(&inst.image_id)
                     .map(|(sid, ver, name)| {
                         let final_name = if name.is_empty() {
-                            scenario_names.get(sid).cloned()
+                            workflow_names.get(sid).cloned()
                         } else {
                             Some(name.clone())
                         };
@@ -1127,7 +1127,7 @@ impl ExecutionEngine {
                     })
                     .unwrap_or_else(|| (String::new(), 0, None));
 
-                runtara_instance_to_dto_with_info(inst, scenario_id, version, scenario_name)
+                runtara_instance_to_dto_with_info(inst, workflow_id, version, workflow_name)
             })
             .collect();
 
@@ -1141,7 +1141,7 @@ impl ExecutionEngine {
         };
         let number_of_elements = instances.len() as i32;
 
-        Ok(PageScenarioInstanceHistoryDto {
+        Ok(PageWorkflowInstanceHistoryDto {
             content: instances,
             total_pages,
             total_elements,
@@ -1297,23 +1297,23 @@ impl ExecutionEngine {
         })
     }
 
-    /// Resolve an explicit or current/latest version for a scenario.
+    /// Resolve an explicit or current/latest version for a workflow.
     async fn resolve_version(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: Option<i32>,
     ) -> Result<i32, ExecutionError> {
         match version {
             Some(v) if v > 0 => Ok(v),
             Some(_) => Err(ExecutionError::NotFound(format!(
-                "Scenario '{}' has no versions",
-                scenario_id
+                "Workflow '{}' has no versions",
+                workflow_id
             ))),
             None => {
                 let resolved = self
-                    .scenario_repo
-                    .get_current_or_latest_version(tenant_id, scenario_id)
+                    .workflow_repo
+                    .get_current_or_latest_version(tenant_id, workflow_id)
                     .await
                     .map_err(|e| {
                         ExecutionError::DatabaseError(format!(
@@ -1322,13 +1322,13 @@ impl ExecutionEngine {
                         ))
                     })?
                     .ok_or_else(|| {
-                        ExecutionError::NotFound(format!("Scenario '{}' not found", scenario_id))
+                        ExecutionError::NotFound(format!("Workflow '{}' not found", workflow_id))
                     })?;
 
                 if resolved == 0 {
                     return Err(ExecutionError::NotFound(format!(
-                        "Scenario '{}' has no versions",
-                        scenario_id
+                        "Workflow '{}' has no versions",
+                        workflow_id
                     )));
                 }
 
@@ -1337,38 +1337,38 @@ impl ExecutionEngine {
         }
     }
 
-    /// Get the registered image ID for a compiled scenario.
+    /// Get the registered image ID for a compiled workflow.
     async fn get_registered_image_id(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: i32,
     ) -> Result<String, ExecutionError> {
-        self.scenario_repo
-            .get_registered_image_id(tenant_id, scenario_id, version)
+        self.workflow_repo
+            .get_registered_image_id(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to get registered image ID: {}", e))
             })?
             .ok_or_else(|| {
                 ExecutionError::BinaryNotFound(format!(
-                    "Scenario '{}' version {} not registered with runtara-environment. Recompile it.",
-                    scenario_id, version
+                    "Workflow '{}' version {} not registered with runtara-environment. Recompile it.",
+                    workflow_id, version
                 ))
             })
     }
 
-    /// Ensure the scenario is compiled (non-blocking: queues compilation if
+    /// Ensure the workflow is compiled (non-blocking: queues compilation if
     /// needed and returns `NotCompiled` for the caller to retry).
     async fn ensure_compiled(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: i32,
     ) -> Result<(), ExecutionError> {
         let status = self
-            .scenario_repo
-            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .workflow_repo
+            .ensure_compilation_ready(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
@@ -1386,7 +1386,7 @@ impl ExecutionEngine {
                 let is_pending = crate::workers::compilation_worker::is_compilation_pending(
                     &redis_url,
                     tenant_id,
-                    scenario_id,
+                    workflow_id,
                     version,
                 )
                 .await
@@ -1395,7 +1395,7 @@ impl ExecutionEngine {
                 if is_pending {
                     info!(
                         tenant_id = %tenant_id,
-                        scenario_id = %scenario_id,
+                        workflow_id = %workflow_id,
                         version = version,
                         "Compilation already pending, returning NotCompiled for retry"
                     );
@@ -1403,15 +1403,15 @@ impl ExecutionEngine {
                 } else {
                     info!(
                         tenant_id = %tenant_id,
-                        scenario_id = %scenario_id,
+                        workflow_id = %workflow_id,
                         version = version,
-                        "Scenario not compiled, queueing compilation..."
+                        "Workflow not compiled, queueing compilation..."
                     );
 
                     match crate::workers::compilation_worker::enqueue_compilation(
                         &redis_url,
                         tenant_id,
-                        scenario_id,
+                        workflow_id,
                         version,
                     )
                     .await
@@ -1419,7 +1419,7 @@ impl ExecutionEngine {
                         Ok(queued) => {
                             info!(
                                 tenant_id = %tenant_id,
-                                scenario_id = %scenario_id,
+                                workflow_id = %workflow_id,
                                 version = version,
                                 queued = queued,
                                 "Compilation queued, returning NotCompiled for retry"
@@ -1429,7 +1429,7 @@ impl ExecutionEngine {
                         Err(e) => {
                             tracing::warn!(
                                 tenant_id = %tenant_id,
-                                scenario_id = %scenario_id,
+                                workflow_id = %workflow_id,
                                 version = version,
                                 error = %e,
                                 "Failed to queue compilation"
@@ -1441,7 +1441,7 @@ impl ExecutionEngine {
             } else {
                 tracing::warn!(
                     tenant_id = %tenant_id,
-                    scenario_id = %scenario_id,
+                    workflow_id = %workflow_id,
                     version = version,
                     "Valkey not configured, cannot queue compilation"
                 );
@@ -1449,7 +1449,7 @@ impl ExecutionEngine {
             };
 
         Err(ExecutionError::NotCompiled {
-            scenario_id: scenario_id.to_string(),
+            workflow_id: workflow_id.to_string(),
             version,
             compilation_queued,
         })
@@ -1461,12 +1461,12 @@ impl ExecutionEngine {
     async fn wait_for_compilation_blocking(
         &self,
         tenant_id: &str,
-        scenario_id: &str,
+        workflow_id: &str,
         version: i32,
     ) -> Result<(), ExecutionError> {
         let status = self
-            .scenario_repo
-            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .workflow_repo
+            .ensure_compilation_ready(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
@@ -1479,8 +1479,8 @@ impl ExecutionEngine {
             Some(v) => v,
             None => {
                 return Err(ExecutionError::NotFound(format!(
-                    "Scenario '{}' version {} not compiled and Valkey is not configured for auto-compilation.",
-                    scenario_id, version
+                    "Workflow '{}' version {} not compiled and Valkey is not configured for auto-compilation.",
+                    workflow_id, version
                 )));
             }
         };
@@ -1489,7 +1489,7 @@ impl ExecutionEngine {
         let is_pending = crate::workers::compilation_worker::is_compilation_pending(
             &redis_url,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
         )
         .await
@@ -1498,21 +1498,21 @@ impl ExecutionEngine {
         if is_pending {
             info!(
                 tenant_id = %tenant_id,
-                scenario_id = %scenario_id,
+                workflow_id = %workflow_id,
                 version = version,
                 "Compilation pending, waiting for it to complete..."
             );
         } else {
             info!(
                 tenant_id = %tenant_id,
-                scenario_id = %scenario_id,
+                workflow_id = %workflow_id,
                 version = version,
-                "Scenario not compiled, queueing compilation..."
+                "Workflow not compiled, queueing compilation..."
             );
             match crate::workers::compilation_worker::enqueue_compilation(
                 &redis_url,
                 tenant_id,
-                scenario_id,
+                workflow_id,
                 version,
             )
             .await
@@ -1520,15 +1520,15 @@ impl ExecutionEngine {
                 Ok(_) => {
                     info!(
                         tenant_id = %tenant_id,
-                        scenario_id = %scenario_id,
+                        workflow_id = %workflow_id,
                         version = version,
                         "Compilation queued, waiting for it to complete..."
                     );
                 }
                 Err(e) => {
                     return Err(ExecutionError::CompilationFailed(format!(
-                        "Failed to queue compilation for scenario '{}' version {}: {}",
-                        scenario_id, version, e
+                        "Failed to queue compilation for workflow '{}' version {}: {}",
+                        workflow_id, version, e
                     )));
                 }
             }
@@ -1539,7 +1539,7 @@ impl ExecutionEngine {
         let completed = crate::workers::compilation_worker::wait_for_compilation(
             &redis_url,
             tenant_id,
-            scenario_id,
+            workflow_id,
             version,
             timeout,
         )
@@ -1548,14 +1548,14 @@ impl ExecutionEngine {
 
         if !completed {
             return Err(ExecutionError::CompilationTimeout(format!(
-                "Compilation for scenario '{}' version {} timed out after 5 minutes.",
-                scenario_id, version
+                "Compilation for workflow '{}' version {} timed out after 5 minutes.",
+                workflow_id, version
             )));
         }
 
         let status_after = self
-            .scenario_repo
-            .ensure_compilation_ready(tenant_id, scenario_id, version)
+            .workflow_repo
+            .ensure_compilation_ready(tenant_id, workflow_id, version)
             .await
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
@@ -1564,8 +1564,8 @@ impl ExecutionEngine {
             Ok(())
         } else {
             Err(ExecutionError::CompilationFailed(format!(
-                "Compilation for scenario '{}' version {} completed but binary not found.",
-                scenario_id, version
+                "Compilation for workflow '{}' version {} completed but binary not found.",
+                workflow_id, version
             )))
         }
     }
@@ -1581,20 +1581,20 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_execution_error_display_scenario_not_found() {
-        let error = ExecutionError::ScenarioNotFound("test-scenario".to_string());
-        assert_eq!(format!("{}", error), "Scenario not found: test-scenario");
+    fn test_execution_error_display_workflow_not_found() {
+        let error = ExecutionError::WorkflowNotFound("test-workflow".to_string());
+        assert_eq!(format!("{}", error), "Workflow not found: test-workflow");
     }
 
     #[test]
     fn test_execution_error_display_not_compiled() {
         let error = ExecutionError::NotCompiled {
-            scenario_id: "test-scenario".to_string(),
+            workflow_id: "test-workflow".to_string(),
             version: 5,
             compilation_queued: true,
         };
         let display = format!("{}", error);
-        assert!(display.contains("test-scenario"));
+        assert!(display.contains("test-workflow"));
         assert!(display.contains("5"));
         assert!(display.contains("true"));
     }
@@ -1616,7 +1616,7 @@ mod tests {
     #[test]
     fn test_execution_error_http_status_not_compiled() {
         let err = ExecutionError::NotCompiled {
-            scenario_id: "s".into(),
+            workflow_id: "s".into(),
             version: 1,
             compilation_queued: false,
         };

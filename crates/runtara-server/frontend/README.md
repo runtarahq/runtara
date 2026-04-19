@@ -54,7 +54,7 @@ server overrides them.
 
 ```
 src/
-├── features/   # domain modules (scenarios, connections, objects, triggers, …)
+├── features/   # domain modules (workflows, connections, objects, triggers, …)
 ├── shared/     # cross-feature UI, hooks, stores, queries, config
 ├── generated/  # swagger-typescript-api output — do not hand-edit
 ├── router/     # React Router definitions

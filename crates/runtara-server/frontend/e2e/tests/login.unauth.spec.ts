@@ -43,7 +43,7 @@ test.describe('Login Page (Unauthenticated)', () => {
 
 test.describe('Protected Routes (Unauthenticated)', () => {
   const protectedRoutes = [
-    '/scenarios',
+    '/workflows',
     '/connections',
     '/invocation-triggers',
     '/analytics',

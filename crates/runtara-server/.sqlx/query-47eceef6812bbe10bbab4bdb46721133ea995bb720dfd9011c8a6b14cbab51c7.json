@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE workflow_definitions\n            SET definition = $4, file_size = $5, updated_at = NOW()\n            WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4",
+        "Jsonb",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d1ff9330c74f48489f61f7a053cd7d0b27f8b1f07da3bbbd376d78709e30ae46"
+}

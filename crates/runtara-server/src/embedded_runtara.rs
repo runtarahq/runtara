@@ -72,7 +72,7 @@ impl EmbeddedRuntara {
         let persistence: Arc<dyn Persistence> =
             Arc::new(PostgresPersistence::new(config.pool.clone()));
 
-        // Start Core (instance protocol - scenarios connect here via HTTP)
+        // Start Core (instance protocol - workflows connect here via HTTP)
         let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);
         info!(addr = %core_http_addr, "Starting runtara-core...");
         let core = CoreRuntime::builder()
@@ -83,17 +83,17 @@ impl EmbeddedRuntara {
             .await?;
         info!("✓ runtara-core started on {}", core_http_addr);
 
-        // Create WASM runner for scenario execution.
-        // Scenarios are compiled to wasm32-wasip2 and executed via wasmtime.
+        // Create WASM runner for workflow execution.
+        // Workflows are compiled to wasm32-wasip2 and executed via wasmtime.
         let runner: Arc<dyn runtara_environment::runner::Runner> =
             Arc::new(runtara_environment::runner::wasm::WasmRunner::new(
                 runtara_environment::runner::wasm::WasmRunnerConfig::from_env(),
                 persistence.clone(),
             ));
-        info!("Using WasmRunner for scenario execution");
+        info!("Using WasmRunner for workflow execution");
 
         // Start Environment (management protocol)
-        // Note: core_client_addr is what scenario processes use to connect to runtara-core.
+        // Note: core_client_addr is what workflow processes use to connect to runtara-core.
         // On Linux (OCI + pasta): localhost in container routes to host.
         // On other platforms (native): process runs on host directly.
         // Start Environment (management protocol via HTTP)

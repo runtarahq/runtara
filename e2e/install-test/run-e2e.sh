@@ -2,7 +2,7 @@
 # End-to-end install test
 #
 # Spins up postgres + valkey + runtara-server (from the latest release bundle),
-# creates a one-step "random-double" scenario, executes it, and verifies the
+# creates a one-step "random-double" workflow, executes it, and verifies the
 # result is a valid number.
 #
 # Usage:
@@ -74,27 +74,27 @@ VALUES (
 
 info "API key created"
 
-# ─── Create scenario ────────────────────────────────────────────────────────
+# ─── Create workflow ────────────────────────────────────────────────────────
 
-info "Creating scenario..."
-CREATE_RESP=$(curl -sf "$API/api/runtime/scenarios/create" \
+info "Creating workflow..."
+CREATE_RESP=$(curl -sf "$API/api/runtime/workflows/create" \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
         "name": "E2E Random Double Test",
-        "description": "One-step scenario that generates a random double",
+        "description": "One-step workflow that generates a random double",
         "trackEvents": true
-    }') || fail "Failed to create scenario: $(echo "$CREATE_RESP" 2>/dev/null)"
+    }') || fail "Failed to create workflow: $(echo "$CREATE_RESP" 2>/dev/null)"
 
-SCENARIO_ID=$(echo "$CREATE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null) \
-    || fail "Failed to parse scenario ID from: $CREATE_RESP"
+WORKFLOW_ID=$(echo "$CREATE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null) \
+    || fail "Failed to parse workflow ID from: $CREATE_RESP"
 
-info "Scenario created: $SCENARIO_ID"
+info "Workflow created: $WORKFLOW_ID"
 
 # ─── Update with execution graph ────────────────────────────────────────────
 
-info "Updating scenario with random-double execution graph..."
-UPDATE_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/update" \
+info "Updating workflow with random-double execution graph..."
+UPDATE_RESP=$(curl -sf "$API/api/runtime/workflows/${WORKFLOW_ID}/update" \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
@@ -132,50 +132,50 @@ UPDATE_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/update" \
             "outputSchema": {}
         },
         "trackEvents": true
-    }') || fail "Failed to update scenario: $(echo "$UPDATE_RESP" 2>/dev/null)"
+    }') || fail "Failed to update workflow: $(echo "$UPDATE_RESP" 2>/dev/null)"
 
-info "Scenario updated"
+info "Workflow updated"
 
 # ─── Wait for compilation ────────────────────────────────────────────────────
 
-info "Waiting for scenario compilation (async)..."
+info "Waiting for workflow compilation (async)..."
 # Compilation is asynchronous via the compilation worker.
 # Poll the compile endpoint until compilation succeeds.
 for i in $(seq 1 60); do
     # Try to trigger compilation explicitly
-    curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/compile" \
+    curl -sf "$API/api/runtime/workflows/${WORKFLOW_ID}/compile" \
         -X POST \
         -H "Authorization: Bearer $API_KEY" \
         -H "Content-Type: application/json" > /dev/null 2>&1 || true
 
     # Try executing — if it returns 200, compilation is done
-    EXEC_TEST=$(curl -s -o /dev/null -w "%{http_code}" "$API/api/runtime/scenarios/${SCENARIO_ID}/execute" \
+    EXEC_TEST=$(curl -s -o /dev/null -w "%{http_code}" "$API/api/runtime/workflows/${WORKFLOW_ID}/execute" \
         -X POST \
         -H "Authorization: Bearer $API_KEY" \
         -H "Content-Type: application/json" \
         -d '{"inputs": {"data": {}}, "debug": false}' 2>/dev/null) || true
 
     if [ "$EXEC_TEST" = "200" ]; then
-        info "Scenario compiled and execution started"
+        info "Workflow compiled and execution started"
         break
     fi
 
     if [ "$i" -eq 60 ]; then
-        fail "Scenario compilation/execution did not succeed within 60s (last HTTP status: ${EXEC_TEST:-unknown})"
+        fail "Workflow compilation/execution did not succeed within 60s (last HTTP status: ${EXEC_TEST:-unknown})"
     fi
     sleep 1
 done
 
-# ─── Execute scenario ───────────────────────────────────────────────────────
+# ─── Execute workflow ───────────────────────────────────────────────────────
 
 info "Fetching execution result..."
-EXEC_RESP=$(curl -sf "$API/api/runtime/scenarios/${SCENARIO_ID}/execute" \
+EXEC_RESP=$(curl -sf "$API/api/runtime/workflows/${WORKFLOW_ID}/execute" \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
         "inputs": { "data": {} },
         "debug": false
-    }') || fail "Failed to execute scenario: $(echo "$EXEC_RESP" 2>/dev/null)"
+    }') || fail "Failed to execute workflow: $(echo "$EXEC_RESP" 2>/dev/null)"
 
 INSTANCE_ID=$(echo "$EXEC_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('instanceId', d.get('data',{}).get('instance_id','')))" 2>/dev/null) \
     || fail "Failed to parse instance ID from: $EXEC_RESP"
@@ -211,7 +211,7 @@ else:
             RESULT="$STATUS_RESP"
             break
         elif [ "$STATUS" = "failed" ]; then
-            fail "Scenario execution failed"
+            fail "Workflow execution failed"
         fi
     fi
 
@@ -233,7 +233,7 @@ RANDOM_VALUE=$(docker compose exec -T postgres psql -U runtara -d runtara -t -A 
 if [ -n "$RANDOM_VALUE" ] && python3 -c "v=float('$RANDOM_VALUE'); assert 0.0 <= v <= 1.0" 2>/dev/null; then
     pass "Random double returned: $RANDOM_VALUE (valid number in [0, 1])"
 else
-    pass "Scenario compiled and executed successfully (step output: ${RANDOM_VALUE:-unknown})"
+    pass "Workflow compiled and executed successfully (step output: ${RANDOM_VALUE:-unknown})"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
@@ -242,6 +242,6 @@ echo ""
 pass "E2E install test passed!"
 echo "  - Installed runtara-server from GitHub release bundle"
 echo "  - Started with PostgreSQL 16 + Valkey 7.2"
-echo "  - Created and compiled a one-step scenario"
-echo "  - Executed scenario, result: ${RANDOM_VALUE:-completed}"
+echo "  - Created and compiled a one-step workflow"
+echo "  - Executed workflow, result: ${RANDOM_VALUE:-completed}"
 echo ""

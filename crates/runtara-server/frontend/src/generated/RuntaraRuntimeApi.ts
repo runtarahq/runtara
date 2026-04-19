@@ -105,7 +105,7 @@ export enum RateLimitEventType {
   Retry = "retry",
 }
 
-/** Memory allocation tier for scenario execution */
+/** Memory allocation tier for workflow execution */
 export enum MemoryTier {
   S = "S",
   M = "M",
@@ -121,7 +121,7 @@ export enum LogLevel {
   Error = "error",
 }
 
-/** Execution status representing the current state of a scenario execution */
+/** Execution status representing the current state of a workflow execution */
 export enum ExecutionStatus {
   Queued = "queued",
   Compiling = "compiling",
@@ -317,7 +317,7 @@ export interface AiAgentConfig {
    * via the provider's structured output feature (e.g., OpenAI `response_format`,
    * Anthropic `response_format`).
    *
-   * Uses the same `SchemaField` format as scenario `inputSchema`/`outputSchema`.
+   * Uses the same `SchemaField` format as workflow `inputSchema`/`outputSchema`.
    *
    * Example:
    * ```json
@@ -373,7 +373,7 @@ export interface AiAgentMemory {
  *
  * The AI Agent step uses an LLM to autonomously decide which tools to call.
  * Tools are defined as labeled edges in the execution plan, each pointing to
- * a concrete step (Agent, StartScenario, WaitForSignal). The LLM picks which
+ * a concrete step (Agent, EmbedWorkflow, WaitForSignal). The LLM picks which
  * tool/branch to execute, collects the result, and loops until it produces a
  * final text response or reaches max_iterations.
  *
@@ -455,10 +455,10 @@ export interface ApiResponseInvocationTrigger {
      */
     remote_tenant_id?: string | null;
     /**
-     * Reference to the scenario to be invoked
-     * @example "scenario-456"
+     * Reference to the workflow to be invoked
+     * @example "workflow-456"
      */
-    scenario_id: string;
+    workflow_id: string;
     /**
      * Whether only a single instance of this trigger should run at a time
      * @example false
@@ -482,11 +482,11 @@ export interface ApiResponseInvocationTrigger {
 }
 
 /** Generic API response wrapper */
-export interface ApiResponseMoveScenarioResponse {
-  /** Response for move scenario operation */
+export interface ApiResponseMoveWorkflowResponse {
+  /** Response for move workflow operation */
   data: {
     path: string;
-    scenarioId: string;
+    workflowId: string;
     success: boolean;
   };
   message: string;
@@ -494,10 +494,10 @@ export interface ApiResponseMoveScenarioResponse {
 }
 
 /** Generic API response wrapper */
-export interface ApiResponsePageScenarioDto {
-  /** Paginated response for scenario listings (matches Spring Boot Page format) */
+export interface ApiResponsePageWorkflowDto {
+  /** Paginated response for workflow listings (matches Spring Boot Page format) */
   data: {
-    content: ScenarioDto[];
+    content: WorkflowDto[];
     first: boolean;
     last: boolean;
     /**
@@ -525,11 +525,11 @@ export interface ApiResponseRenameFolderResponse {
     newPath: string;
     oldPath: string;
     /**
-     * Number of scenarios updated
+     * Number of workflows updated
      * @format int64
      * @min 0
      */
-    scenariosUpdated: number;
+    workflowsUpdated: number;
     success: boolean;
   };
   message: string;
@@ -537,11 +537,11 @@ export interface ApiResponseRenameFolderResponse {
 }
 
 /** Generic API response wrapper */
-export interface ApiResponseScenarioDto {
+export interface ApiResponseWorkflowDto {
   data: {
     created: string;
     /**
-     * The active/current version that will be used when executing this scenario
+     * The active/current version that will be used when executing this workflow
      * Can be set explicitly via the set-current-version endpoint, otherwise defaults to latest_version
      * @format int32
      */
@@ -556,14 +556,14 @@ export interface ApiResponseScenarioDto {
     id: string;
     inputSchema: any;
     /**
-     * The highest version number that exists for this scenario
+     * The highest version number that exists for this workflow
      * @format int32
      */
     lastVersionNumber: number;
-    /** Memory allocation tier for scenario execution */
+    /** Memory allocation tier for workflow execution */
     memoryTier?: MemoryTier;
     name: string;
-    /** Visual notes/annotations for the scenario canvas */
+    /** Visual notes/annotations for the workflow canvas */
     notes?: Note[];
     outputSchema: any;
     /**
@@ -613,10 +613,10 @@ export interface ApiResponseVecInvocationTrigger {
      */
     remote_tenant_id?: string | null;
     /**
-     * Reference to the scenario to be invoked
-     * @example "scenario-456"
+     * Reference to the workflow to be invoked
+     * @example "workflow-456"
      */
-    scenario_id: string;
+    workflow_id: string;
     /**
      * Whether only a single instance of this trigger should run at a time
      * @example false
@@ -640,7 +640,7 @@ export interface ApiResponseVecInvocationTrigger {
 }
 
 /** Generic API response wrapper */
-export interface ApiResponseVecScenarioVersionInfoDto {
+export interface ApiResponseVecWorkflowVersionInfoDto {
   data: {
     /** Whether this version has been compiled */
     compiled: boolean;
@@ -649,7 +649,7 @@ export interface ApiResponseVecScenarioVersionInfoDto {
     createdAt: string;
     /** Whether this is the current/active version used for execution */
     isActive: boolean;
-    scenarioId: string;
+    workflowId: string;
     /** Whether step-event tracking is enabled for this version */
     trackEvents: boolean;
     updatedAt: string;
@@ -681,7 +681,7 @@ export interface BulkDeleteResponse {
 
 /**
  * API-compatible capability field info.
- * Used for agent inputs and scenario input/output schemas.
+ * Used for agent inputs and workflow input/output schemas.
  */
 export interface CapabilityField {
   default?: any;
@@ -736,14 +736,14 @@ export interface CapabilityInfo {
 
 /** Request body for starting a chat session with an initial message */
 export interface ChatRequest {
-  /** Input data for the scenario (merged with message) */
+  /** Input data for the workflow (merged with message) */
   data?: any;
   /** User message to send to the AI agent */
   message: string;
-  /** Variables for the scenario */
+  /** Variables for the workflow */
   variables?: any;
   /**
-   * Scenario version to execute (defaults to current)
+   * Workflow version to execute (defaults to current)
    * @format int32
    */
   version?: number | null;
@@ -751,12 +751,12 @@ export interface ChatRequest {
 
 /** Request body for starting a chat session without an initial message */
 export interface ChatStartRequest {
-  /** Input data for the scenario */
+  /** Input data for the workflow */
   data?: any;
-  /** Variables for the scenario */
+  /** Variables for the workflow */
   variables?: any;
   /**
-   * Scenario version to execute (defaults to current)
+   * Workflow version to execute (defaults to current)
    * @format int32
    */
   version?: number | null;
@@ -778,10 +778,10 @@ export interface CheckpointMetadataDto {
   stepId?: string | null;
 }
 
-/** Child scenario version specification */
+/** Child workflow version specification */
 export type ChildVersion = string | number;
 
-export interface CloneScenarioRequest {
+export interface CloneWorkflowRequest {
   name: string;
 }
 
@@ -879,12 +879,12 @@ export interface CompensationHintInfo {
   description?: string | null;
 }
 
-export interface CompileScenarioResponse {
+export interface CompileWorkflowResponse {
   binaryChecksum: string;
   /** @min 0 */
   binarySize: number;
   message: string;
-  scenarioId: string;
+  workflowId: string;
   success: boolean;
   timestamp: string;
   translatedPath: string;
@@ -1127,10 +1127,10 @@ export interface CreateInvocationTriggerRequest {
    */
   remote_tenant_id?: string | null;
   /**
-   * Reference to the scenario to be invoked
-   * @example "scenario-456"
+   * Reference to the workflow to be invoked
+   * @example "workflow-456"
    */
-  scenario_id: string;
+  workflow_id: string;
   /**
    * Whether only a single instance of this trigger should run at a time
    * @example false
@@ -1140,11 +1140,11 @@ export interface CreateInvocationTriggerRequest {
   trigger_type: TriggerType;
 }
 
-export interface CreateScenarioRequest {
+export interface CreateWorkflowRequest {
   description: string;
   memoryTier?: null | MemoryTier;
   name: string;
-  /** Enable step-event tracking for this scenario version (default: true) */
+  /** Enable step-event tracking for this workflow version (default: true) */
   trackEvents?: boolean | null;
 }
 
@@ -1381,10 +1381,10 @@ export interface ExecuteAgentRequest {
   connectionId?: string | null;
   /** Agent-specific input data (structure depends on the agent/capability). */
   inputs: any;
-  /** Instance ID of the calling scenario (for tracing/logging). */
+  /** Instance ID of the calling workflow (for tracing/logging). */
   instanceId?: string | null;
   /**
-   * Tenant ID of the calling scenario.
+   * Tenant ID of the calling workflow.
    * Used as fallback if not available from auth context.
    */
   tenantId?: string | null;
@@ -1405,7 +1405,7 @@ export interface ExecuteAgentResponse {
   success: boolean;
 }
 
-export interface ExecuteScenarioRequest {
+export interface ExecuteWorkflowRequest {
   /**
    * When true, enables debug mode: execution pauses at steps with breakpoints.
    * Use the resume endpoint to continue execution to the next breakpoint.
@@ -1414,17 +1414,17 @@ export interface ExecuteScenarioRequest {
   inputs: any;
 }
 
-export interface ExecuteScenarioResponse {
+export interface ExecuteWorkflowResponse {
   instanceId: string;
   status: string;
 }
 
 /** The execution graph containing all steps and control flow */
 export interface ExecutionGraph {
-  /** Detailed description of what the scenario does */
+  /** Detailed description of what the workflow does */
   description?: string | null;
   /**
-   * UI edge positions for the visual scenario editor.
+   * UI edge positions for the visual workflow editor.
    * This is opaque data managed by the UI - the runtime does not interpret this field.
    * Typically contains an array of edge objects connecting nodes.
    * Not used in compilation or execution.
@@ -1435,14 +1435,14 @@ export interface ExecutionGraph {
   /** Ordered list of step transitions defining control flow */
   executionPlan?: ExecutionPlanEdge[];
   /**
-   * Schema defining expected input data structure for this scenario.
+   * Schema defining expected input data structure for this workflow.
    * Keys are field names, values define the field type and constraints.
    */
   inputSchema?: Partial<Record<string, SchemaField>>;
-  /** Human-readable name for the scenario */
+  /** Human-readable name for the workflow */
   name?: string | null;
   /**
-   * UI node positions for the visual scenario editor.
+   * UI node positions for the visual workflow editor.
    * This is opaque data managed by the UI - the runtime does not interpret this field.
    * Typically contains an array of node objects with position coordinates.
    * Not used in compilation or execution.
@@ -1451,14 +1451,14 @@ export interface ExecutionGraph {
   /** Visual annotations for UI (not used in compilation) */
   notes?: Note[] | null;
   /**
-   * Schema defining output data structure for this scenario.
+   * Schema defining output data structure for this workflow.
    * Keys are field names, values define the field type and constraints.
    */
   outputSchema?: Partial<Record<string, SchemaField>>;
   /**
    * Maximum cumulative time (in milliseconds) that rate-limited retries may
-   * durable-sleep before giving up.  Applies to all steps in this scenario.
-   * Default: 60 000 (1 minute).  Set higher for scenarios that make many
+   * durable-sleep before giving up.  Applies to all steps in this workflow.
+   * Default: 60 000 (1 minute).  Set higher for workflows that make many
    * calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
    * @format int64
    * @min 0
@@ -1566,7 +1566,7 @@ export interface FieldTypeInfo {
 
 /**
  * Base64-encoded file data structure.
- * Used for file inputs/outputs in scenarios and operators.
+ * Used for file inputs/outputs in workflows and operators.
  */
 export interface FileData {
   /** Base64-encoded file content */
@@ -1680,13 +1680,13 @@ export interface FilterStep {
   name?: string | null;
 }
 
-/** Exit point step - defines scenario outputs */
+/** Exit point step - defines workflow outputs */
 export interface FinishStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
   /** Unique step identifier */
   id: string;
-  /** Maps scenario data to output values */
+  /** Maps workflow data to output values */
   inputMapping?: null | HashMap;
   /** Human-readable step name */
   name?: string | null;
@@ -1874,10 +1874,10 @@ export interface InvocationTrigger {
    */
   remote_tenant_id?: string | null;
   /**
-   * Reference to the scenario to be invoked
-   * @example "scenario-456"
+   * Reference to the workflow to be invoked
+   * @example "workflow-456"
    */
-  scenario_id: string;
+  workflow_id: string;
   /**
    * Whether only a single instance of this trigger should run at a time
    * @example false
@@ -1916,7 +1916,7 @@ export interface ListAgentsResponse {
 
 /** Response for listing all executions */
 export interface ListAllExecutionsResponse {
-  data: PageScenarioInstanceHistoryDto;
+  data: PageWorkflowInstanceHistoryDto;
   success: boolean;
 }
 
@@ -2083,11 +2083,11 @@ export interface MemoryInfo {
    */
   availableBytes: number;
   /**
-   * Memory available for scenarios (80% of available, 20% reserved for runtime)
+   * Memory available for workflows (80% of available, 20% reserved for runtime)
    * @format int64
    * @min 0
    */
-  availableForScenariosBytes: number;
+  availableForWorkflowsBytes: number;
   /**
    * Total system memory in bytes
    * @format int64
@@ -2112,8 +2112,8 @@ export interface MetricsResponse {
   success: boolean;
 }
 
-/** Request to move a scenario to a different folder */
-export interface MoveScenarioRequest {
+/** Request to move a workflow to a different folder */
+export interface MoveWorkflowRequest {
   /**
    * Target folder path (e.g., "/Sales/Shopify/")
    * Must start and end with "/"
@@ -2121,10 +2121,10 @@ export interface MoveScenarioRequest {
   path: string;
 }
 
-/** Response for move scenario operation */
-export interface MoveScenarioResponse {
+/** Response for move workflow operation */
+export interface MoveWorkflowResponse {
   path: string;
-  scenarioId: string;
+  workflowId: string;
   success: boolean;
 }
 
@@ -2139,7 +2139,7 @@ export interface NotImplementedResponse {
   success: boolean;
 }
 
-/** Visual note/annotation for scenario canvas */
+/** Visual note/annotation for workflow canvas */
 export interface Note {
   /** Note text content */
   content: string;
@@ -2186,9 +2186,9 @@ export interface OutputField {
   type: string;
 }
 
-/** Paginated response for scenario listings (matches Spring Boot Page format) */
-export interface PageScenarioDto {
-  content: ScenarioDto[];
+/** Paginated response for workflow listings (matches Spring Boot Page format) */
+export interface PageWorkflowDto {
+  content: WorkflowDto[];
   first: boolean;
   last: boolean;
   /**
@@ -2206,8 +2206,8 @@ export interface PageScenarioDto {
   totalPages: number;
 }
 
-export interface PageScenarioInstanceHistoryDto {
-  content: ScenarioInstanceDto[];
+export interface PageWorkflowInstanceHistoryDto {
+  content: WorkflowInstanceDto[];
   first: boolean;
   last: boolean;
   /** @format int32 */
@@ -2491,13 +2491,13 @@ export interface RateLimitTimelineResponse {
  * Paths use dot notation: "data.user.name", "steps.step1.outputs.items", "variables.counter"
  *
  * Available root contexts:
- * - `data` - Current iteration data (in Split) or scenario input data
- * - `variables` - Scenario variables (user-defined + built-in)
+ * - `data` - Current iteration data (in Split) or workflow input data
+ * - `variables` - Workflow variables (user-defined + built-in)
  * - `steps.<stepId>.outputs` - Outputs from a previous step
- * - `scenario.inputs` - Original scenario inputs
+ * - `workflow.inputs` - Original workflow inputs
  *
  * Built-in variables (available in all steps, including subgraphs):
- * - `variables._scenario_id` - Unique per execution: "{scenario_id}::{instance_id}"
+ * - `variables._workflow_id` - Unique per execution: "{workflow_id}::{instance_id}"
  * - `variables._instance_id` - Execution instance UUID
  * - `variables._tenant_id` - Tenant identifier
  *
@@ -2520,7 +2520,7 @@ export interface ReferenceValue {
   value: string;
 }
 
-/** Request to rename a folder (updates all scenarios in that folder and subfolders) */
+/** Request to rename a folder (updates all workflows in that folder and subfolders) */
 export interface RenameFolderRequest {
   /** New folder path (e.g., "/Revenue/") */
   newPath: string;
@@ -2533,28 +2533,28 @@ export interface RenameFolderResponse {
   newPath: string;
   oldPath: string;
   /**
-   * Number of scenarios updated
+   * Number of workflows updated
    * @format int64
    * @min 0
    */
-  scenariosUpdated: number;
+  workflowsUpdated: number;
   success: boolean;
 }
 
-/** Complete scenario definition */
-export interface Scenario {
+/** Complete workflow definition */
+export interface Workflow {
   /** The execution graph containing all steps */
   executionGraph: ExecutionGraph;
-  /** Memory allocation tier for scenario execution */
+  /** Memory allocation tier for workflow execution */
   memoryTier?: null | MemoryTier;
   /** Enable step-level debug instrumentation */
   trackEvents?: boolean | null;
 }
 
-export interface ScenarioDto {
+export interface WorkflowDto {
   created: string;
   /**
-   * The active/current version that will be used when executing this scenario
+   * The active/current version that will be used when executing this workflow
    * Can be set explicitly via the set-current-version endpoint, otherwise defaults to latest_version
    * @format int32
    */
@@ -2569,14 +2569,14 @@ export interface ScenarioDto {
   id: string;
   inputSchema: any;
   /**
-   * The highest version number that exists for this scenario
+   * The highest version number that exists for this workflow
    * @format int32
    */
   lastVersionNumber: number;
-  /** Memory allocation tier for scenario execution */
+  /** Memory allocation tier for workflow execution */
   memoryTier?: MemoryTier;
   name: string;
-  /** Visual notes/annotations for the scenario canvas */
+  /** Visual notes/annotations for the workflow canvas */
   notes?: Note[];
   outputSchema: any;
   /**
@@ -2592,7 +2592,7 @@ export interface ScenarioDto {
   variables?: any;
 }
 
-export interface ScenarioInstanceDto {
+export interface WorkflowInstanceDto {
   created: string;
   /** @format double */
   executionDurationSeconds?: number | null;
@@ -2607,12 +2607,12 @@ export interface ScenarioInstanceDto {
   processingOverheadSeconds?: number | null;
   /** @format double */
   queueDurationSeconds?: number | null;
-  scenarioId: string;
-  /** Scenario name (populated when listing all executions) */
-  scenarioName?: string | null;
+  workflowId: string;
+  /** Workflow name (populated when listing all executions) */
+  workflowName?: string | null;
   /** Current execution status */
   status: ExecutionStatus;
-  steps?: ScenarioStepDto[];
+  steps?: WorkflowStepDto[];
   tags?: string[];
   /** Reason for termination (set for all terminal states including successful completion) */
   terminationType?: null | TerminationType;
@@ -2622,7 +2622,7 @@ export interface ScenarioInstanceDto {
 }
 
 /** Daily aggregated metrics */
-export interface ScenarioMetricsDaily {
+export interface WorkflowMetricsDaily {
   /** @format double */
   avgDurationSeconds?: number | null;
   /** @format double */
@@ -2653,7 +2653,7 @@ export interface ScenarioMetricsDaily {
   minProcessingOverheadSeconds?: number | null;
   /** @format double */
   minQueueDurationSeconds?: number | null;
-  scenarioId: string;
+  workflowId: string;
   /** @format int64 */
   successCount?: number | null;
   /** @format double */
@@ -2665,29 +2665,29 @@ export interface ScenarioMetricsDaily {
   version: number;
 }
 
-/** Response for scenario metrics (daily) */
-export interface ScenarioMetricsDailyResponse {
-  /** Response data for scenario metrics endpoint */
-  data: ScenarioMetricsData;
+/** Response for workflow metrics (daily) */
+export interface WorkflowMetricsDailyResponse {
+  /** Response data for workflow metrics endpoint */
+  data: WorkflowMetricsData;
   message: string;
   success: boolean;
 }
 
-/** Response data for scenario metrics endpoint */
-export interface ScenarioMetricsData {
+/** Response data for workflow metrics endpoint */
+export interface WorkflowMetricsData {
   /** @format date-time */
   endTime: string;
   granularity: string;
-  metrics: ScenarioMetricsDaily[];
-  scenarioId: string;
+  metrics: WorkflowMetricsDaily[];
+  workflowId: string;
   /** @format date-time */
   startTime: string;
   /** @format int32 */
   version?: number | null;
 }
 
-/** Hourly metrics for a scenario */
-export interface ScenarioMetricsHourly {
+/** Hourly metrics for a workflow */
+export interface WorkflowMetricsHourly {
   /** @format date-time */
   created_at: string;
   /** @format int32 */
@@ -2714,7 +2714,7 @@ export interface ScenarioMetricsHourly {
   min_processing_overhead_seconds?: number | null;
   /** @format double */
   min_queue_duration_seconds?: number | null;
-  scenario_id: string;
+  workflow_id: string;
   side_effect_counts: any;
   /** @format int32 */
   success_count: number;
@@ -2735,29 +2735,29 @@ export interface ScenarioMetricsHourly {
   version: number;
 }
 
-/** Response data for scenario metrics hourly endpoint */
-export interface ScenarioMetricsHourlyData {
+/** Response data for workflow metrics hourly endpoint */
+export interface WorkflowMetricsHourlyData {
   /** @format date-time */
   endTime: string;
   granularity: string;
-  metrics: ScenarioMetricsHourly[];
-  scenarioId: string;
+  metrics: WorkflowMetricsHourly[];
+  workflowId: string;
   /** @format date-time */
   startTime: string;
   /** @format int32 */
   version?: number | null;
 }
 
-/** Response for scenario metrics (hourly) */
-export interface ScenarioMetricsHourlyResponse {
-  /** Response data for scenario metrics hourly endpoint */
-  data: ScenarioMetricsHourlyData;
+/** Response for workflow metrics (hourly) */
+export interface WorkflowMetricsHourlyResponse {
+  /** Response data for workflow metrics hourly endpoint */
+  data: WorkflowMetricsHourlyData;
   message: string;
   success: boolean;
 }
 
-/** Overall scenario statistics */
-export interface ScenarioStats {
+/** Overall workflow statistics */
+export interface WorkflowStats {
   /** @format double */
   avgDurationSeconds?: number | null;
   /** @format double */
@@ -2803,23 +2803,23 @@ export interface ScenarioStats {
 }
 
 /** Statistics data */
-export interface ScenarioStatsData {
-  scenarioId: string;
-  /** Overall scenario statistics */
-  stats: ScenarioStats;
+export interface WorkflowStatsData {
+  workflowId: string;
+  /** Overall workflow statistics */
+  stats: WorkflowStats;
   /** @format int32 */
   version?: number | null;
 }
 
-/** Response for scenario statistics */
-export interface ScenarioStatsResponse {
+/** Response for workflow statistics */
+export interface WorkflowStatsResponse {
   /** Statistics data */
-  data: ScenarioStatsData;
+  data: WorkflowStatsData;
   message: string;
   success: boolean;
 }
 
-export interface ScenarioStepDto {
+export interface WorkflowStepDto {
   connectionDataId?: string | null;
   created: string;
   /** @format int64 */
@@ -2834,7 +2834,7 @@ export interface ScenarioStepDto {
   maxDepth?: number | null;
   nextStepId?: string | null;
   outputs?: any;
-  scenarioInstanceId?: string | null;
+  workflowInstanceId?: string | null;
   started?: string | null;
   stepLabel?: string | null;
   stepName?: string | null;
@@ -2843,7 +2843,7 @@ export interface ScenarioStepDto {
   updated: string;
 }
 
-export interface ScenarioVersionInfoDto {
+export interface WorkflowVersionInfoDto {
   /** Whether this version has been compiled */
   compiled: boolean;
   /** Timestamp when this version was compiled (RFC3339 format, null if not compiled) */
@@ -2851,7 +2851,7 @@ export interface ScenarioVersionInfoDto {
   createdAt: string;
   /** Whether this is the current/active version used for execution */
   isActive: boolean;
-  scenarioId: string;
+  workflowId: string;
   /** Whether step-event tracking is enabled for this version */
   trackEvents: boolean;
   updatedAt: string;
@@ -2884,7 +2884,7 @@ export interface SchemaColumnInfo {
 /**
  * A field definition for input/output schemas.
  *
- * Used to define the structure of scenario inputs and outputs.
+ * Used to define the structure of workflow inputs and outputs.
  * The field name is the key in the HashMap.
  *
  * ## Form rendering extensions
@@ -3030,17 +3030,17 @@ export interface SplitStep {
   subgraph: ExecutionGraph;
 }
 
-/** Executes a nested child scenario */
-export interface StartScenarioStep {
+/** Executes a nested child workflow */
+export interface EmbedWorkflowStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
-  /** ID of the child scenario to execute */
-  childScenarioId: string;
-  /** Version of child scenario ("latest" or specific version number) */
+  /** ID of the child workflow to execute */
+  childWorkflowId: string;
+  /** Version of child workflow ("latest" or specific version number) */
   childVersion: ChildVersion;
   /** Unique step identifier */
   id: string;
-  /** Maps parent data to child scenario inputs */
+  /** Maps parent data to child workflow inputs */
   inputMapping?: null | HashMap;
   /**
    * Maximum retry attempts (default: 3)
@@ -3081,8 +3081,8 @@ export type Step =
   | (SwitchStep & {
       stepType: "Switch";
     })
-  | (StartScenarioStep & {
-      stepType: "StartScenario";
+  | (EmbedWorkflowStep & {
+      stepType: "EmbedWorkflow";
     })
   | (WhileStep & {
       stepType: "While";
@@ -3137,7 +3137,7 @@ export interface StepEvent {
   sequence: number;
   /** Step status: "running", "completed", "failed" */
   status: string;
-  /** Step identifier from scenario definition */
+  /** Step identifier from workflow definition */
   stepId: string;
   /** Step type (Agent, Conditional, Split, etc.) */
   stepType: string;
@@ -3185,7 +3185,7 @@ export interface StepEventsData {
   count: number;
   events: StepEvent[];
   instanceId: string;
-  scenarioId: string;
+  workflowId: string;
 }
 
 /** Response wrapper for step events with total count */
@@ -3212,7 +3212,7 @@ export interface StepEventsResponseData {
    * @min 0
    */
   offset: number;
-  scenarioId: string;
+  workflowId: string;
   /**
    * @format int32
    * @min 0
@@ -3254,7 +3254,7 @@ export interface StepSummariesResponseData {
    * @min 0
    */
   offset: number;
-  scenarioId: string;
+  workflowId: string;
   steps: StepSummaryResponse[];
   /**
    * @format int32
@@ -3376,10 +3376,10 @@ export interface SystemAnalyticsResponse {
  * Templates support full minijinja syntax: variable interpolation, filters, conditionals, loops.
  *
  * Available context variables (same as reference resolution):
- * - `data.*` — scenario input data
- * - `variables.*` — scenario variables
+ * - `data.*` — workflow input data
+ * - `variables.*` — workflow variables
  * - `steps.<id>.outputs.*` — previous step outputs
- * - `scenario.inputs.*` — original scenario inputs
+ * - `workflow.inputs.*` — original workflow inputs
  *
  * Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
  * With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
@@ -3503,10 +3503,10 @@ export interface UpdateInvocationTriggerRequest {
    */
   remote_tenant_id?: string | null;
   /**
-   * Reference to the scenario to be invoked
-   * @example "scenario-456"
+   * Reference to the workflow to be invoked
+   * @example "workflow-456"
    */
-  scenario_id: string;
+  workflow_id: string;
   /**
    * Whether only a single instance of this trigger should run at a time
    * @example false
@@ -3516,14 +3516,14 @@ export interface UpdateInvocationTriggerRequest {
   trigger_type: TriggerType;
 }
 
-export interface UpdateScenarioRequest {
+export interface UpdateWorkflowRequest {
   /**
-   * The execution graph containing scenario definition.
+   * The execution graph containing workflow definition.
    * Must include 'name' and optionally 'description' fields.
    */
   executionGraph: any;
   memoryTier?: null | MemoryTier;
-  /** Enable step-event tracking for this scenario version (optional, keeps existing if not provided) */
+  /** Enable step-event tracking for this workflow version (optional, keeps existing if not provided) */
   trackEvents?: boolean | null;
 }
 
@@ -3540,7 +3540,7 @@ export interface UpdateSchemaResponse {
 }
 
 export interface UpdateTrackEventsRequest {
-  /** Enable or disable step-event tracking for this scenario version */
+  /** Enable or disable step-event tracking for this workflow version */
   trackEvents: boolean;
 }
 
@@ -3572,7 +3572,7 @@ export interface ValidationErrorDto {
 /**
  * A typed variable definition with its value.
  *
- * Variables are static values available during scenario execution
+ * Variables are static values available during workflow execution
  * via the `variables.*` path in mappings.
  */
 export interface Variable {
@@ -3584,7 +3584,7 @@ export interface Variable {
   value: any;
 }
 
-/** Response containing schemas from a specific scenario version's execution graph */
+/** Response containing schemas from a specific workflow version's execution graph */
 export interface VersionSchemasResponse {
   /** Input schema definition from the execution graph */
   inputSchema: any;
@@ -3620,7 +3620,7 @@ export interface VisibleWhen {
  *
  * This step pauses workflow execution until an external system sends a signal
  * with the matching signal_id. The signal_id is auto-generated based on the
- * step's position in the workflow (instance_id + scenario context + step_id + loop indices).
+ * step's position in the workflow (instance_id + workflow context + step_id + loop indices).
  *
  * The `on_wait` subgraph executes immediately when the step starts waiting,
  * allowing the workflow to notify external systems of the signal_id they should
@@ -3683,7 +3683,7 @@ export interface WaitForSignalStep {
   pollIntervalMs?: number | null;
   /**
    * Schema describing the expected response from the human/external system.
-   * Uses the same flat-map format as scenario `inputSchema`.
+   * Uses the same flat-map format as workflow `inputSchema`.
    *
    * Examples:
    * - Confirm: `{"approved": {"type": "boolean", "required": true}}`
@@ -3928,7 +3928,7 @@ export class HttpClient<SecurityDataType = unknown> {
  * @version 1
  * @license AGPL-3.0-or-later
  *
- * API for managing scenario definitions with versioning support
+ * API for managing workflow definitions with versioning support
  */
 export class Api<
   SecurityDataType extends unknown,
@@ -3951,7 +3951,7 @@ export class Api<
       }),
 
     /**
-     * @description Scenario instances call this endpoint to delegate I/O-heavy agent work (HTTP requests, database queries, SFTP operations, etc.) to the host process. The host resolves connections, executes the agent, and returns the result. Pure computation agents (transform, csv, xml, utils, text) can still run in-process in the scenario binary — this endpoint is for agents that require network access or platform-specific dependencies.
+     * @description Workflow instances call this endpoint to delegate I/O-heavy agent work (HTTP requests, database queries, SFTP operations, etc.) to the host process. The host resolves connections, executes the agent, and returns the result. Pure computation agents (transform, csv, xml, utils, text) can still run in-process in the workflow binary — this endpoint is for agents that require network access or platform-specific dependencies.
      *
      * @tags agents-controller
      * @name ExecuteAgentHandler
@@ -4404,20 +4404,20 @@ export class Api<
       }),
 
     /**
-     * @description This endpoint provides immediate execution results without creating database records or checkpoints. Ideal for low-latency use cases. Accepts ANY HTTP method (GET, POST, PUT, DELETE, PATCH, etc.) Request data (method, URI, headers, body) is forwarded to the scenario as inputs. Always executes the latest version of the scenario. # Performance - First execution: ~50-100ms overhead + execution time - Cached executions: ~5-10ms overhead + execution time - Hard timeout: 30 seconds # Limitations - No execution history in database - No checkpoint/replay support - Not suitable for long-running scenarios
+     * @description This endpoint provides immediate execution results without creating database records or checkpoints. Ideal for low-latency use cases. Accepts ANY HTTP method (GET, POST, PUT, DELETE, PATCH, etc.) Request data (method, URI, headers, body) is forwarded to the workflow as inputs. Always executes the latest version of the workflow. # Performance - First execution: ~50-100ms overhead + execution time - Cached executions: ~5-10ms overhead + execution time - Hard timeout: 30 seconds # Limitations - No execution history in database - No checkpoint/replay support - Not suitable for long-running workflows
      *
      * @tags Event Capture
      * @name CaptureHttpEventSync
-     * @summary Execute a scenario synchronously with minimal latency
-     * @request POST:/api/runtime/events/http-sync/{scenario_id}
+     * @summary Execute a workflow synchronously with minimal latency
+     * @request POST:/api/runtime/events/http-sync/{workflow_id}
      */
     captureHttpEventSync: (
-      scenarioId: string,
+      workflowId: string,
       data: string,
       params: RequestParams = {},
     ) =>
       this.request<any, any>({
-        path: `/api/runtime/events/http-sync/${scenarioId}`,
+        path: `/api/runtime/events/http-sync/${workflowId}`,
         method: "POST",
         body: data,
         format: "json",
@@ -4450,7 +4450,7 @@ export class Api<
      *
      * @tags executions-controller
      * @name ListAllExecutionsHandler
-     * @summary List all executions across all scenarios with filtering, sorting, and pagination
+     * @summary List all executions across all workflows with filtering, sorting, and pagination
      * @request GET:/api/runtime/executions
      */
     listAllExecutionsHandler: (
@@ -4465,8 +4465,8 @@ export class Api<
          * @format int32
          */
         size?: number;
-        /** Filter by scenario ID */
-        scenarioId?: string;
+        /** Filter by workflow ID */
+        workflowId?: string;
         /** Filter by status (comma-separated, lowercase: queued,completed,failed,running,compiling,timeout,cancelled) */
         status?: string;
         /**
@@ -4489,7 +4489,7 @@ export class Api<
          * @format date-time
          */
         completedTo?: string;
-        /** Sort by field (default: completedAt). Options: createdAt, completedAt, status, scenarioId */
+        /** Sort by field (default: completedAt). Options: createdAt, completedAt, status, workflowId */
         sortBy?: string;
         /** Sort order (default: desc). Options: asc, desc */
         sortOrder?: string;
@@ -4731,14 +4731,14 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-step-type-api
-     * @name GetScenarioStepTypesHandler
-     * @summary Get all available scenario step types
-     * @request GET:/api/runtime/metadata/scenario/step-types
+     * @tags workflow-step-type-api
+     * @name GetWorkflowStepTypesHandler
+     * @summary Get all available workflow step types
+     * @request GET:/api/runtime/metadata/workflow/step-types
      */
-    getScenarioStepTypesHandler: (params: RequestParams = {}) =>
+    getWorkflowStepTypesHandler: (params: RequestParams = {}) =>
       this.request<void, any>({
-        path: `/api/runtime/metadata/scenario/step-types`,
+        path: `/api/runtime/metadata/workflow/step-types`,
         method: "GET",
         ...params,
       }),
@@ -4747,12 +4747,12 @@ export class Api<
      * No description
      *
      * @tags metrics-controller
-     * @name GetScenarioMetrics
-     * @summary Get metrics for a specific scenario
-     * @request GET:/api/runtime/metrics/scenarios/{scenario_id}
+     * @name GetWorkflowMetrics
+     * @summary Get metrics for a specific workflow
+     * @request GET:/api/runtime/metrics/workflows/{workflow_id}
      */
-    getScenarioMetrics: (
-      scenarioId: string,
+    getWorkflowMetrics: (
+      workflowId: string,
       query?: {
         /** Start time (ISO 8601), defaults to 24h ago */
         startTime?: string;
@@ -4768,8 +4768,8 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<ScenarioMetricsHourlyResponse, MetricsResponse>({
-        path: `/api/runtime/metrics/scenarios/${scenarioId}`,
+      this.request<WorkflowMetricsHourlyResponse, MetricsResponse>({
+        path: `/api/runtime/metrics/workflows/${workflowId}`,
         method: "GET",
         query: query,
         format: "json",
@@ -4780,12 +4780,12 @@ export class Api<
      * No description
      *
      * @tags metrics-controller
-     * @name GetScenarioStats
-     * @summary Get overall statistics for a scenario (all time)
-     * @request GET:/api/runtime/metrics/scenarios/{scenario_id}/stats
+     * @name GetWorkflowStats
+     * @summary Get overall statistics for a workflow (all time)
+     * @request GET:/api/runtime/metrics/workflows/{workflow_id}/stats
      */
-    getScenarioStats: (
-      scenarioId: string,
+    getWorkflowStats: (
+      workflowId: string,
       query?: {
         /**
          * Specific version, or all versions if not specified
@@ -4795,8 +4795,8 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<ScenarioStatsResponse, MetricsResponse>({
-        path: `/api/runtime/metrics/scenarios/${scenarioId}/stats`,
+      this.request<WorkflowStatsResponse, MetricsResponse>({
+        path: `/api/runtime/metrics/workflows/${workflowId}/stats`,
         method: "GET",
         query: query,
         format: "json",
@@ -4808,7 +4808,7 @@ export class Api<
      *
      * @tags metrics-controller
      * @name GetTenantMetrics
-     * @summary Get tenant-level metrics aggregated across all scenarios (hourly)
+     * @summary Get tenant-level metrics aggregated across all workflows (hourly)
      * @request GET:/api/runtime/metrics/tenant
      */
     getTenantMetrics: (
@@ -5326,12 +5326,12 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name ListScenariosHandler
-     * @summary List all scenarios for a tenant with pagination and optional folder filtering
-     * @request GET:/api/runtime/scenarios
+     * @tags workflow-controller
+     * @name ListWorkflowsHandler
+     * @summary List all workflows for a tenant with pagination and optional folder filtering
+     * @request GET:/api/runtime/workflows
      */
-    listScenariosHandler: (
+    listWorkflowsHandler: (
       query: {
         /**
          * Page number (1-based, default: 1)
@@ -5343,17 +5343,17 @@ export class Api<
          * @format int32
          */
         pageSize?: number;
-        /** Filter by folder path (e.g., '/Sales/'). If not provided, returns all scenarios. */
+        /** Filter by folder path (e.g., '/Sales/'). If not provided, returns all workflows. */
         path?: string;
-        /** If true and path is provided, includes scenarios in subfolders (default: false) */
+        /** If true and path is provided, includes workflows in subfolders (default: false) */
         recursive: boolean;
-        /** Search scenarios by name (case-insensitive substring match) */
+        /** Search workflows by name (case-insensitive substring match) */
         search?: string;
       },
       params: RequestParams = {},
     ) =>
-      this.request<ApiResponsePageScenarioDto, any>({
-        path: `/api/runtime/scenarios`,
+      this.request<ApiResponsePageWorkflowDto, any>({
+        path: `/api/runtime/workflows`,
         method: "GET",
         query: query,
         format: "json",
@@ -5363,17 +5363,17 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name CreateScenarioHandler
-     * @summary Create a new scenario with auto-generated ID
-     * @request POST:/api/runtime/scenarios/create
+     * @tags workflow-controller
+     * @name CreateWorkflowHandler
+     * @summary Create a new workflow with auto-generated ID
+     * @request POST:/api/runtime/workflows/create
      */
-    createScenarioHandler: (
-      data: CreateScenarioRequest,
+    createWorkflowHandler: (
+      data: CreateWorkflowRequest,
       params: RequestParams = {},
     ) =>
-      this.request<ApiResponseScenarioDto, any>({
-        path: `/api/runtime/scenarios/create`,
+      this.request<ApiResponseWorkflowDto, any>({
+        path: `/api/runtime/workflows/create`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5384,14 +5384,14 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ListFoldersHandler
      * @summary List all folders (distinct paths) for a tenant
-     * @request GET:/api/runtime/scenarios/folders
+     * @request GET:/api/runtime/workflows/folders
      */
     listFoldersHandler: (params: RequestParams = {}) =>
       this.request<FoldersResponse, any>({
-        path: `/api/runtime/scenarios/folders`,
+        path: `/api/runtime/workflows/folders`,
         method: "GET",
         format: "json",
         ...params,
@@ -5400,17 +5400,17 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name RenameFolderHandler
-     * @summary Rename a folder (updates all scenarios with matching path prefix)
-     * @request PUT:/api/runtime/scenarios/folders/rename
+     * @summary Rename a folder (updates all workflows with matching path prefix)
+     * @request PUT:/api/runtime/workflows/folders/rename
      */
     renameFolderHandler: (
       data: RenameFolderRequest,
       params: RequestParams = {},
     ) =>
       this.request<ApiResponseRenameFolderResponse, any>({
-        path: `/api/runtime/scenarios/folders/rename`,
+        path: `/api/runtime/workflows/folders/rename`,
         method: "PUT",
         body: data,
         type: ContentType.Json,
@@ -5421,14 +5421,14 @@ export class Api<
     /**
      * @description Pure validation handler - no database or external dependencies. Validates the execution graph using runtara-workflows validation.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ValidateGraphHandler
      * @summary Validate graph structure
-     * @request POST:/api/runtime/scenarios/graph/validate
+     * @request POST:/api/runtime/workflows/graph/validate
      */
     validateGraphHandler: (data: any, params: RequestParams = {}) =>
       this.request<void, void>({
-        path: `/api/runtime/scenarios/graph/validate`,
+        path: `/api/runtime/workflows/graph/validate`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5438,17 +5438,17 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name GetExecutionMetricsHandler
-     * @summary Get execution results for a scenario instance
-     * @request GET:/api/runtime/scenarios/instances/{instance_id}
+     * @summary Get execution results for a workflow instance
+     * @request GET:/api/runtime/workflows/instances/{instance_id}
      */
     getExecutionMetricsHandler: (
       instanceId: string,
       params: RequestParams = {},
     ) =>
-      this.request<ScenarioInstanceDto, ErrorResponse>({
-        path: `/api/runtime/scenarios/instances/${instanceId}`,
+      this.request<WorkflowInstanceDto, ErrorResponse>({
+        path: `/api/runtime/workflows/instances/${instanceId}`,
         method: "GET",
         format: "json",
         ...params,
@@ -5457,14 +5457,14 @@ export class Api<
     /**
      * @description Sends a pause signal to the instance. The instance will checkpoint its state and suspend execution until resumed.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name PauseInstanceHandler
      * @summary Pause a running workflow instance
-     * @request POST:/api/runtime/scenarios/instances/{instance_id}/pause
+     * @request POST:/api/runtime/workflows/instances/{instance_id}/pause
      */
     pauseInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
       this.request<any, ErrorResponse>({
-        path: `/api/runtime/scenarios/instances/${instanceId}/pause`,
+        path: `/api/runtime/workflows/instances/${instanceId}/pause`,
         method: "POST",
         format: "json",
         ...params,
@@ -5473,14 +5473,14 @@ export class Api<
     /**
      * @description Note: This endpoint is currently not implemented as execution data is stored in runtara-environment and replay requires fetching instance inputs from there.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ReplayInstanceHandler
-     * @summary Replay a scenario instance with the same inputs
-     * @request POST:/api/runtime/scenarios/instances/{instance_id}/replay
+     * @summary Replay a workflow instance with the same inputs
+     * @request POST:/api/runtime/workflows/instances/{instance_id}/replay
      */
     replayInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
       this.request<any, ErrorResponse>({
-        path: `/api/runtime/scenarios/instances/${instanceId}/replay`,
+        path: `/api/runtime/workflows/instances/${instanceId}/replay`,
         method: "POST",
         ...params,
       }),
@@ -5488,14 +5488,14 @@ export class Api<
     /**
      * @description Sends a resume signal to the instance. The instance will resume execution from its last checkpoint.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ResumeInstanceHandler
      * @summary Resume a paused workflow instance
-     * @request POST:/api/runtime/scenarios/instances/{instance_id}/resume
+     * @request POST:/api/runtime/workflows/instances/{instance_id}/resume
      */
     resumeInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
       this.request<any, ErrorResponse>({
-        path: `/api/runtime/scenarios/instances/${instanceId}/resume`,
+        path: `/api/runtime/workflows/instances/${instanceId}/resume`,
         method: "POST",
         format: "json",
         ...params,
@@ -5504,10 +5504,10 @@ export class Api<
     /**
      * @description Note: This endpoint is currently not implemented as execution event data is stored in runtara-environment and requires querying the environment.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name GetStepSubinstancesHandler
      * @summary Get step subinstances (execution events) for a specific step
-     * @request GET:/api/runtime/scenarios/instances/{instance_id}/steps/{step_id}/subinstances
+     * @request GET:/api/runtime/workflows/instances/{instance_id}/steps/{step_id}/subinstances
      */
     getStepSubinstancesHandler: (
       instanceId: string,
@@ -5515,7 +5515,7 @@ export class Api<
       params: RequestParams = {},
     ) =>
       this.request<any, ErrorResponse>({
-        path: `/api/runtime/scenarios/instances/${instanceId}/steps/${stepId}/subinstances`,
+        path: `/api/runtime/workflows/instances/${instanceId}/steps/${stepId}/subinstances`,
         method: "GET",
         ...params,
       }),
@@ -5523,14 +5523,14 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name StopInstanceHandler
-     * @summary Stop a running scenario instance
-     * @request POST:/api/runtime/scenarios/instances/{instance_id}/stop
+     * @summary Stop a running workflow instance
+     * @request POST:/api/runtime/workflows/instances/{instance_id}/stop
      */
     stopInstanceHandler: (instanceId: string, params: RequestParams = {}) =>
       this.request<any, ErrorResponse>({
-        path: `/api/runtime/scenarios/instances/${instanceId}/stop`,
+        path: `/api/runtime/workflows/instances/${instanceId}/stop`,
         method: "POST",
         format: "json",
         ...params,
@@ -5539,12 +5539,12 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name GetScenarioHandler
-     * @summary Get a specific scenario by ID and optional version
-     * @request GET:/api/runtime/scenarios/{id}
+     * @tags workflow-controller
+     * @name GetWorkflowHandler
+     * @summary Get a specific workflow by ID and optional version
+     * @request GET:/api/runtime/workflows/{id}
      */
-    getScenarioHandler: (
+    getWorkflowHandler: (
       id: string,
       query?: {
         /**
@@ -5555,8 +5555,8 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<ApiResponseScenarioDto, any>({
-        path: `/api/runtime/scenarios/${id}`,
+      this.request<ApiResponseWorkflowDto, any>({
+        path: `/api/runtime/workflows/${id}`,
         method: "GET",
         query: query,
         format: "json",
@@ -5564,16 +5564,16 @@ export class Api<
       }),
 
     /**
-     * @description The scenario executes asynchronously while this endpoint streams execution events (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events. For scenarios with WaitForSignal steps (human-in-the-loop), the stream emits a `waiting_for_input` event with a `signal_id`. Use `POST /api/runtime/signals/{instanceId}` to submit the response and resume execution.
+     * @description The workflow executes asynchronously while this endpoint streams execution events (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events. For workflows with WaitForSignal steps (human-in-the-loop), the stream emits a `waiting_for_input` event with a `signal_id`. Use `POST /api/runtime/signals/{instanceId}` to submit the response and resume execution.
      *
      * @tags Chat
      * @name ChatHandler
      * @summary Start a chat session with an initial message and stream events via SSE.
-     * @request POST:/api/runtime/scenarios/{id}/chat
+     * @request POST:/api/runtime/workflows/{id}/chat
      */
     chatHandler: (id: string, data: ChatRequest, params: RequestParams = {}) =>
       this.request<void, void>({
-        path: `/api/runtime/scenarios/${id}/chat`,
+        path: `/api/runtime/workflows/${id}/chat`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5581,12 +5581,12 @@ export class Api<
       }),
 
     /**
-     * @description Use this when the scenario doesn't require an initial user message to begin (e.g., the AI agent starts the conversation proactively).
+     * @description Use this when the workflow doesn't require an initial user message to begin (e.g., the AI agent starts the conversation proactively).
      *
      * @tags Chat
      * @name ChatStartHandler
      * @summary Start a chat session without an initial message and stream events via SSE.
-     * @request POST:/api/runtime/scenarios/{id}/chat/start
+     * @request POST:/api/runtime/workflows/{id}/chat/start
      */
     chatStartHandler: (
       id: string,
@@ -5594,7 +5594,7 @@ export class Api<
       params: RequestParams = {},
     ) =>
       this.request<void, void>({
-        path: `/api/runtime/scenarios/${id}/chat/start`,
+        path: `/api/runtime/workflows/${id}/chat/start`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5604,18 +5604,18 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name CloneScenarioHandler
-     * @summary Clone a scenario with all its versions
-     * @request POST:/api/runtime/scenarios/{id}/clone
+     * @tags workflow-controller
+     * @name CloneWorkflowHandler
+     * @summary Clone a workflow with all its versions
+     * @request POST:/api/runtime/workflows/{id}/clone
      */
-    cloneScenarioHandler: (
+    cloneWorkflowHandler: (
       id: string,
-      data: CloneScenarioRequest,
+      data: CloneWorkflowRequest,
       params: RequestParams = {},
     ) =>
       this.request<any, any>({
-        path: `/api/runtime/scenarios/${id}/clone`,
+        path: `/api/runtime/workflows/${id}/clone`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5626,14 +5626,14 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name DeleteScenarioHandler
-     * @summary Delete a scenario and all its versions (soft delete)
-     * @request POST:/api/runtime/scenarios/{id}/delete
+     * @tags workflow-controller
+     * @name DeleteWorkflowHandler
+     * @summary Delete a workflow and all its versions (soft delete)
+     * @request POST:/api/runtime/workflows/{id}/delete
      */
-    deleteScenarioHandler: (id: string, params: RequestParams = {}) =>
+    deleteWorkflowHandler: (id: string, params: RequestParams = {}) =>
       this.request<any, any>({
-        path: `/api/runtime/scenarios/${id}/delete`,
+        path: `/api/runtime/workflows/${id}/delete`,
         method: "POST",
         format: "json",
         ...params,
@@ -5642,14 +5642,14 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name ExecuteScenarioHandler
-     * @summary Execute a scenario by scheduling it with inputs (defaults to active version)
-     * @request POST:/api/runtime/scenarios/{id}/execute
+     * @tags workflow-controller
+     * @name ExecuteWorkflowHandler
+     * @summary Execute a workflow by scheduling it with inputs (defaults to active version)
+     * @request POST:/api/runtime/workflows/{id}/execute
      */
-    executeScenarioHandler: (
+    executeWorkflowHandler: (
       id: string,
-      data: ExecuteScenarioRequest,
+      data: ExecuteWorkflowRequest,
       query?: {
         /**
          * Specific version to execute (defaults to current)
@@ -5659,8 +5659,8 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<ExecuteScenarioResponse, ErrorResponse>({
-        path: `/api/runtime/scenarios/${id}/execute`,
+      this.request<ExecuteWorkflowResponse, ErrorResponse>({
+        path: `/api/runtime/workflows/${id}/execute`,
         method: "POST",
         query: query,
         body: data,
@@ -5672,18 +5672,18 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name MoveScenarioHandler
-     * @summary Move a scenario to a different folder
-     * @request PUT:/api/runtime/scenarios/{id}/move
+     * @tags workflow-controller
+     * @name MoveWorkflowHandler
+     * @summary Move a workflow to a different folder
+     * @request PUT:/api/runtime/workflows/{id}/move
      */
-    moveScenarioHandler: (
+    moveWorkflowHandler: (
       id: string,
-      data: MoveScenarioRequest,
+      data: MoveWorkflowRequest,
       params: RequestParams = {},
     ) =>
-      this.request<ApiResponseMoveScenarioResponse, any>({
-        path: `/api/runtime/scenarios/${id}/move`,
+      this.request<ApiResponseMoveWorkflowResponse, any>({
+        path: `/api/runtime/workflows/${id}/move`,
         method: "PUT",
         body: data,
         type: ContentType.Json,
@@ -5694,18 +5694,18 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name ScheduleScenarioHandler
-     * @summary Schedule a scenario execution (placeholder - not implemented)
-     * @request POST:/api/runtime/scenarios/{id}/schedule
+     * @tags workflow-controller
+     * @name ScheduleWorkflowHandler
+     * @summary Schedule a workflow execution (placeholder - not implemented)
+     * @request POST:/api/runtime/workflows/{id}/schedule
      */
-    scheduleScenarioHandler: (
+    scheduleWorkflowHandler: (
       id: string,
       data: any,
       params: RequestParams = {},
     ) =>
       this.request<any, any>({
-        path: `/api/runtime/scenarios/${id}/schedule`,
+        path: `/api/runtime/workflows/${id}/schedule`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5715,18 +5715,18 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name UpdateScenarioHandler
-     * @summary Update a scenario by creating a new version
-     * @request POST:/api/runtime/scenarios/{id}/update
+     * @tags workflow-controller
+     * @name UpdateWorkflowHandler
+     * @summary Update a workflow by creating a new version
+     * @request POST:/api/runtime/workflows/{id}/update
      */
-    updateScenarioHandler: (
+    updateWorkflowHandler: (
       id: string,
-      data: UpdateScenarioRequest,
+      data: UpdateWorkflowRequest,
       params: RequestParams = {},
     ) =>
       this.request<any, WorkflowValidationErrorResponse>({
-        path: `/api/runtime/scenarios/${id}/update`,
+        path: `/api/runtime/workflows/${id}/update`,
         method: "POST",
         body: data,
         type: ContentType.Json,
@@ -5737,14 +5737,14 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name ListScenarioVersionsHandler
-     * @summary Get all versions of a specific scenario
-     * @request GET:/api/runtime/scenarios/{id}/versions
+     * @tags workflow-controller
+     * @name ListWorkflowVersionsHandler
+     * @summary Get all versions of a specific workflow
+     * @request GET:/api/runtime/workflows/{id}/versions
      */
-    listScenarioVersionsHandler: (id: string, params: RequestParams = {}) =>
-      this.request<ApiResponseVecScenarioVersionInfoDto, any>({
-        path: `/api/runtime/scenarios/${id}/versions`,
+    listWorkflowVersionsHandler: (id: string, params: RequestParams = {}) =>
+      this.request<ApiResponseVecWorkflowVersionInfoDto, any>({
+        path: `/api/runtime/workflows/${id}/versions`,
         method: "GET",
         format: "json",
         ...params,
@@ -5753,31 +5753,31 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
-     * @name CompileScenarioHandler
-     * @summary Compile a specific scenario by tenant ID, scenario ID, and version
-     * @request POST:/api/runtime/scenarios/{id}/versions/{version}/compile
+     * @tags workflow-controller
+     * @name CompileWorkflowHandler
+     * @summary Compile a specific workflow by tenant ID, workflow ID, and version
+     * @request POST:/api/runtime/workflows/{id}/versions/{version}/compile
      */
-    compileScenarioHandler: (
-      scenarioId: string,
+    compileWorkflowHandler: (
+      workflowId: string,
       version: string,
       id: string,
       params: RequestParams = {},
     ) =>
-      this.request<CompileScenarioResponse, ErrorResponse>({
-        path: `/api/runtime/scenarios/${id}/versions/${version}/compile`,
+      this.request<CompileWorkflowResponse, ErrorResponse>({
+        path: `/api/runtime/workflows/${id}/versions/${version}/compile`,
         method: "POST",
         format: "json",
         ...params,
       }),
 
     /**
-     * @description Returns the input schema, output schema, and variables from the execution graph of a specific scenario version.
+     * @description Returns the input schema, output schema, and variables from the execution graph of a specific workflow version.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name GetVersionSchemasHandler
-     * @summary Get schemas for a specific scenario version
-     * @request GET:/api/runtime/scenarios/{id}/versions/{version}/schemas
+     * @summary Get schemas for a specific workflow version
+     * @request GET:/api/runtime/workflows/{id}/versions/{version}/schemas
      */
     getVersionSchemasHandler: (
       id: string,
@@ -5785,7 +5785,7 @@ export class Api<
       params: RequestParams = {},
     ) =>
       this.request<VersionSchemasResponse, void>({
-        path: `/api/runtime/scenarios/${id}/versions/${version}/schemas`,
+        path: `/api/runtime/workflows/${id}/versions/${version}/schemas`,
         method: "GET",
         format: "json",
         ...params,
@@ -5794,10 +5794,10 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ToggleTrackEventsHandler
-     * @summary Toggle step-event tracking for a specific scenario version
-     * @request PUT:/api/runtime/scenarios/{id}/versions/{version}/track-events
+     * @summary Toggle step-event tracking for a specific workflow version
+     * @request PUT:/api/runtime/workflows/{id}/versions/{version}/track-events
      */
     toggleTrackEventsHandler: (
       id: string,
@@ -5805,8 +5805,8 @@ export class Api<
       data: UpdateTrackEventsRequest,
       params: RequestParams = {},
     ) =>
-      this.request<ApiResponseScenarioDto, any>({
-        path: `/api/runtime/scenarios/${id}/versions/${version}/track-events`,
+      this.request<ApiResponseWorkflowDto, any>({
+        path: `/api/runtime/workflows/${id}/versions/${version}/track-events`,
         method: "PUT",
         body: data,
         type: ContentType.Json,
@@ -5815,15 +5815,15 @@ export class Api<
       }),
 
     /**
-     * @description GET /api/runtime/scenarios/{scenario_id}/instances/{instance_id}/step-events Retrieves debug step events from runtara-environment. The scenario must be compiled with track_events enabled for events to be recorded.
+     * @description GET /api/runtime/workflows/{workflow_id}/instances/{instance_id}/step-events Retrieves debug step events from runtara-environment. The workflow must be compiled with track_events enabled for events to be recorded.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name GetStepEvents
-     * @summary Handler to get step events for a scenario execution
-     * @request GET:/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/step-events
+     * @summary Handler to get step events for a workflow execution
+     * @request GET:/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events
      */
     getStepEvents: (
-      scenarioId: string,
+      workflowId: string,
       instanceId: string,
       query?: {
         /** Filter by event type (e.g., "custom", "started", "completed") */
@@ -5854,7 +5854,7 @@ export class Api<
         createdBefore?: string | null;
         /** Full-text search in event payload JSON */
         payloadContains?: string | null;
-        /** Filter events by scope ID (for hierarchical step events in Split/While/StartScenario) */
+        /** Filter events by scope ID (for hierarchical step events in Split/While/EmbedWorkflow) */
         scopeId?: string | null;
         /** Filter events by parent scope ID (use "null" for root-level events) */
         parentScopeId?: string | null;
@@ -5866,7 +5866,7 @@ export class Api<
       params: RequestParams = {},
     ) =>
       this.request<StepEventsResponse, any>({
-        path: `/api/runtime/scenarios/${scenarioId}/instances/${instanceId}/step-events`,
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}/step-events`,
         method: "GET",
         query: query,
         format: "json",
@@ -5874,15 +5874,15 @@ export class Api<
       }),
 
     /**
-     * @description GET /api/runtime/scenarios/{scenario_id}/instances/{instance_id}/steps Returns unified step records with paired start/end events. Each step appears once with its complete lifecycle information (inputs, outputs, duration, status).
+     * @description GET /api/runtime/workflows/{workflow_id}/instances/{instance_id}/steps Returns unified step records with paired start/end events. Each step appears once with its complete lifecycle information (inputs, outputs, duration, status).
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name GetStepSummaries
-     * @summary Handler to get step summaries for a scenario execution
-     * @request GET:/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/steps
+     * @summary Handler to get step summaries for a workflow execution
+     * @request GET:/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps
      */
     getStepSummaries: (
-      scenarioId: string,
+      workflowId: string,
       instanceId: string,
       query?: {
         /**
@@ -5903,7 +5903,7 @@ export class Api<
         status?: string | null;
         /** Filter by step type (e.g., "Http", "Transform", "Agent") */
         stepType?: string | null;
-        /** Filter by scope ID (for hierarchical steps in Split/While/StartScenario) */
+        /** Filter by scope ID (for hierarchical steps in Split/While/EmbedWorkflow) */
         scopeId?: string | null;
         /** Filter by parent scope ID */
         parentScopeId?: string | null;
@@ -5913,7 +5913,7 @@ export class Api<
       params: RequestParams = {},
     ) =>
       this.request<StepSummariesResponse, any>({
-        path: `/api/runtime/scenarios/${scenarioId}/instances/${instanceId}/steps`,
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}/steps`,
         method: "GET",
         query: query,
         format: "json",
@@ -5923,13 +5923,13 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ListInstancesHandler
-     * @summary List all scenario instances for a given tenant and scenario
-     * @request GET:/api/runtime/scenarios/{scenario_id}/instances
+     * @summary List all workflow instances for a given tenant and workflow
+     * @request GET:/api/runtime/workflows/{workflow_id}/instances
      */
     listInstancesHandler: (
-      scenarioId: string,
+      workflowId: string,
       query?: {
         /**
          * Page number (default: 0)
@@ -5944,8 +5944,8 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<PageScenarioInstanceHistoryDto, ErrorResponse>({
-        path: `/api/runtime/scenarios/${scenarioId}/instances`,
+      this.request<PageWorkflowInstanceHistoryDto, ErrorResponse>({
+        path: `/api/runtime/workflows/${workflowId}/instances`,
         method: "GET",
         query: query,
         format: "json",
@@ -5955,18 +5955,18 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name GetInstanceHandler
-     * @summary Get a scenario instance by scenario_id and instance_id with all available data
-     * @request GET:/api/runtime/scenarios/{scenario_id}/instances/{instance_id}
+     * @summary Get a workflow instance by workflow_id and instance_id with all available data
+     * @request GET:/api/runtime/workflows/{workflow_id}/instances/{instance_id}
      */
     getInstanceHandler: (
-      scenarioId: string,
+      workflowId: string,
       instanceId: string,
       params: RequestParams = {},
     ) =>
-      this.request<ScenarioInstanceDto, ErrorResponse>({
-        path: `/api/runtime/scenarios/${scenarioId}/instances/${instanceId}`,
+      this.request<WorkflowInstanceDto, ErrorResponse>({
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}`,
         method: "GET",
         format: "json",
         ...params,
@@ -5975,13 +5975,13 @@ export class Api<
     /**
      * No description
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ListInstanceCheckpointsHandler
-     * @summary List checkpoints for a scenario instance via runtara management SDK
-     * @request GET:/api/runtime/scenarios/{scenario_id}/instances/{instance_id}/checkpoints
+     * @summary List checkpoints for a workflow instance via runtara management SDK
+     * @request GET:/api/runtime/workflows/{workflow_id}/instances/{instance_id}/checkpoints
      */
     listInstanceCheckpointsHandler: (
-      scenarioId: string,
+      workflowId: string,
       instanceId: string,
       query?: {
         /**
@@ -5998,7 +5998,7 @@ export class Api<
       params: RequestParams = {},
     ) =>
       this.request<ListCheckpointsResponse, ErrorResponse>({
-        path: `/api/runtime/scenarios/${scenarioId}/instances/${instanceId}/checkpoints`,
+        path: `/api/runtime/workflows/${workflowId}/instances/${instanceId}/checkpoints`,
         method: "GET",
         query: query,
         format: "json",
@@ -6008,18 +6008,18 @@ export class Api<
     /**
      * @description Updates which version is marked as "current" for execution. Note: Requires database migration to add current_version column.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name SetCurrentVersionHandler
-     * @summary Set the current version for a scenario
-     * @request POST:/api/runtime/scenarios/{scenario_id}/versions/{version_number}/set-current
+     * @summary Set the current version for a workflow
+     * @request POST:/api/runtime/workflows/{workflow_id}/versions/{version_number}/set-current
      */
     setCurrentVersionHandler: (
-      scenarioId: string,
+      workflowId: string,
       versionNumber: number,
       params: RequestParams = {},
     ) =>
       this.request<void, ErrorResponse>({
-        path: `/api/runtime/scenarios/${scenarioId}/versions/${versionNumber}/set-current`,
+        path: `/api/runtime/workflows/${workflowId}/versions/${versionNumber}/set-current`,
         method: "POST",
         ...params,
       }),
@@ -6171,7 +6171,7 @@ export class Api<
     /**
      * @description Returns hardcoded metadata about available step types. No database or external dependencies - just static data.
      *
-     * @tags scenario-controller
+     * @tags workflow-controller
      * @name ListStepTypesHandler
      * @summary List all supported step types
      * @request GET:/api/runtime/steps

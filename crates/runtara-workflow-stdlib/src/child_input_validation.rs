@@ -1,15 +1,15 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Runtime validation for child scenario inputs.
+//! Runtime validation for child workflow inputs.
 //!
 //! This module provides types and functions for validating inputs
-//! to child scenarios at runtime, catching issues that compile-time
+//! to child workflows at runtime, catching issues that compile-time
 //! validation cannot detect (null values for required fields, dynamic references).
 
 use serde_json::Value;
 use std::fmt;
 
-/// Information about a required field in a child scenario's input schema.
+/// Information about a required field in a child workflow's input schema.
 #[derive(Debug, Clone)]
 pub struct RequiredField {
     /// Field name
@@ -20,7 +20,7 @@ pub struct RequiredField {
     pub description: Option<&'static str>,
 }
 
-/// Embedded input schema for a child scenario.
+/// Embedded input schema for a child workflow.
 #[derive(Debug, Clone)]
 pub struct ChildInputSchema {
     /// List of required fields
@@ -58,13 +58,13 @@ pub struct MissingInput {
     pub reason: MissingReason,
 }
 
-/// Error when child scenario inputs are invalid.
+/// Error when child workflow inputs are invalid.
 #[derive(Debug, Clone)]
 pub struct ChildInputValidationError {
     /// Parent step ID
     pub parent_step: String,
-    /// Child scenario ID
-    pub child_scenario: String,
+    /// Child workflow ID
+    pub child_workflow: String,
     /// Missing or invalid fields
     pub missing_inputs: Vec<MissingInput>,
 }
@@ -73,8 +73,8 @@ impl fmt::Display for ChildInputValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "StartScenario step '{}' is missing required inputs for child scenario '{}':",
-            self.parent_step, self.child_scenario
+            "EmbedWorkflow step '{}' is missing required inputs for child workflow '{}':",
+            self.parent_step, self.child_workflow
         )?;
         for input in &self.missing_inputs {
             write!(f, "  - {} ({})", input.name, input.field_type)?;
@@ -89,13 +89,13 @@ impl fmt::Display for ChildInputValidationError {
 
 impl std::error::Error for ChildInputValidationError {}
 
-/// Validate inputs against a child scenario's schema.
+/// Validate inputs against a child workflow's schema.
 ///
 /// Returns Ok(()) if all required fields are present and non-null.
 /// Returns Err with details about missing/null fields otherwise.
 pub fn validate_child_inputs(
     parent_step: &str,
-    child_scenario: &str,
+    child_workflow: &str,
     inputs: &Value,
     schema: &ChildInputSchema,
 ) -> Result<(), ChildInputValidationError> {
@@ -134,7 +134,7 @@ pub fn validate_child_inputs(
     } else {
         Err(ChildInputValidationError {
             parent_step: parent_step.to_string(),
-            child_scenario: child_scenario.to_string(),
+            child_workflow: child_workflow.to_string(),
             missing_inputs,
         })
     }

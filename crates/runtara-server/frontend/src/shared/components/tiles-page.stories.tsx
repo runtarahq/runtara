@@ -60,7 +60,7 @@ const SampleTile = ({
 
 export const Default: Story = {
   render: () => (
-    <TilesPage title="Scenarios" action={<Button>Create Scenario</Button>}>
+    <TilesPage title="Workflows" action={<Button>Create Workflow</Button>}>
       <TileList>
         <SampleTile
           title="Order Sync"
@@ -87,11 +87,11 @@ export const WithKicker: Story = {
   render: () => (
     <TilesPage
       kicker="Automation"
-      title="Scenarios"
+      title="Workflows"
       action={
         <Button>
           <Plus className="w-4 h-4 mr-2" />
-          New Scenario
+          New Workflow
         </Button>
       }
     >
@@ -217,7 +217,7 @@ export const WithComplexTiles: Story = {
   render: () => (
     <TilesPage
       kicker="Workflows"
-      title="Scenarios"
+      title="Workflows"
       action={
         <Button>
           <Plus className="w-4 h-4 mr-2" />
@@ -263,30 +263,30 @@ export const WithComplexTiles: Story = {
             runs: '0',
             lastRun: 'Never',
           },
-        ].map((scenario) => (
+        ].map((workflow) => (
           <div
-            key={scenario.title}
+            key={workflow.title}
             className="bg-white dark:bg-slate-800 border rounded-lg p-4 hover:shadow-md transition-shadow"
           >
             <div className="flex items-start justify-between">
               <div className="space-y-1 flex-1">
                 <div className="flex items-center gap-2">
-                  <h3 className="font-medium">{scenario.title}</h3>
+                  <h3 className="font-medium">{workflow.title}</h3>
                   <Badge
                     variant={
-                      scenario.status === 'active' ? 'default' : 'secondary'
+                      workflow.status === 'active' ? 'default' : 'secondary'
                     }
                     className="text-xs"
                   >
-                    {scenario.status}
+                    {workflow.status}
                   </Badge>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  {scenario.description}
+                  {workflow.description}
                 </p>
                 <div className="flex items-center gap-4 text-xs text-muted-foreground pt-2">
-                  <span>{scenario.runs} runs</span>
-                  <span>Last run: {scenario.lastRun}</span>
+                  <span>{workflow.runs} runs</span>
+                  <span>Last run: {workflow.lastRun}</span>
                 </div>
               </div>
               <Button variant="ghost" size="icon">

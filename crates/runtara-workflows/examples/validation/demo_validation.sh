@@ -23,7 +23,7 @@ COMPILE_BIN="./target/debug/runtara-compile"
 EXAMPLES_DIR="$SCRIPT_DIR"
 
 # Common args for the CLI
-COMMON_ARGS="--tenant demo --scenario validation-test"
+COMMON_ARGS="--tenant demo --workflow validation-test"
 
 # Function to run validation and show output
 run_validation() {
@@ -76,7 +76,7 @@ run_validation "$EXAMPLES_DIR/error_security_leak.json" "E040: Connection leak t
 run_validation "$EXAMPLES_DIR/error_security_leak_to_finish.json" "E041: Connection leak to Finish step"
 
 echo "=============================================="
-echo "  6. Child Scenario Errors"
+echo "  6. Child Workflow Errors"
 echo "=============================================="
 run_validation "$EXAMPLES_DIR/error_invalid_child_version.json" "E050: Invalid child version"
 

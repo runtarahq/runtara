@@ -23,10 +23,10 @@ test.describe('Navigation', () => {
   });
 
   test.describe('Protected routes redirect', () => {
-    test('should redirect to login when accessing scenarios without auth', async ({
+    test('should redirect to login when accessing workflows without auth', async ({
       page,
     }) => {
-      await page.goto('/scenarios');
+      await page.goto('/workflows');
 
       // Should redirect to login or show login prompt
       // The exact behavior depends on your auth implementation

@@ -152,7 +152,7 @@ build_stdlib() {
     # different hashes; cargo doesn't remove the old ones)
     rm -rf "${TARGET_DIR}"/wasm32-wasip2/release/deps/*.rlib "${TARGET_DIR}"/wasm32-wasip2/release/*.rlib 2>/dev/null || true
 
-    # embed-bitcode=yes is required so that scenario compilation can use LTO
+    # embed-bitcode=yes is required so that workflow compilation can use LTO
     # for cross-crate dead code elimination (see compile.rs)
     RUSTFLAGS="-C embed-bitcode=yes" \
         cargo build -p runtara-workflow-stdlib --release --target wasm32-wasip2 --no-default-features
@@ -243,7 +243,7 @@ assemble_bundle() {
         cp "$wasm_ld" "$bundle/toolchain/bin/"
         info "Included wasm-component-ld from ${wasm_ld}"
     else
-        warn "wasm-component-ld not found — WASM scenario compilation will fail at runtime!"
+        warn "wasm-component-ld not found — WASM workflow compilation will fail at runtime!"
         warn "Install it with: cargo install wasm-component-ld"
     fi
 
@@ -271,7 +271,7 @@ assemble_bundle() {
           "$bundle/toolchain/lib/"*tsan* \
           "$bundle/toolchain/lib/"*lsan* 2>/dev/null || true
 
-    # lib/rustlib: wasm32-wasip2 target (needed for scenario compilation)
+    # lib/rustlib: wasm32-wasip2 target (needed for workflow compilation)
     cp -R "$sysroot/lib/rustlib/wasm32-wasip2" "$bundle/toolchain/lib/rustlib/"
 
     # ── Stdlib library cache ──

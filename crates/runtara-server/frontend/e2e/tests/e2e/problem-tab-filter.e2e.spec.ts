@@ -9,8 +9,8 @@ import { fileURLToPath } from 'url';
  * Verifies that the Problem tab's filter tabs (All / Errors / Warnings)
  * correctly filter the displayed validation messages.
  *
- * Flow: create scenario → add step → save (triggers server validation errors) →
- *       verify filter tabs switch displayed messages → delete scenario
+ * Flow: create workflow → add step → save (triggers server validation errors) →
+ *       verify filter tabs switch displayed messages → delete workflow
  *
  * Requires: full local stack running (gateway, runtime, management, frontend)
  */
@@ -19,7 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirnameLocal = path.dirname(__filename);
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:8080';
-const SCENARIO_NAME = `E2E Problem Filter ${Date.now()}`;
+const WORKFLOW_NAME = `E2E Problem Filter ${Date.now()}`;
 
 /** Read the access token from the Playwright auth state file. */
 function getAccessToken(): string {
@@ -50,18 +50,18 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 test.describe.serial('Problem tab filter switching (SYN-235)', () => {
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
     token = getAccessToken();
   });
 
-  // Safety-net cleanup: delete scenario via API if UI deletion fails
+  // Safety-net cleanup: delete workflow via API if UI deletion fails
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -70,24 +70,24 @@ test.describe.serial('Problem tab filter switching (SYN-235)', () => {
     }
   });
 
-  test('create scenario', async ({ page }) => {
-    await page.goto('/scenarios/create');
+  test('create workflow', async ({ page }) => {
+    await page.goto('/workflows/create');
     await page.waitForLoadState('networkidle');
 
-    await page.getByLabel('Name').fill(SCENARIO_NAME);
+    await page.getByLabel('Name').fill(WORKFLOW_NAME);
     await page.getByRole('button', { name: 'Save' }).click();
 
     await page.waitForURL(
-      (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+      (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
       { timeout: 15000 }
     );
 
-    scenarioId = page.url().split('/scenarios/').pop()!;
-    expect(scenarioId).toBeTruthy();
+    workflowId = page.url().split('/workflows/').pop()!;
+    expect(workflowId).toBeTruthy();
   });
 
   test('add step, save, and verify filter tabs work', async ({ page }) => {
-    await page.goto(`/scenarios/${scenarioId}`);
+    await page.goto(`/workflows/${workflowId}`);
     await page.waitForLoadState('networkidle');
     await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
 
@@ -117,7 +117,7 @@ test.describe.serial('Problem tab filter switching (SYN-235)', () => {
       page.locator('.react-flow__node').filter({ hasText: 'Random Double' })
     ).toBeVisible({ timeout: 10000 });
 
-    // Save the scenario — triggers server-side validation/compilation
+    // Save the workflow — triggers server-side validation/compilation
     const saveButton = page.getByTitle('Save changes');
     await expect(saveButton).toBeVisible({ timeout: 5000 });
     await saveButton.click();
@@ -140,7 +140,7 @@ test.describe.serial('Problem tab filter switching (SYN-235)', () => {
     const hasMessages = await allFilterTab.isVisible().catch(() => false);
 
     if (!hasMessages) {
-      // If save succeeded with no validation issues, the scenario compiled OK.
+      // If save succeeded with no validation issues, the workflow compiled OK.
       // We still need to test filter tabs, so trigger client-side validation
       // by making the graph invalid: delete the step to make it empty, then save.
       const randomDoubleNode = page
@@ -234,17 +234,17 @@ test.describe.serial('Problem tab filter switching (SYN-235)', () => {
     expect(messageCount).toBe(totalCount);
   });
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: SCENARIO_NAME });
+    const card = page.locator('article').filter({ hasText: WORKFLOW_NAME });
     await expect(card).toBeVisible({ timeout: 10000 });
 
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
 
     await expect(card).not.toBeVisible({ timeout: 10000 });
-    scenarioId = '';
+    workflowId = '';
   });
 });

@@ -1,7 +1,7 @@
 //! Agent Execution Handler
 //!
 //! HTTP endpoint for executing agent capabilities on the host, on behalf of
-//! scenario instances. This is the host-mediated I/O path for the WASM
+//! workflow instances. This is the host-mediated I/O path for the WASM
 //! transition (see docs/wasm-transition-plan.md, Step 1).
 //!
 //! Unlike the agent testing endpoint (which goes through the OCI dispatcher),
@@ -22,12 +22,12 @@ use crate::middleware::tenant_auth::OrgId;
 
 /// Execute an agent capability on the host
 ///
-/// Scenario instances call this endpoint to delegate I/O-heavy agent work
+/// Workflow instances call this endpoint to delegate I/O-heavy agent work
 /// (HTTP requests, database queries, SFTP operations, etc.) to the host process.
 /// The host resolves connections, executes the agent, and returns the result.
 ///
 /// Pure computation agents (transform, csv, xml, utils, text) can still run
-/// in-process in the scenario binary — this endpoint is for agents that
+/// in-process in the workflow binary — this endpoint is for agents that
 /// require network access or platform-specific dependencies.
 #[utoipa::path(
     post,

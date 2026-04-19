@@ -20,7 +20,7 @@ use runtara_environment::runner::oci::{
     BundleConfig, BundleManager, NetworkMode, OciRunner, OciRunnerConfig,
 };
 use runtara_environment::runner::{LaunchOptions, Runner};
-use runtara_workflows::compile::{CompilationInput, compile_scenario};
+use runtara_workflows::compile::{CompilationInput, compile_workflow};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -156,22 +156,22 @@ async fn test_launch_detached_captures_spawned_pid() {
     }
 
     let tenant_id = format!("pid-test-tenant-{}", Uuid::new_v4());
-    let scenario_id = format!("pid-test-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("pid-test-workflow-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
 
-    // 1. Compile scenario
-    println!("Step 1: Compiling DSL scenario...");
+    // 1. Compile workflow
+    println!("Step 1: Compiling DSL workflow...");
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
     println!(
         "  ✓ Compiled binary: {} bytes",
         compilation_result.binary_size
@@ -253,7 +253,7 @@ async fn test_launch_detached_captures_spawned_pid() {
 }
 
 /// Tests that launch_detached captures PID with pasta networking.
-/// This specifically tests the pasta wrapper scenario.
+/// This specifically tests the pasta wrapper workflow.
 #[tokio::test]
 async fn test_launch_detached_with_pasta_captures_pid() {
     skip_if_no_prereqs!();
@@ -271,22 +271,22 @@ async fn test_launch_detached_with_pasta_captures_pid() {
     }
 
     let tenant_id = format!("pasta-pid-test-{}", Uuid::new_v4());
-    let scenario_id = format!("pasta-pid-scenario-{}", Uuid::new_v4());
+    let workflow_id = format!("pasta-pid-workflow-{}", Uuid::new_v4());
     let instance_id = Uuid::new_v4().to_string();
 
-    // 1. Compile scenario
-    println!("Step 1: Compiling DSL scenario for pasta test...");
+    // 1. Compile workflow
+    println!("Step 1: Compiling DSL workflow for pasta test...");
     let input = CompilationInput {
         tenant_id: tenant_id.clone(),
-        scenario_id: scenario_id.clone(),
+        workflow_id: workflow_id.clone(),
         version: 1,
         execution_graph: create_minimal_finish_graph(),
         track_events: false,
-        child_scenarios: vec![],
+        child_workflows: vec![],
         connection_service_url: None,
     };
 
-    let compilation_result = compile_scenario(input).expect("Compilation failed");
+    let compilation_result = compile_workflow(input).expect("Compilation failed");
 
     // 2. Create OCI bundle with pasta networking
     println!("Step 2: Creating OCI bundle with pasta networking...");

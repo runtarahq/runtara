@@ -49,18 +49,18 @@ pub async fn has_events(
     Ok(len > 0)
 }
 
-/// Store session metadata (instance_id + scenario_id).
+/// Store session metadata (instance_id + workflow_id).
 pub async fn set_session_meta(
     conn: &mut ConnectionManager,
     org_id: &str,
     session_id: &str,
     instance_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
 ) -> Result<(), redis::RedisError> {
     let key = meta_key(org_id, session_id);
     redis::pipe()
         .hset(&key, "instance_id", instance_id)
-        .hset(&key, "scenario_id", scenario_id)
+        .hset(&key, "workflow_id", workflow_id)
         .expire(&key, META_TTL_SECS)
         .query_async::<()>(conn)
         .await?;
@@ -70,10 +70,10 @@ pub async fn set_session_meta(
 /// Get session metadata.
 pub struct SessionMeta {
     pub instance_id: String,
-    pub scenario_id: String,
+    pub workflow_id: String,
 }
 
-/// Get session metadata (instance_id + scenario_id).
+/// Get session metadata (instance_id + workflow_id).
 pub async fn get_session_meta(
     conn: &mut ConnectionManager,
     org_id: &str,
@@ -82,7 +82,7 @@ pub async fn get_session_meta(
     let key = meta_key(org_id, session_id);
     let values: Vec<Option<String>> = redis::pipe()
         .hget(&key, "instance_id")
-        .hget(&key, "scenario_id")
+        .hget(&key, "workflow_id")
         .query_async(conn)
         .await?;
 
@@ -90,9 +90,9 @@ pub async fn get_session_meta(
         values.first().and_then(|v| v.clone()),
         values.get(1).and_then(|v| v.clone()),
     ) {
-        (Some(instance_id), Some(scenario_id)) => Ok(Some(SessionMeta {
+        (Some(instance_id), Some(workflow_id)) => Ok(Some(SessionMeta {
             instance_id,
-            scenario_id,
+            workflow_id,
         })),
         _ => Ok(None),
     }

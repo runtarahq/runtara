@@ -71,7 +71,7 @@ type SessionKey = (String, String, String);
 
 /// Routes incoming channel messages to the right session.
 ///
-/// Looks up connection + trigger from DB to determine org_id, scenario_id,
+/// Looks up connection + trigger from DB to determine org_id, workflow_id,
 /// and bot credentials. Each active conversation gets its own session actor.
 pub struct ChannelRouter {
     sessions: Arc<DashMap<SessionKey, mpsc::Sender<InboundMessage>>>,
@@ -172,7 +172,7 @@ impl ChannelRouter {
     /// Handle an inbound message from a platform conversation.
     ///
     /// Looks up the connection to get org_id + bot token, then finds
-    /// the Channel trigger to get scenario_id. Creates or routes to
+    /// the Channel trigger to get workflow_id. Creates or routes to
     /// an existing session.
     pub async fn handle_message(
         &self,
@@ -224,7 +224,7 @@ impl ChannelRouter {
             })?;
 
         let trigger_id = trigger.id.clone();
-        let scenario_id = trigger.scenario_id.clone();
+        let workflow_id = trigger.workflow_id.clone();
 
         // Determine session mode from trigger configuration.
         let session_mode = trigger
@@ -331,7 +331,7 @@ impl ChannelRouter {
         tokio::spawn(async move {
             info!(
                 conv_id = %conv_id,
-                scenario_id = %scenario_id,
+                workflow_id = %workflow_id,
                 session_mode = %session_mode,
                 "Channel session starting"
             );
@@ -344,7 +344,7 @@ impl ChannelRouter {
                 engine,
                 valkey,
                 &tenant_id,
-                &scenario_id,
+                &workflow_id,
                 &session_mode,
             )
             .await
@@ -374,7 +374,7 @@ async fn session_loop(
     engine: Arc<ExecutionEngine>,
     mut valkey: ConnectionManager,
     org_id: &str,
-    scenario_id: &str,
+    workflow_id: &str,
     session_mode: &str,
 ) -> anyhow::Result<()> {
     // conv_id tracks the current conversation target (channel/thread).
@@ -384,7 +384,7 @@ async fn session_loop(
 
     let session_id = Uuid::new_v4().to_string();
 
-    let _token = session_token::sign(org_id, scenario_id, &session_id)
+    let _token = session_token::sign(org_id, workflow_id, &session_id)
         .map_err(|e| anyhow::anyhow!("Failed to sign session token: {}", e))?;
 
     // Queue first execution with the full inbound message data.
@@ -408,7 +408,7 @@ async fn session_loop(
     let result = engine
         .queue(QueueRequest {
             tenant_id: org_id,
-            scenario_id,
+            workflow_id,
             version: None,
             inputs,
             debug: false,
@@ -425,7 +425,7 @@ async fn session_loop(
         org_id,
         &session_id,
         &instance_id,
-        scenario_id,
+        workflow_id,
     )
     .await;
 
@@ -610,7 +610,7 @@ async fn session_loop(
                             // Pop the message from the queue so it's not re-processed.
                             // The message content will be delivered to the new instance
                             // via the queue-drain bridge if it has WaitForSignal.
-                            // For scenarios without WaitForSignal, the message was already
+                            // For workflows without WaitForSignal, the message was already
                             // handled by the webhook handler.
                             let queued_msg = session_queue::pop_event(&mut valkey, org_id, &session_id).await.ok().flatten();
                             let user_message = queued_msg.as_ref()
@@ -637,7 +637,7 @@ async fn session_loop(
                             });
                             match engine.queue(QueueRequest {
                                 tenant_id: org_id,
-                                scenario_id,
+                                workflow_id,
                                 version: None,
                                 inputs,
                                 debug: false,
@@ -647,7 +647,7 @@ async fn session_loop(
                                 Ok(result) => {
                                     instance_id = result.instance_id.to_string();
                                     let _ = session_queue::set_session_meta(
-                                        &mut valkey, org_id, &session_id, &instance_id, scenario_id,
+                                        &mut valkey, org_id, &session_id, &instance_id, workflow_id,
                                     ).await;
                                     // Update pending signal payload for the new instance
                                     // so the WaitForSignal handler delivers this message.
@@ -796,7 +796,7 @@ async fn dispatch_event(
             }
 
             ChatEvent::Error { message } => {
-                warn!(conv_id = %conv_id, error = %message, "Scenario error");
+                warn!(conv_id = %conv_id, error = %message, "Workflow error");
                 let _ = channel
                     .send_text(conv_id, "Sorry, something went wrong. Please try again.")
                     .await;

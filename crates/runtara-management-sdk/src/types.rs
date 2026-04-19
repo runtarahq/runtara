@@ -169,7 +169,7 @@ pub struct InstanceInfo {
     pub instance_id: String,
     /// Image UUID used for this execution.
     pub image_id: String,
-    /// Human-readable image name (format: {scenario_id}:{version}).
+    /// Human-readable image name (format: {workflow_id}:{version}).
     pub image_name: String,
     /// Tenant/org that owns this instance.
     pub tenant_id: String,
@@ -388,7 +388,7 @@ pub struct ListInstancesOptions {
     pub status: Option<InstanceStatus>,
     /// Filter by image ID (exact UUID match).
     pub image_id: Option<String>,
-    /// Filter by image name prefix (e.g., "scenario_id:" matches "scenario_id:1", "scenario_id:2").
+    /// Filter by image name prefix (e.g., "workflow_id:" matches "workflow_id:1", "workflow_id:2").
     pub image_name_prefix: Option<String>,
     /// Filter by created_at >= value.
     pub created_after: Option<DateTime<Utc>>,
@@ -433,7 +433,7 @@ impl ListInstancesOptions {
         self
     }
 
-    /// Filter by image name prefix (e.g., "scenario_id:" matches "scenario_id:1", "scenario_id:2").
+    /// Filter by image name prefix (e.g., "workflow_id:" matches "workflow_id:1", "workflow_id:2").
     pub fn with_image_name_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.image_name_prefix = Some(prefix.into());
         self
@@ -1075,7 +1075,7 @@ pub struct ScopeInfo {
     pub step_id: String,
     /// Human-readable step name.
     pub step_name: Option<String>,
-    /// Step type (e.g., "Split", "While", "StartScenario").
+    /// Step type (e.g., "Split", "While", "EmbedWorkflow").
     pub step_type: String,
     /// Iteration index (for Split/While loops).
     pub index: Option<u32>,

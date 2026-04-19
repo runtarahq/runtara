@@ -10,9 +10,9 @@ import { fileURLToPath } from 'url';
  * NodeConfigDialog did not persist to the canvas node label.
  *
  * For each step type:
- * 1. Create scenario → add step via "+" → rename in dialog → save dialog
+ * 1. Create workflow → add step via "+" → rename in dialog → save dialog
  * 2. Verify canvas shows the custom name (not the default step type name)
- * 3. Delete scenario
+ * 3. Delete workflow
  */
 
 const __filename = fileURLToPath(import.meta.url);
@@ -47,30 +47,30 @@ function apiHeaders(token: string): Record<string, string> {
 }
 
 /**
- * Helper: create scenario via UI, add a step type, rename it, and verify
+ * Helper: create workflow via UI, add a step type, rename it, and verify
  * the canvas node shows the custom name.
  *
- * Returns the scenario ID for cleanup.
+ * Returns the workflow ID for cleanup.
  */
 async function addStepAndRename(
   page: import('@playwright/test').Page,
   opts: {
-    scenarioName: string;
+    workflowName: string;
     stepTypeName: string;
     customName: string;
   }
 ): Promise<string> {
-  // 1. Create scenario
-  await page.goto('/scenarios/create');
+  // 1. Create workflow
+  await page.goto('/workflows/create');
   await page.waitForLoadState('networkidle');
-  await page.getByLabel('Name').fill(opts.scenarioName);
+  await page.getByLabel('Name').fill(opts.workflowName);
   await page.getByRole('button', { name: 'Save' }).click();
 
   await page.waitForURL(
-    (url) => /\/scenarios\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
+    (url) => /\/workflows\/(?!create\b)[a-zA-Z0-9_-]+$/.test(url.pathname),
     { timeout: 15000 }
   );
-  const scenarioId = page.url().split('/scenarios/').pop()!;
+  const workflowId = page.url().split('/workflows/').pop()!;
 
   // 2. Wait for canvas
   await expect(page.locator('.react-flow')).toBeVisible({ timeout: 15000 });
@@ -107,15 +107,15 @@ async function addStepAndRename(
     page.locator('.react-flow__node').filter({ hasText: opts.customName })
   ).toBeVisible({ timeout: 10000 });
 
-  return scenarioId;
+  return workflowId;
 }
 
 // ── Conditional step rename ─────────────────────────────────────────
 
 test.describe.serial('SYN-140: Conditional step rename', () => {
-  const scenarioName = `SYN-140 Conditional ${Date.now()}`;
+  const workflowName = `SYN-140 Conditional ${Date.now()}`;
   const customName = 'My Custom Conditional';
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -123,9 +123,9 @@ test.describe.serial('SYN-140: Conditional step rename', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -135,33 +135,33 @@ test.describe.serial('SYN-140: Conditional step rename', () => {
   });
 
   test('rename shows on canvas', async ({ page }) => {
-    scenarioId = await addStepAndRename(page, {
-      scenarioName,
+    workflowId = await addStepAndRename(page, {
+      workflowName,
       stepTypeName: 'Conditional',
       customName,
     });
   });
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: scenarioName });
+    const card = page.locator('article').filter({ hasText: workflowName });
     await expect(card).toBeVisible({ timeout: 10000 });
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
     await expect(card).not.toBeVisible({ timeout: 10000 });
 
-    scenarioId = '';
+    workflowId = '';
   });
 });
 
 // ── Split step rename ───────────────────────────────────────────────
 
 test.describe.serial('SYN-140: Split step rename', () => {
-  const scenarioName = `SYN-140 Split ${Date.now()}`;
+  const workflowName = `SYN-140 Split ${Date.now()}`;
   const customName = 'My Custom Split';
-  let scenarioId: string;
+  let workflowId: string;
   let token: string;
 
   test.beforeAll(() => {
@@ -169,9 +169,9 @@ test.describe.serial('SYN-140: Split step rename', () => {
   });
 
   test.afterAll(async () => {
-    if (!scenarioId) return;
+    if (!workflowId) return;
     try {
-      await fetch(`${GATEWAY_URL}/api/runtime/scenarios/${scenarioId}/delete`, {
+      await fetch(`${GATEWAY_URL}/api/runtime/workflows/${workflowId}/delete`, {
         method: 'POST',
         headers: apiHeaders(token),
       });
@@ -181,23 +181,23 @@ test.describe.serial('SYN-140: Split step rename', () => {
   });
 
   test('rename shows on canvas', async ({ page }) => {
-    scenarioId = await addStepAndRename(page, {
-      scenarioName,
+    workflowId = await addStepAndRename(page, {
+      workflowName,
       stepTypeName: 'Split',
       customName,
     });
   });
 
-  test('delete scenario', async ({ page }) => {
-    await page.goto('/scenarios');
+  test('delete workflow', async ({ page }) => {
+    await page.goto('/workflows');
     await page.waitForLoadState('networkidle');
 
-    const card = page.locator('article').filter({ hasText: scenarioName });
+    const card = page.locator('article').filter({ hasText: workflowName });
     await expect(card).toBeVisible({ timeout: 10000 });
     await card.getByTitle('Delete').first().click();
     await page.getByRole('button', { name: 'Confirm' }).click();
     await expect(card).not.toBeVisible({ timeout: 10000 });
 
-    scenarioId = '';
+    workflowId = '';
   });
 });

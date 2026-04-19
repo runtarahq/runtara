@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Finish step emitter.
 //!
-//! The Finish step defines the scenario outputs and returns from the workflow.
+//! The Finish step defines the workflow outputs and returns from the workflow.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -58,8 +58,8 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         quote! { serde_json::Value::Object(serde_json::Map::new()) }
     };
 
-    // Get the scenario inputs variable to access _loop_indices at runtime
-    let scenario_inputs_var = ctx.inputs_var.clone();
+    // Get the workflow inputs variable to access _loop_indices at runtime
+    let workflow_inputs_var = ctx.inputs_var.clone();
 
     // Generate debug event emissions (Finish doesn't create a scope)
     let debug_start = emit_step_debug_start(
@@ -69,7 +69,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         "Finish",
         Some(&finish_inputs_var),
         input_mapping_json.as_deref(),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
     let debug_end = emit_step_debug_end(
@@ -78,7 +78,7 @@ pub fn emit(step: &FinishStep, ctx: &mut EmitContext) -> Result<TokenStream, Cod
         step_name,
         "Finish",
         Some(&step_var),
-        Some(&scenario_inputs_var),
+        Some(&workflow_inputs_var),
         None,
     );
 

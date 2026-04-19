@@ -39,33 +39,33 @@ const Triggers = lazy(() =>
     default: m.Triggers,
   }))
 );
-const CreateScenario = lazy(() =>
-  import('@/features/scenarios/pages/CreateScenario').then((m) => ({
-    default: m.CreateScenario,
+const CreateWorkflow = lazy(() =>
+  import('@/features/workflows/pages/CreateWorkflow').then((m) => ({
+    default: m.CreateWorkflow,
   }))
 );
-const Scenarios = lazy(() =>
-  import('@/features/scenarios/pages/Scenarios').then((m) => ({
-    default: m.Scenarios,
+const Workflows = lazy(() =>
+  import('@/features/workflows/pages/Workflows').then((m) => ({
+    default: m.Workflows,
   }))
 );
-const Scenario = lazy(() =>
-  import('@/features/scenarios/pages/Scenario').then((m) => ({
-    default: m.Scenario,
+const Workflow = lazy(() =>
+  import('@/features/workflows/pages/Workflow').then((m) => ({
+    default: m.Workflow,
   }))
 );
-const ScenarioHistory = lazy(() =>
-  import('@/features/scenarios/pages/ScenarioHistory').then((m) => ({
-    default: m.ScenarioHistory,
+const WorkflowHistory = lazy(() =>
+  import('@/features/workflows/pages/WorkflowHistory').then((m) => ({
+    default: m.WorkflowHistory,
   }))
 );
-const ScenarioLogs = lazy(() =>
-  import('@/features/scenarios/pages/ScenarioLogs').then((m) => ({
-    default: m.ScenarioLogs,
+const WorkflowLogs = lazy(() =>
+  import('@/features/workflows/pages/WorkflowLogs').then((m) => ({
+    default: m.WorkflowLogs,
   }))
 );
 const ChatPage = lazy(() =>
-  import('@/features/scenarios/pages/Chat').then((m) => ({
+  import('@/features/workflows/pages/Chat').then((m) => ({
     default: m.ChatPage,
   }))
 );
@@ -158,63 +158,63 @@ export const router = createBrowserRouter(
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
-              <Scenarios />
+              <Workflows />
             </Suspense>
           </PrivateRoute>
         ),
       },
       {
-        path: '/scenarios',
+        path: '/workflows',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
-              <Scenarios />
+              <Workflows />
             </Suspense>
           </PrivateRoute>
         ),
       },
       {
-        path: '/scenarios/create',
+        path: '/workflows/create',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
-              <CreateScenario />
+              <CreateWorkflow />
             </Suspense>
           </PrivateRoute>
         ),
       },
       {
-        path: '/scenarios/:scenarioId',
+        path: '/workflows/:workflowId',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
-              <Scenario />
+              <Workflow />
             </Suspense>
           </PrivateRoute>
         ),
       },
       {
-        path: '/scenarios/:scenarioId/history/:instanceId',
+        path: '/workflows/:workflowId/history/:instanceId',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
-              <ScenarioHistory />
+              <WorkflowHistory />
             </Suspense>
           </PrivateRoute>
         ),
       },
       {
-        path: '/scenarios/:scenarioId/history/:instanceId/logs',
+        path: '/workflows/:workflowId/history/:instanceId/logs',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
-              <ScenarioLogs />
+              <WorkflowLogs />
             </Suspense>
           </PrivateRoute>
         ),
       },
       {
-        path: '/scenarios/:scenarioId/chat',
+        path: '/workflows/:workflowId/chat',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>
@@ -224,7 +224,7 @@ export const router = createBrowserRouter(
         ),
       },
       {
-        path: '/scenarios/:scenarioId/chat/:instanceId',
+        path: '/workflows/:workflowId/chat/:instanceId',
         element: (
           <PrivateRoute>
             <Suspense fallback={<PageLoader />}>

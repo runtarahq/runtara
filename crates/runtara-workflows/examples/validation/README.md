@@ -26,9 +26,9 @@ This directory contains example workflow JSON files that demonstrate the validat
 - **error_security_leak.json** - Passes connection credentials to a non-secure agent (E040)
 - **error_security_leak_to_finish.json** - Exposes connection data in workflow outputs (E041)
 
-### Child Scenario Errors (E050)
+### Child Workflow Errors (E050)
 
-- **error_invalid_child_version.json** - Invalid child scenario version format (E050)
+- **error_invalid_child_version.json** - Invalid child workflow version format (E050)
 
 ## Warning Examples (Compilation Succeeds with Warnings)
 
@@ -72,7 +72,7 @@ cargo run -p runtara-workflows --bin runtara-compile -- --verbose --validate exa
 | E040 | Security | Connection leak to non-secure agent |
 | E041 | Security | Connection leak to Finish step |
 | E042 | Security | Connection leak to Log step |
-| E050 | Child | Invalid child scenario version |
+| E050 | Child | Invalid child workflow version |
 
 ## Warning Code Reference
 

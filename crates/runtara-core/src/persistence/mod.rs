@@ -205,7 +205,7 @@ pub struct StepSummaryRecord {
     pub outputs: Option<serde_json::Value>,
     /// Error details from step_debug_end payload (if failed).
     pub error: Option<serde_json::Value>,
-    /// Scope ID for nested execution contexts (Split/While/StartScenario).
+    /// Scope ID for nested execution contexts (Split/While/EmbedWorkflow).
     pub scope_id: Option<String>,
     /// Parent scope ID for hierarchy.
     pub parent_scope_id: Option<String>,

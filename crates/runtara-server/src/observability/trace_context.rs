@@ -1,7 +1,7 @@
 //! Trace context extraction for distributed tracing propagation.
 //!
 //! Provides utilities to extract W3C Trace Context from the current span
-//! for propagation to child processes (compiled scenarios).
+//! for propagation to child processes (compiled workflows).
 
 use opentelemetry::trace::TraceContextExt;
 use tracing_opentelemetry::OpenTelemetrySpanExt;

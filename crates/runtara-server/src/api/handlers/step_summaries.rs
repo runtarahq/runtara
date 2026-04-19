@@ -27,7 +27,7 @@ pub struct StepSummariesQuery {
     pub status: Option<String>,
     /// Filter by step type (e.g., "Http", "Transform", "Agent")
     pub step_type: Option<String>,
-    /// Filter by scope ID (for hierarchical steps in Split/While/StartScenario)
+    /// Filter by scope ID (for hierarchical steps in Split/While/EmbedWorkflow)
     pub scope_id: Option<String>,
     /// Filter by parent scope ID
     pub parent_scope_id: Option<String>,
@@ -50,7 +50,7 @@ pub struct StepSummariesResponse {
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct StepSummariesResponseData {
-    pub scenario_id: String,
+    pub workflow_id: String,
     pub instance_id: String,
     pub steps: Vec<StepSummaryResponse>,
     pub count: usize,
@@ -97,17 +97,17 @@ pub struct StepSummaryResponse {
     pub parent_scope_id: Option<String>,
 }
 
-/// Handler to get step summaries for a scenario execution
+/// Handler to get step summaries for a workflow execution
 ///
-/// GET /api/runtime/scenarios/{scenario_id}/instances/{instance_id}/steps
+/// GET /api/runtime/workflows/{workflow_id}/instances/{instance_id}/steps
 ///
 /// Returns unified step records with paired start/end events. Each step appears
 /// once with its complete lifecycle information (inputs, outputs, duration, status).
 #[utoipa::path(
     get,
-    path = "/api/runtime/scenarios/{scenarioId}/instances/{instanceId}/steps",
+    path = "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
     params(
-        ("scenarioId" = String, Path, description = "Scenario identifier"),
+        ("workflowId" = String, Path, description = "Workflow identifier"),
         ("instanceId" = String, Path, description = "Instance identifier (UUID)"),
         StepSummariesQuery
     ),
@@ -118,11 +118,11 @@ pub struct StepSummaryResponse {
         (status = 503, description = "Runtime client not configured", body = Value),
         (status = 500, description = "Internal server error", body = Value)
     ),
-    tag = "scenario-controller"
+    tag = "workflow-controller"
 )]
 pub async fn get_step_summaries(
     crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
-    Path((scenario_id, instance_id)): Path<(String, String)>,
+    Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<StepSummariesQuery>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
 ) -> (StatusCode, Json<Value>) {
@@ -272,7 +272,7 @@ pub async fn get_step_summaries(
                 "success": true,
                 "message": "Step summaries retrieved successfully",
                 "data": {
-                    "scenarioId": scenario_id,
+                    "workflowId": workflow_id,
                     "instanceId": instance_id,
                     "steps": steps,
                     "count": count,

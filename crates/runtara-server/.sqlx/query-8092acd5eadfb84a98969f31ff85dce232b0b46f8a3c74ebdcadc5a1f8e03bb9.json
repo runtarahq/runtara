@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT latest_version, current_version\n        FROM workflows\n        WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "latest_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "current_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "37c3e98283a1ffe62203cc049ef37b3b2e955a367fbcb4635bf5ce8e91d894de"
+}

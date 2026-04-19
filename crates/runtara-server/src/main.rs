@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to connect to database");
 
-    // Run server-level migrations (scenarios, connections, compilations, etc.)
+    // Run server-level migrations (workflows, connections, compilations, etc.)
     // ignore_missing(true) allows existing databases that have the old individual
     // smo-runtime migrations in _sqlx_migrations to work without errors.
     let skip_migrations = std::env::var("SKIP_MIGRATIONS")

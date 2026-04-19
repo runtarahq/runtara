@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! CLI tool to generate the complete DSL specification for LLM scenario generation.
+//! CLI tool to generate the complete DSL specification for LLM workflow generation.
 //!
 //! This binary outputs a combined specification that includes:
 //! - DSL JSON Schema (workflow structure, steps, conditions, mappings)
@@ -89,7 +89,7 @@ fn main() {
 
 fn print_help() {
     eprintln!(
-        r#"Generate DSL Specification for LLM Scenario Generation
+        r#"Generate DSL Specification for LLM Workflow Generation
 
 Usage: generate_dsl_spec [OPTIONS]
 
@@ -174,7 +174,7 @@ fn generate_markdown(spec: &Value) -> String {
 
     // Overview
     md.push_str("## Overview\n\n");
-    md.push_str("This specification defines the Runtara workflow DSL for creating durable execution scenarios.\n\n");
+    md.push_str("This specification defines the Runtara workflow DSL for creating durable execution workflows.\n\n");
 
     // Step Types
     md.push_str("## Step Types\n\n");

@@ -91,14 +91,14 @@ mod tests {
     #[test]
     fn test_normalize_path() {
         assert_eq!(
-            normalize_path("/api/runtime/scenarios/123e4567-e89b-12d3-a456-426614174000"),
-            "/api/runtime/scenarios/{id}"
+            normalize_path("/api/runtime/workflows/123e4567-e89b-12d3-a456-426614174000"),
+            "/api/runtime/workflows/{id}"
         );
         assert_eq!(
             normalize_path(
-                "/api/runtime/scenarios/123e4567-e89b-12d3-a456-426614174000/versions/5"
+                "/api/runtime/workflows/123e4567-e89b-12d3-a456-426614174000/versions/5"
             ),
-            "/api/runtime/scenarios/{id}/versions/{id}"
+            "/api/runtime/workflows/{id}/versions/{id}"
         );
         assert_eq!(
             normalize_path("/api/runtime/metrics/tenant"),

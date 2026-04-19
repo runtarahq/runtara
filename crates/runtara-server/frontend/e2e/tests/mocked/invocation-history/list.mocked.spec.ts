@@ -1,4 +1,4 @@
-import { test, buildScenario } from '../../../fixtures';
+import { test, buildWorkflow } from '../../../fixtures';
 import { InvocationHistoryPage } from '../../../pages/InvocationHistoryPage';
 
 test.describe('Invocation history (mocked)', () => {
@@ -7,21 +7,21 @@ test.describe('Invocation history (mocked)', () => {
     mockApi,
     runA11y,
   }) => {
-    const scenario = buildScenario({ id: 'scn_h', name: 'History scenario' });
+    const workflow = buildWorkflow({ id: 'scn_h', name: 'History workflow' });
 
     await mockApi.bootstrap(page);
-    await mockApi.scenarios.list(page, [scenario]);
+    await mockApi.workflows.list(page, [workflow]);
     await mockApi.invocationHistory.list(page, [
       {
         id: 'inst_h1',
-        scenarioId: scenario.id,
+        workflowId: workflow.id,
         status: 'COMPLETED',
         created: '2026-01-01T12:00:00Z',
         finished: '2026-01-01T12:00:02Z',
       },
       {
         id: 'inst_h2',
-        scenarioId: scenario.id,
+        workflowId: workflow.id,
         status: 'FAILED',
         created: '2026-01-01T12:05:00Z',
       },

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::metrics::{ScenarioMetricsDaily, ScenarioMetricsHourly};
+use crate::metrics::{WorkflowMetricsDaily, WorkflowMetricsHourly};
 
 // ============================================================================
 // Query Parameters
@@ -31,59 +31,59 @@ pub struct MetricsResponse {
     pub data: Value,
 }
 
-/// Response data for scenario metrics endpoint
+/// Response data for workflow metrics endpoint
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ScenarioMetricsData {
-    pub scenario_id: String,
+pub struct WorkflowMetricsData {
+    pub workflow_id: String,
     pub version: Option<i32>,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     pub granularity: String,
-    pub metrics: Vec<ScenarioMetricsDaily>,
+    pub metrics: Vec<WorkflowMetricsDaily>,
 }
 
-/// Response for scenario metrics (daily)
+/// Response for workflow metrics (daily)
 #[derive(Serialize, ToSchema)]
-pub struct ScenarioMetricsDailyResponse {
+pub struct WorkflowMetricsDailyResponse {
     pub success: bool,
     pub message: String,
-    pub data: ScenarioMetricsData,
+    pub data: WorkflowMetricsData,
 }
 
-/// Response data for scenario metrics hourly endpoint
+/// Response data for workflow metrics hourly endpoint
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ScenarioMetricsHourlyData {
-    pub scenario_id: String,
+pub struct WorkflowMetricsHourlyData {
+    pub workflow_id: String,
     pub version: Option<i32>,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     pub granularity: String,
-    pub metrics: Vec<ScenarioMetricsHourly>,
+    pub metrics: Vec<WorkflowMetricsHourly>,
 }
 
-/// Response for scenario metrics (hourly)
+/// Response for workflow metrics (hourly)
 #[derive(Serialize, ToSchema)]
-pub struct ScenarioMetricsHourlyResponse {
+pub struct WorkflowMetricsHourlyResponse {
     pub success: bool,
     pub message: String,
-    pub data: ScenarioMetricsHourlyData,
+    pub data: WorkflowMetricsHourlyData,
 }
 
 /// Statistics data
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ScenarioStatsData {
-    pub scenario_id: String,
+pub struct WorkflowStatsData {
+    pub workflow_id: String,
     pub version: Option<i32>,
-    pub stats: ScenarioStats,
+    pub stats: WorkflowStats,
 }
 
-/// Overall scenario statistics
+/// Overall workflow statistics
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ScenarioStats {
+pub struct WorkflowStats {
     pub total_invocations: Option<i64>,
     pub total_successes: Option<i64>,
     pub total_failures: Option<i64>,
@@ -107,12 +107,12 @@ pub struct ScenarioStats {
     pub success_rate_percent: Option<f64>,
 }
 
-/// Response for scenario statistics
+/// Response for workflow statistics
 #[derive(Serialize, ToSchema)]
-pub struct ScenarioStatsResponse {
+pub struct WorkflowStatsResponse {
     pub success: bool,
     pub message: String,
-    pub data: ScenarioStatsData,
+    pub data: WorkflowStatsData,
 }
 
 /// Tenant metrics data point

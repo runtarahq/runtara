@@ -430,7 +430,7 @@ pub fn emit_build_source(ctx: &EmitContext) -> TokenStream {
             source_map.insert("data".to_string(), (*#inputs.data).clone());
             source_map.insert("variables".to_string(), (*#inputs.variables).clone());
             source_map.insert("steps".to_string(), serde_json::Value::Object(#steps_context.clone()));
-            source_map.insert("scenario".to_string(), serde_json::json!({
+            source_map.insert("workflow".to_string(), serde_json::json!({
                 "inputs": {
                     "data": &*#inputs.data,
                     "variables": &*#inputs.variables
@@ -886,11 +886,11 @@ mod tests {
         let tokens = emit_build_source(&ctx);
         let code = tokens.to_string();
 
-        // Should build source with data, variables, steps, and scenario
+        // Should build source with data, variables, steps, and workflow
         assert!(code.contains("data"));
         assert!(code.contains("variables"));
         assert!(code.contains("steps"));
-        assert!(code.contains("scenario"));
+        assert!(code.contains("workflow"));
         assert!(code.contains("source_map"));
     }
 
@@ -906,16 +906,16 @@ mod tests {
     }
 
     #[test]
-    fn test_emit_build_source_includes_scenario_inputs() {
+    fn test_emit_build_source_includes_workflow_inputs() {
         let ctx = EmitContext::new(false);
         let tokens = emit_build_source(&ctx);
         let code = tokens.to_string();
 
-        // Should include scenario.inputs structure
+        // Should include workflow.inputs structure
         assert!(code.contains("inputs"));
         assert!(
             code.contains("data") && code.contains("variables"),
-            "Should have both data and variables in scenario.inputs"
+            "Should have both data and variables in workflow.inputs"
         );
     }
 

@@ -38,7 +38,7 @@ A single, script-based installation and update path for Runtara that:
 
 ## The core design decision
 
-Runtara invokes `rustc` on every scenario compile ([crates/runtara-workflows/src/compile.rs:551](../crates/runtara-workflows/src/compile.rs#L551)). Scenario compilation is foundational to the product — it happens whenever a user saves or publishes a workflow via the no-code UI, on the hot path, in every deployment.
+Runtara invokes `rustc` on every workflow compile ([crates/runtara-workflows/src/compile.rs:551](../crates/runtara-workflows/src/compile.rs#L551)). Workflow compilation is foundational to the product — it happens whenever a user saves or publishes a workflow via the no-code UI, on the hot path, in every deployment.
 
 There are two ways to deliver that compiler to the host:
 
@@ -49,7 +49,7 @@ There are two ways to deliver that compiler to the host:
 
 ## Design: the hermetic bundle
 
-Every release produces one **all-in-one tarball per (os, arch)** containing Runtara plus every runtime dependency it needs to compile and execute scenarios. Installing Runtara means extracting one tarball into one directory and wiring up a service unit. That's the entire story.
+Every release produces one **all-in-one tarball per (os, arch)** containing Runtara plus every runtime dependency it needs to compile and execute workflows. Installing Runtara means extracting one tarball into one directory and wiring up a service unit. That's the entire story.
 
 ### Bundle layout
 
@@ -65,7 +65,7 @@ Every release produces one **all-in-one tarball per (os, arch)** containing Runt
     lib/
       rustlib/
         {host-target}/                 # native libs for compiling proc-macros
-        wasm32-wasip2/                 # target libs for scenario WASM
+        wasm32-wasip2/                 # target libs for workflow WASM
   stdlib/                              # pre-built Runtara workflow stdlib
     libruntara_workflow_stdlib.rlib
     deps/
@@ -82,7 +82,7 @@ Every release produces one **all-in-one tarball per (os, arch)** containing Runt
   MANIFEST.json                        # { runtara, rustc, wasmtime } versions + checksums
 ```
 
-**Nothing in `toolchain/` is ever added to `$PATH`.** `runtara-server` sets `RUSTC=/opt/runtara/toolchain/bin/rustc` when spawning the scenario compile subprocess. The user's shell, user's Rust install (if any), and system package manager are all untouched.
+**Nothing in `toolchain/` is ever added to `$PATH`.** `runtara-server` sets `RUSTC=/opt/runtara/toolchain/bin/rustc` when spawning the workflow compile subprocess. The user's shell, user's Rust install (if any), and system package manager are all untouched.
 
 **Single version stamp.** The bundled rustc, the bundled stdlib rlibs, the proc-macros, and the server binary are all produced by the same CI job against the same pinned rustc. They ship together. No separate manifests to verify — if you have the bundle, the parts are consistent by construction.
 
@@ -103,7 +103,7 @@ Every release produces one **all-in-one tarball per (os, arch)** containing Runt
 
 Tarball size estimate: 300–500 MB per target. Comparable to a rustup install, which users are already accustomed to for similar tooling.
 
-**Linux libc strategy:** build against glibc on `ubuntu-22.04` (glibc 2.35). Covers Ubuntu 22.04+, Debian 12+, Amazon Linux 2023, RHEL 9+. Amazon Linux 2 and older are explicitly not supported. We deliberately avoid musl — the scenario-native-compile path that previously motivated it has been replaced by `wasm32-wasip2`, and the host binary has no cross-distro requirements beyond "modern Linux". Cleanup of the dead musl code in [crates/runtara-workflows/src/compile.rs](../crates/runtara-workflows/src/compile.rs), [.cargo/config.toml](../.cargo/config.toml), and [Cargo.toml:47-48](../Cargo.toml#L47-L48) is tracked as a follow-up.
+**Linux libc strategy:** build against glibc on `ubuntu-22.04` (glibc 2.35). Covers Ubuntu 22.04+, Debian 12+, Amazon Linux 2023, RHEL 9+. Amazon Linux 2 and older are explicitly not supported. We deliberately avoid musl — the workflow-native-compile path that previously motivated it has been replaced by `wasm32-wasip2`, and the host binary has no cross-distro requirements beyond "modern Linux". Cleanup of the dead musl code in [crates/runtara-workflows/src/compile.rs](../crates/runtara-workflows/src/compile.rs), [.cargo/config.toml](../.cargo/config.toml), and [Cargo.toml:47-48](../Cargo.toml#L47-L48) is tracked as a follow-up.
 
 **No `.deb` packages.** The `.deb` path and `packaging/` directory have been removed.
 
@@ -188,7 +188,7 @@ Non-interactive mode works the same as today — export env vars (`RUNTARA_NONIN
 
 Today, Runtara ships as a single `runtara-server` binary. The `runtara-environment` crate exists but is linked into `runtara-server` as a library dependency ([runtara-server/Cargo.toml:27](../crates/runtara-server/Cargo.toml#L27)) — there is no separate execution-host deployable to install. One bundle, one binary, one service unit. The installer has no component selection because there's only one thing to install.
 
-A future split of compilation or execution into a dedicated sidecar (e.g. `runtara-compiler`) would be the moment to introduce a `--component` flag. Until then, the installer stays flag-free on this axis. The bundle's `toolchain/` + `stdlib/` are always present because `runtara-server` always needs them (to compile scenarios).
+A future split of compilation or execution into a dedicated sidecar (e.g. `runtara-compiler`) would be the moment to introduce a `--component` flag. Until then, the installer stays flag-free on this axis. The bundle's `toolchain/` + `stdlib/` are always present because `runtara-server` always needs them (to compile workflows).
 
 ## Install layout on the host
 
@@ -373,9 +373,9 @@ It does **not** permit:
 
 ### Pre-existing question — worth flagging separately
 
-When Runtara compiles a user scenario, the output links against `runtara-workflow-stdlib`, which is AGPL. The compiled WASM artifact is arguably a derivative work of AGPL code.
+When Runtara compiles a user workflow, the output links against `runtara-workflow-stdlib`, which is AGPL. The compiled WASM artifact is arguably a derivative work of AGPL code.
 
-- For users running scenarios **inside their own Runtara instance**: fine, they're using the product, not distributing or modifying anything.
+- For users running workflows **inside their own Runtara instance**: fine, they're using the product, not distributing or modifying anything.
 - For users **extracting the compiled WASM and running it elsewhere**: the AGPL obligations arguably travel with the artifact. This may already be intentional (part of the commercial-license pitch) but should be documented explicitly in [LICENSING.md](../LICENSING.md) if so. It's a product-level question, not an install-plan question.
 
 ## Prior art — why this shape is well-trodden
@@ -445,13 +445,13 @@ curl -fsSL https://github.com/runtarahq/runtara/releases/download/v1.5.0/install
 
 ## Rollout
 
-1. **Phase 1 — licenses directory + CI bundle build.** Add `docs/licenses/` with all third-party license texts and `THIRD-PARTY-NOTICES.md`. Prototype the bundle-build CI job on one target (x86_64-linux) to validate the approach end-to-end: download upstream Rust, build Runtara against it, build stdlib + proc-macros, assemble bundle, install locally, compile a trivial scenario. No release changes yet.
+1. **Phase 1 — licenses directory + CI bundle build.** Add `docs/licenses/` with all third-party license texts and `THIRD-PARTY-NOTICES.md`. Prototype the bundle-build CI job on one target (x86_64-linux) to validate the approach end-to-end: download upstream Rust, build Runtara against it, build stdlib + proc-macros, assemble bundle, install locally, compile a trivial workflow. No release changes yet.
 2. **Phase 2 — full matrix.** Extend to aarch64-linux and aarch64-darwin.
 3. **Phase 3 — installer rewrite.** Rewrite [scripts/install.sh](../scripts/install.sh) around the bundle: detect platform, download bundle, verify, atomic swap, install service. Add `--user`, `--uninstall`, `--version`, `--purge` flags.
 4. **Phase 4 — self-update subcommand.** Add `runtara-server self-update` in Rust. Uses the same atomic-swap flow as the installer.
 5. **Phase 5 — ~~delete `.deb` packaging~~.** Done. `packaging/`, `scripts/build-deb.sh`, and the old `install.sh` have been removed.
 6. **Phase 6 — docs.** Rewrite the installation section of user docs around the one-liner. (No domain or worker setup — we serve `install.sh` from GitHub release assets directly.)
-7. **Follow-up — dead code cleanup.** Remove the vestigial scenario-native-compile code in [compile.rs](../crates/runtara-workflows/src/compile.rs) (musl target, `get_host_target`, `+crt-static`), and the `musl`-related bits of [.cargo/config.toml](../.cargo/config.toml) and [Cargo.toml:47-48](../Cargo.toml#L47-L48) now that scenarios compile to WASM exclusively.
+7. **Follow-up — dead code cleanup.** Remove the vestigial workflow-native-compile code in [compile.rs](../crates/runtara-workflows/src/compile.rs) (musl target, `get_host_target`, `+crt-static`), and the `musl`-related bits of [.cargo/config.toml](../.cargo/config.toml) and [Cargo.toml:47-48](../Cargo.toml#L47-L48) now that workflows compile to WASM exclusively.
 
 ## Open questions
 
@@ -472,5 +472,5 @@ curl -fsSL https://github.com/runtarahq/runtara/releases/download/v1.5.0/install
 - Re-running the installer is a noop if already at the target version.
 - Uninstall leaves no stray files beyond config + data (unless `--purge`).
 - `runtara-server` never touches `$PATH`, `$CARGO_HOME`, `$RUSTUP_HOME`, or any user-owned rustc install.
-- CI end-to-end test on every supported platform: install → compile a trivial scenario → execute → uninstall. Gates releases.
+- CI end-to-end test on every supported platform: install → compile a trivial workflow → execute → uninstall. Gates releases.
 - Bundle licenses directory validated in CI: every third-party component in `toolchain/`, `stdlib/`, and `bin/wasmtime` has a corresponding license entry in `licenses/` and an entry in `THIRD-PARTY-NOTICES.md`.

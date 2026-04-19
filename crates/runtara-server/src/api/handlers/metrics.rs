@@ -18,28 +18,28 @@ use crate::api::dto::metrics::*;
 use crate::metrics::MetricsService;
 use crate::runtime_client::{GetTenantMetricsOptions, MetricsGranularity, RuntimeClient};
 
-/// Get metrics for a specific scenario
+/// Get metrics for a specific workflow
 #[utoipa::path(
     get,
-    path = "/api/runtime/metrics/scenarios/{scenario_id}",
+    path = "/api/runtime/metrics/workflows/{workflow_id}",
     params(
-        ("scenario_id" = String, Path, description = "Scenario identifier"),
+        ("workflow_id" = String, Path, description = "Workflow identifier"),
         ("startTime" = Option<String>, Query, description = "Start time (ISO 8601), defaults to 24h ago"),
         ("endTime" = Option<String>, Query, description = "End time (ISO 8601), defaults to now"),
         ("version" = Option<i32>, Query, description = "Specific version, or all versions if not specified"),
         ("granularity" = Option<String>, Query, description = "Time granularity: 'hourly' or 'daily' (default: daily)")
     ),
     responses(
-        (status = 200, description = "Daily metrics retrieved successfully", body = ScenarioMetricsDailyResponse),
-        (status = 200, description = "Hourly metrics retrieved successfully", body = ScenarioMetricsHourlyResponse),
+        (status = 200, description = "Daily metrics retrieved successfully", body = WorkflowMetricsDailyResponse),
+        (status = 200, description = "Hourly metrics retrieved successfully", body = WorkflowMetricsHourlyResponse),
         (status = 500, description = "Internal server error", body = MetricsResponse)
     ),
     tag = "metrics-controller"
 )]
-pub async fn get_scenario_metrics(
+pub async fn get_workflow_metrics(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    Path(scenario_id): Path<String>,
+    Path(workflow_id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> (StatusCode, Json<Value>) {
     let metrics_service = MetricsService::new(pool);
@@ -55,9 +55,9 @@ pub async fn get_scenario_metrics(
     let result = match granularity {
         "hourly" => {
             let metrics = metrics_service
-                .get_scenario_metrics_hourly(
+                .get_workflow_metrics_hourly(
                     &tenant_id,
-                    &scenario_id,
+                    &workflow_id,
                     query.version,
                     start_time,
                     end_time,
@@ -69,7 +69,7 @@ pub async fn get_scenario_metrics(
                     "success": true,
                     "message": "Hourly metrics retrieved successfully",
                     "data": {
-                        "scenarioId": scenario_id,
+                        "workflowId": workflow_id,
                         "version": query.version,
                         "startTime": start_time,
                         "endTime": end_time,
@@ -92,9 +92,9 @@ pub async fn get_scenario_metrics(
         _ => {
             // Default to daily
             let metrics = metrics_service
-                .get_scenario_metrics_daily(
+                .get_workflow_metrics_daily(
                     &tenant_id,
-                    &scenario_id,
+                    &workflow_id,
                     query.version,
                     start_time,
                     end_time,
@@ -106,7 +106,7 @@ pub async fn get_scenario_metrics(
                     "success": true,
                     "message": "Daily metrics retrieved successfully",
                     "data": {
-                        "scenarioId": scenario_id,
+                        "workflowId": workflow_id,
                         "version": query.version,
                         "startTime": start_time,
                         "endTime": end_time,
@@ -131,31 +131,31 @@ pub async fn get_scenario_metrics(
     (StatusCode::OK, Json(result))
 }
 
-/// Get overall statistics for a scenario (all time)
+/// Get overall statistics for a workflow (all time)
 #[utoipa::path(
     get,
-    path = "/api/runtime/metrics/scenarios/{scenario_id}/stats",
+    path = "/api/runtime/metrics/workflows/{workflow_id}/stats",
     params(
-        ("scenario_id" = String, Path, description = "Scenario identifier"),
+        ("workflow_id" = String, Path, description = "Workflow identifier"),
         ("version" = Option<i32>, Query, description = "Specific version, or all versions if not specified")
     ),
     responses(
-        (status = 200, description = "Statistics retrieved successfully", body = ScenarioStatsResponse),
+        (status = 200, description = "Statistics retrieved successfully", body = WorkflowStatsResponse),
         (status = 404, description = "No statistics found", body = MetricsResponse),
         (status = 500, description = "Internal server error", body = MetricsResponse)
     ),
     tag = "metrics-controller"
 )]
-pub async fn get_scenario_stats(
+pub async fn get_workflow_stats(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    Path(scenario_id): Path<String>,
+    Path(workflow_id): Path<String>,
     Query(query): Query<MetricsQuery>,
 ) -> (StatusCode, Json<Value>) {
     let metrics_service = MetricsService::new(pool);
 
     match metrics_service
-        .get_scenario_overall_stats(&tenant_id, &scenario_id, query.version)
+        .get_workflow_overall_stats(&tenant_id, &workflow_id, query.version)
         .await
     {
         Ok(Some(stats)) => (
@@ -164,7 +164,7 @@ pub async fn get_scenario_stats(
                 "success": true,
                 "message": "Overall statistics retrieved successfully",
                 "data": {
-                    "scenarioId": scenario_id,
+                    "workflowId": workflow_id,
                     "version": query.version,
                     "stats": stats
                 }
@@ -174,7 +174,7 @@ pub async fn get_scenario_stats(
             StatusCode::NOT_FOUND,
             Json(json!({
                 "success": false,
-                "message": "No statistics found for this scenario",
+                "message": "No statistics found for this workflow",
                 "data": null
             })),
         ),
@@ -189,7 +189,7 @@ pub async fn get_scenario_stats(
     }
 }
 
-/// Get tenant-level metrics aggregated across all scenarios (hourly)
+/// Get tenant-level metrics aggregated across all workflows (hourly)
 #[utoipa::path(
     get,
     path = "/api/runtime/metrics/tenant",

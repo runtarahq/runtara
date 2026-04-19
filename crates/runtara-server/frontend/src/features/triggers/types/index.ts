@@ -8,12 +8,12 @@ import {
 export type { InvocationTrigger, TriggerType };
 
 // Extended trigger type with UI enrichment from queries
-// - scenarioName: resolved from scenario_id lookup
+// - workflowName: resolved from workflow_id lookup
 // - Converted from snake_case to camelCase for UI consistency
 export interface EnrichedTrigger {
   id: string;
-  scenarioId: string;
-  scenarioName: string;
+  workflowId: string;
+  workflowName: string;
   triggerType: TriggerType;
   configuration?: object | null;
   configurationPreview?: string;

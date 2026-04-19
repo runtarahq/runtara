@@ -27,7 +27,7 @@ import { useCustomMutation } from '@/shared/hooks/api';
 import { createBillingPortalSession } from '@/shared/queries';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router';
-import { useFolders } from '@/features/scenarios/hooks/useFolders';
+import { useFolders } from '@/features/workflows/hooks/useFolders';
 
 export function Sidebar() {
   return (
@@ -104,7 +104,7 @@ function AppMenu() {
   const menuWithFolders = useMemo(() => {
     return allowedMenu.map((menuItem) => {
       if (
-        menuItem.key === 'scenarios' &&
+        menuItem.key === 'workflows' &&
         foldersData?.root &&
         foldersData.root.length > 0
       ) {
@@ -113,7 +113,7 @@ function AppMenu() {
           children: foldersData.root.map((folder) => ({
             key: folder.path,
             title: folder.name,
-            to: `/scenarios?folder=${encodeURIComponent(folder.path)}`,
+            to: `/workflows?folder=${encodeURIComponent(folder.path)}`,
             icon: <Folder className="h-4 w-4 text-amber-500" />,
           })),
         };
@@ -134,7 +134,7 @@ function AppMenu() {
             tooltip={menuItem.title}
             active={
               location.pathname.startsWith(menuItem.to) ||
-              (menuItem.to === '/scenarios' && isHomePage)
+              (menuItem.to === '/workflows' && isHomePage)
             }
           />
         ))}

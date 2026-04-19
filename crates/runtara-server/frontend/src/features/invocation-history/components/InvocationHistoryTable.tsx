@@ -25,7 +25,7 @@ export function InvocationHistoryTable() {
   const [filters, setFilters] = useState<ExecutionHistoryFilters>(() => ({
     sortBy: 'createdAt',
     sortOrder: 'desc',
-    scenarioId: searchParams.get('scenarioId') || undefined,
+    workflowId: searchParams.get('workflowId') || undefined,
     status: searchParams.get('status') || undefined,
   }));
 
@@ -50,12 +50,12 @@ export function InvocationHistoryTable() {
     // Reset to first page when filters change
     setPagination((prev) => ({ ...prev, pageIndex: 0 }));
 
-    // Update URL params for scenarioId and status
+    // Update URL params for workflowId and status
     const newParams = new URLSearchParams(searchParams);
-    if (newFilters.scenarioId) {
-      newParams.set('scenarioId', newFilters.scenarioId);
+    if (newFilters.workflowId) {
+      newParams.set('workflowId', newFilters.workflowId);
     } else {
-      newParams.delete('scenarioId');
+      newParams.delete('workflowId');
     }
     if (newFilters.status) {
       newParams.set('status', newFilters.status);

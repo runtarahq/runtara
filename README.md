@@ -49,7 +49,7 @@ Important top-level directories:
 
 ## Runtime Model
 
-The practical entrypoint is `runtara-server`. It embeds `runtara-environment` and `runtara-core` in a single process and adds scenario management, auth, connections, channels, MCP, and background workers.
+The practical entrypoint is `runtara-server`. It embeds `runtara-environment` and `runtara-core` in a single process and adds workflow management, auth, connections, channels, MCP, and background workers.
 
 - `runtara-server` exposes the application HTTP API on port `7001` by default
 - `runtara-environment` runs embedded, handling image registry, instance lifecycle, and runners
@@ -64,7 +64,7 @@ UI / API clients / MCP agents
                 v
       runtara-server (HTTP + MCP API, default :7001)
                 |
-                +--> scenario management, auth, connections, channels
+                +--> workflow management, auth, connections, channels
                 +--> background workers (triggers, compilation, cron)
                 |
                 v
@@ -95,7 +95,7 @@ Runner implementations currently present in the repo:
 |------|---------|
 | `runtara-core` | Core runtime: checkpoints, signals, events, durable sleep, instance HTTP API |
 | `runtara-environment` | Management plane: image registry, instance lifecycle, runners, wake scheduling |
-| `runtara-server` | Complete HTTP API server: scenarios, connections, channels, workers, MCP integration |
+| `runtara-server` | Complete HTTP API server: workflows, connections, channels, workers, MCP integration |
 | `runtara-management-sdk` | SDK and CLI-facing client for `runtara-environment` |
 | `runtara-sdk` | Instance-side SDK used by compiled workflows |
 | `runtara-sdk-macros` | Proc macros for `runtara-sdk` |
@@ -118,7 +118,7 @@ Runtara is organized into three independent layers. Each layer builds on the one
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │  runtara-server                                                  │
-│  Full application server: scenarios, connections, auth, MCP,     │
+│  Full application server: workflows, connections, auth, MCP,     │
 │  channels, workers, file storage, object model                   │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  runtara-environment                                       │  │
@@ -169,7 +169,7 @@ Runner backends:
 | **Native** | Development — direct child process execution, no container runtime needed |
 | **Mock** | Testing — simulates execution without running real processes |
 
-**Use this layer when** you need to run compiled workflows as isolated units but want to manage scenarios, auth, and application logic in your own code. Embed `runtara-environment` as a library (see `docs/embedding-runtara.md`) and interact with it through `runtara-management-sdk`.
+**Use this layer when** you need to run compiled workflows as isolated units but want to manage workflows, auth, and application logic in your own code. Embed `runtara-environment` as a library (see `docs/embedding-runtara.md`) and interact with it through `runtara-management-sdk`.
 
 ```rust
 // Embed environment with OCI runner and embedded core
@@ -191,13 +191,13 @@ A complete, batteries-included server that embeds both Layer 1 and Layer 2 and a
 
 `runtara-server` is a library crate (no binary — you host it in your own `main`). It provides:
 
-- **Scenario management** — CRUD, compilation, execution, scheduling, and replay of workflows
+- **Workflow management** — CRUD, compilation, execution, scheduling, and replay of workflows
 - **Authentication** — JWT (with JWKS) and API key auth with tenant isolation
 - **Connections** — third-party credential storage with OAuth2 flows and rate limiting
 - **Object model** — user-defined schemas and instance CRUD backed by a separate PostgreSQL database
 - **File storage** — S3-compatible bucket and file management for workflows
 - **Channels** — webhook integrations (Slack, Teams, Telegram, Mailgun) for conversational triggers
-- **MCP server** — Model Context Protocol interface so AI agents can manage scenarios, executions, and connections through tools
+- **MCP server** — Model Context Protocol interface so AI agents can manage workflows, executions, and connections through tools
 - **Background workers** — trigger execution, compilation queues, cron scheduling, cleanup
 - **Observability** — OpenTelemetry with Datadog, HTTP metrics middleware, system analytics
 
@@ -217,7 +217,7 @@ runtara_server::start(pool).await?;
 |-----------------|-----|
 | Add durable checkpointing to your own long-running tasks | Layer 1 (`runtara-core` + `runtara-sdk`) |
 | Run compiled workflows in containers with lifecycle management | Layer 2 (`runtara-environment`) |
-| Deploy the full Runtara platform with auth, scenarios, MCP, and channels | Layer 3 (`runtara-server`) |
+| Deploy the full Runtara platform with auth, workflows, MCP, and channels | Layer 3 (`runtara-server`) |
 | Embed workflow execution inside an existing Rust service | Layer 2 as a library (see `docs/embedding-runtara.md`) |
 
 Each higher layer embeds the layers below it. You never need to run them as separate processes unless you want to scale them independently.
@@ -227,9 +227,9 @@ Each higher layer embeds the layers below it. You never need to run them as sepa
 ### Prerequisites
 
 - Rust toolchain (stable, Edition 2024)
-- `wasm32-wasip2` target: `rustup target add wasm32-wasip2` (scenarios compile to WASM by default)
+- `wasm32-wasip2` target: `rustup target add wasm32-wasip2` (workflows compile to WASM by default)
 - PostgreSQL — one database for `runtara-environment`/`runtara-core` state, and (if running `runtara-server`) a separate database for the object model
-- Valkey or Redis — required by `runtara-server` for checkpoint storage during scenario execution
+- Valkey or Redis — required by `runtara-server` for checkpoint storage during workflow execution
 - `crun` and Linux container support if you enable the OCI runner
 
 If you're only using Layer 1 (`runtara-core` + `runtara-sdk`) or Layer 2 (`runtara-environment`), you do not need Valkey or the object-model database.
@@ -273,23 +273,23 @@ CLI:
 cargo run -p runtara-workflows --bin runtara-compile -- \
   --workflow e2e/workflows/simple_passthrough.json \
   --tenant demo \
-  --scenario simple-passthrough
+  --workflow simple-passthrough
 ```
 
 Library:
 
 ```rust
-use runtara_workflows::{compile_scenario, CompilationInput, Scenario};
+use runtara_workflows::{compile_workflow, CompilationInput, Workflow};
 
-let scenario: Scenario = serde_json::from_str(&std::fs::read_to_string("workflow.json")?)?;
+let workflow: Workflow = serde_json::from_str(&std::fs::read_to_string("workflow.json")?)?;
 
-let result = compile_scenario(CompilationInput {
+let result = compile_workflow(CompilationInput {
     tenant_id: "demo".to_string(),
-    scenario_id: "simple-passthrough".to_string(),
+    workflow_id: "simple-passthrough".to_string(),
     version: 1,
-    execution_graph: scenario.into(),
+    execution_graph: workflow.into(),
     track_events: false,
-    child_scenarios: vec![],
+    child_workflows: vec![],
     connection_service_url: None,
 })?;
 
@@ -309,7 +309,7 @@ use runtara_management_sdk::{ManagementSdk, RegisterImageOptions, StartInstanceO
 let sdk = ManagementSdk::localhost()?;
 sdk.connect().await?;
 
-let binary = std::fs::read("./scenario")?;
+let binary = std::fs::read("./workflow")?;
 let image = sdk
     .register_image(RegisterImageOptions::new("tenant-1", "demo-workflow", binary))
     .await?;
@@ -410,12 +410,12 @@ The tables below reflect the current code paths in the workspace, not older tran
 
 ### `runtara-server`
 
-The application-server layer embeds `runtara-environment` + `runtara-core` and adds scenario management, auth, connections, and channels. It reads all of the `runtara-environment` variables plus these:
+The application-server layer embeds `runtara-environment` + `runtara-core` and adds workflow management, auth, connections, and channels. It reads all of the `runtara-environment` variables plus these:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `OBJECT_MODEL_DATABASE_URL` | Yes | - | Separate PostgreSQL connection string for the user-defined object model. `DATABASE_URL` is accepted by some startup paths as a legacy alias, but set `OBJECT_MODEL_DATABASE_URL` to avoid surprises. |
-| `VALKEY_HOST` | Yes | - | Valkey/Redis host for checkpoint storage during scenario execution. Startup aborts if unset. |
+| `VALKEY_HOST` | Yes | - | Valkey/Redis host for checkpoint storage during workflow execution. Startup aborts if unset. |
 | `VALKEY_PORT` | No | `6379` | Valkey/Redis port |
 | `INTERNAL_PORT` | No | `7002` | Internal HTTP port used for service-to-service communication |
 | `CHECKPOINT_TTL_HOURS` | No | `48` | How long checkpoints are retained in Valkey |

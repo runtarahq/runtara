@@ -1,18 +1,18 @@
-//! Connection validation for scenario steps.
+//! Connection validation for workflow steps.
 //!
 //! Validates that connection_id references in Agent steps point to
 //! existing connections in the database.
 
 use std::collections::HashSet;
 
-use runtara_dsl::{Scenario, Step};
+use runtara_dsl::{Step, Workflow};
 
 use super::reference_validation::{IssueCategory, ValidationIssue};
 
-/// Extract all connection IDs referenced in a scenario
-pub fn extract_connection_ids(scenario: &Scenario) -> HashSet<String> {
+/// Extract all connection IDs referenced in a workflow
+pub fn extract_connection_ids(workflow: &Workflow) -> HashSet<String> {
     let mut connection_ids = HashSet::new();
-    extract_from_graph(&scenario.execution_graph, &mut connection_ids);
+    extract_from_graph(&workflow.execution_graph, &mut connection_ids);
     connection_ids
 }
 
@@ -42,12 +42,12 @@ fn extract_from_graph(graph: &runtara_dsl::ExecutionGraph, connection_ids: &mut 
 /// Returns validation issues for any connection_id that is not in the
 /// `existing_connections` set.
 pub fn validate_connections(
-    scenario: &Scenario,
+    workflow: &Workflow,
     existing_connections: &HashSet<String>,
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     validate_graph_connections(
-        &scenario.execution_graph,
+        &workflow.execution_graph,
         existing_connections,
         &mut issues,
         None,
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_extract_connection_ids() {
-        let scenario: Scenario = serde_json::from_value(json!({
+        let workflow: Workflow = serde_json::from_value(json!({
             "executionGraph": {
                 "steps": {
                     "step1": {
@@ -148,7 +148,7 @@ mod tests {
         }))
         .unwrap();
 
-        let conn_ids = extract_connection_ids(&scenario);
+        let conn_ids = extract_connection_ids(&workflow);
         assert_eq!(conn_ids.len(), 2);
         assert!(conn_ids.contains("my-connection"));
         assert!(conn_ids.contains("shopify-conn"));
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_validate_missing_connection() {
-        let scenario: Scenario = serde_json::from_value(json!({
+        let workflow: Workflow = serde_json::from_value(json!({
             "executionGraph": {
                 "steps": {
                     "step1": {
@@ -175,7 +175,7 @@ mod tests {
         .unwrap();
 
         let existing: HashSet<String> = HashSet::new();
-        let issues = validate_connections(&scenario, &existing);
+        let issues = validate_connections(&workflow, &existing);
 
         assert_eq!(issues.len(), 1);
         assert!(issues[0].message.contains("nonexistent-connection"));
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_validate_existing_connection() {
-        let scenario: Scenario = serde_json::from_value(json!({
+        let workflow: Workflow = serde_json::from_value(json!({
             "executionGraph": {
                 "steps": {
                     "step1": {
@@ -205,7 +205,7 @@ mod tests {
         let mut existing: HashSet<String> = HashSet::new();
         existing.insert("my-connection".to_string());
 
-        let issues = validate_connections(&scenario, &existing);
+        let issues = validate_connections(&workflow, &existing);
         assert!(issues.is_empty());
     }
 }

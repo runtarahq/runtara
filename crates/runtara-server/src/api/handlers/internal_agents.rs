@@ -1,7 +1,7 @@
 //! Agent Capability Execution Handlers
 //!
 //! Internal endpoint for executing native-only agent capabilities (sftp, xlsx,
-//! compression) on behalf of scenario binaries:
+//! compression) on behalf of workflow binaries:
 //!
 //! 1. **Internal** (`/api/internal/agents/{module}/{capability_id}`) —
 //!    No authentication, localhost only.

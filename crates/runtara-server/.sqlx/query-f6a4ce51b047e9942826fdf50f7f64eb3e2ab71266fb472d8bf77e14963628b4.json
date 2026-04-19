@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM workflow_compilations\n            WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b19c250a41f79000f2d052ef93ff0528dc4f6864249446d60f652fb7b9e4afdc"
+}
