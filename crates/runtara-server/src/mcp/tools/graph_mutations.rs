@@ -353,6 +353,38 @@ pub struct UpdateStepParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct PatchStepOp {
+    #[schemars(description = "Operation: 'replace', 'add', or 'remove'")]
+    pub op: String,
+    #[schemars(
+        description = "JSON Pointer path inside the step (RFC 6901). Examples: \
+                       '/inputMapping/url/value', '/name', '/retryPolicy'. Use '~1' for '/' \
+                       and '~0' for '~' inside a segment. '-' on arrays means append."
+    )]
+    pub path: String,
+    #[schemars(description = "Value for 'replace' and 'add' (ignored for 'remove')")]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PatchStepParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Step ID to patch")]
+    pub step_id: String,
+    #[schemars(
+        description = "List of JSON-Patch-style operations applied in order to the step object."
+    )]
+    pub patches: Vec<PatchStepOp>,
+    #[schemars(
+        description = "Path to nested subgraph — array of step IDs to traverse. Omit for root graph."
+    )]
+    pub path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectStepsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -723,6 +755,157 @@ pub async fn update_step(
         "version": version,
         "newVersion": new_version,
         "stepId": params.step_id,
+    }))
+}
+
+/// Decode a JSON Pointer segment per RFC 6901 (~1 → '/', ~0 → '~').
+fn unescape_pointer_segment(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
+}
+
+/// Split `/a/b/c` into (`/a/b`, `c`). Returns an error for empty pointers.
+fn split_pointer(pointer: &str) -> Result<(String, String), rmcp::ErrorData> {
+    if pointer.is_empty() {
+        return Err(err(
+            "Cannot patch at root of step — use update_step instead",
+        ));
+    }
+    let idx = pointer
+        .rfind('/')
+        .ok_or_else(|| err(format!("Invalid JSON pointer: '{}'", pointer)))?;
+    Ok((pointer[..idx].to_string(), pointer[idx + 1..].to_string()))
+}
+
+fn apply_patches(
+    step: &mut serde_json::Value,
+    patches: &[PatchStepParamsOp],
+) -> Result<(), rmcp::ErrorData> {
+    for patch in patches {
+        match patch.op.as_str() {
+            "replace" => {
+                let target = step
+                    .pointer_mut(&patch.path)
+                    .ok_or_else(|| err(format!("Path '{}' not found on step", patch.path)))?;
+                let value = patch
+                    .value
+                    .clone()
+                    .ok_or_else(|| err("'replace' op requires 'value'"))?;
+                *target = value;
+            }
+            "add" => {
+                let value = patch
+                    .value
+                    .clone()
+                    .ok_or_else(|| err("'add' op requires 'value'"))?;
+                let (parent_path, key) = split_pointer(&patch.path)?;
+                let parent = step
+                    .pointer_mut(&parent_path)
+                    .ok_or_else(|| err(format!("Parent path '{}' not found", parent_path)))?;
+                match parent {
+                    serde_json::Value::Object(o) => {
+                        o.insert(unescape_pointer_segment(&key), value);
+                    }
+                    serde_json::Value::Array(a) => {
+                        if key == "-" {
+                            a.push(value);
+                        } else {
+                            let idx: usize = key.parse().map_err(|_| {
+                                err(format!("Invalid array index '{}' for 'add'", key))
+                            })?;
+                            if idx > a.len() {
+                                return Err(err(format!(
+                                    "Array index {} out of bounds (len={})",
+                                    idx,
+                                    a.len()
+                                )));
+                            }
+                            a.insert(idx, value);
+                        }
+                    }
+                    _ => {
+                        return Err(err(format!(
+                            "Parent at '{}' is not an object or array",
+                            parent_path
+                        )));
+                    }
+                }
+            }
+            "remove" => {
+                let (parent_path, key) = split_pointer(&patch.path)?;
+                let parent = step
+                    .pointer_mut(&parent_path)
+                    .ok_or_else(|| err(format!("Parent path '{}' not found", parent_path)))?;
+                match parent {
+                    serde_json::Value::Object(o) => {
+                        let k = unescape_pointer_segment(&key);
+                        o.remove(&k)
+                            .ok_or_else(|| err(format!("Key '{}' not found", k)))?;
+                    }
+                    serde_json::Value::Array(a) => {
+                        let idx: usize = key.parse().map_err(|_| {
+                            err(format!("Invalid array index '{}' for 'remove'", key))
+                        })?;
+                        if idx >= a.len() {
+                            return Err(err(format!(
+                                "Array index {} out of bounds (len={})",
+                                idx,
+                                a.len()
+                            )));
+                        }
+                        a.remove(idx);
+                    }
+                    _ => {
+                        return Err(err(format!(
+                            "Parent at '{}' is not an object or array",
+                            parent_path
+                        )));
+                    }
+                }
+            }
+            other => {
+                return Err(err(format!(
+                    "Unsupported op '{}'. Supported: replace, add, remove",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Alias kept so apply_patches reads naturally regardless of which param struct
+/// passes in the ops. Both PatchStepOp and (future) callers share the same shape.
+type PatchStepParamsOp = PatchStepOp;
+
+pub async fn patch_step(
+    server: &SmoMcpServer,
+    params: PatchStepParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    if params.patches.is_empty() {
+        return Err(err("patches must not be empty"));
+    }
+
+    let (mut graph, latest, current) = fetch_latest_graph(server, &params.workflow_id).await?;
+    let path = params.path.unwrap_or_default();
+    let target = resolve_graph_mut(&mut graph, &path)?;
+
+    let step = target
+        .get_mut("steps")
+        .and_then(|s| s.as_object_mut())
+        .and_then(|s| s.get_mut(&params.step_id))
+        .ok_or_else(|| err(format!("Step '{}' not found in graph", params.step_id)))?;
+
+    apply_patches(step, &params.patches)?;
+
+    let (version, new_version) =
+        save_graph(server, &params.workflow_id, graph, latest, current).await?;
+    json_result(serde_json::json!({
+        "success": true,
+        "workflowId": params.workflow_id,
+        "version": version,
+        "newVersion": new_version,
+        "stepId": params.step_id,
+        "patchesApplied": params.patches.len(),
     }))
 }
 
@@ -1437,4 +1620,119 @@ pub async fn remove_variable(
         "newVersion": new_version,
         "removedVariable": params.name,
     }))
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    fn op(op: &str, path: &str, value: Option<serde_json::Value>) -> PatchStepOp {
+        PatchStepOp {
+            op: op.to_string(),
+            path: path.to_string(),
+            value,
+        }
+    }
+
+    #[test]
+    fn replace_sets_leaf_value() {
+        let mut step = serde_json::json!({
+            "stepType": "Agent",
+            "inputMapping": { "url": { "valueType": "immediate", "value": "old" } }
+        });
+        apply_patches(
+            &mut step,
+            &[op(
+                "replace",
+                "/inputMapping/url/value",
+                Some(serde_json::json!("new")),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            step["inputMapping"]["url"]["value"],
+            serde_json::json!("new")
+        );
+    }
+
+    #[test]
+    fn replace_missing_path_errors() {
+        let mut step = serde_json::json!({ "stepType": "Agent" });
+        let e = apply_patches(
+            &mut step,
+            &[op("replace", "/nope", Some(serde_json::json!(1)))],
+        )
+        .unwrap_err();
+        assert!(e.message.contains("not found"));
+    }
+
+    #[test]
+    fn add_creates_missing_object_key() {
+        let mut step = serde_json::json!({ "stepType": "Agent", "inputMapping": {} });
+        apply_patches(
+            &mut step,
+            &[op(
+                "add",
+                "/inputMapping/newKey",
+                Some(serde_json::json!({"valueType": "immediate", "value": 42})),
+            )],
+        )
+        .unwrap();
+        assert_eq!(step["inputMapping"]["newKey"]["value"], 42);
+    }
+
+    #[test]
+    fn add_appends_to_array_with_dash() {
+        let mut step = serde_json::json!({ "stepType": "Agent", "tags": ["a"] });
+        apply_patches(
+            &mut step,
+            &[op("add", "/tags/-", Some(serde_json::json!("b")))],
+        )
+        .unwrap();
+        assert_eq!(step["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn remove_deletes_object_key() {
+        let mut step = serde_json::json!({ "stepType": "Agent", "retryPolicy": {"max": 3} });
+        apply_patches(&mut step, &[op("remove", "/retryPolicy", None)]).unwrap();
+        assert!(step.get("retryPolicy").is_none());
+    }
+
+    #[test]
+    fn remove_missing_key_errors() {
+        let mut step = serde_json::json!({ "stepType": "Agent" });
+        let e = apply_patches(&mut step, &[op("remove", "/nope", None)]).unwrap_err();
+        assert!(e.message.contains("not found"));
+    }
+
+    #[test]
+    fn escaped_segment_resolves() {
+        // A key containing '/' is represented as '~1' in the pointer.
+        let mut step = serde_json::json!({
+            "stepType": "Agent",
+            "inputMapping": { "path/with/slashes": { "value": "x" } }
+        });
+        apply_patches(
+            &mut step,
+            &[op(
+                "replace",
+                "/inputMapping/path~1with~1slashes/value",
+                Some(serde_json::json!("y")),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            step["inputMapping"]["path/with/slashes"]["value"],
+            serde_json::json!("y")
+        );
+    }
+
+    #[test]
+    fn unsupported_op_errors() {
+        let mut step = serde_json::json!({ "stepType": "Agent" });
+        let e =
+            apply_patches(&mut step, &[op("move", "/a", Some(serde_json::json!(1)))]).unwrap_err();
+        assert!(e.message.contains("Unsupported op"));
+    }
 }

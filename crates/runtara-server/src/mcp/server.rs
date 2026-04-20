@@ -445,6 +445,18 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Apply targeted JSON Patch ops (replace/add/remove) to a step without \
+                       re-sending its full definition. Paths are RFC 6901 JSON Pointers relative \
+                       to the step (e.g. '/inputMapping/url/value', '/retryPolicy')."
+    )]
+    async fn patch_step(
+        &self,
+        params: Parameters<tools::graph_mutations::PatchStepParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::graph_mutations::patch_step(self, params.0).await
+    }
+
+    #[tool(
         description = "Add an edge between two steps in the execution plan. Updates the latest version in-place."
     )]
     async fn connect_steps(
