@@ -2187,3 +2187,299 @@ async fn test_create_instances_extended_partial_columns_typed_null() {
 
     cleanup_test(&store, &prefix).await;
 }
+
+// ==================== Bulk-insert: JSONB null vs SQL NULL ====================
+//
+// Regression coverage for the bug where a bulk-insert payload that omits a
+// `ColumnType::Json` column wrote JSONB `null` (a real JSONB value) rather
+// than SQL NULL, making `WHERE col IS NULL` miss those rows. An explicit
+// `{"col": null}` should still write JSONB `null`.
+
+async fn setup_json_null_schema(store: &ObjectStore, schema_name: &str, table_name: &str) {
+    store
+        .create_schema(CreateSchemaRequest {
+            name: schema_name.to_string(),
+            description: None,
+            table_name: table_name.to_string(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("attrs", ColumnType::Json),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+}
+
+async fn assert_json_null_semantics(store: &ObjectStore, table_name: &str) {
+    let absent_is_null: i64 = sqlx::query_scalar(&format!(
+        r#"SELECT COUNT(*) FROM "{}" WHERE attrs IS NULL"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("count IS NULL");
+    assert_eq!(
+        absent_is_null, 1,
+        "absent JSON column should be stored as SQL NULL"
+    );
+
+    let jsonb_null: i64 = sqlx::query_scalar(&format!(
+        r#"SELECT COUNT(*) FROM "{}" WHERE attrs IS NOT NULL AND jsonb_typeof(attrs) = 'null'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("count JSONB null");
+    assert_eq!(
+        jsonb_null, 1,
+        "explicit null on JSON column should stay JSONB `null`"
+    );
+
+    let object_match: i64 = sqlx::query_scalar(&format!(
+        r#"SELECT COUNT(*) FROM "{}" WHERE attrs @> '{{"x":1}}'::jsonb"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("count object");
+    assert_eq!(object_match, 1, "object JSON value should be preserved");
+}
+
+#[tokio::test]
+async fn test_create_instances_json_absent_vs_explicit_null() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_json_null", prefix);
+    setup_json_null_schema(&store, "json_null", &table_name).await;
+
+    let n = store
+        .create_instances(
+            "json_null",
+            vec![
+                serde_json::json!({"sku": "a"}),
+                serde_json::json!({"sku": "b", "attrs": null}),
+                serde_json::json!({"sku": "c", "attrs": {"x": 1}}),
+            ],
+        )
+        .await
+        .expect("bulk insert");
+    assert_eq!(n, 3);
+
+    assert_json_null_semantics(&store, &table_name).await;
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_upsert_instances_json_absent_vs_explicit_null() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_json_null_up", prefix);
+    setup_json_null_schema(&store, "json_null_up", &table_name).await;
+
+    let n = store
+        .upsert_instances(
+            "json_null_up",
+            vec![
+                serde_json::json!({"sku": "a"}),
+                serde_json::json!({"sku": "b", "attrs": null}),
+                serde_json::json!({"sku": "c", "attrs": {"x": 1}}),
+            ],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("bulk upsert");
+    assert_eq!(n, 3);
+
+    assert_json_null_semantics(&store, &table_name).await;
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_create_instances_extended_json_absent_vs_explicit_null() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_json_null_ext", prefix);
+    setup_json_null_schema(&store, "json_null_ext", &table_name).await;
+
+    let result = store
+        .create_instances_extended(
+            "json_null_ext",
+            vec![
+                serde_json::json!({"sku": "a"}),
+                serde_json::json!({"sku": "b", "attrs": null}),
+                serde_json::json!({"sku": "c", "attrs": {"x": 1}}),
+            ],
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Error,
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await
+        .expect("bulk extended insert");
+    assert_eq!(result.created_count, 3);
+
+    assert_json_null_semantics(&store, &table_name).await;
+    cleanup_test(&store, &prefix).await;
+}
+
+// ==================== Bulk-insert: DB DEFAULT firing ====================
+//
+// Regression coverage for the bug where an absent column silently bound SQL
+// NULL, bypassing the column's declared `DEFAULT` clause. For NOT NULL +
+// DEFAULT columns this previously tripped the constraint after validation
+// passed; for nullable columns it silently erased the default.
+
+#[tokio::test]
+async fn test_create_instances_fires_db_default_when_column_absent() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_default_ts", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "default_ts".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("snapshot_at", ColumnType::Timestamp)
+                    .not_null()
+                    .default("now()"),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // Mixed batch in a single call exercises per-row DEFAULT/$N placeholder
+    // interleaving in one INSERT (the risky code path).
+    let before = chrono::Utc::now();
+    let n = store
+        .create_instances(
+            "default_ts",
+            vec![
+                serde_json::json!({"sku": "x"}),
+                serde_json::json!({"sku": "y", "snapshot_at": "2020-01-01T00:00:00Z"}),
+                serde_json::json!({"sku": "z"}),
+            ],
+        )
+        .await
+        .expect("bulk insert should succeed with DEFAULT firing");
+    assert_eq!(n, 3);
+    let after = chrono::Utc::now();
+    let slack = chrono::Duration::seconds(5);
+
+    for sku in ["x", "z"] {
+        let ts: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+            r#"SELECT snapshot_at FROM "{}" WHERE sku = '{}'"#,
+            table_name, sku
+        ))
+        .fetch_one(store.pool())
+        .await
+        .unwrap_or_else(|e| panic!("read {}: {}", sku, e));
+        assert!(
+            ts >= before - slack && ts <= after + slack,
+            "absent DEFAULT-column for {} should be near now(); got {}",
+            sku,
+            ts
+        );
+    }
+
+    let y_ts: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        r#"SELECT snapshot_at FROM "{}" WHERE sku = 'y'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read y");
+    assert_eq!(
+        y_ts,
+        chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        "explicit value should win over DEFAULT"
+    );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_upsert_instances_default_on_insert_and_update() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_default_up", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "default_up".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("updated_count", ColumnType::Integer)
+                    .not_null()
+                    .default("0"),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    store
+        .upsert_instances(
+            "default_up",
+            vec![serde_json::json!({"sku": "x"})],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("first upsert (INSERT path, DEFAULT fires)");
+
+    let initial: i64 = sqlx::query_scalar(&format!(
+        r#"SELECT updated_count FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read initial");
+    assert_eq!(initial, 0, "absent column should use DB default on INSERT");
+
+    store
+        .upsert_instances(
+            "default_up",
+            vec![serde_json::json!({"sku": "x", "updated_count": 5})],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("second upsert (UPDATE path via ON CONFLICT)");
+
+    let updated: i64 = sqlx::query_scalar(&format!(
+        r#"SELECT updated_count FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read updated");
+    assert_eq!(updated, 5, "explicit value should overwrite via UPDATE");
+
+    cleanup_test(&store, &prefix).await;
+}

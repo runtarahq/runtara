@@ -929,15 +929,20 @@ impl ObjectStore {
             let mut placeholders = Vec::new();
             let mut param_idx = 1;
 
-            for _ in chunk {
+            for (_, properties_obj) in chunk {
                 let mut row_placeholders = Vec::new();
                 if self.config.auto_columns.id {
                     row_placeholders.push(format!("${}", param_idx));
                     param_idx += 1;
                 }
-                for _ in &schema.columns {
-                    row_placeholders.push(format!("${}", param_idx));
-                    param_idx += 1;
+                for col in &schema.columns {
+                    match classify_slot(col, properties_obj) {
+                        Slot::Default => row_placeholders.push("DEFAULT".to_string()),
+                        Slot::TypedNull | Slot::Value(_) => {
+                            row_placeholders.push(format!("${}", param_idx));
+                            param_idx += 1;
+                        }
+                    }
                 }
                 placeholders.push(format!("({})", row_placeholders.join(", ")));
             }
@@ -957,10 +962,11 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
-                    let value = properties_obj
-                        .get(&col.name)
-                        .unwrap_or(&serde_json::Value::Null);
-                    query = Self::bind_value(query, &col.column_type, &col.name, value)?;
+                    query = match classify_slot(col, properties_obj) {
+                        Slot::Default => query,
+                        Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
+                        Slot::Value(v) => Self::bind_value(query, &col.column_type, &col.name, v)?,
+                    };
                 }
             }
 
@@ -1100,15 +1106,20 @@ impl ObjectStore {
             let mut placeholders = Vec::new();
             let mut param_idx = 1;
 
-            for _ in chunk {
+            for (_, properties_obj) in chunk {
                 let mut row_placeholders = Vec::new();
                 if self.config.auto_columns.id {
                     row_placeholders.push(format!("${}", param_idx));
                     param_idx += 1;
                 }
-                for _ in &schema.columns {
-                    row_placeholders.push(format!("${}", param_idx));
-                    param_idx += 1;
+                for col in &schema.columns {
+                    match classify_slot(col, properties_obj) {
+                        Slot::Default => row_placeholders.push("DEFAULT".to_string()),
+                        Slot::TypedNull | Slot::Value(_) => {
+                            row_placeholders.push(format!("${}", param_idx));
+                            param_idx += 1;
+                        }
+                    }
                 }
                 placeholders.push(format!("({})", row_placeholders.join(", ")));
             }
@@ -1140,10 +1151,11 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
-                    let value = properties_obj
-                        .get(&col.name)
-                        .unwrap_or(&serde_json::Value::Null);
-                    query = Self::bind_value(query, &col.column_type, &col.name, value)?;
+                    query = match classify_slot(col, properties_obj) {
+                        Slot::Default => query,
+                        Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
+                        Slot::Value(v) => Self::bind_value(query, &col.column_type, &col.name, v)?,
+                    };
                 }
             }
 
@@ -1305,15 +1317,20 @@ impl ObjectStore {
         for chunk in validated.chunks(chunk_size) {
             let mut placeholders = Vec::new();
             let mut param_idx = 1;
-            for _ in chunk {
+            for (_, properties_obj) in chunk {
                 let mut row_placeholders = Vec::new();
                 if self.config.auto_columns.id {
                     row_placeholders.push(format!("${}", param_idx));
                     param_idx += 1;
                 }
-                for _ in &schema.columns {
-                    row_placeholders.push(format!("${}", param_idx));
-                    param_idx += 1;
+                for col in &schema.columns {
+                    match classify_slot(col, properties_obj) {
+                        Slot::Default => row_placeholders.push("DEFAULT".to_string()),
+                        Slot::TypedNull | Slot::Value(_) => {
+                            row_placeholders.push(format!("${}", param_idx));
+                            param_idx += 1;
+                        }
+                    }
                 }
                 placeholders.push(format!("({})", row_placeholders.join(", ")));
             }
@@ -1332,10 +1349,11 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
-                    let value = properties_obj
-                        .get(&col.name)
-                        .unwrap_or(&serde_json::Value::Null);
-                    query = Self::bind_value(query, &col.column_type, &col.name, value)?;
+                    query = match classify_slot(col, properties_obj) {
+                        Slot::Default => query,
+                        Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
+                        Slot::Value(v) => Self::bind_value(query, &col.column_type, &col.name, v)?,
+                    };
                 }
             }
 
@@ -1749,6 +1767,52 @@ impl ObjectStore {
             }
             ColumnType::Json => query.bind(value),
         })
+    }
+
+    /// Bind a typed SQL NULL (`None::<T>`) for the given column type.
+    ///
+    /// Used by the bulk-insert path when a column is absent from the payload
+    /// and has no declared DB default: we still need a typed placeholder so
+    /// Postgres can infer the column's type (and, for `Json`, so it writes
+    /// SQL NULL rather than JSONB `null`).
+    fn bind_typed_null<'q>(
+        query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        column_type: &ColumnType,
+    ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+        match column_type {
+            ColumnType::String | ColumnType::Enum { .. } => query.bind(None::<String>),
+            ColumnType::Integer => query.bind(None::<i64>),
+            ColumnType::Decimal { .. } => query.bind(None::<f64>),
+            ColumnType::Boolean => query.bind(None::<bool>),
+            ColumnType::Timestamp => query.bind(None::<chrono::DateTime<chrono::Utc>>),
+            ColumnType::Json => query.bind(None::<serde_json::Value>),
+        }
+    }
+}
+
+/// Per-column slot in a bulk-insert VALUES tuple.
+///
+/// Preserves the distinction between "payload omitted this key" and "payload
+/// set this key to null" — which Postgres cares about for (a) firing declared
+/// `DEFAULT` clauses and (b) writing SQL NULL vs JSONB `null` on JSON columns.
+enum Slot<'a> {
+    /// Key absent and the column declares a DB default — emit literal `DEFAULT`.
+    Default,
+    /// Key absent with no default — emit `$N`, bind typed `None::<T>` (SQL NULL).
+    TypedNull,
+    /// Key present (including explicit null) — emit `$N`, bind via [`ObjectStore::bind_value`].
+    Value(&'a serde_json::Value),
+}
+
+/// Classify a (column, row-payload) pair into the correct [`Slot`] variant.
+fn classify_slot<'a>(
+    col: &ColumnDefinition,
+    properties_obj: &'a serde_json::Map<String, serde_json::Value>,
+) -> Slot<'a> {
+    match properties_obj.get(&col.name) {
+        None if col.default_value.is_some() => Slot::Default,
+        None => Slot::TypedNull,
+        Some(v) => Slot::Value(v),
     }
 }
 
