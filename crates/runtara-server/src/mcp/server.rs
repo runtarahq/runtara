@@ -597,6 +597,57 @@ impl SmoMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::connections::validate_mappings(self, params.0).await
     }
+
+    // ===== Invocation Trigger Tools =====
+
+    #[tool(
+        description = "List all invocation triggers (CRON, HTTP, EMAIL, APPLICATION, CHANNEL) for the tenant."
+    )]
+    async fn list_triggers(
+        &self,
+        params: Parameters<tools::triggers::ListTriggersParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::triggers::list_triggers(self, params.0).await
+    }
+
+    #[tool(description = "Get a single invocation trigger by its UUID.")]
+    async fn get_trigger(
+        &self,
+        params: Parameters<tools::triggers::GetTriggerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::triggers::get_trigger(self, params.0).await
+    }
+
+    #[tool(
+        description = "Create an invocation trigger. For CRON, set trigger_type=\"CRON\" and \
+                       configuration={expression, timezone?, inputs?, debug?} where `inputs` is the \
+                       workflow input payload (e.g., {\"data\": {...}, \"variables\": {...}})."
+    )]
+    async fn create_trigger(
+        &self,
+        params: Parameters<tools::triggers::CreateTriggerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::triggers::create_trigger(self, params.0).await
+    }
+
+    #[tool(
+        description = "Replace an invocation trigger's definition. All fields are required; \
+                       configuration fully replaces the prior value."
+    )]
+    async fn update_trigger(
+        &self,
+        params: Parameters<tools::triggers::UpdateTriggerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::triggers::update_trigger(self, params.0).await
+    }
+
+    #[tool(description = "Delete an invocation trigger by its UUID.")]
+    async fn delete_trigger(
+        &self,
+        params: Parameters<tools::triggers::DeleteTriggerParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::triggers::delete_trigger(self, params.0).await
+    }
 }
 
 #[tool_handler]
