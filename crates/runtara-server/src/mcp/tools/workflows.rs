@@ -37,6 +37,12 @@ pub struct GetWorkflowParams {
     pub workflow_id: String,
     #[schemars(description = "Specific version number (omit for latest)")]
     pub version: Option<i32>,
+    #[schemars(
+        description = "If false, return full step definitions including large inputMapping \
+                       immediate values (HTML templates, JSON blobs). Default: true \
+                       (compact — string values >512B are replaced with a truncated preview)."
+    )]
+    pub compact: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -174,12 +180,59 @@ pub async fn get_workflow(
         Some(v) => format!("?versionNumber={}", v),
         None => String::new(),
     };
-    let result = api_get(
+    let mut result = api_get(
         server,
         &format!("/api/runtime/workflows/{}{}", params.workflow_id, qs),
     )
     .await?;
+
+    if params.compact != Some(false) {
+        for pointer in ["/data/definition/executionGraph", "/data/executionGraph"] {
+            if let Some(graph) = result.pointer_mut(pointer) {
+                truncate_large_strings_in_graph(graph);
+                break;
+            }
+        }
+    }
+
     json_result(result)
+}
+
+/// Walk an execution graph and replace any string value >512 bytes with a truncated
+/// preview. Catches large immediate mapping values (HTML templates, JSON blobs pasted
+/// as strings) without losing the structural outline the caller needs.
+fn truncate_large_strings_in_graph(graph: &mut serde_json::Value) {
+    const MAX: usize = 512;
+    const PREVIEW: usize = 256;
+
+    fn walk(v: &mut serde_json::Value, max: usize, preview: usize) {
+        match v {
+            serde_json::Value::String(s) if s.len() > max => {
+                let mut cut = preview.min(s.len());
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                *v = serde_json::json!({
+                    "_truncated": true,
+                    "_originalSize": s.len(),
+                    "_preview": &s[..cut],
+                });
+            }
+            serde_json::Value::Array(a) => {
+                for item in a {
+                    walk(item, max, preview);
+                }
+            }
+            serde_json::Value::Object(o) => {
+                for (_, child) in o.iter_mut() {
+                    walk(child, max, preview);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    walk(graph, MAX, PREVIEW);
 }
 
 pub async fn create_workflow(
