@@ -14,6 +14,9 @@ use crate::sql::ddl::DdlGenerator;
 use crate::sql::sanitize::quote_identifier;
 use crate::types::{ColumnDefinition, ColumnType};
 
+/// A validated row destined for bulk insert: (generated id, payload map).
+type ValidatedRow = (String, serde_json::Map<String, serde_json::Value>);
+
 /// Schema-driven dynamic PostgreSQL object store
 ///
 /// Manages schemas and instances in a single PostgreSQL database.
@@ -1070,28 +1073,22 @@ impl ObjectStore {
             column_names.push(quote_identifier(&col.name));
         }
 
-        // Build ON CONFLICT clause
+        // Build ON CONFLICT column list (same for every group).
         let conflict_cols: Vec<String> = conflict_columns
             .iter()
             .map(|c| quote_identifier(c))
             .collect();
+        let conflict_set: std::collections::HashSet<&str> =
+            conflict_columns.iter().map(String::as_str).collect();
 
-        // Build DO UPDATE SET clause (exclude conflict columns)
-        let conflict_set: std::collections::HashSet<_> = conflict_columns.iter().collect();
-        let mut update_sets = Vec::new();
-
-        for col in &schema.columns {
-            if !conflict_set.contains(&col.name) {
-                update_sets.push(format!(
-                    "{} = EXCLUDED.{}",
-                    quote_identifier(&col.name),
-                    quote_identifier(&col.name)
-                ));
-            }
-        }
-
-        if self.config.auto_columns.updated_at {
-            update_sets.push("updated_at = NOW()".to_string());
+        // Group rows by UPDATE signature — rows that share the same set of
+        // "present non-conflict columns" can share one DO UPDATE SET clause.
+        // This way a row's absent columns are never stomped on UPDATE.
+        let mut groups: std::collections::HashMap<Vec<String>, Vec<ValidatedRow>> =
+            std::collections::HashMap::new();
+        for (id, props) in validated_instances {
+            let sig = update_signature(&schema, &props, &conflict_set);
+            groups.entry(sig).or_default().push((id, props));
         }
 
         // Calculate chunk size
@@ -1102,65 +1099,81 @@ impl ObjectStore {
         let mut tx = self.pool.begin().await?;
         let mut total_affected: i64 = 0;
 
-        for chunk in validated_instances.chunks(chunk_size) {
-            let mut placeholders = Vec::new();
-            let mut param_idx = 1;
+        for (signature, group_rows) in groups {
+            // DO UPDATE SET lists only columns present in this group's payloads.
+            let mut update_sets: Vec<String> = signature
+                .iter()
+                .map(|name| {
+                    let q = quote_identifier(name);
+                    format!("{} = EXCLUDED.{}", q, q)
+                })
+                .collect();
+            if self.config.auto_columns.updated_at {
+                update_sets.push("updated_at = NOW()".to_string());
+            }
 
-            for (_, properties_obj) in chunk {
-                let mut row_placeholders = Vec::new();
-                if self.config.auto_columns.id {
-                    row_placeholders.push(format!("${}", param_idx));
-                    param_idx += 1;
-                }
-                for col in &schema.columns {
-                    match classify_slot(col, properties_obj) {
-                        Slot::Default => row_placeholders.push("DEFAULT".to_string()),
-                        Slot::TypedNull | Slot::Value(_) => {
-                            row_placeholders.push(format!("${}", param_idx));
-                            param_idx += 1;
+            for chunk in group_rows.chunks(chunk_size) {
+                let mut placeholders = Vec::new();
+                let mut param_idx = 1;
+
+                for (_, properties_obj) in chunk {
+                    let mut row_placeholders = Vec::new();
+                    if self.config.auto_columns.id {
+                        row_placeholders.push(format!("${}", param_idx));
+                        param_idx += 1;
+                    }
+                    for col in &schema.columns {
+                        match classify_slot(col, properties_obj) {
+                            Slot::Default => row_placeholders.push("DEFAULT".to_string()),
+                            Slot::TypedNull | Slot::Value(_) => {
+                                row_placeholders.push(format!("${}", param_idx));
+                                param_idx += 1;
+                            }
                         }
                     }
+                    placeholders.push(format!("({})", row_placeholders.join(", ")));
                 }
-                placeholders.push(format!("({})", row_placeholders.join(", ")));
+
+                let upsert_sql = if update_sets.is_empty() {
+                    // Nothing to update for this group — skip conflicts via DO NOTHING.
+                    format!(
+                        "INSERT INTO {} ({}) VALUES {} ON CONFLICT ({}) DO NOTHING",
+                        quote_identifier(&schema.table_name),
+                        column_names.join(", "),
+                        placeholders.join(", "),
+                        conflict_cols.join(", ")
+                    )
+                } else {
+                    format!(
+                        "INSERT INTO {} ({}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {}",
+                        quote_identifier(&schema.table_name),
+                        column_names.join(", "),
+                        placeholders.join(", "),
+                        conflict_cols.join(", "),
+                        update_sets.join(", ")
+                    )
+                };
+
+                let mut query = sqlx::query(&upsert_sql);
+
+                for (instance_id, properties_obj) in chunk {
+                    if self.config.auto_columns.id {
+                        query = query.bind(instance_id);
+                    }
+                    for col in &schema.columns {
+                        query = match classify_slot(col, properties_obj) {
+                            Slot::Default => query,
+                            Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
+                            Slot::Value(v) => {
+                                Self::bind_value(query, &col.column_type, &col.name, v)?
+                            }
+                        };
+                    }
+                }
+
+                let result = query.execute(&mut *tx).await?;
+                total_affected += result.rows_affected() as i64;
             }
-
-            let upsert_sql = if update_sets.is_empty() {
-                // If no columns to update (all columns are conflict columns), use DO NOTHING
-                format!(
-                    "INSERT INTO {} ({}) VALUES {} ON CONFLICT ({}) DO NOTHING",
-                    quote_identifier(&schema.table_name),
-                    column_names.join(", "),
-                    placeholders.join(", "),
-                    conflict_cols.join(", ")
-                )
-            } else {
-                format!(
-                    "INSERT INTO {} ({}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {}",
-                    quote_identifier(&schema.table_name),
-                    column_names.join(", "),
-                    placeholders.join(", "),
-                    conflict_cols.join(", "),
-                    update_sets.join(", ")
-                )
-            };
-
-            let mut query = sqlx::query(&upsert_sql);
-
-            for (instance_id, properties_obj) in chunk {
-                if self.config.auto_columns.id {
-                    query = query.bind(instance_id);
-                }
-                for col in &schema.columns {
-                    query = match classify_slot(col, properties_obj) {
-                        Slot::Default => query,
-                        Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
-                        Slot::Value(v) => Self::bind_value(query, &col.column_type, &col.name, v)?,
-                    };
-                }
-            }
-
-            let result = query.execute(&mut *tx).await?;
-            total_affected += result.rows_affected() as i64;
         }
 
         tx.commit().await?;
@@ -1258,6 +1271,9 @@ impl ObjectStore {
             return Ok(result);
         }
 
+        // Captured before `validated` is moved into conflict groups.
+        let validated_len = validated.len() as i64;
+
         // Compute chunk size under Postgres' ~32k-param limit.
         let params_per_row = 1 + schema.columns.len();
         let chunk_size = (32000 / params_per_row.max(1)).max(1);
@@ -1271,15 +1287,19 @@ impl ObjectStore {
             column_names.push(quote_identifier(&col.name));
         }
 
-        // ON CONFLICT clause (if any). Computed once.
-        let on_conflict_clause = match &opts.conflict_mode {
-            ConflictMode::Error => String::new(),
+        // Build (ON CONFLICT clause, rows) groups. Error and Skip share a
+        // single clause across all rows. Upsert groups rows by their UPDATE
+        // signature so each group's DO UPDATE SET only touches the columns
+        // present in those rows' payloads.
+        let conflict_groups: Vec<(String, Vec<ValidatedRow>)> = match &opts.conflict_mode {
+            ConflictMode::Error => vec![(String::new(), validated)],
             ConflictMode::Skip { conflict_columns } => {
                 let cols: Vec<String> = conflict_columns
                     .iter()
                     .map(|c| quote_identifier(c))
                     .collect();
-                format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "))
+                let clause = format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "));
+                vec![(clause, validated)]
             }
             ConflictMode::Upsert { conflict_columns } => {
                 let cols: Vec<String> = conflict_columns
@@ -1288,84 +1308,100 @@ impl ObjectStore {
                     .collect();
                 let conflict_set: std::collections::HashSet<&str> =
                     conflict_columns.iter().map(String::as_str).collect();
-                let mut update_sets: Vec<String> = Vec::new();
-                for col in &schema.columns {
-                    if !conflict_set.contains(col.name.as_str()) {
-                        let q = quote_identifier(&col.name);
-                        update_sets.push(format!("{} = EXCLUDED.{}", q, q));
-                    }
+                let mut row_groups: std::collections::HashMap<Vec<String>, Vec<ValidatedRow>> =
+                    std::collections::HashMap::new();
+                for (id, props) in validated {
+                    let sig = update_signature(&schema, &props, &conflict_set);
+                    row_groups.entry(sig).or_default().push((id, props));
                 }
-                if self.config.auto_columns.updated_at {
-                    update_sets.push("updated_at = NOW()".to_string());
-                }
-                if update_sets.is_empty() {
-                    // All columns are conflict columns — fall back to DO NOTHING.
-                    format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "))
-                } else {
-                    format!(
-                        " ON CONFLICT ({}) DO UPDATE SET {}",
-                        cols.join(", "),
-                        update_sets.join(", ")
-                    )
-                }
+                let updated_at_bump = self.config.auto_columns.updated_at;
+                row_groups
+                    .into_iter()
+                    .map(|(signature, rows)| {
+                        let mut update_sets: Vec<String> = signature
+                            .iter()
+                            .map(|name| {
+                                let q = quote_identifier(name);
+                                format!("{} = EXCLUDED.{}", q, q)
+                            })
+                            .collect();
+                        if updated_at_bump {
+                            update_sets.push("updated_at = NOW()".to_string());
+                        }
+                        let clause = if update_sets.is_empty() {
+                            // Group has nothing to update — skip conflicts.
+                            format!(" ON CONFLICT ({}) DO NOTHING", cols.join(", "))
+                        } else {
+                            format!(
+                                " ON CONFLICT ({}) DO UPDATE SET {}",
+                                cols.join(", "),
+                                update_sets.join(", ")
+                            )
+                        };
+                        (clause, rows)
+                    })
+                    .collect()
             }
         };
 
         let mut tx = self.pool.begin().await?;
         let mut db_affected: i64 = 0;
 
-        for chunk in validated.chunks(chunk_size) {
-            let mut placeholders = Vec::new();
-            let mut param_idx = 1;
-            for (_, properties_obj) in chunk {
-                let mut row_placeholders = Vec::new();
-                if self.config.auto_columns.id {
-                    row_placeholders.push(format!("${}", param_idx));
-                    param_idx += 1;
-                }
-                for col in &schema.columns {
-                    match classify_slot(col, properties_obj) {
-                        Slot::Default => row_placeholders.push("DEFAULT".to_string()),
-                        Slot::TypedNull | Slot::Value(_) => {
-                            row_placeholders.push(format!("${}", param_idx));
-                            param_idx += 1;
+        for (on_conflict_clause, group_rows) in conflict_groups {
+            for chunk in group_rows.chunks(chunk_size) {
+                let mut placeholders = Vec::new();
+                let mut param_idx = 1;
+                for (_, properties_obj) in chunk {
+                    let mut row_placeholders = Vec::new();
+                    if self.config.auto_columns.id {
+                        row_placeholders.push(format!("${}", param_idx));
+                        param_idx += 1;
+                    }
+                    for col in &schema.columns {
+                        match classify_slot(col, properties_obj) {
+                            Slot::Default => row_placeholders.push("DEFAULT".to_string()),
+                            Slot::TypedNull | Slot::Value(_) => {
+                                row_placeholders.push(format!("${}", param_idx));
+                                param_idx += 1;
+                            }
                         }
                     }
+                    placeholders.push(format!("({})", row_placeholders.join(", ")));
                 }
-                placeholders.push(format!("({})", row_placeholders.join(", ")));
+
+                let insert_sql = format!(
+                    "INSERT INTO {} ({}) VALUES {}{}",
+                    quote_identifier(&schema.table_name),
+                    column_names.join(", "),
+                    placeholders.join(", "),
+                    on_conflict_clause,
+                );
+
+                let mut query = sqlx::query(&insert_sql);
+                for (instance_id, properties_obj) in chunk {
+                    if self.config.auto_columns.id {
+                        query = query.bind(instance_id);
+                    }
+                    for col in &schema.columns {
+                        query = match classify_slot(col, properties_obj) {
+                            Slot::Default => query,
+                            Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
+                            Slot::Value(v) => {
+                                Self::bind_value(query, &col.column_type, &col.name, v)?
+                            }
+                        };
+                    }
+                }
+
+                let executed = query.execute(&mut *tx).await?;
+                db_affected += executed.rows_affected() as i64;
             }
-
-            let insert_sql = format!(
-                "INSERT INTO {} ({}) VALUES {}{}",
-                quote_identifier(&schema.table_name),
-                column_names.join(", "),
-                placeholders.join(", "),
-                on_conflict_clause,
-            );
-
-            let mut query = sqlx::query(&insert_sql);
-            for (instance_id, properties_obj) in chunk {
-                if self.config.auto_columns.id {
-                    query = query.bind(instance_id);
-                }
-                for col in &schema.columns {
-                    query = match classify_slot(col, properties_obj) {
-                        Slot::Default => query,
-                        Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
-                        Slot::Value(v) => Self::bind_value(query, &col.column_type, &col.name, v)?,
-                    };
-                }
-            }
-
-            let executed = query.execute(&mut *tx).await?;
-            db_affected += executed.rows_affected() as i64;
         }
 
         tx.commit().await?;
 
         // Under Skip conflict, `rows_affected` is the inserted count; the rest
         // were skipped by ON CONFLICT DO NOTHING. Add that delta to skipped.
-        let validated_len = validated.len() as i64;
         if matches!(opts.conflict_mode, ConflictMode::Skip { .. }) && db_affected < validated_len {
             result.skipped_count += validated_len - db_affected;
         }
@@ -1814,6 +1850,26 @@ fn classify_slot<'a>(
         None => Slot::TypedNull,
         Some(v) => Slot::Value(v),
     }
+}
+
+/// Compute a row's UPDATE signature: the schema column names, in schema order,
+/// that are both (a) not in the conflict-column set and (b) present in the
+/// payload. Used by the upsert paths to group rows so each group's
+/// `ON CONFLICT ... DO UPDATE SET` only touches columns the caller actually
+/// provided — absent columns keep their stored value (or fall back to
+/// `DO NOTHING` if the group has nothing to update).
+fn update_signature(
+    schema: &Schema,
+    properties_obj: &serde_json::Map<String, serde_json::Value>,
+    conflict_cols: &std::collections::HashSet<&str>,
+) -> Vec<String> {
+    schema
+        .columns
+        .iter()
+        .filter(|col| !conflict_cols.contains(col.name.as_str()))
+        .filter(|col| properties_obj.contains_key(&col.name))
+        .map(|col| col.name.clone())
+        .collect()
 }
 
 /// Validate a single instance payload for an INSERT operation.

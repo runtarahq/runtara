@@ -2483,3 +2483,297 @@ async fn test_upsert_instances_default_on_insert_and_update() {
 
     cleanup_test(&store, &prefix).await;
 }
+
+// ==================== Upsert: absent columns untouched on UPDATE ====================
+//
+// Regression coverage for the pre-existing issue where the upsert path's
+// `DO UPDATE SET col = EXCLUDED.col` clause listed every non-conflict schema
+// column, so columns absent from the payload were overwritten on conflict —
+// scalar absents became NULL, and defaulted absents were re-fired to the
+// DEFAULT expression's value on every upsert. The fix groups rows by which
+// columns they actually specify, so DO UPDATE SET only touches present ones.
+
+#[tokio::test]
+async fn test_upsert_instances_leaves_absent_columns_untouched() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_upsert_preserve", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "upsert_preserve".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                // Nullable: Postgres checks NOT NULL on the proposed INSERT row
+                // before ON CONFLICT resolution, so a partial-upsert test has to
+                // omit only nullable (or defaulted) columns.
+                ColumnDefinition::new("name", ColumnType::String),
+                ColumnDefinition::new("price", ColumnType::decimal(10, 2)),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // Seed a row with all columns populated.
+    store
+        .upsert_instances(
+            "upsert_preserve",
+            vec![serde_json::json!({"sku": "x", "name": "original", "price": 10.0})],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("seed upsert");
+
+    // Upsert again with only `price` present. `name` must be left alone.
+    store
+        .upsert_instances(
+            "upsert_preserve",
+            vec![serde_json::json!({"sku": "x", "price": 20.0})],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("partial upsert");
+
+    let name: String = sqlx::query_scalar(&format!(
+        r#"SELECT name FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read name");
+    assert_eq!(name, "original", "absent `name` must not be stomped");
+
+    let price: f64 = sqlx::query_scalar(&format!(
+        r#"SELECT price::float8 FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read price");
+    assert_eq!(price, 20.0, "present `price` must be updated");
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_upsert_instances_does_not_restamp_defaulted_absent_column() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_upsert_default_stable", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "upsert_default_stable".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("stamped_at", ColumnType::Timestamp)
+                    .not_null()
+                    .default("now()"),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // First upsert: DEFAULT now() fires on INSERT.
+    store
+        .upsert_instances(
+            "upsert_default_stable",
+            vec![serde_json::json!({"sku": "x"})],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("first upsert");
+
+    let t1: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        r#"SELECT stamped_at FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read t1");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Second upsert with `created_at` absent: must NOT stomp to a new now().
+    store
+        .upsert_instances(
+            "upsert_default_stable",
+            vec![serde_json::json!({"sku": "x"})],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("second upsert");
+
+    let t2: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(&format!(
+        r#"SELECT stamped_at FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read t2");
+
+    assert_eq!(
+        t1, t2,
+        "absent DEFAULTed column must keep its original value across upserts"
+    );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_upsert_instances_mixed_signatures_single_batch() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_upsert_multi_sig", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "upsert_multi_sig".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("a", ColumnType::String),
+                ColumnDefinition::new("b", ColumnType::String),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // Seed two rows with both `a` and `b`.
+    store
+        .upsert_instances(
+            "upsert_multi_sig",
+            vec![
+                serde_json::json!({"sku": "X", "a": "A1", "b": "B1"}),
+                serde_json::json!({"sku": "Y", "a": "A2", "b": "B2"}),
+            ],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("seed upsert");
+
+    // Same batch, different presence signatures per row:
+    // X updates only `a`; Y updates only `b`. The other column on each row
+    // must stay untouched.
+    store
+        .upsert_instances(
+            "upsert_multi_sig",
+            vec![
+                serde_json::json!({"sku": "X", "a": "A1_new"}),
+                serde_json::json!({"sku": "Y", "b": "B2_new"}),
+            ],
+            vec!["sku".to_string()],
+        )
+        .await
+        .expect("mixed-signature upsert");
+
+    let (x_a, x_b): (String, String) = sqlx::query_as(&format!(
+        r#"SELECT a, b FROM "{}" WHERE sku = 'X'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read X");
+    assert_eq!(x_a, "A1_new", "X.a updated");
+    assert_eq!(x_b, "B1", "X.b untouched");
+
+    let (y_a, y_b): (String, String) = sqlx::query_as(&format!(
+        r#"SELECT a, b FROM "{}" WHERE sku = 'Y'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read Y");
+    assert_eq!(y_a, "A2", "Y.a untouched");
+    assert_eq!(y_b, "B2_new", "Y.b updated");
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_create_instances_extended_upsert_preserves_absent_columns() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_ext_upsert_preserve", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "ext_upsert_preserve".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("name", ColumnType::String),
+                ColumnDefinition::new("price", ColumnType::decimal(10, 2)),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // Seed.
+    store
+        .create_instances_extended(
+            "ext_upsert_preserve",
+            vec![serde_json::json!({"sku": "x", "name": "original", "price": 10.0})],
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Upsert {
+                    conflict_columns: vec!["sku".to_string()],
+                },
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await
+        .expect("seed");
+
+    // Partial upsert: `name` absent.
+    store
+        .create_instances_extended(
+            "ext_upsert_preserve",
+            vec![serde_json::json!({"sku": "x", "price": 20.0})],
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Upsert {
+                    conflict_columns: vec!["sku".to_string()],
+                },
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await
+        .expect("partial upsert");
+
+    let (name, price): (String, f64) = sqlx::query_as(&format!(
+        r#"SELECT name, price::float8 FROM "{}" WHERE sku = 'x'"#,
+        table_name
+    ))
+    .fetch_one(store.pool())
+    .await
+    .expect("read");
+    assert_eq!(name, "original", "absent `name` must not be stomped");
+    assert_eq!(price, 20.0, "present `price` must be updated");
+
+    cleanup_test(&store, &prefix).await;
+}
