@@ -14,12 +14,14 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateGraphParams {
     #[schemars(description = "Execution graph JSON to validate")]
     pub execution_graph: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateMappingsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -28,6 +30,7 @@ pub struct ValidateMappingsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListConnectionsParams {
     #[schemars(
         description = "Filter by integration type (e.g., 'openai_api_key', 'shopify_access_token', 'sftp', 'bearer')"

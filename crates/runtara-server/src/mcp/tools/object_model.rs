@@ -14,12 +14,14 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetObjectSchemaParams {
     #[schemars(description = "Schema name")]
     pub name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateObjectSchemaParams {
     #[schemars(description = "Schema name")]
     pub name: String,
@@ -34,12 +36,14 @@ pub struct CreateObjectSchemaParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListObjectInstancesParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QueryObjectInstancesParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
@@ -57,6 +61,7 @@ pub struct QueryObjectInstancesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QueryAggregateParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
@@ -109,6 +114,7 @@ pub struct QueryAggregateParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateObjectInstanceParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
@@ -117,6 +123,7 @@ pub struct CreateObjectInstanceParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateObjectInstanceParams {
     #[schemars(description = "Schema ID")]
     pub schema_id: String,

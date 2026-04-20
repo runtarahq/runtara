@@ -14,12 +14,14 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetStepTypeSchemaParams {
     #[schemars(description = "Step type name (e.g., 'Agent', 'Conditional', 'Split', 'Switch')")]
     pub step_type: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetAgentParams {
     #[schemars(
         description = "Agent ID — same value used in agentId field of Agent steps (e.g., 'utils', 'transform', 'shopify', 'http', 'openai')"
@@ -28,6 +30,7 @@ pub struct GetAgentParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetCapabilityParams {
     #[schemars(description = "Agent ID (e.g., 'http', 'shopify', 'utils')")]
     pub agent_id: String,
@@ -38,6 +41,7 @@ pub struct GetCapabilityParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TestCapabilityParams {
     #[schemars(description = "Agent ID (e.g., 'http', 'shopify', 'utils')")]
     pub agent_id: String,

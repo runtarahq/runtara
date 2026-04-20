@@ -307,6 +307,7 @@ fn resolve_graph_mut<'a>(
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddStepParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -323,6 +324,7 @@ pub struct AddStepParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveStepParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -335,6 +337,7 @@ pub struct RemoveStepParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateStepParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -349,6 +352,7 @@ pub struct UpdateStepParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectStepsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -369,6 +373,7 @@ pub struct ConnectStepsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DisconnectStepsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -385,6 +390,7 @@ pub struct DisconnectStepsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetEntryPointParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -397,6 +403,7 @@ pub struct SetEntryPointParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetMappingParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -431,6 +438,7 @@ pub struct SetMappingParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListReferencesParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -441,6 +449,7 @@ pub struct ListReferencesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveMappingParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -455,6 +464,7 @@ pub struct RemoveMappingParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetInputSchemaParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -469,6 +479,7 @@ pub struct SetInputSchemaParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetOutputSchemaParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -483,6 +494,7 @@ pub struct SetOutputSchemaParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetVariableParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -497,6 +509,7 @@ pub struct SetVariableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveVariableParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -509,6 +522,7 @@ pub struct RemoveVariableParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetWorkflowMetadataParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -523,6 +537,7 @@ pub struct SetWorkflowMetadataParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddAgentStepParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,

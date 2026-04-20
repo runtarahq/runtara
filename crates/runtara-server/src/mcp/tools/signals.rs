@@ -14,6 +14,7 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListPendingSignalsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -22,6 +23,7 @@ pub struct ListPendingSignalsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetSignalSchemaParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -32,6 +34,7 @@ pub struct GetSignalSchemaParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SubmitSignalResponseParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,

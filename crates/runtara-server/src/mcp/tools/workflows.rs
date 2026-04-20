@@ -18,6 +18,7 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListWorkflowsParams {
     #[schemars(description = "Page number (1-based)")]
     pub page: Option<i64>,
@@ -30,6 +31,7 @@ pub struct ListWorkflowsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -38,6 +40,7 @@ pub struct GetWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateWorkflowParams {
     #[schemars(description = "Workflow name")]
     pub name: String,
@@ -46,6 +49,7 @@ pub struct CreateWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -54,6 +58,7 @@ pub struct UpdateWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CompileWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -62,6 +67,7 @@ pub struct CompileWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -74,6 +80,7 @@ pub struct ExecuteWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowSyncParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -82,6 +89,7 @@ pub struct ExecuteWorkflowSyncParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetCurrentVersionParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -90,6 +98,7 @@ pub struct SetCurrentVersionParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeployWorkflowParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -98,6 +107,7 @@ pub struct DeployWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeployLatestParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -108,6 +118,7 @@ pub struct DeployLatestParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PreflightCompileParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -116,6 +127,7 @@ pub struct PreflightCompileParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DiffWorkflowVersionsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,

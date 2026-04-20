@@ -15,6 +15,7 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
 // ===== Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListExecutionsParams {
     #[schemars(description = "Filter by workflow ID")]
     pub workflow_id: Option<String>,
@@ -33,12 +34,14 @@ pub struct ListExecutionsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetExecutionParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetStepEventsParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -57,6 +60,7 @@ pub struct GetStepEventsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetStepSummariesParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -75,12 +79,14 @@ pub struct GetStepSummariesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StopExecutionParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteWorkflowWaitParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -284,12 +290,14 @@ pub async fn stop_execution(
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PauseExecutionParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResumeExecutionParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
@@ -332,6 +340,7 @@ pub async fn resume_execution(
 // ===== Debugging Tool Parameter Structs =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct InspectStepParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -342,6 +351,7 @@ pub struct InspectStepParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TraceReferenceParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -354,6 +364,7 @@ pub struct TraceReferenceParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WhyExecutionFailedParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
