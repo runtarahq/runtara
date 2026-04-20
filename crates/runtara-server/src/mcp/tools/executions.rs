@@ -163,12 +163,16 @@ pub async fn get_execution(
             if let Some(val) = data.get(key.to_owned()) {
                 let s = serde_json::to_string(val).unwrap_or_default();
                 if s.len() > 4000 {
+                    let mut cut = 2000;
+                    while cut > 0 && !s.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
                     data.insert(
                         key.to_string(),
                         serde_json::json!({
                             "_truncated": true,
                             "_originalSize": s.len(),
-                            "_preview": &s[..2000]
+                            "_preview": &s[..cut]
                         }),
                     );
                 }

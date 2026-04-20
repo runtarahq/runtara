@@ -462,7 +462,11 @@ fn emit_input_structs() -> TokenStream {
             if serialized.len() <= max_size {
                 value.clone()
             } else {
-                let truncated = &serialized[..max_size.saturating_sub(20)];
+                let mut cut = max_size.saturating_sub(20);
+                while cut > 0 && !serialized.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let truncated = &serialized[..cut];
                 serde_json::json!({
                     "_truncated": true,
                     "_original_size": serialized.len(),
