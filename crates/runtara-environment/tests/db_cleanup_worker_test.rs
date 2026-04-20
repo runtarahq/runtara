@@ -342,9 +342,9 @@ fn test_config_default() {
     // Test that the default config has expected values
     let config = DbCleanupWorkerConfig::default();
 
-    assert!(!config.enabled, "Should be disabled by default for safety");
+    assert!(config.enabled, "Should be enabled by default");
     assert_eq!(config.poll_interval, Duration::from_secs(3600));
-    assert_eq!(config.max_age, Duration::from_secs(30 * 24 * 3600));
+    assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
     assert_eq!(config.batch_size, 100);
 }
 

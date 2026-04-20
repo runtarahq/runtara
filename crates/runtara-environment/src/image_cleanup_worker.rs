@@ -47,9 +47,9 @@ pub struct ImageCleanupWorkerConfig {
 impl Default for ImageCleanupWorkerConfig {
     fn default() -> Self {
         Self {
-            enabled: false,                               // Disabled by default for safety
+            enabled: true, // Enabled by default — override via env to disable
             poll_interval: Duration::from_secs(6 * 3600), // 6 hours
-            max_age: Duration::from_secs(7 * 24 * 3600),  // 7 days
+            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
             batch_size: 50,
             data_dir: PathBuf::new(), // Set by runtime
         }
@@ -60,14 +60,14 @@ impl ImageCleanupWorkerConfig {
     /// Load configuration from environment variables.
     ///
     /// Environment variables:
-    /// - `RUNTARA_IMAGE_CLEANUP_ENABLED`: "true" or "1" to enable (default: false)
+    /// - `RUNTARA_IMAGE_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
     /// - `RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS`: seconds between cleanup runs (default: 21600)
     /// - `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS`: days before stale images are deleted (default: 7)
     /// - `RUNTARA_IMAGE_CLEANUP_BATCH_SIZE`: max images per cycle (default: 50)
     pub fn from_env() -> Self {
         let enabled = std::env::var("RUNTARA_IMAGE_CLEANUP_ENABLED")
             .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let poll_interval_secs = std::env::var("RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS")
             .ok()
@@ -327,18 +327,18 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = ImageCleanupWorkerConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(6 * 3600));
         assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
         assert_eq!(config.batch_size, 50);
     }
 
     #[test]
-    fn test_config_disabled_by_default() {
+    fn test_config_enabled_by_default() {
         let config = ImageCleanupWorkerConfig::default();
         assert!(
-            !config.enabled,
-            "Image cleanup should be disabled by default for safety"
+            config.enabled,
+            "Image cleanup should be enabled by default; disable via RUNTARA_IMAGE_CLEANUP_ENABLED=false"
         );
     }
 

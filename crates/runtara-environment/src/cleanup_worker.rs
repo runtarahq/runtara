@@ -20,6 +20,8 @@ use tracing::{debug, error, info, warn};
 /// Configuration for the cleanup worker.
 #[derive(Debug, Clone)]
 pub struct CleanupWorkerConfig {
+    /// Whether run-dir cleanup is enabled.
+    pub enabled: bool,
     /// Data directory containing tenant run directories.
     pub data_dir: PathBuf,
     /// How often to scan for old directories.
@@ -31,9 +33,41 @@ pub struct CleanupWorkerConfig {
 impl Default for CleanupWorkerConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             data_dir: PathBuf::from(".data"),
             poll_interval: Duration::from_secs(3600), // 1 hour
-            max_age: Duration::from_secs(24 * 3600),  // 24 hours
+            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+        }
+    }
+}
+
+impl CleanupWorkerConfig {
+    /// Load configuration from environment variables.
+    ///
+    /// Environment variables:
+    /// - `RUNTARA_RUN_DIR_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
+    /// - `RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS`: seconds between scans (default: 3600)
+    /// - `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS`: days before run dirs are removed (default: 7)
+    pub fn from_env() -> Self {
+        let enabled = std::env::var("RUNTARA_RUN_DIR_CLEANUP_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true);
+
+        let poll_interval_secs = std::env::var("RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600);
+
+        let max_age_days = std::env::var("RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(7);
+
+        Self {
+            enabled,
+            data_dir: PathBuf::from(".data"),
+            poll_interval: Duration::from_secs(poll_interval_secs),
+            max_age: Duration::from_secs(max_age_days * 24 * 3600),
         }
     }
 }
@@ -63,6 +97,11 @@ impl CleanupWorker {
     /// This will periodically scan for and remove old run directories.
     /// The loop exits when the shutdown signal is received.
     pub async fn run(&self) {
+        if !self.config.enabled {
+            info!("Run-dir cleanup worker disabled");
+            return;
+        }
+
         info!(
             data_dir = %self.config.data_dir.display(),
             poll_interval_secs = self.config.poll_interval.as_secs(),
@@ -248,8 +287,9 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = CleanupWorkerConfig::default();
+        assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(3600));
-        assert_eq!(config.max_age, Duration::from_secs(24 * 3600));
+        assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
     }
 
     #[test]
@@ -274,6 +314,7 @@ mod tests {
             data_dir: temp_dir.path().to_path_buf(),
             poll_interval: Duration::from_secs(1),
             max_age: Duration::from_secs(1),
+            ..Default::default()
         };
         let worker = CleanupWorker::new(config);
 
@@ -288,6 +329,7 @@ mod tests {
             data_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
             poll_interval: Duration::from_secs(1),
             max_age: Duration::from_secs(1),
+            ..Default::default()
         };
         let worker = CleanupWorker::new(config);
 
@@ -315,6 +357,7 @@ mod tests {
             data_dir: temp_dir.path().to_path_buf(),
             poll_interval: Duration::from_secs(1),
             max_age: Duration::from_secs(0), // Immediate cleanup
+            ..Default::default()
         };
         let worker = CleanupWorker::new(config);
 
@@ -344,6 +387,7 @@ mod tests {
             data_dir: temp_dir.path().to_path_buf(),
             poll_interval: Duration::from_secs(1),
             max_age: Duration::from_secs(0), // Immediate cleanup
+            ..Default::default()
         };
         let worker = CleanupWorker::new(config);
 

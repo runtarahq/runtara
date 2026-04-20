@@ -758,6 +758,22 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     ));
     let shutdown_signal = shutdown_coordinator.signal();
 
+    // Invocation cleanup worker (server DB retention).
+    // Does not require Valkey — runs independently.
+    {
+        let cleanup_pool = pool.clone();
+        let cleanup_shutdown = shutdown_signal.clone();
+        tokio::spawn(async move {
+            let cfg = workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
+            let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
+                cleanup_pool,
+                cfg,
+                cleanup_shutdown,
+            );
+            worker.run().await;
+        });
+    }
+
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
 

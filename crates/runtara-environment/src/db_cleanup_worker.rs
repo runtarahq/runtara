@@ -44,9 +44,10 @@ pub struct DbCleanupWorkerConfig {
 impl Default for DbCleanupWorkerConfig {
     fn default() -> Self {
         Self {
-            enabled: false,                               // Disabled by default for safety
-            poll_interval: Duration::from_secs(3600),     // 1 hour
-            max_age: Duration::from_secs(30 * 24 * 3600), // 30 days
+            enabled: true, // Enabled by default — retention is
+            // bounded; override via env to disable
+            poll_interval: Duration::from_secs(3600), // 1 hour
+            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
             batch_size: 100,
         }
     }
@@ -56,14 +57,14 @@ impl DbCleanupWorkerConfig {
     /// Load configuration from environment variables.
     ///
     /// Environment variables:
-    /// - `RUNTARA_DB_CLEANUP_ENABLED`: "true" or "1" to enable (default: false)
+    /// - `RUNTARA_DB_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
     /// - `RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS`: seconds between cleanup runs (default: 3600)
-    /// - `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS`: days before terminal instances are deleted (default: 30)
+    /// - `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS`: days before terminal instances are deleted (default: 7)
     /// - `RUNTARA_DB_CLEANUP_BATCH_SIZE`: max instances per batch (default: 100)
     pub fn from_env() -> Self {
         let enabled = std::env::var("RUNTARA_DB_CLEANUP_ENABLED")
             .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let poll_interval_secs = std::env::var("RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS")
             .ok()
@@ -73,7 +74,7 @@ impl DbCleanupWorkerConfig {
         let max_age_days = std::env::var("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(30);
+            .unwrap_or(7);
 
         let batch_size = std::env::var("RUNTARA_DB_CLEANUP_BATCH_SIZE")
             .ok()
@@ -276,9 +277,9 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = DbCleanupWorkerConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(3600));
-        assert_eq!(config.max_age, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
         assert_eq!(config.batch_size, 100);
     }
 
@@ -292,11 +293,11 @@ mod tests {
     }
 
     #[test]
-    fn test_config_disabled_by_default() {
+    fn test_config_enabled_by_default() {
         let config = DbCleanupWorkerConfig::default();
         assert!(
-            !config.enabled,
-            "Cleanup should be disabled by default for safety"
+            config.enabled,
+            "Cleanup should be enabled by default; disable via RUNTARA_DB_CLEANUP_ENABLED=false"
         );
     }
 }

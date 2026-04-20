@@ -127,7 +127,7 @@ impl Default for EnvironmentRuntimeBuilder {
             wake_batch_size: 10,
             request_timeout: Duration::from_secs(30),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
-            cleanup_max_age: Duration::from_secs(24 * 3600),  // 24 hours
+            cleanup_max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
             heartbeat_poll_interval: Duration::from_secs(30), // 30 seconds
             heartbeat_timeout: Duration::from_secs(120),      // 2 minutes
             db_cleanup_config: DbCleanupWorkerConfig::from_env(),
@@ -400,12 +400,13 @@ impl EnvironmentRuntimeConfig {
             wake_scheduler.run().await;
         });
 
-        // Create cleanup worker
-        let cleanup_config = CleanupWorkerConfig {
-            data_dir: self.data_dir.clone(),
-            poll_interval: self.cleanup_poll_interval,
-            max_age: self.cleanup_max_age,
-        };
+        // Create cleanup worker. Config loads from env (so operators can tune
+        // RUNTARA_RUN_DIR_CLEANUP_* at runtime) but the builder-supplied
+        // data_dir and (non-default) poll/max-age overrides win.
+        let mut cleanup_config = CleanupWorkerConfig::from_env();
+        cleanup_config.data_dir = self.data_dir.clone();
+        cleanup_config.poll_interval = self.cleanup_poll_interval;
+        cleanup_config.max_age = self.cleanup_max_age;
         let cleanup_worker = CleanupWorker::new(cleanup_config);
         let cleanup_shutdown = cleanup_worker.shutdown_handle();
 

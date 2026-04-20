@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 pub mod compilation_worker;
 pub mod cron_scheduler;
 pub mod execution_engine;
+pub mod invocation_cleanup_worker;
 pub mod runtara_dto;
 pub mod trigger_worker;
 
