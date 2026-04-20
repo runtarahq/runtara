@@ -5,6 +5,7 @@
 pub mod aggregate;
 pub mod condition;
 pub mod ddl;
+pub mod expr;
 pub mod sanitize;
 
 pub use aggregate::{
@@ -13,4 +14,5 @@ pub use aggregate::{
 };
 pub use condition::{build_condition_clause, build_order_by_clause};
 pub use ddl::DdlGenerator;
+pub use expr::{ExprNode, ExprOp, ExprOperation, ExprValue};
 pub use sanitize::{POSTGRES_RESERVED_WORDS, quote_identifier, validate_identifier};

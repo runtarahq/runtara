@@ -550,6 +550,9 @@ pub enum AggregateFn {
     Max,
     FirstValue,
     LastValue,
+    /// Computed column — the value is derived from prior aliases via an
+    /// `expression` tree. Reads no DB column. See v1.1 spec.
+    Expr,
 }
 
 /// Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`).
@@ -572,10 +575,11 @@ pub struct AggregateOrderBy {
 pub struct AggregateSpec {
     /// Output column name. Must match `[a-zA-Z_][a-zA-Z0-9_]*` and be unique.
     pub alias: String,
-    /// Aggregate function. One of COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE.
+    /// Aggregate function. One of COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE, EXPR.
     #[serde(rename = "fn")]
     pub fn_: AggregateFn,
     /// Source column. Optional for COUNT (COUNT(*)); required otherwise.
+    /// Must be omitted for EXPR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
     /// Apply DISTINCT. Only valid with `fn = COUNT` and a non-null `column`.
@@ -584,6 +588,10 @@ pub struct AggregateSpec {
     /// Required for FIRST_VALUE / LAST_VALUE; rejected for others.
     #[serde(default, rename = "orderBy", alias = "order_by")]
     pub order_by: Vec<AggregateOrderBy>,
+    /// Required for EXPR — an expression tree referencing prior aliases and
+    /// constants. Rejected for every other function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -632,6 +640,7 @@ impl From<AggregateFn> for runtara_object_store::AggregateFn {
             AggregateFn::Max => runtara_object_store::AggregateFn::Max,
             AggregateFn::FirstValue => runtara_object_store::AggregateFn::FirstValue,
             AggregateFn::LastValue => runtara_object_store::AggregateFn::LastValue,
+            AggregateFn::Expr => runtara_object_store::AggregateFn::Expr,
         }
     }
 }
@@ -653,6 +662,7 @@ impl From<AggregateSpec> for runtara_object_store::AggregateSpec {
             column: s.column,
             distinct: s.distinct,
             order_by: s.order_by.into_iter().map(Into::into).collect(),
+            expression: s.expression,
         }
     }
 }

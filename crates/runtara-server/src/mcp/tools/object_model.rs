@@ -74,12 +74,23 @@ pub struct QueryAggregateParams {
     pub group_by: Option<Vec<String>>,
     #[schemars(
         description = "Array of aggregate specs: [{alias, fn, column?, distinct?, \
-                       orderBy?}]. `fn` is one of COUNT, SUM, MIN, MAX, FIRST_VALUE, \
-                       LAST_VALUE. Each alias must be a unique \
+                       orderBy?, expression?}]. `fn` is one of COUNT, SUM, MIN, MAX, \
+                       FIRST_VALUE, LAST_VALUE, EXPR. Each alias must be a unique \
                        [a-zA-Z_][a-zA-Z0-9_]* identifier. `column` is optional for \
-                       COUNT (→ COUNT(*)) and required otherwise. `distinct: true` is \
+                       COUNT (→ COUNT(*)) and required for SUM/MIN/MAX/FIRST_VALUE/\
+                       LAST_VALUE; must be omitted for EXPR. `distinct: true` is \
                        valid only with COUNT + column. FIRST_VALUE/LAST_VALUE require \
-                       non-empty orderBy: [{column, direction: ASC|DESC}]."
+                       non-empty orderBy: [{column, direction: ASC|DESC}]. EXPR \
+                       requires `expression`: a tree over previously-declared aliases \
+                       and constants. Operators: arithmetic (ADD, SUB, MUL, DIV, NEG, \
+                       ABS, COALESCE; DIV returns NULL on divide-by-zero), comparison \
+                       (EQ, NE, GT, GTE, LT, LTE), logical (AND, OR, NOT), and \
+                       nullability (IS_DEFINED, IS_EMPTY, IS_NOT_EMPTY). Operand forms \
+                       inside an expression: {valueType:'alias', value:'<prior_alias>'} \
+                       (resolves to a prior aggregate's value), {valueType:'immediate', \
+                       value:<number|bool|string|null>} (literal). Field references \
+                       ({valueType:'reference', ...}) are rejected inside EXPR. Max \
+                       tree depth is 8."
     )]
     pub aggregates: serde_json::Value,
     #[schemars(

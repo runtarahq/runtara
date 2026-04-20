@@ -116,4 +116,5 @@ pub use sql::aggregate::{
 };
 pub use sql::condition::{build_condition_clause, build_order_by_clause};
 pub use sql::ddl::DdlGenerator;
+pub use sql::expr::{ExprNode, ExprOp, ExprOperation, ExprValue};
 pub use sql::sanitize::{quote_identifier, validate_identifier};

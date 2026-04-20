@@ -16,13 +16,16 @@
 //! rather than window functions so the whole query stays a single GROUP BY
 //! and composes cleanly with filtering and outer wrappers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::instance::Condition;
 use crate::schema::Schema;
 use crate::sql::condition::{build_condition_clause, field_to_sql, resolve_sql_cast};
+use crate::sql::expr::{
+    AliasKind, AliasSqlMap, ExprNode, column_kind, render_expression, validate_expression,
+};
 use crate::sql::sanitize::quote_identifier;
 use crate::types::ColumnType;
 
@@ -40,6 +43,9 @@ pub enum AggregateFn {
     Max,
     FirstValue,
     LastValue,
+    /// A column computed from previously-declared aliases and constants via
+    /// arithmetic / comparison / logical operators. Reads no DB column.
+    Expr,
 }
 
 /// Sort direction for `order_by` entries. JSON encoding is UPPERCASE.
@@ -87,7 +93,7 @@ pub struct AggregateSpec {
     pub fn_: AggregateFn,
 
     /// Source column. Optional for `COUNT` (`COUNT(*)`). Required for every
-    /// other function.
+    /// other function. Must be absent for `EXPR`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
 
@@ -98,6 +104,13 @@ pub struct AggregateSpec {
     /// Required for `FIRST_VALUE` / `LAST_VALUE`; ignored for everything else.
     #[serde(default, rename = "orderBy", alias = "order_by")]
     pub order_by: Vec<AggregateOrderBy>,
+
+    /// Required for `EXPR`; rejected for every other function. An expression
+    /// tree over prior aliases and constants. Typed as raw JSON here so the
+    /// DTO boundary can pass it through; parsed and validated as an
+    /// [`ExprNode`] inside `build_aggregate_query`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<serde_json::Value>,
 }
 
 /// Request for [`ObjectStore::aggregate_instances`].
@@ -172,17 +185,8 @@ pub fn build_aggregate_query(
         return Err("aggregates must contain at least one entry".to_string());
     }
 
-    // Validate aggregate specs up front.
-    let mut seen_aliases: HashSet<&str> = HashSet::new();
-    for spec in &req.aggregates {
-        validate_alias(&spec.alias)?;
-        if !seen_aliases.insert(spec.alias.as_str()) {
-            return Err(format!("Duplicate aggregate alias: {}", spec.alias));
-        }
-        validate_spec(spec, schema)?;
-    }
-
-    // Validate group_by columns and normalize them to SQL column names.
+    // Validate group_by columns and normalize them to SQL column names first —
+    // we need this to reject aliases that collide with group_by column names.
     let mut group_sql_cols: Vec<String> = Vec::with_capacity(req.group_by.len());
     for raw in &req.group_by {
         validate_field_chars(raw, "group_by")?;
@@ -191,6 +195,32 @@ pub fn build_aggregate_query(
             return Err(format!("Unknown group_by column: '{}'", raw));
         }
         group_sql_cols.push(sql_field.to_string());
+    }
+
+    // Validate aggregate specs up front, building (alias → inferred kind) as
+    // we go so each EXPR can resolve references to prior aliases. Parsed
+    // ExprNodes are cached here keyed by alias so we don't deserialize twice.
+    let group_sql_set_for_validation: HashSet<&str> =
+        group_sql_cols.iter().map(|s| s.as_str()).collect();
+    let mut seen_aliases: HashSet<&str> = HashSet::new();
+    let mut prior_alias_kinds: Vec<(String, AliasKind)> = Vec::with_capacity(req.aggregates.len());
+    let mut parsed_exprs: HashMap<String, ExprNode> = HashMap::new();
+    for spec in &req.aggregates {
+        validate_alias(&spec.alias)?;
+        if !seen_aliases.insert(spec.alias.as_str()) {
+            return Err(format!("Duplicate aggregate alias: {}", spec.alias));
+        }
+        if group_sql_set_for_validation.contains(spec.alias.as_str()) {
+            return Err(format!(
+                "Aggregate alias '{}' collides with a group_by column",
+                spec.alias
+            ));
+        }
+        let (kind, parsed) = validate_spec(spec, schema, &prior_alias_kinds)?;
+        if let Some(node) = parsed {
+            parsed_exprs.insert(spec.alias.clone(), node);
+        }
+        prior_alias_kinds.push((spec.alias.clone(), kind));
     }
 
     // Validate top-level order_by — each column must resolve to either a
@@ -228,10 +258,12 @@ pub fn build_aggregate_query(
         output_columns.push(sql_col.clone());
     }
 
-    for spec in &req.aggregates {
-        let expr = render_aggregate_expr(spec, schema)?;
-        inner_select_parts.push(format!("{} AS {}", expr, quote_identifier(&spec.alias)));
+    let mut prior_alias_sql: AliasSqlMap = HashMap::with_capacity(req.aggregates.len());
+    for (spec, (_, kind)) in req.aggregates.iter().zip(prior_alias_kinds.iter()) {
+        let expr_sql = render_aggregate_expr(spec, schema, &prior_alias_sql, &parsed_exprs)?;
+        inner_select_parts.push(format!("{} AS {}", expr_sql, quote_identifier(&spec.alias)));
         output_columns.push(spec.alias.clone());
+        prior_alias_sql.insert(spec.alias.clone(), (expr_sql, *kind));
     }
 
     // ---- Inner GROUP BY ---------------------------------------------------
@@ -369,7 +401,22 @@ fn column_type<'a>(sql_field: &str, schema: &'a Schema) -> Option<&'a ColumnType
         .map(|c| &c.column_type)
 }
 
-fn validate_spec(spec: &AggregateSpec, schema: &Schema) -> Result<(), String> {
+/// Returns `(kind, parsed_expression_node)`. The parsed node is cached by the
+/// caller so `render_aggregate_expr` doesn't have to deserialize a second
+/// time.
+fn validate_spec(
+    spec: &AggregateSpec,
+    schema: &Schema,
+    prior_alias_kinds: &[(String, AliasKind)],
+) -> Result<(AliasKind, Option<ExprNode>), String> {
+    // Every non-EXPR function rejects an `expression` field to keep the wire
+    // format unambiguous.
+    if !matches!(spec.fn_, AggregateFn::Expr) && spec.expression.is_some() {
+        return Err(format!(
+            "Aggregate '{}': `expression` is only valid for EXPR",
+            spec.alias
+        ));
+    }
     match spec.fn_ {
         AggregateFn::Count => {
             if spec.distinct && spec.column.is_none() {
@@ -394,6 +441,7 @@ fn validate_spec(spec: &AggregateSpec, schema: &Schema) -> Result<(), String> {
                     spec.alias
                 ));
             }
+            Ok((AliasKind::Numeric, None))
         }
         AggregateFn::Sum => {
             let col = spec
@@ -429,6 +477,7 @@ fn validate_spec(spec: &AggregateSpec, schema: &Schema) -> Result<(), String> {
                     spec.alias
                 ));
             }
+            Ok((AliasKind::Numeric, None))
         }
         AggregateFn::Min | AggregateFn::Max => {
             let col = spec.column.as_ref().ok_or_else(|| {
@@ -463,6 +512,7 @@ fn validate_spec(spec: &AggregateSpec, schema: &Schema) -> Result<(), String> {
                     spec.alias
                 ));
             }
+            Ok((column_kind(sql, schema), None))
         }
         AggregateFn::FirstValue | AggregateFn::LastValue => {
             let col = spec.column.as_ref().ok_or_else(|| {
@@ -501,16 +551,53 @@ fn validate_spec(spec: &AggregateSpec, schema: &Schema) -> Result<(), String> {
                     ));
                 }
             }
+            Ok((column_kind(sql, schema), None))
+        }
+        AggregateFn::Expr => {
+            let raw = spec.expression.as_ref().ok_or_else(|| {
+                format!("Aggregate '{}': EXPR requires an `expression`", spec.alias)
+            })?;
+            if spec.column.is_some() {
+                return Err(format!(
+                    "Aggregate '{}': EXPR must not specify `column`",
+                    spec.alias
+                ));
+            }
+            if spec.distinct {
+                return Err(format!(
+                    "Aggregate '{}': EXPR must not specify `distinct`",
+                    spec.alias
+                ));
+            }
+            if !spec.order_by.is_empty() {
+                return Err(format!(
+                    "Aggregate '{}': EXPR must not specify `order_by`",
+                    spec.alias
+                ));
+            }
+            let node: ExprNode = serde_json::from_value(raw.clone()).map_err(|e| {
+                format!(
+                    "Aggregate '{}': invalid `expression` JSON: {}",
+                    spec.alias, e
+                )
+            })?;
+            let kind = validate_expression(&node, prior_alias_kinds, 0)
+                .map_err(|e| format!("Aggregate '{}': {}", spec.alias, e))?;
+            Ok((kind, Some(node)))
         }
     }
-    Ok(())
 }
 
 // ============================================================================
 // SQL rendering
 // ============================================================================
 
-fn render_aggregate_expr(spec: &AggregateSpec, schema: &Schema) -> Result<String, String> {
+fn render_aggregate_expr(
+    spec: &AggregateSpec,
+    schema: &Schema,
+    prior_alias_sql: &AliasSqlMap,
+    parsed_exprs: &HashMap<String, ExprNode>,
+) -> Result<String, String> {
     match spec.fn_ {
         AggregateFn::Count => Ok(match &spec.column {
             None => "COUNT(*)::bigint".to_string(),
@@ -573,6 +660,16 @@ fn render_aggregate_expr(spec: &AggregateSpec, schema: &Schema) -> Result<String
                 val_cast,
                 order_parts.join(", "),
             ))
+        }
+        AggregateFn::Expr => {
+            // Use the ExprNode that was parsed during validation — saves a
+            // second serde round-trip and guarantees the rendered tree is
+            // the same one that passed validation.
+            let node = parsed_exprs.get(spec.alias.as_str()).expect(
+                "validate_spec should have cached the parsed ExprNode for every EXPR alias",
+            );
+            render_expression(node, prior_alias_sql, 0)
+                .map_err(|e| format!("Aggregate '{}': {}", spec.alias, e))
         }
     }
 }
@@ -645,6 +742,7 @@ mod tests {
             column: None,
             distinct: false,
             order_by: vec![],
+            expression: None,
         }
     }
 
@@ -675,6 +773,7 @@ mod tests {
                 column: None,
                 distinct: true,
                 order_by: vec![],
+                expression: None,
             }],
             ..Default::default()
         };
@@ -704,6 +803,7 @@ mod tests {
                 column: Some("qty".into()),
                 distinct: false,
                 order_by: vec![],
+                expression: None,
             }],
             order_by: vec![AggregateOrderBy {
                 column: "total".into(),
@@ -738,6 +838,7 @@ mod tests {
                         column: "snapshot_date".into(),
                         direction: SortDirection::Asc,
                     }],
+                    expression: None,
                 },
                 AggregateSpec {
                     alias: "last_qty".into(),
@@ -748,6 +849,7 @@ mod tests {
                         column: "snapshot_date".into(),
                         direction: SortDirection::Asc,
                     }],
+                    expression: None,
                 },
             ],
             order_by: vec![AggregateOrderBy {
@@ -782,6 +884,7 @@ mod tests {
                 column: Some("sku".into()),
                 distinct: false,
                 order_by: vec![],
+                expression: None,
             }],
             ..Default::default()
         };
@@ -799,6 +902,7 @@ mod tests {
                 column: Some("qty".into()),
                 distinct: false,
                 order_by: vec![],
+                expression: None,
             }],
             ..Default::default()
         };
@@ -866,6 +970,7 @@ mod tests {
                 column: Some("notes".into()),
                 distinct: false,
                 order_by: vec![],
+                expression: None,
             }],
             ..Default::default()
         };
@@ -939,6 +1044,7 @@ mod tests {
                     column: "sku".into(),
                     direction: SortDirection::Asc,
                 }],
+                expression: None,
             }],
             ..Default::default()
         };
@@ -975,5 +1081,351 @@ mod tests {
         // Two condition params → LIMIT $3 OFFSET $4
         assert_eq!(sql.params.len(), 2);
         assert!(sql.data_sql.contains("LIMIT $3 OFFSET $4"));
+    }
+
+    // ========================================================================
+    // EXPR aggregate (v1.1) tests
+    // ========================================================================
+
+    fn first_last_qty_specs() -> Vec<AggregateSpec> {
+        vec![
+            AggregateSpec {
+                alias: "first_qty".into(),
+                fn_: AggregateFn::FirstValue,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![AggregateOrderBy {
+                    column: "snapshot_date".into(),
+                    direction: SortDirection::Asc,
+                }],
+                expression: None,
+            },
+            AggregateSpec {
+                alias: "last_qty".into(),
+                fn_: AggregateFn::LastValue,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![AggregateOrderBy {
+                    column: "snapshot_date".into(),
+                    direction: SortDirection::Asc,
+                }],
+                expression: None,
+            },
+        ]
+    }
+
+    fn expr_spec(alias: &str, expression: serde_json::Value) -> AggregateSpec {
+        AggregateSpec {
+            alias: alias.into(),
+            fn_: AggregateFn::Expr,
+            column: None,
+            distinct: false,
+            order_by: vec![],
+            expression: Some(expression),
+        }
+    }
+
+    #[test]
+    fn expr_delta_compiles_with_inlined_alias_sql() {
+        let schema = stock_snapshot_schema();
+        let mut aggregates = first_last_qty_specs();
+        aggregates.push(expr_spec(
+            "delta",
+            serde_json::json!({
+                "op": "SUB",
+                "arguments": [
+                    {"valueType": "alias", "value": "last_qty"},
+                    {"valueType": "alias", "value": "first_qty"}
+                ]
+            }),
+        ));
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates,
+            ..Default::default()
+        };
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert_eq!(
+            sql.columns,
+            vec![
+                "sku".to_string(),
+                "first_qty".to_string(),
+                "last_qty".to_string(),
+                "delta".to_string()
+            ]
+        );
+        // Both aggregate SQLs are inlined inside the delta expression.
+        assert!(
+            sql.data_sql
+                .matches("array_agg(\"qty\"::bigint ORDER BY")
+                .count()
+                >= 4,
+            "expected alias SQL inlined into delta: {}",
+            sql.data_sql
+        );
+        assert!(sql.data_sql.contains(" - "), "{}", sql.data_sql);
+        assert!(sql.data_sql.contains("AS \"delta\""), "{}", sql.data_sql);
+    }
+
+    #[test]
+    fn expr_missing_expression_rejected() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![AggregateSpec {
+                alias: "x".into(),
+                fn_: AggregateFn::Expr,
+                column: None,
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("EXPR requires an `expression`"), "{}", err);
+    }
+
+    #[test]
+    fn expr_with_column_rejected() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![AggregateSpec {
+                alias: "x".into(),
+                fn_: AggregateFn::Expr,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![],
+                expression: Some(serde_json::json!({
+                    "valueType": "immediate", "value": 1
+                })),
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("EXPR must not specify `column`"), "{}", err);
+    }
+
+    #[test]
+    fn expression_on_non_expr_rejected() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![AggregateSpec {
+                alias: "total".into(),
+                fn_: AggregateFn::Sum,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![],
+                expression: Some(serde_json::json!({
+                    "valueType": "immediate", "value": 1
+                })),
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("`expression` is only valid for EXPR"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn expr_invalid_json_shape_rejected() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![AggregateSpec {
+                alias: "x".into(),
+                fn_: AggregateFn::Expr,
+                column: None,
+                distinct: false,
+                order_by: vec![],
+                // Missing both `op` and `valueType` — matches no ExprNode variant.
+                expression: Some(serde_json::json!({"nope": 1})),
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("invalid `expression` JSON"), "{}", err);
+    }
+
+    #[test]
+    fn expr_alias_out_of_order_rejected() {
+        let schema = stock_snapshot_schema();
+        let mut aggregates = vec![expr_spec(
+            "delta",
+            serde_json::json!({
+                "op": "SUB",
+                "arguments": [
+                    {"valueType": "alias", "value": "last_qty"},
+                    {"valueType": "alias", "value": "first_qty"}
+                ]
+            }),
+        )];
+        // first/last declared AFTER delta
+        aggregates.extend(first_last_qty_specs());
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates,
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("is not declared before its use"), "{}", err);
+    }
+
+    #[test]
+    fn expr_field_reference_rejected() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![expr_spec(
+                "x",
+                serde_json::json!({
+                    "op": "GT",
+                    "arguments": [
+                        {"valueType": "reference", "value": "qty"},
+                        {"valueType": "immediate", "value": 5}
+                    ]
+                }),
+            )],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("field reference 'qty' is not allowed inside EXPR"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn expr_div_renders_nullif() {
+        let schema = stock_snapshot_schema();
+        let mut aggregates = first_last_qty_specs();
+        aggregates.push(expr_spec(
+            "ratio",
+            serde_json::json!({
+                "op": "DIV",
+                "arguments": [
+                    {"valueType": "alias", "value": "last_qty"},
+                    {"valueType": "alias", "value": "first_qty"}
+                ]
+            }),
+        ));
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates,
+            ..Default::default()
+        };
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(sql.data_sql.contains("NULLIF("), "{}", sql.data_sql);
+    }
+
+    #[test]
+    fn expr_arithmetic_on_text_alias_rejected() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates: vec![
+                AggregateSpec {
+                    alias: "min_sku".into(),
+                    fn_: AggregateFn::Min,
+                    column: Some("sku".into()),
+                    distinct: false,
+                    order_by: vec![],
+                    expression: None,
+                },
+                expr_spec(
+                    "bad",
+                    serde_json::json!({
+                        "op": "SUB",
+                        "arguments": [
+                            {"valueType": "alias", "value": "min_sku"},
+                            {"valueType": "immediate", "value": 1}
+                        ]
+                    }),
+                ),
+            ],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("must be numeric"), "{}", err);
+    }
+
+    #[test]
+    fn expr_order_by_on_expr_alias_renders_in_sql() {
+        let schema = stock_snapshot_schema();
+        let mut aggregates = first_last_qty_specs();
+        aggregates.push(expr_spec(
+            "delta",
+            serde_json::json!({
+                "op": "SUB",
+                "arguments": [
+                    {"valueType": "alias", "value": "last_qty"},
+                    {"valueType": "alias", "value": "first_qty"}
+                ]
+            }),
+        ));
+        aggregates.push(expr_spec(
+            "delta_abs",
+            serde_json::json!({
+                "op": "ABS",
+                "arguments": [
+                    {"valueType": "alias", "value": "delta"}
+                ]
+            }),
+        ));
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates,
+            order_by: vec![AggregateOrderBy {
+                column: "delta_abs".into(),
+                direction: SortDirection::Desc,
+            }],
+            limit: Some(10),
+            offset: Some(0),
+            ..Default::default()
+        };
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(
+            sql.data_sql.contains("ORDER BY \"delta_abs\" DESC"),
+            "{}",
+            sql.data_sql
+        );
+    }
+
+    #[test]
+    fn expr_alias_collides_with_group_by() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates: vec![AggregateSpec {
+                alias: "sku".into(),
+                fn_: AggregateFn::Count,
+                column: None,
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("collides with a group_by column"), "{}", err);
+    }
+
+    #[test]
+    fn expr_v1_0_spec_serializes_without_expression_field() {
+        let spec = AggregateSpec {
+            alias: "total".into(),
+            fn_: AggregateFn::Sum,
+            column: Some("qty".into()),
+            distinct: false,
+            order_by: vec![],
+            expression: None,
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert!(
+            json.get("expression").is_none(),
+            "v1.0 specs should not emit `expression`: {}",
+            json
+        );
     }
 }

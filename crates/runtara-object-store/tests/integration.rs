@@ -2853,6 +2853,7 @@ async fn test_aggregate_first_last_value_per_group() {
                     column: "snapshot_date".into(),
                     direction: SortDirection::Asc,
                 }],
+                expression: None,
             },
             AggregateSpec {
                 alias: "last_qty".into(),
@@ -2863,6 +2864,7 @@ async fn test_aggregate_first_last_value_per_group() {
                     column: "snapshot_date".into(),
                     direction: SortDirection::Asc,
                 }],
+                expression: None,
             },
         ],
         order_by: vec![AggregateOrderBy {
@@ -2929,6 +2931,7 @@ async fn test_aggregate_count_sum_grouped() {
                 column: None,
                 distinct: false,
                 order_by: vec![],
+                expression: None,
             },
             AggregateSpec {
                 alias: "total_qty".into(),
@@ -2936,6 +2939,7 @@ async fn test_aggregate_count_sum_grouped() {
                 column: Some("qty".into()),
                 distinct: false,
                 order_by: vec![],
+                expression: None,
             },
         ],
         order_by: vec![AggregateOrderBy {
@@ -2991,6 +2995,7 @@ async fn test_aggregate_count_star_no_group_by() {
             column: None,
             distinct: false,
             order_by: vec![],
+            expression: None,
         }],
         order_by: vec![],
         limit: None,
@@ -3032,6 +3037,7 @@ async fn test_aggregate_with_condition_filter() {
             column: Some("qty".into()),
             distinct: false,
             order_by: vec![],
+            expression: None,
         }],
         order_by: vec![],
         limit: None,
@@ -3072,6 +3078,7 @@ async fn test_aggregate_unknown_column_rejected_at_store() {
             column: None,
             distinct: false,
             order_by: vec![],
+            expression: None,
         }],
         order_by: vec![],
         limit: None,
@@ -3087,6 +3094,251 @@ async fn test_aggregate_unknown_column_rejected_at_store() {
         "unexpected error: {}",
         err
     );
+
+    cleanup_test(&store, &prefix).await;
+}
+
+// ==================== EXPR aggregate (v1.1) integration tests ====================
+
+fn row_cell_as_f64(row: &[serde_json::Value], idx: usize) -> f64 {
+    row[idx]
+        .as_f64()
+        .or_else(|| row[idx].as_str().and_then(|s| s.parse().ok()))
+        .expect("numeric cell")
+}
+
+fn first_last_qty_agg_specs() -> Vec<AggregateSpec> {
+    vec![
+        AggregateSpec {
+            alias: "first_qty".into(),
+            fn_: AggregateFn::FirstValue,
+            column: Some("qty".into()),
+            distinct: false,
+            order_by: vec![AggregateOrderBy {
+                column: "snapshot_date".into(),
+                direction: SortDirection::Asc,
+            }],
+            expression: None,
+        },
+        AggregateSpec {
+            alias: "last_qty".into(),
+            fn_: AggregateFn::LastValue,
+            column: Some("qty".into()),
+            distinct: false,
+            order_by: vec![AggregateOrderBy {
+                column: "snapshot_date".into(),
+                direction: SortDirection::Asc,
+            }],
+            expression: None,
+        },
+    ]
+}
+
+fn make_expr_spec(alias: &str, expression: serde_json::Value) -> AggregateSpec {
+    AggregateSpec {
+        alias: alias.into(),
+        fn_: AggregateFn::Expr,
+        column: None,
+        distinct: false,
+        order_by: vec![],
+        expression: Some(expression),
+    }
+}
+
+/// Market-research example: delta = last_qty - first_qty, delta_abs = ABS(delta),
+/// ordered by delta_abs DESC. With seed data A: 10→0, B: 5→9, C: 100→50
+/// we expect delta_abs order: C(50), A(10), B(4).
+#[tokio::test]
+async fn test_aggregate_expr_delta_end_to_end() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let mut aggregates = first_last_qty_agg_specs();
+    aggregates.push(make_expr_spec(
+        "delta",
+        serde_json::json!({
+            "op": "SUB",
+            "arguments": [
+                {"valueType": "alias", "value": "last_qty"},
+                {"valueType": "alias", "value": "first_qty"}
+            ]
+        }),
+    ));
+    aggregates.push(make_expr_spec(
+        "delta_abs",
+        serde_json::json!({
+            "op": "ABS",
+            "arguments": [
+                {"valueType": "alias", "value": "delta"}
+            ]
+        }),
+    ));
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["sku".into()],
+        aggregates,
+        order_by: vec![AggregateOrderBy {
+            column: "delta_abs".into(),
+            direction: SortDirection::Desc,
+        }],
+        limit: Some(200),
+        offset: Some(0),
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    assert_eq!(
+        result.columns,
+        vec![
+            "sku".to_string(),
+            "first_qty".to_string(),
+            "last_qty".to_string(),
+            "delta".to_string(),
+            "delta_abs".to_string(),
+        ]
+    );
+    assert_eq!(result.rows.len(), 3);
+
+    let skus: Vec<&str> = result
+        .rows
+        .iter()
+        .map(|r| r[0].as_str().expect("sku"))
+        .collect();
+    assert_eq!(skus, vec!["C", "A", "B"]);
+
+    // Check the computed deltas.
+    for row in &result.rows {
+        let sku = row[0].as_str().unwrap();
+        let delta = row_cell_as_f64(row, 3);
+        let delta_abs = row_cell_as_f64(row, 4);
+        assert_eq!(delta_abs, delta.abs(), "sku {}", sku);
+        match sku {
+            "A" => assert!((delta + 10.0).abs() < 1e-9),
+            "B" => assert!((delta - 4.0).abs() < 1e-9),
+            "C" => assert!((delta + 50.0).abs() < 1e-9),
+            _ => panic!("unexpected sku {}", sku),
+        }
+    }
+
+    cleanup_test(&store, &prefix).await;
+}
+
+/// `DIV` returns NULL on divide-by-zero. A's first_qty=10 last_qty=0, so
+/// `last / first` is valid for A (=0) but `first / last` divides by zero.
+#[tokio::test]
+async fn test_aggregate_expr_div_by_zero_returns_null() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let mut aggregates = first_last_qty_agg_specs();
+    // For A: first=10, last=0 → first/last divides by zero → NULL.
+    // For B: first=5, last=9 → 5/9 ≈ 0.5555…
+    // For C: first=100, last=50 → 2.0
+    aggregates.push(make_expr_spec(
+        "ratio",
+        serde_json::json!({
+            "op": "DIV",
+            "arguments": [
+                {"valueType": "alias", "value": "first_qty"},
+                {"valueType": "alias", "value": "last_qty"}
+            ]
+        }),
+    ));
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["sku".into()],
+        aggregates,
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    for row in &result.rows {
+        let sku = row[0].as_str().unwrap();
+        let ratio = &row[3];
+        match sku {
+            "A" => assert!(ratio.is_null(), "expected NULL for A, got {:?}", ratio),
+            "B" => {
+                let v = row_cell_as_f64(row, 3);
+                assert!((v - (5.0 / 9.0)).abs() < 1e-6, "B ratio = {}", v);
+            }
+            "C" => {
+                let v = row_cell_as_f64(row, 3);
+                assert!((v - 2.0).abs() < 1e-9, "C ratio = {}", v);
+            }
+            _ => panic!("unexpected sku {}", sku),
+        }
+    }
+
+    cleanup_test(&store, &prefix).await;
+}
+
+/// Boolean EXPR column should surface as JSON `true`/`false`.
+#[tokio::test]
+async fn test_aggregate_expr_boolean_column() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let mut aggregates = first_last_qty_agg_specs();
+    aggregates.push(make_expr_spec(
+        "is_big",
+        serde_json::json!({
+            "op": "GT",
+            "arguments": [
+                {"valueType": "alias", "value": "last_qty"},
+                {"valueType": "immediate", "value": 10}
+            ]
+        }),
+    ));
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["sku".into()],
+        aggregates,
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    for row in &result.rows {
+        let sku = row[0].as_str().unwrap();
+        let is_big = row[3]
+            .as_bool()
+            .unwrap_or_else(|| panic!("expected JSON bool for is_big, got {:?}", row[3]));
+        match sku {
+            "A" => assert!(!is_big, "A last_qty=0 → not > 10"),
+            "B" => assert!(!is_big, "B last_qty=9 → not > 10"),
+            "C" => assert!(is_big, "C last_qty=50 → > 10"),
+            _ => panic!("unexpected sku {}", sku),
+        }
+    }
 
     cleanup_test(&store, &prefix).await;
 }

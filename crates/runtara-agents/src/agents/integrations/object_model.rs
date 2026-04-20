@@ -1099,10 +1099,12 @@ pub struct AggregateSpec {
     /// Output column name (must match `[a-zA-Z_][a-zA-Z0-9_]*` and be unique
     /// within the spec).
     pub alias: String,
-    /// Aggregate function: "COUNT", "SUM", "MIN", "MAX", "FIRST_VALUE", "LAST_VALUE".
+    /// Aggregate function: "COUNT", "SUM", "MIN", "MAX", "FIRST_VALUE",
+    /// "LAST_VALUE", or "EXPR".
     #[serde(rename = "fn")]
     pub fn_: String,
-    /// Source column. Optional for COUNT (→ COUNT(*)); required otherwise.
+    /// Source column. Optional for COUNT (→ COUNT(*)); required for most
+    /// functions; must be omitted for EXPR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
     /// Apply DISTINCT. Only valid with `fn = "COUNT"` + a non-null column.
@@ -1111,6 +1113,11 @@ pub struct AggregateSpec {
     /// Required for FIRST_VALUE / LAST_VALUE; ignored otherwise.
     #[serde(default)]
     pub order_by: Vec<AggregateOrderBy>,
+    /// Required for EXPR; forbidden otherwise. A tree over prior aliases and
+    /// constants using arithmetic / comparison / logical operators. Validated
+    /// and rendered by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<Value>,
 }
 
 /// Input for aggregating (GROUP BY) instances.
@@ -1153,9 +1160,13 @@ pub struct QueryAggregateInput {
     #[field(
         display_name = "Aggregates",
         description = "Aggregate expressions: [{alias, fn, column?, distinct?, \
-                       order_by?}]. fn is one of COUNT, SUM, MIN, MAX, \
-                       FIRST_VALUE, LAST_VALUE. FIRST_VALUE/LAST_VALUE require \
-                       non-empty order_by.",
+                       order_by?, expression?}]. fn is one of COUNT, SUM, MIN, \
+                       MAX, FIRST_VALUE, LAST_VALUE, EXPR. FIRST_VALUE/LAST_VALUE \
+                       require non-empty order_by. EXPR requires `expression`: \
+                       a tree over previously-declared aliases and constants \
+                       using arithmetic (ADD, SUB, MUL, DIV, NEG, ABS, COALESCE), \
+                       comparison, and logical operators. Operands use \
+                       {valueType:'alias'|'immediate', value:...}.",
         example = r#"[{"alias":"first_qty","fn":"FIRST_VALUE","column":"qty","order_by":[{"column":"snapshot_date","direction":"ASC"}]}]"#
     )]
     pub aggregates: Vec<AggregateSpec>,
