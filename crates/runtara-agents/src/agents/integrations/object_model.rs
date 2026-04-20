@@ -1076,6 +1076,216 @@ pub fn bulk_delete_instances(
     })
 }
 
+// ============================================================================
+// Aggregate (GROUP BY) Operation
+// ============================================================================
+
+/// A single entry in an aggregate spec's `order_by` or the top-level `order_by`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateOrderBy {
+    pub column: String,
+    /// "ASC" or "DESC". Defaults to "ASC" when omitted.
+    #[serde(default = "default_asc")]
+    pub direction: String,
+}
+
+fn default_asc() -> String {
+    "ASC".to_string()
+}
+
+/// A single aggregate expression.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateSpec {
+    /// Output column name (must match `[a-zA-Z_][a-zA-Z0-9_]*` and be unique
+    /// within the spec).
+    pub alias: String,
+    /// Aggregate function: "COUNT", "SUM", "MIN", "MAX", "FIRST_VALUE", "LAST_VALUE".
+    #[serde(rename = "fn")]
+    pub fn_: String,
+    /// Source column. Optional for COUNT (→ COUNT(*)); required otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Apply DISTINCT. Only valid with `fn = "COUNT"` + a non-null column.
+    #[serde(default)]
+    pub distinct: bool,
+    /// Required for FIRST_VALUE / LAST_VALUE; ignored otherwise.
+    #[serde(default)]
+    pub order_by: Vec<AggregateOrderBy>,
+}
+
+/// Input for aggregating (GROUP BY) instances.
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityInput)]
+#[capability_input(display_name = "Query Aggregate Input")]
+pub struct QueryAggregateInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Schema Name",
+        description = "The name of the object model schema to aggregate over",
+        example = "StockSnapshot"
+    )]
+    pub schema_name: String,
+
+    /// Filter predicate — same DSL as Query Instances. Applied as the WHERE
+    /// clause before grouping.
+    #[field(
+        display_name = "Condition",
+        description = "Optional filter condition (same DSL as Query Instances). \
+                       Applied before GROUP BY."
+    )]
+    #[serde(default)]
+    pub condition: Option<ConditionExpression>,
+
+    /// Columns to group by. Empty/omitted → one output row over the whole
+    /// filtered set.
+    #[field(
+        display_name = "Group By",
+        description = "Columns to group by. Empty list → one row over the whole \
+                       filtered set.",
+        example = r#"["sku"]"#
+    )]
+    #[serde(default)]
+    pub group_by: Vec<String>,
+
+    /// At least one aggregate expression is required.
+    #[field(
+        display_name = "Aggregates",
+        description = "Aggregate expressions: [{alias, fn, column?, distinct?, \
+                       order_by?}]. fn is one of COUNT, SUM, MIN, MAX, \
+                       FIRST_VALUE, LAST_VALUE. FIRST_VALUE/LAST_VALUE require \
+                       non-empty order_by.",
+        example = r#"[{"alias":"first_qty","fn":"FIRST_VALUE","column":"qty","order_by":[{"column":"snapshot_date","direction":"ASC"}]}]"#
+    )]
+    pub aggregates: Vec<AggregateSpec>,
+
+    /// Optional top-level sort. Each `column` must be a group_by column or an
+    /// aggregate alias.
+    #[field(
+        display_name = "Order By",
+        description = "Top-level sort — targets group_by columns or aggregate aliases.",
+        example = r#"[{"column":"last_qty","direction":"DESC"}]"#
+    )]
+    #[serde(default)]
+    pub order_by: Vec<AggregateOrderBy>,
+
+    /// Max result rows. Omit to let the server return all — if the natural
+    /// result exceeds the server cap (100k) the request is rejected.
+    #[field(
+        display_name = "Limit",
+        description = "Max result rows. Server caps at 100000. Omit to return \
+                       everything (rejected if the group count would exceed the cap).",
+        example = "200"
+    )]
+    #[serde(default)]
+    pub limit: Option<i64>,
+
+    #[field(
+        display_name = "Offset",
+        description = "Pagination offset",
+        example = "0"
+    )]
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "Query Aggregate Output",
+    description = "Columnar aggregate result: ordered column names, rows aligned \
+                   to those columns, and the total number of groups matched."
+)]
+pub struct QueryAggregateOutput {
+    #[field(
+        display_name = "Success",
+        description = "Whether the operation succeeded"
+    )]
+    pub success: bool,
+
+    #[field(
+        display_name = "Columns",
+        description = "Output column names — group_by columns first, then aggregate aliases."
+    )]
+    pub columns: Vec<String>,
+
+    #[field(
+        display_name = "Rows",
+        description = "Result rows, each aligned to the `columns` list."
+    )]
+    pub rows: Vec<Vec<Value>>,
+
+    #[field(
+        display_name = "Group Count",
+        description = "Total number of groups matched by the condition (before limit/offset). \
+                       1 when there is no group_by."
+    )]
+    pub group_count: i64,
+
+    #[field(
+        display_name = "Error",
+        description = "Error message if the operation failed"
+    )]
+    pub error: Option<String>,
+}
+
+/// Run an aggregate (GROUP BY) query over an object model schema.
+#[capability(
+    module = "object_model",
+    display_name = "Query Aggregate",
+    description = "Group and aggregate object model instances (COUNT, SUM, MIN, MAX, \
+                   FIRST_VALUE, LAST_VALUE). Returns a columnar {columns, rows, \
+                   group_count} result. Prefer this over Query Instances + \
+                   client-side folding for any GROUP BY workload.",
+    module_supports_connections = true,
+    module_integration_ids = "postgres",
+    side_effects = false
+)]
+pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutput, AgentError> {
+    let condition_json = input.condition.as_ref().map(condition_expr_to_json);
+
+    let resp = http_post(
+        "/instances/aggregate",
+        json!({
+            "schema_name": input.schema_name,
+            "condition": condition_json,
+            "group_by": input.group_by,
+            "aggregates": input.aggregates,
+            "order_by": input.order_by,
+            "limit": input.limit,
+            "offset": input.offset,
+        }),
+    )?;
+
+    let columns = resp
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let rows = resp
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| row.as_array().map(|cells| cells.to_vec()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(QueryAggregateOutput {
+        success: resp["success"].as_bool().unwrap_or(false),
+        columns,
+        rows,
+        group_count: resp["group_count"].as_i64().unwrap_or(0),
+        error: resp["error"].as_str().map(String::from),
+    })
+}
+
 /// Convert a `MappingValue` to a JSON value for use in conditions.
 fn mapping_value_to_json(mv: &MappingValue) -> serde_json::Value {
     match mv {

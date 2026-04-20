@@ -57,6 +57,47 @@ pub struct QueryObjectInstancesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryAggregateParams {
+    #[schemars(description = "Schema name")]
+    pub schema_name: String,
+    #[schemars(
+        description = "Filter condition (same DSL as query_object_instances): \
+                       { op, arguments?: any[] }. Supported ops: AND, OR, NOT, \
+                       EQ, NE, GT, LT, GTE, LTE, CONTAINS, IN, NOT_IN, \
+                       IS_EMPTY, IS_NOT_EMPTY, IS_DEFINED."
+    )]
+    pub condition: Option<serde_json::Value>,
+    #[schemars(
+        description = "Columns to GROUP BY. Empty/omitted → one output row over \
+                       the whole filtered set."
+    )]
+    pub group_by: Option<Vec<String>>,
+    #[schemars(
+        description = "Array of aggregate specs: [{alias, fn, column?, distinct?, \
+                       orderBy?}]. `fn` is one of COUNT, SUM, MIN, MAX, FIRST_VALUE, \
+                       LAST_VALUE. Each alias must be a unique \
+                       [a-zA-Z_][a-zA-Z0-9_]* identifier. `column` is optional for \
+                       COUNT (→ COUNT(*)) and required otherwise. `distinct: true` is \
+                       valid only with COUNT + column. FIRST_VALUE/LAST_VALUE require \
+                       non-empty orderBy: [{column, direction: ASC|DESC}]."
+    )]
+    pub aggregates: serde_json::Value,
+    #[schemars(
+        description = "Optional top-level sort: [{column, direction}]. Each column \
+                       must match a group_by column or an aggregate alias."
+    )]
+    pub order_by: Option<serde_json::Value>,
+    #[schemars(
+        description = "Max result rows (server caps at 100000). Omit to let the \
+                       server return all rows — if the natural result exceeds the \
+                       cap the request is rejected."
+    )]
+    pub limit: Option<i64>,
+    #[schemars(description = "Pagination offset")]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateObjectInstanceParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
@@ -168,6 +209,39 @@ pub async fn query_object_instances(
         server,
         &format!(
             "/api/runtime/object-model/instances/schema/{}/filter",
+            params.schema_name
+        ),
+        Some(body),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn query_aggregate(
+    server: &SmoMcpServer,
+    params: QueryAggregateParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("schema_name", &params.schema_name)?;
+    let mut body = serde_json::json!({ "aggregates": params.aggregates });
+    if let Some(condition) = params.condition {
+        body["condition"] = condition;
+    }
+    if let Some(group_by) = params.group_by {
+        body["groupBy"] = serde_json::json!(group_by);
+    }
+    if let Some(order_by) = params.order_by {
+        body["orderBy"] = order_by;
+    }
+    if let Some(limit) = params.limit {
+        body["limit"] = serde_json::json!(limit);
+    }
+    if let Some(offset) = params.offset {
+        body["offset"] = serde_json::json!(offset);
+    }
+    let result = api_post(
+        server,
+        &format!(
+            "/api/runtime/object-model/instances/schema/{}/aggregate",
             params.schema_name
         ),
         Some(body),

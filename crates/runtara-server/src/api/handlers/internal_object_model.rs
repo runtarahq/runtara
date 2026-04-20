@@ -263,6 +263,32 @@ pub struct InternalBulkDeleteResponse {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct InternalAggregateRequest {
+    pub schema_name: String,
+    #[serde(default)]
+    pub condition: Option<crate::api::dto::object_model::Condition>,
+    #[serde(default, alias = "groupBy")]
+    pub group_by: Vec<String>,
+    pub aggregates: Vec<crate::api::dto::object_model::AggregateSpec>,
+    #[serde(default, alias = "orderBy")]
+    pub order_by: Vec<crate::api::dto::object_model::AggregateOrderBy>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InternalAggregateResponse {
+    pub success: bool,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    pub group_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InternalGetSchemaResponse {
     pub success: bool,
@@ -911,6 +937,51 @@ pub async fn bulk_delete_instances(
             Json(InternalBulkDeleteResponse {
                 success: false,
                 deleted_count: 0,
+                error: Some(e.to_string()),
+            }),
+        )),
+    }
+}
+
+/// POST /api/internal/object-model/instances/aggregate — GROUP BY aggregates
+pub async fn aggregate_instances(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<ObjectModelState>>,
+    Json(request): Json<InternalAggregateRequest>,
+) -> Result<(StatusCode, Json<InternalAggregateResponse>), (StatusCode, Json<Value>)> {
+    let tenant_id = extract_tenant_id(&headers)?;
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    let api_req = crate::api::dto::object_model::AggregateRequest {
+        condition: request.condition,
+        group_by: request.group_by,
+        aggregates: request.aggregates,
+        order_by: request.order_by,
+        limit: request.limit,
+        offset: request.offset,
+    };
+
+    match service
+        .aggregate_instances_by_schema(&tenant_id, &request.schema_name, api_req, None)
+        .await
+    {
+        Ok(result) => Ok((
+            StatusCode::OK,
+            Json(InternalAggregateResponse {
+                success: true,
+                columns: result.columns,
+                rows: result.rows,
+                group_count: result.group_count,
+                error: None,
+            }),
+        )),
+        Err(e) => Ok((
+            StatusCode::OK,
+            Json(InternalAggregateResponse {
+                success: false,
+                columns: vec![],
+                rows: vec![],
+                group_count: 0,
                 error: Some(e.to_string()),
             }),
         )),

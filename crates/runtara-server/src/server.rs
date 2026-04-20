@@ -95,6 +95,7 @@ use runtime_client::RuntimeClient;
         api::handlers::object_model::get_instances_by_schema_name,
         api::handlers::object_model::create_instance,
         api::handlers::object_model::filter_instances,
+        api::handlers::object_model::aggregate_instances,
         api::handlers::object_model::get_instance_by_id,
         api::handlers::object_model::update_instance,
         api::handlers::object_model::delete_instance,
@@ -262,6 +263,12 @@ use runtime_client::RuntimeClient;
             api::dto::object_model::BulkDeleteRequest,
             api::dto::object_model::BulkDeleteResponse,
             api::dto::object_model::FilterInstancesResponse,
+            api::dto::object_model::AggregateRequest,
+            api::dto::object_model::AggregateResponse,
+            api::dto::object_model::AggregateSpec,
+            api::dto::object_model::AggregateOrderBy,
+            api::dto::object_model::AggregateFn,
+            api::dto::object_model::SortDirection,
             api::dto::object_model::ColumnType,
             api::dto::object_model::ColumnDefinition,
             api::dto::object_model::IndexDefinition,
@@ -1331,6 +1338,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             post(api::handlers::object_model::filter_instances),
         )
         .route(
+            "/api/runtime/object-model/instances/schema/{name}/aggregate",
+            post(api::handlers::object_model::aggregate_instances),
+        )
+        .route(
             "/api/runtime/object-model/instances/{schema_id}/{instance_id}",
             get(api::handlers::object_model::get_instance_by_id),
         )
@@ -1472,6 +1483,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/internal/object-model/instances/bulk-delete",
             post(api::handlers::internal_object_model::bulk_delete_instances),
+        )
+        .route(
+            "/api/internal/object-model/instances/aggregate",
+            post(api::handlers::internal_object_model::aggregate_instances),
         )
         .route(
             "/api/internal/object-model/schemas/{name}",

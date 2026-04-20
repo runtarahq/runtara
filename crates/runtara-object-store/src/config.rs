@@ -50,6 +50,11 @@ impl StoreConfig {
 /// Default cap on the number of items accepted per bulk request.
 pub const DEFAULT_BULK_REQUEST_LIMIT: usize = 10_000;
 
+/// Default cap on the number of result rows returned by `aggregate_instances`.
+/// If a caller omits `limit` and the natural result exceeds this cap, the
+/// request is rejected so the caller must add an explicit `limit`.
+pub const DEFAULT_AGGREGATE_RESULT_ROW_LIMIT: usize = 100_000;
+
 /// Builder for StoreConfig
 #[derive(Debug)]
 pub struct StoreConfigBuilder {

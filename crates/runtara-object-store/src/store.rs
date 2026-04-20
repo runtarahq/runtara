@@ -5,10 +5,11 @@
 
 use sqlx::{PgPool, Row};
 
-use crate::config::StoreConfig;
+use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
 use crate::error::{ObjectStoreError, Result};
 use crate::instance::{Condition, FilterRequest, Instance, SimpleFilter};
 use crate::schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
+use crate::sql::aggregate::{AggregateRequest, AggregateResult, build_aggregate_query};
 use crate::sql::condition::{build_condition_clause, build_order_by_clause};
 use crate::sql::ddl::DdlGenerator;
 use crate::sql::sanitize::quote_identifier;
@@ -538,6 +539,97 @@ impl ObjectStore {
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
         self.filter_instances_internal(&schema, filter).await
+    }
+
+    /// Run an aggregate (GROUP BY) query and return a columnar result.
+    ///
+    /// Enforces [`DEFAULT_AGGREGATE_RESULT_ROW_LIMIT`]:
+    /// - If the caller sets `limit`, it is silently clamped to the cap.
+    /// - If the caller omits `limit` and the natural result exceeds the cap,
+    ///   the request is rejected so the caller must add an explicit `limit`.
+    pub async fn aggregate_instances(
+        &self,
+        schema_name: &str,
+        request: AggregateRequest,
+    ) -> Result<AggregateResult> {
+        let schema = self
+            .get_schema(schema_name)
+            .await?
+            .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
+
+        let sql =
+            build_aggregate_query(&schema, &request).map_err(ObjectStoreError::InvalidCondition)?;
+
+        // Effective LIMIT / OFFSET.
+        let cap = DEFAULT_AGGREGATE_RESULT_ROW_LIMIT as i64;
+        let (effective_limit, caller_set_limit) = match request.limit {
+            Some(l) if l < 0 => (0i64, true),
+            Some(l) => (l.min(cap), true),
+            None => (cap + 1, false),
+        };
+        let effective_offset = request.offset.unwrap_or(0).max(0);
+
+        // Bind condition params as strings (matches filter_instances_internal).
+        let mut data_q = sqlx::query(&sql.data_sql);
+        for param in &sql.params {
+            let s = match param {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            data_q = data_q.bind(s);
+        }
+        data_q = data_q.bind(effective_limit).bind(effective_offset);
+        let rows = data_q.fetch_all(&self.pool).await?;
+
+        // If the caller did not supply a limit and we got more than the cap,
+        // reject: the full result is too large to materialize safely.
+        if !caller_set_limit && rows.len() as i64 > cap {
+            return Err(ObjectStoreError::validation(format!(
+                "aggregate result exceeds {} rows; add an explicit `limit`",
+                cap
+            )));
+        }
+
+        // Decode each row — every output column is wrapped in to_jsonb(),
+        // so sqlx decodes each cell as a serde_json::Value.
+        let mut out_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut cells = Vec::with_capacity(sql.columns.len());
+            for col_name in &sql.columns {
+                let cell: serde_json::Value = row
+                    .try_get::<Option<serde_json::Value>, _>(col_name.as_str())
+                    .map_err(|e| {
+                        ObjectStoreError::database(format!(
+                            "decoding aggregate column '{}': {}",
+                            col_name, e
+                        ))
+                    })?
+                    .unwrap_or(serde_json::Value::Null);
+                cells.push(cell);
+            }
+            out_rows.push(cells);
+        }
+
+        // group_count: separate COUNT query when there's a GROUP BY, otherwise 1.
+        let group_count: i64 = if let Some(count_sql) = &sql.count_sql {
+            let mut count_q = sqlx::query_as::<_, (i64,)>(count_sql);
+            for param in &sql.params {
+                let s = match param {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                count_q = count_q.bind(s);
+            }
+            count_q.fetch_one(&self.pool).await?.0
+        } else {
+            1
+        };
+
+        Ok(AggregateResult {
+            columns: sql.columns,
+            rows: out_rows,
+            group_count,
+        })
     }
 
     /// Check if an instance exists matching the filters

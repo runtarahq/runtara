@@ -8,7 +8,7 @@ use crate::sql::sanitize::quote_identifier;
 use crate::types::ColumnType;
 
 /// Map camelCase system field names to their snake_case SQL column equivalents.
-fn field_to_sql(field: &str) -> &str {
+pub(crate) fn field_to_sql(field: &str) -> &str {
     match field {
         "createdAt" => "created_at",
         "updatedAt" => "updated_at",
@@ -21,7 +21,7 @@ fn field_to_sql(field: &str) -> &str {
 /// System fields are handled first (id → text, created_at/updated_at → timestamptz).
 /// Then schema columns are looked up by name and mapped to their SQL cast type.
 /// Falls back to "text" for unknown fields.
-fn resolve_sql_cast(field: &str, schema: &Schema) -> &'static str {
+pub(crate) fn resolve_sql_cast(field: &str, schema: &Schema) -> &'static str {
     // System fields (already in SQL name form after field_to_sql)
     match field {
         "id" => return "text",

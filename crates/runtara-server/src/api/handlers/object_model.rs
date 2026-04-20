@@ -1296,3 +1296,72 @@ pub async fn filter_instances(
         )),
     }
 }
+
+/// Aggregate instances with GROUP BY for a specific schema.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/object-model/instances/schema/{name}/aggregate",
+    request_body = AggregateRequest,
+    params(
+        ("name" = String, Path, description = "Schema name"),
+        ("connectionId" = Option<String>, Query, description = "Optional connection ID for database selection")
+    ),
+    responses(
+        (status = 200, description = "Aggregate computed successfully", body = AggregateResponse),
+        (status = 400, description = "Invalid aggregate request", body = Value),
+        (status = 404, description = "Schema not found", body = Value),
+        (status = 500, description = "Internal server error", body = Value),
+    ),
+    tag = "object-model"
+)]
+pub async fn aggregate_instances(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(state): State<Arc<ObjectModelState>>,
+    Path(schema_name): Path<String>,
+    Query(params): Query<ConnectionQueryParams>,
+    Json(request): Json<AggregateRequest>,
+) -> Result<(StatusCode, Json<AggregateResponse>), (StatusCode, Json<Value>)> {
+    tracing::info!(
+        "Aggregate instances handler called for schema '{}'",
+        schema_name
+    );
+
+    let service = InstanceService::new(state.manager.clone(), state.connections.clone());
+
+    match service
+        .aggregate_instances_by_schema(
+            &tenant_id,
+            &schema_name,
+            request,
+            params.connection_id.as_deref(),
+        )
+        .await
+    {
+        Ok(result) => Ok((
+            StatusCode::OK,
+            Json(AggregateResponse {
+                success: true,
+                columns: result.columns,
+                rows: result.rows,
+                group_count: result.group_count,
+                error: None,
+            }),
+        )),
+        Err(ServiceError::ValidationError(msg)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::DatabaseError(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::NotFound(msg)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"success": false, "error": msg})),
+        )),
+        Err(ServiceError::Conflict(msg)) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"success": false, "error": msg})),
+        )),
+    }
+}

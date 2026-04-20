@@ -95,7 +95,10 @@ pub mod store;
 pub mod types;
 
 // Re-export main types for convenience
-pub use config::{AutoColumns, DEFAULT_BULK_REQUEST_LIMIT, StoreConfig, StoreConfigBuilder};
+pub use config::{
+    AutoColumns, DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, DEFAULT_BULK_REQUEST_LIMIT, StoreConfig,
+    StoreConfigBuilder,
+};
 pub use error::{ObjectStoreError, Result};
 pub use instance::{
     BulkCreateOptions, BulkCreateResult, BulkRowError, Condition, ConflictMode,
@@ -107,6 +110,10 @@ pub use store::ObjectStore;
 pub use types::{ColumnDefinition, ColumnType, IndexDefinition};
 
 // Re-export SQL utilities for advanced users
+pub use sql::aggregate::{
+    AggregateFn, AggregateOrderBy, AggregateRequest, AggregateResult, AggregateSpec, AggregateSql,
+    SortDirection, build_aggregate_query,
+};
 pub use sql::condition::{build_condition_clause, build_order_by_clause};
 pub use sql::ddl::DdlGenerator;
 pub use sql::sanitize::{quote_identifier, validate_identifier};

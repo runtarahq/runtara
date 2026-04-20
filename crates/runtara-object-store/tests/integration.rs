@@ -11,7 +11,8 @@
 use runtara_object_store::instance::{BulkCreateOptions, Condition, ConflictMode, ValidationMode};
 use runtara_object_store::types::{ColumnDefinition, ColumnType, IndexDefinition};
 use runtara_object_store::{
-    CreateSchemaRequest, FilterRequest, ObjectStore, SimpleFilter, StoreConfig,
+    AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, CreateSchemaRequest,
+    FilterRequest, ObjectStore, SimpleFilter, SortDirection, StoreConfig,
 };
 
 /// Get a unique test prefix for this test run
@@ -2774,6 +2775,318 @@ async fn test_create_instances_extended_upsert_preserves_absent_columns() {
     .expect("read");
     assert_eq!(name, "original", "absent `name` must not be stomped");
     assert_eq!(price, 20.0, "present `price` must be updated");
+
+    cleanup_test(&store, &prefix).await;
+}
+
+// ==================== Aggregate Tests ====================
+
+/// Seed a `stock_snapshot`-style schema with three SKUs × three dates. Returns
+/// the canonical (first_qty, last_qty) expected per SKU when grouped by `sku`
+/// and ordered by `snapshot_date ASC`.
+async fn seed_stock_snapshot(
+    store: &ObjectStore,
+    prefix: &str,
+    schema_name: &str,
+) -> std::collections::HashMap<&'static str, (i64, i64)> {
+    let request = CreateSchemaRequest {
+        name: schema_name.to_string(),
+        description: None,
+        table_name: format!("{}_{}", prefix, schema_name),
+        columns: vec![
+            ColumnDefinition::new("sku", ColumnType::String).not_null(),
+            ColumnDefinition::new("qty", ColumnType::Integer),
+            ColumnDefinition::new("snapshot_date", ColumnType::Timestamp).not_null(),
+        ],
+        indexes: None,
+    };
+    store.create_schema(request).await.expect("create_schema");
+
+    // (sku, qty, date)
+    let rows = vec![
+        ("A", 10, "2026-04-01T00:00:00Z"),
+        ("A", 15, "2026-04-02T00:00:00Z"),
+        ("A", 0, "2026-04-03T00:00:00Z"),
+        ("B", 5, "2026-04-01T00:00:00Z"),
+        ("B", 7, "2026-04-02T00:00:00Z"),
+        ("B", 9, "2026-04-03T00:00:00Z"),
+        ("C", 100, "2026-04-01T00:00:00Z"),
+        ("C", 100, "2026-04-02T00:00:00Z"),
+        ("C", 50, "2026-04-03T00:00:00Z"),
+    ];
+    for (sku, qty, date) in rows {
+        store
+            .create_instance(
+                schema_name,
+                serde_json::json!({
+                    "sku": sku,
+                    "qty": qty,
+                    "snapshot_date": date,
+                }),
+            )
+            .await
+            .expect("create_instance");
+    }
+
+    std::collections::HashMap::from([("A", (10i64, 0i64)), ("B", (5, 9)), ("C", (100, 50))])
+}
+
+#[tokio::test]
+async fn test_aggregate_first_last_value_per_group() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let expected = seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["sku".into()],
+        aggregates: vec![
+            AggregateSpec {
+                alias: "first_qty".into(),
+                fn_: AggregateFn::FirstValue,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![AggregateOrderBy {
+                    column: "snapshot_date".into(),
+                    direction: SortDirection::Asc,
+                }],
+            },
+            AggregateSpec {
+                alias: "last_qty".into(),
+                fn_: AggregateFn::LastValue,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![AggregateOrderBy {
+                    column: "snapshot_date".into(),
+                    direction: SortDirection::Asc,
+                }],
+            },
+        ],
+        order_by: vec![AggregateOrderBy {
+            column: "last_qty".into(),
+            direction: SortDirection::Desc,
+        }],
+        limit: Some(200),
+        offset: Some(0),
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    assert_eq!(result.columns, vec!["sku", "first_qty", "last_qty"]);
+    assert_eq!(result.rows.len(), 3);
+    assert_eq!(result.group_count, 3);
+
+    // Build a map for order-independent comparison of per-SKU values.
+    let mut got: std::collections::HashMap<String, (i64, i64)> = Default::default();
+    for row in &result.rows {
+        let sku = row[0].as_str().expect("sku str").to_string();
+        let first = row[1].as_i64().expect("first_qty i64");
+        let last = row[2].as_i64().expect("last_qty i64");
+        got.insert(sku, (first, last));
+    }
+    for (sku, (first, last)) in &expected {
+        let actual = got
+            .get(*sku)
+            .unwrap_or_else(|| panic!("missing sku {}", sku));
+        assert_eq!(actual.0, *first, "first_qty[{}]", sku);
+        assert_eq!(actual.1, *last, "last_qty[{}]", sku);
+    }
+
+    // Top-level ORDER BY last_qty DESC ⇒ B(9) is ahead of A(0); C(50) is the
+    // largest, so it must come first.
+    let skus_in_order: Vec<&str> = result
+        .rows
+        .iter()
+        .map(|r| r[0].as_str().expect("sku"))
+        .collect();
+    assert_eq!(skus_in_order, vec!["C", "B", "A"]);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_count_sum_grouped() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["sku".into()],
+        aggregates: vec![
+            AggregateSpec {
+                alias: "n".into(),
+                fn_: AggregateFn::Count,
+                column: None,
+                distinct: false,
+                order_by: vec![],
+            },
+            AggregateSpec {
+                alias: "total_qty".into(),
+                fn_: AggregateFn::Sum,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![],
+            },
+        ],
+        order_by: vec![AggregateOrderBy {
+            column: "total_qty".into(),
+            direction: SortDirection::Desc,
+        }],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    assert_eq!(result.columns, vec!["sku", "n", "total_qty"]);
+    assert_eq!(result.rows.len(), 3);
+    assert_eq!(result.group_count, 3);
+
+    // Each SKU has 3 rows → COUNT(*) = 3 everywhere.
+    for row in &result.rows {
+        let n = row[1].as_i64().expect("n is i64");
+        assert_eq!(n, 3);
+    }
+
+    // Top row has highest SUM(qty). C: 100+100+50 = 250 is the largest.
+    let top_sku = result.rows[0][0].as_str().expect("sku");
+    assert_eq!(top_sku, "C");
+    let top_total: f64 = result.rows[0][2]
+        .as_f64()
+        .or_else(|| result.rows[0][2].as_str().and_then(|s| s.parse().ok()))
+        .expect("total_qty numeric");
+    assert!((top_total - 250.0).abs() < 1e-9);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_count_star_no_group_by() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec![],
+        aggregates: vec![AggregateSpec {
+            alias: "n".into(),
+            fn_: AggregateFn::Count,
+            column: None,
+            distinct: false,
+            order_by: vec![],
+        }],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    assert_eq!(result.columns, vec!["n"]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.group_count, 1, "no group_by → group_count == 1");
+    assert_eq!(result.rows[0][0].as_i64().unwrap(), 9);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_with_condition_filter() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    // Only SKU "C" matches this condition — 3 rows, all with qty ≥ 50.
+    let req = AggregateRequest {
+        condition: Some(Condition {
+            op: "EQ".into(),
+            arguments: Some(vec![serde_json::json!("sku"), serde_json::json!("C")]),
+        }),
+        group_by: vec!["sku".into()],
+        aggregates: vec![AggregateSpec {
+            alias: "total".into(),
+            fn_: AggregateFn::Sum,
+            column: Some("qty".into()),
+            distinct: false,
+            order_by: vec![],
+        }],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.group_count, 1);
+    let total: f64 = result.rows[0][1]
+        .as_f64()
+        .or_else(|| result.rows[0][1].as_str().and_then(|s| s.parse().ok()))
+        .expect("total numeric");
+    assert!((total - 250.0).abs() < 1e-9);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_unknown_column_rejected_at_store() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["does_not_exist".into()],
+        aggregates: vec![AggregateSpec {
+            alias: "n".into(),
+            fn_: AggregateFn::Count,
+            column: None,
+            distinct: false,
+            order_by: vec![],
+        }],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let err = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect_err("should reject unknown group_by column");
+    assert!(
+        err.to_string().contains("Unknown group_by column"),
+        "unexpected error: {}",
+        err
+    );
 
     cleanup_test(&store, &prefix).await;
 }

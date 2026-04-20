@@ -360,6 +360,20 @@ impl SmoMcpServer {
         tools::object_model::query_object_instances(self, params.0).await
     }
 
+    #[tool(
+        description = "Aggregate object model instances with GROUP BY. Supports \
+                       COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE. Returns \
+                       columnar {columns, rows, groupCount}. Prefer this over \
+                       query_object_instances + client-side folding for any \
+                       GROUP BY workload (e.g. first/last snapshot per SKU)."
+    )]
+    async fn query_aggregate(
+        &self,
+        params: Parameters<tools::object_model::QueryAggregateParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::query_aggregate(self, params.0).await
+    }
+
     #[tool(description = "Create a new object model instance.")]
     async fn create_object_instance(
         &self,

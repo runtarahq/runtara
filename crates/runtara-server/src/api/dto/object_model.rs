@@ -537,6 +537,140 @@ pub struct FilterInstancesResponse {
 }
 
 // ============================================================================
+// Aggregate (GROUP BY) DTOs
+// ============================================================================
+
+/// Aggregate function. JSON encoding is SCREAMING_SNAKE_CASE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AggregateFn {
+    Count,
+    Sum,
+    Min,
+    Max,
+    FirstValue,
+    LastValue,
+}
+
+/// Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AggregateOrderBy {
+    pub column: String,
+    #[serde(default)]
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AggregateSpec {
+    /// Output column name. Must match `[a-zA-Z_][a-zA-Z0-9_]*` and be unique.
+    pub alias: String,
+    /// Aggregate function. One of COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE.
+    #[serde(rename = "fn")]
+    pub fn_: AggregateFn,
+    /// Source column. Optional for COUNT (COUNT(*)); required otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Apply DISTINCT. Only valid with `fn = COUNT` and a non-null `column`.
+    #[serde(default)]
+    pub distinct: bool,
+    /// Required for FIRST_VALUE / LAST_VALUE; rejected for others.
+    #[serde(default, rename = "orderBy", alias = "order_by")]
+    pub order_by: Vec<AggregateOrderBy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AggregateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    #[serde(default, rename = "groupBy", alias = "group_by")]
+    pub group_by: Vec<String>,
+    pub aggregates: Vec<AggregateSpec>,
+    #[serde(default, rename = "orderBy", alias = "order_by")]
+    pub order_by: Vec<AggregateOrderBy>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AggregateResponse {
+    pub success: bool,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    #[serde(rename = "groupCount")]
+    pub group_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ---- Conversions to store-level types ----
+
+impl From<SortDirection> for runtara_object_store::SortDirection {
+    fn from(d: SortDirection) -> Self {
+        match d {
+            SortDirection::Asc => runtara_object_store::SortDirection::Asc,
+            SortDirection::Desc => runtara_object_store::SortDirection::Desc,
+        }
+    }
+}
+
+impl From<AggregateFn> for runtara_object_store::AggregateFn {
+    fn from(f: AggregateFn) -> Self {
+        match f {
+            AggregateFn::Count => runtara_object_store::AggregateFn::Count,
+            AggregateFn::Sum => runtara_object_store::AggregateFn::Sum,
+            AggregateFn::Min => runtara_object_store::AggregateFn::Min,
+            AggregateFn::Max => runtara_object_store::AggregateFn::Max,
+            AggregateFn::FirstValue => runtara_object_store::AggregateFn::FirstValue,
+            AggregateFn::LastValue => runtara_object_store::AggregateFn::LastValue,
+        }
+    }
+}
+
+impl From<AggregateOrderBy> for runtara_object_store::AggregateOrderBy {
+    fn from(o: AggregateOrderBy) -> Self {
+        runtara_object_store::AggregateOrderBy {
+            column: o.column,
+            direction: o.direction.into(),
+        }
+    }
+}
+
+impl From<AggregateSpec> for runtara_object_store::AggregateSpec {
+    fn from(s: AggregateSpec) -> Self {
+        runtara_object_store::AggregateSpec {
+            alias: s.alias,
+            fn_: s.fn_.into(),
+            column: s.column,
+            distinct: s.distinct,
+            order_by: s.order_by.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<AggregateRequest> for runtara_object_store::AggregateRequest {
+    fn from(r: AggregateRequest) -> Self {
+        runtara_object_store::AggregateRequest {
+            condition: r.condition.map(Into::into),
+            group_by: r.group_by,
+            aggregates: r.aggregates.into_iter().map(Into::into).collect(),
+            order_by: r.order_by.into_iter().map(Into::into).collect(),
+            limit: r.limit,
+            offset: r.offset,
+        }
+    }
+}
+
+// ============================================================================
 // Conversions from runtara-object-store types
 // ============================================================================
 

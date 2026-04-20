@@ -477,6 +477,34 @@ impl InstanceService {
         Ok((instances, total))
     }
 
+    /// Run an aggregate (GROUP BY) query for a schema.
+    pub async fn aggregate_instances_by_schema(
+        &self,
+        tenant_id: &str,
+        schema_name: &str,
+        request: AggregateRequest,
+        connection_id: Option<&str>,
+    ) -> Result<runtara_object_store::AggregateResult, ServiceError> {
+        let store = get_store(&self.manager, Some(&self.facade), connection_id, tenant_id).await?;
+
+        let store_request: runtara_object_store::AggregateRequest = request.into();
+
+        store
+            .aggregate_instances(schema_name, store_request)
+            .await
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("validation") || msg.contains("Invalid") || msg.contains("exceeds")
+                {
+                    ServiceError::ValidationError(format!("Invalid aggregate: {}", e))
+                } else if msg.contains("not found") {
+                    ServiceError::NotFound(msg)
+                } else {
+                    ServiceError::DatabaseError(msg)
+                }
+            })
+    }
+
     /// Get a single instance by ID
     pub async fn get_instance_by_id(
         &self,
