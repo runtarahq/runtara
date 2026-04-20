@@ -2114,3 +2114,76 @@ async fn test_create_instances_extended_requires_conflict_columns() {
 
     cleanup_test(&store, &prefix).await;
 }
+
+#[tokio::test]
+async fn test_create_instances_extended_partial_columns_typed_null() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+
+    let table_name = format!("{}_bulk_partial", prefix);
+    store
+        .create_schema(CreateSchemaRequest {
+            name: "bulk_partial".to_string(),
+            description: None,
+            table_name: table_name.clone(),
+            columns: vec![
+                ColumnDefinition::new("sku", ColumnType::String)
+                    .unique()
+                    .not_null(),
+                ColumnDefinition::new("category_leaf_id", ColumnType::Integer),
+                ColumnDefinition::new("price", ColumnType::decimal(10, 2)),
+                ColumnDefinition::new("active", ColumnType::Boolean),
+                ColumnDefinition::new("released_at", ColumnType::Timestamp),
+            ],
+            indexes: None,
+        })
+        .await
+        .expect("Should create schema");
+
+    // Instance with only `sku` populated — mimics the columnar normalizer
+    // output when `columns = ["sku"]`. Every other schema column is absent
+    // from the map. Regression test for the bug where missing columns were
+    // bound as `None::<String>`, causing Postgres to reject non-text columns
+    // with "expression is of type text".
+    let result = store
+        .create_instances_extended(
+            "bulk_partial",
+            vec![serde_json::json!({"sku": "A1"})],
+            BulkCreateOptions {
+                conflict_mode: ConflictMode::Skip {
+                    conflict_columns: vec!["sku".to_string()],
+                },
+                validation_mode: ValidationMode::Stop,
+            },
+        )
+        .await
+        .expect("partial-column insert should succeed with typed NULLs");
+
+    assert_eq!(result.created_count, 1);
+
+    let (found, _) = store
+        .filter_instances(
+            "bulk_partial",
+            FilterRequest {
+                condition: Some(Condition::eq("sku", "A1")),
+                offset: 0,
+                limit: 10,
+                sort_by: None,
+                sort_order: None,
+            },
+        )
+        .await
+        .expect("query inserted row");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].properties["sku"], serde_json::json!("A1"));
+    // NULL columns are absent from properties (see `extract_column_value`).
+    let props = found[0].properties.as_object().expect("object properties");
+    assert!(!props.contains_key("category_leaf_id"));
+    assert!(!props.contains_key("price"));
+    assert!(!props.contains_key("active"));
+    assert!(!props.contains_key("released_at"));
+
+    cleanup_test(&store, &prefix).await;
+}

@@ -957,12 +957,10 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
-                    if let Some(value) = properties_obj.get(&col.name) {
-                        query = Self::bind_value(query, &col.column_type, &col.name, value)?;
-                    } else {
-                        // Bind NULL for missing optional columns
-                        query = query.bind(None::<String>);
-                    }
+                    let value = properties_obj
+                        .get(&col.name)
+                        .unwrap_or(&serde_json::Value::Null);
+                    query = Self::bind_value(query, &col.column_type, &col.name, value)?;
                 }
             }
 
@@ -1142,11 +1140,10 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
-                    if let Some(value) = properties_obj.get(&col.name) {
-                        query = Self::bind_value(query, &col.column_type, &col.name, value)?;
-                    } else {
-                        query = query.bind(None::<String>);
-                    }
+                    let value = properties_obj
+                        .get(&col.name)
+                        .unwrap_or(&serde_json::Value::Null);
+                    query = Self::bind_value(query, &col.column_type, &col.name, value)?;
                 }
             }
 
@@ -1335,11 +1332,10 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
-                    if let Some(value) = properties_obj.get(&col.name) {
-                        query = Self::bind_value(query, &col.column_type, &col.name, value)?;
-                    } else {
-                        query = query.bind(None::<String>);
-                    }
+                    let value = properties_obj
+                        .get(&col.name)
+                        .unwrap_or(&serde_json::Value::Null);
+                    query = Self::bind_value(query, &col.column_type, &col.name, value)?;
                 }
             }
 
