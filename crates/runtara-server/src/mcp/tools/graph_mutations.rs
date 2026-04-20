@@ -108,18 +108,18 @@ fn validate_output_path(
 
 /// Fetch the latest execution graph for a workflow.
 /// Returns (execution_graph, latest_version, current_version).
+///
+/// When an unpublished draft exists (latest > current), `GET /workflows/{id}` without
+/// `versionNumber` returns the *published* version's graph — so subsequent mutations
+/// would re-base off current and clobber earlier edits when PUT in-place to latest.
+/// We detect that case and re-fetch with `versionNumber=latest` so mutations stack
+/// on the draft.
 async fn fetch_latest_graph(
     server: &SmoMcpServer,
     workflow_id: &str,
 ) -> Result<(serde_json::Value, i64, i64), rmcp::ErrorData> {
     validate_path_param("workflow_id", workflow_id)?;
     let result = api_get(server, &format!("/api/runtime/workflows/{}", workflow_id)).await?;
-
-    let graph = result
-        .pointer("/data/definition/executionGraph")
-        .or_else(|| result.pointer("/data/executionGraph"))
-        .cloned()
-        .ok_or_else(|| err("Workflow has no executionGraph"))?;
 
     let latest_version = result
         .pointer("/data/latestVersion")
@@ -132,6 +132,25 @@ async fn fetch_latest_graph(
         .or_else(|| result.pointer("/data/current_version"))
         .and_then(|v| v.as_i64())
         .unwrap_or(latest_version);
+
+    let graph_source = if latest_version != current_version {
+        api_get(
+            server,
+            &format!(
+                "/api/runtime/workflows/{}?versionNumber={}",
+                workflow_id, latest_version
+            ),
+        )
+        .await?
+    } else {
+        result
+    };
+
+    let graph = graph_source
+        .pointer("/data/definition/executionGraph")
+        .or_else(|| graph_source.pointer("/data/executionGraph"))
+        .cloned()
+        .ok_or_else(|| err("Workflow has no executionGraph"))?;
 
     Ok((graph, latest_version, current_version))
 }
