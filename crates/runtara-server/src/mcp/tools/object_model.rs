@@ -43,8 +43,13 @@ pub struct ListObjectInstancesParams {
 pub struct QueryObjectInstancesParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
-    #[schemars(description = "Filter conditions as JSON array")]
-    pub conditions: Option<serde_json::Value>,
+    #[schemars(
+        description = "Filter condition as a JSON object: { op: string, arguments?: any[] }. \
+                              Supported ops: AND, OR, NOT, EQ, NE, GT, LT, GTE, LTE, CONTAINS, \
+                              IN, NOT_IN, IS_EMPTY, IS_NOT_EMPTY, IS_DEFINED. Compound filters \
+                              nest child Conditions inside arguments of AND/OR."
+    )]
+    pub condition: Option<serde_json::Value>,
     #[schemars(description = "Max results")]
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
@@ -150,8 +155,8 @@ pub async fn query_object_instances(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("schema_name", &params.schema_name)?;
     let mut body = serde_json::json!({});
-    if let Some(conditions) = params.conditions {
-        body["conditions"] = conditions;
+    if let Some(condition) = params.condition {
+        body["condition"] = condition;
     }
     if let Some(limit) = params.limit {
         body["limit"] = serde_json::json!(limit);
