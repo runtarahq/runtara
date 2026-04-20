@@ -122,14 +122,14 @@ async fn fetch_latest_graph(
     let result = api_get(server, &format!("/api/runtime/workflows/{}", workflow_id)).await?;
 
     let latest_version = result
-        .pointer("/data/latestVersion")
-        .or_else(|| result.pointer("/data/latest_version"))
+        .pointer("/data/lastVersionNumber")
+        .or_else(|| result.pointer("/data/last_version_number"))
         .and_then(|v| v.as_i64())
         .unwrap_or(1);
 
     let current_version = result
-        .pointer("/data/currentVersion")
-        .or_else(|| result.pointer("/data/current_version"))
+        .pointer("/data/currentVersionNumber")
+        .or_else(|| result.pointer("/data/current_version_number"))
         .and_then(|v| v.as_i64())
         .unwrap_or(latest_version);
 
