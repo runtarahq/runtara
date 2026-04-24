@@ -1,503 +1,556 @@
 import { describe, it, expect } from 'vitest';
+import {
+  composeExecutionGraph,
+  executionGraphToReactFlow,
+} from './utils.tsx';
+import type { ExecutionGraphDto } from '@/features/workflows/types/execution-graph';
 
 /**
- * Tests for inputMapping value preservation through save/load cycle.
+ * Round-trip tests for the workflow editor's save/load conversion.
  *
- * Issue: Values entered in input mapping fields (especially integers)
- * are not being preserved after save and reload.
+ * These tests use the REAL `composeExecutionGraph` / `executionGraphToReactFlow`
+ * functions so that drift between load and save is caught. An earlier bug report
+ * ("auto-layout + save mutates reference types") was caused by asymmetric conversion
+ * paths; the tests below lock the symmetry in place.
  *
- * The flow is:
- * 1. User enters value "5" in an integer field
- * 2. SimpleInputMappingEditor stores { type: 'fieldName', value: '5', valueType: 'immediate', typeHint: 'integer' }
- * 3. On save, cleanNodeData -> processMappingEntry converts to backend format
- * 4. Backend stores and returns the value
- * 5. On load, executionGraphToReactFlow converts back to UI format
- * 6. SimpleInputMappingEditor should display "5"
+ * Invariant: `compose(reactFlow(graph)) ≈ graph` (modulo UI-synthesized width/height
+ * inside `renderingParameters`, which the editor fills in from measured React Flow
+ * dimensions).
  */
 
-// Simulate the processMappingEntry logic from utils.tsx
-// Uses API ValueType convention directly (no internal name mapping)
-function processMappingEntry({
-  type,
-  value,
-  typeHint,
-  valueType,
-}: {
-  type: string;
-  value: any;
-  typeHint?: string;
-  valueType?: 'reference' | 'immediate';
-}) {
-  let finalValue = value;
+type StepWithId = {
+  id: string;
+  stepType: string;
+  renderingParameters?: { x?: number; y?: number };
+  [key: string]: unknown;
+};
 
-  if (typeof value === 'string' && value) {
-    const isTemplate = value.includes('{{');
-
-    if (!isTemplate) {
-      // JSON parsing - only when typeHint is explicitly 'json'
-      // No auto-detection based on string content
-      if (typeHint === 'json') {
-        try {
-          finalValue = JSON.parse(value);
-        } catch {
-          finalValue = value;
-        }
-      }
-
-      // Convert numeric strings to actual numbers for integer/number type hints
-      if (typeHint === 'integer' || typeHint === 'number') {
-        const numValue = Number(value);
-        if (!isNaN(numValue)) {
-          finalValue = typeHint === 'integer' ? Math.trunc(numValue) : numValue;
-        }
-      }
-
-      // Convert boolean strings to actual booleans for boolean type hint
-      if (typeHint === 'boolean') {
-        const lowerValue = value.toLowerCase();
-        if (lowerValue === 'true' || lowerValue === '1') {
-          finalValue = true;
-        } else if (lowerValue === 'false' || lowerValue === '0') {
-          finalValue = false;
-        }
-      }
-    }
-  }
-
-  const resolvedValueType: 'reference' | 'immediate' =
-    valueType ||
-    (typeof finalValue === 'string' && finalValue.includes('{{')
-      ? 'reference'
-      : 'immediate');
-
-  const mappingValue: {
-    valueType: 'reference' | 'immediate';
-    value: any;
-    type?: string;
-  } = {
-    valueType: resolvedValueType,
-    value: finalValue,
-  };
-
-  if (typeHint && typeHint !== 'auto') {
-    mappingValue.type = typeHint;
-  }
-
-  return [type, mappingValue];
-}
-
-// Simulate the reverse conversion from executionGraphToReactFlow
-function convertBackendToUI(fieldName: string, backendValue: any) {
-  if (
-    typeof backendValue === 'object' &&
-    backendValue !== null &&
-    'value' in backendValue
-  ) {
-    return {
-      type: fieldName,
-      value: backendValue.value,
-      typeHint: backendValue.type || 'auto',
-      valueType: backendValue.valueType || 'immediate',
-    };
-  }
-
-  // Legacy format
+/** Build a minimal single-step execution graph for round-trip tests. */
+function makeGraph(step: StepWithId): ExecutionGraphDto & { entryPoint: string } {
   return {
-    type: fieldName,
-    value: backendValue,
-    typeHint: 'auto',
-    valueType: 'immediate' as const,
+    name: 'round-trip-fixture',
+    steps: { [step.id]: step as any },
+    executionPlan: [],
+    entryPoint: step.id,
   };
 }
 
-// Helper type for the backend value format
-type BackendMappingValue = { valueType: string; value: any; type?: string };
+/** Run graph through load→save and return the resulting graph's single step. */
+function roundTripStep(graph: ExecutionGraphDto & { entryPoint: string }) {
+  const { nodes, edges } = executionGraphToReactFlow(graph as any);
+  const round = composeExecutionGraph(nodes, edges, { name: graph.name });
+  expect(round).not.toBeNull();
+  const stepId = graph.entryPoint;
+  return (round!.steps as Record<string, any>)[stepId];
+}
 
-describe('InputMapping Value Preservation', () => {
-  describe('processMappingEntry - converting UI values to backend format', () => {
-    it('should convert string "5" to number 5 when typeHint is "integer"', () => {
-      const res = processMappingEntry({
-        type: 'count',
-        value: '5',
-        typeHint: 'integer',
-        valueType: 'immediate',
-      });
-      const fieldName = res[0] as string;
-      const result = res[1] as BackendMappingValue;
-
-      expect(fieldName).toBe('count');
-      expect(result.value).toBe(5);
-      expect(typeof result.value).toBe('number');
-      expect(result.type).toBe('integer');
+describe('MappingValue round-trip', () => {
+  it('preserves `type` on top-level reference', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        count: {
+          valueType: 'reference',
+          value: 'steps.prev.outputs.count',
+          type: 'integer',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
     });
 
-    it('should convert string "3.14" to number 3.14 when typeHint is "number"', () => {
-      const res = processMappingEntry({
-        type: 'price',
-        value: '3.14',
-        typeHint: 'number',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      expect(result.value).toBe(3.14);
-      expect(typeof result.value).toBe('number');
-      expect(result.type).toBe('number');
-    });
-
-    it('should convert string "true" to boolean true when typeHint is "boolean"', () => {
-      const res = processMappingEntry({
-        type: 'enabled',
-        value: 'true',
-        typeHint: 'boolean',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      expect(result.value).toBe(true);
-      expect(typeof result.value).toBe('boolean');
-    });
-
-    it('should keep string as-is when typeHint is "string"', () => {
-      const res = processMappingEntry({
-        type: 'name',
-        value: 'hello',
-        typeHint: 'string',
-        valueType: 'immediate',
-      });
-      const result = res[1] as { value: any };
-
-      expect(result.value).toBe('hello');
-      expect(typeof result.value).toBe('string');
-    });
-
-    it('should NOT convert when typeHint is undefined', () => {
-      const res = processMappingEntry({
-        type: 'unknown',
-        value: '5',
-        typeHint: undefined,
-        valueType: 'immediate',
-      });
-      const result = res[1] as { value: any };
-
-      expect(result.value).toBe('5');
-      expect(typeof result.value).toBe('string');
-    });
-
-    it('should NOT convert when typeHint is "auto"', () => {
-      const res = processMappingEntry({
-        type: 'unknown',
-        value: '5',
-        typeHint: 'auto',
-        valueType: 'immediate',
-      });
-      const result = res[1] as { value: any };
-
-      expect(result.value).toBe('5');
-      expect(typeof result.value).toBe('string');
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.count).toEqual({
+      valueType: 'reference',
+      value: 'steps.prev.outputs.count',
+      type: 'integer',
     });
   });
 
-  describe('Round-trip conversion (UI -> Backend -> UI)', () => {
-    it('should preserve integer value through save/load cycle', () => {
-      // Step 1: UI has this entry
-      const uiEntry = {
-        type: 'count',
-        value: '5',
-        typeHint: 'integer',
-        valueType: 'immediate' as const,
-      };
-
-      // Step 2: Convert to backend format
-      const result = processMappingEntry(uiEntry);
-      const fieldName = result[0] as string;
-      const backendValue = result[1] as {
-        valueType: string;
-        value: any;
-        type?: string;
-      };
-
-      // Step 3: Simulate what backend returns
-      const backendData: Record<string, any> = { [fieldName]: backendValue };
-
-      // Step 4: Convert back to UI format
-      const loadedEntry = convertBackendToUI(fieldName, backendData[fieldName]);
-
-      // Step 5: Verify the value is preserved
-      expect(loadedEntry.value).toBe(5); // Now a number
-      expect(loadedEntry.typeHint).toBe('integer');
-
-      // When displayed in input, String(5) = "5"
-      expect(String(loadedEntry.value)).toBe('5');
+  it('preserves `default` on top-level reference', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        limit: {
+          valueType: 'reference',
+          value: 'data.limit',
+          type: 'integer',
+          default: 10,
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
     });
 
-    it('should preserve number value through save/load cycle', () => {
-      const uiEntry = {
-        type: 'price',
-        value: '19.99',
-        typeHint: 'number',
-        valueType: 'immediate' as const,
-      };
-
-      const result = processMappingEntry(uiEntry);
-      const fieldName = result[0] as string;
-      const backendValue = result[1] as {
-        valueType: string;
-        value: any;
-        type?: string;
-      };
-      const loadedEntry = convertBackendToUI(fieldName, backendValue);
-
-      expect(loadedEntry.value).toBe(19.99);
-      expect(String(loadedEntry.value)).toBe('19.99');
-    });
-
-    it('should preserve boolean value through save/load cycle', () => {
-      const uiEntry = {
-        type: 'enabled',
-        value: 'true',
-        typeHint: 'boolean',
-        valueType: 'immediate' as const,
-      };
-
-      const result = processMappingEntry(uiEntry);
-      const fieldName = result[0] as string;
-      const backendValue = result[1] as {
-        valueType: string;
-        value: any;
-        type?: string;
-      };
-      const loadedEntry = convertBackendToUI(fieldName, backendValue);
-
-      expect(loadedEntry.value).toBe(true);
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.limit).toEqual({
+      valueType: 'reference',
+      value: 'data.limit',
+      type: 'integer',
+      default: 10,
     });
   });
 
-  describe('Filter behavior with empty values', () => {
-    it('should filter out empty string values', () => {
-      const entries = [
-        {
-          type: 'field1',
-          value: '',
-          typeHint: 'integer',
-          valueType: 'immediate',
+  it('preserves `default` (object) on top-level reference', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        settings: {
+          valueType: 'reference',
+          value: 'data.settings',
+          default: { foo: 1, bar: 'baz' },
         },
-        {
-          type: 'field2',
-          value: '5',
-          typeHint: 'integer',
-          valueType: 'immediate',
-        },
-        {
-          type: 'field3',
-          value: null,
-          typeHint: 'string',
-          valueType: 'immediate',
-        },
-      ];
-
-      const filtered = entries.filter(({ value }) => {
-        if (value === undefined || value === null || value === '') {
-          return false;
-        }
-        return true;
-      });
-
-      expect(filtered).toHaveLength(1);
-      expect(filtered[0].type).toBe('field2');
+      },
+      renderingParameters: { x: 0, y: 0 },
     });
 
-    it('should NOT filter out numeric zero', () => {
-      const entries = [
-        {
-          type: 'field1',
-          value: 0,
-          typeHint: 'integer',
-          valueType: 'immediate',
-        },
-        {
-          type: 'field2',
-          value: '0',
-          typeHint: 'integer',
-          valueType: 'immediate',
-        },
-      ];
-
-      const filtered = entries.filter(({ value }) => {
-        if (value === undefined || value === null || value === '') {
-          return false;
-        }
-        return true;
-      });
-
-      expect(filtered).toHaveLength(2);
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.settings).toEqual({
+      valueType: 'reference',
+      value: 'data.settings',
+      default: { foo: 1, bar: 'baz' },
     });
   });
 
-  describe('TypeHint flow verification', () => {
-    it('should fail if typeHint is lost during data flow', () => {
-      // This test documents the bug: if typeHint is dropped, conversion doesn't happen
-
-      // Simulate what happens when typeHint is NOT included in the data flow
-      const entryWithoutTypeHint = {
-        type: 'count',
-        value: '5',
-        valueType: 'immediate' as const,
-        // typeHint is MISSING
-      };
-
-      const result = processMappingEntry(entryWithoutTypeHint);
-      const backendValue = result[1] as {
-        valueType: string;
-        value: any;
-        type?: string;
-      };
-
-      // BUG: Without typeHint, the value remains a string!
-      expect(backendValue.value).toBe('5');
-      expect(typeof backendValue.value).toBe('string'); // This causes the type incompatibility error
-    });
-
-    it('should succeed when typeHint is properly included', () => {
-      const entryWithTypeHint = {
-        type: 'count',
-        value: '5',
-        valueType: 'immediate' as const,
-        typeHint: 'integer',
-      };
-
-      const result = processMappingEntry(entryWithTypeHint);
-      const backendValue = result[1] as {
-        valueType: string;
-        value: any;
-        type?: string;
-      };
-
-      // With typeHint, the value is properly converted
-      expect(backendValue.value).toBe(5);
-      expect(typeof backendValue.value).toBe('number');
-    });
-  });
-
-  describe('JSON auto-detection removal', () => {
-    it('should NOT parse JSON-looking string when typeHint is undefined', () => {
-      const slackBlocks =
-        '{"blocks":[{"type":"header","text":{"type":"plain_text","text":"Hello"}}]}';
-      const res = processMappingEntry({
-        type: 'text',
-        value: slackBlocks,
-        typeHint: undefined,
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      // Value should remain a string, NOT be parsed into an object
-      expect(typeof result.value).toBe('string');
-      expect(result.value).toBe(slackBlocks);
-    });
-
-    it('should NOT parse JSON-looking string when typeHint is "auto"', () => {
-      const jsonArray = '[1, 2, 3]';
-      const res = processMappingEntry({
-        type: 'items',
-        value: jsonArray,
-        typeHint: 'auto',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      // Value should remain a string, NOT be parsed into an array
-      expect(typeof result.value).toBe('string');
-      expect(result.value).toBe(jsonArray);
-    });
-
-    it('should NOT parse JSON object string when typeHint is "string"', () => {
-      const jsonObject = '{"key": "value"}';
-      const res = processMappingEntry({
-        type: 'template',
-        value: jsonObject,
-        typeHint: 'string',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      expect(typeof result.value).toBe('string');
-      expect(result.value).toBe(jsonObject);
-    });
-
-    it('should parse JSON string ONLY when typeHint is explicitly "json"', () => {
-      const jsonObject = '{"key": "value"}';
-      const res = processMappingEntry({
-        type: 'data',
-        value: jsonObject,
-        typeHint: 'json',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      // Only with explicit 'json' typeHint should parsing occur
-      expect(typeof result.value).toBe('object');
-      expect(result.value).toEqual({ key: 'value' });
-    });
-
-    it('should parse JSON array ONLY when typeHint is explicitly "json"', () => {
-      const jsonArray = '[1, 2, 3]';
-      const res = processMappingEntry({
-        type: 'items',
-        value: jsonArray,
-        typeHint: 'json',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      expect(Array.isArray(result.value)).toBe(true);
-      expect(result.value).toEqual([1, 2, 3]);
-    });
-
-    it('should keep invalid JSON as string even when typeHint is "json"', () => {
-      const invalidJson = '{invalid json}';
-      const res = processMappingEntry({
-        type: 'data',
-        value: invalidJson,
-        typeHint: 'json',
-        valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
-
-      // Invalid JSON should remain as string
-      expect(typeof result.value).toBe('string');
-      expect(result.value).toBe(invalidJson);
-    });
-
-    it('should preserve Slack blocks as string for render-template capability', () => {
-      // This is the exact workflow that was causing the bug
-      const slackMessage = JSON.stringify({
-        blocks: [
-          {
-            type: 'header',
-            text: {
-              type: 'plain_text',
-              text: 'Travion Catalog Sync - COMPLETED',
+  it('preserves `type` on reference inside composite object', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        payload: {
+          valueType: 'composite',
+          value: {
+            userId: {
+              valueType: 'reference',
+              value: 'steps.api.outputs.user.id',
+              type: 'integer',
+            },
+            name: {
+              valueType: 'immediate',
+              value: 'Alice',
+              type: 'string',
             },
           },
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: '*Status:* No files found' },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.payload).toEqual({
+      valueType: 'composite',
+      value: {
+        userId: {
+          valueType: 'reference',
+          value: 'steps.api.outputs.user.id',
+          type: 'integer',
+        },
+        name: {
+          valueType: 'immediate',
+          value: 'Alice',
+          type: 'string',
+        },
+      },
+    });
+  });
+
+  it('preserves `default` on reference inside composite object', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        payload: {
+          valueType: 'composite',
+          value: {
+            limit: {
+              valueType: 'reference',
+              value: 'data.limit',
+              type: 'integer',
+              default: 25,
+            },
           },
-        ],
-      });
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
 
-      const res = processMappingEntry({
-        type: 'text',
-        value: slackMessage,
-        typeHint: undefined, // render-template text field has no typeHint
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.payload.value.limit).toEqual({
+      valueType: 'reference',
+      value: 'data.limit',
+      type: 'integer',
+      default: 25,
+    });
+  });
+
+  it('preserves `type` on reference inside composite array', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        items: {
+          valueType: 'composite',
+          value: [
+            {
+              valueType: 'reference',
+              value: 'data.first',
+              type: 'integer',
+            },
+            {
+              valueType: 'immediate',
+              value: 42,
+              type: 'integer',
+            },
+          ],
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.items.value).toEqual([
+      {
+        valueType: 'reference',
+        value: 'data.first',
+        type: 'integer',
+      },
+      {
         valueType: 'immediate',
-      });
-      const result = res[1] as BackendMappingValue;
+        value: 42,
+        type: 'integer',
+      },
+    ]);
+  });
 
-      // Must remain a string for the backend to accept it
-      expect(typeof result.value).toBe('string');
-      expect(result.value).toBe(slackMessage);
+  it('preserves template valueType', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        greeting: {
+          valueType: 'template',
+          value: 'Hello {{ data.name }}',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.greeting).toEqual({
+      valueType: 'template',
+      value: 'Hello {{ data.name }}',
+    });
+  });
+
+  it('preserves immediate with integer type', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        timeout: {
+          valueType: 'immediate',
+          value: 5000,
+          type: 'integer',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.timeout).toEqual({
+      valueType: 'immediate',
+      value: 5000,
+      type: 'integer',
+    });
+  });
+
+  it('preserves immediate object without type', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Agent',
+      agentId: 'http',
+      capabilityId: 'http-request',
+      inputMapping: {
+        headers: {
+          valueType: 'immediate',
+          value: { 'X-API-Key': 'abc' },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.inputMapping.headers).toEqual({
+      valueType: 'immediate',
+      value: { 'X-API-Key': 'abc' },
+    });
+  });
+});
+
+/**
+ * Regression: when a user types `"5"` in an integer field and saves, the save path
+ * should coerce it to the number `5`. These tests run the SAVE path directly
+ * (bypassing load) with form-shaped input to lock that coercion in place.
+ */
+describe('Form-input coercion on save', () => {
+  function saveWithInput(field: {
+    type: string;
+    value: unknown;
+    typeHint?: string;
+    valueType?: string;
+  }) {
+    const graph = {
+      name: 'coercion-fixture',
+      steps: {
+        s1: {
+          id: 's1',
+          stepType: 'Agent',
+          agentId: 'x',
+          capabilityId: 'y',
+          inputMapping: {
+            // placeholder — we replace via load, then override in UI form
+          },
+          renderingParameters: { x: 0, y: 0 },
+        },
+      },
+      executionPlan: [],
+      entryPoint: 's1',
+    };
+    const { nodes, edges } = executionGraphToReactFlow(graph as any);
+    // Simulate a user-typed form entry
+    (nodes[0].data as any).inputMapping = [field];
+    const round = composeExecutionGraph(nodes, edges, { name: graph.name });
+    return (round!.steps as Record<string, any>).s1.inputMapping[field.type];
+  }
+
+  it('coerces string "5" to number 5 when typeHint is integer', () => {
+    const out = saveWithInput({
+      type: 'count',
+      value: '5',
+      typeHint: 'integer',
+      valueType: 'immediate',
+    });
+    expect(out.value).toBe(5);
+    expect(out.type).toBe('integer');
+  });
+
+  it('coerces string "true" to boolean true when typeHint is boolean', () => {
+    const out = saveWithInput({
+      type: 'enabled',
+      value: 'true',
+      typeHint: 'boolean',
+      valueType: 'immediate',
+    });
+    expect(out.value).toBe(true);
+  });
+
+  it('parses JSON string only when typeHint is explicitly json', () => {
+    const withJson = saveWithInput({
+      type: 'data',
+      value: '{"k":"v"}',
+      typeHint: 'json',
+      valueType: 'immediate',
+    });
+    expect(withJson.value).toEqual({ k: 'v' });
+
+    const withoutJson = saveWithInput({
+      type: 'text',
+      value: '{"k":"v"}',
+      typeHint: undefined,
+      valueType: 'immediate',
+    });
+    expect(withoutJson.value).toBe('{"k":"v"}');
+  });
+
+  it('preserves reference path string even with integer typeHint', () => {
+    const out = saveWithInput({
+      type: 'count',
+      value: 'data.count',
+      typeHint: 'integer',
+      valueType: 'reference',
+    });
+    expect(out.value).toBe('data.count');
+    expect(out.type).toBe('integer');
+  });
+});
+
+describe('Split variable round-trip', () => {
+  it('preserves numeric immediate variable (no JSON.stringify on load)', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          counter: {
+            valueType: 'immediate',
+            value: 5,
+            type: 'integer',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.counter).toEqual({
+      valueType: 'immediate',
+      value: 5,
+      type: 'integer',
+    });
+  });
+
+  it('preserves boolean immediate variable', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          active: {
+            valueType: 'immediate',
+            value: true,
+            type: 'boolean',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.active).toEqual({
+      valueType: 'immediate',
+      value: true,
+      type: 'boolean',
+    });
+  });
+
+  it('preserves composite array variable', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          payload: {
+            valueType: 'composite',
+            value: [
+              { valueType: 'immediate', value: 'a' },
+              { valueType: 'immediate', value: 'b' },
+            ],
+            type: 'array',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.payload.valueType).toBe('composite');
+    expect(Array.isArray(step.config.variables.payload.value)).toBe(true);
+    expect(step.config.variables.payload.value).toEqual([
+      { valueType: 'immediate', value: 'a' },
+      { valueType: 'immediate', value: 'b' },
+    ]);
+    expect(step.config.variables.payload.type).toBe('array');
+  });
+
+  it('does not synthesize `type: "string"` when backend omitted it', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          name: {
+            valueType: 'immediate',
+            value: 'Alice',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.name).not.toHaveProperty('type');
+  });
+
+  it('preserves reference variable with type hint', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+        },
+        variables: {
+          counter: {
+            valueType: 'reference',
+            value: 'variables.counter',
+            type: 'integer',
+          },
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.variables.counter).toEqual({
+      valueType: 'reference',
+      value: 'variables.counter',
+      type: 'integer',
+    });
+  });
+
+  it('preserves type hint on Split config.value reference', () => {
+    const graph = makeGraph({
+      id: 's1',
+      stepType: 'Split',
+      config: {
+        value: {
+          valueType: 'reference',
+          value: 'data.items',
+          type: 'json',
+        },
+      },
+      renderingParameters: { x: 0, y: 0 },
+    });
+
+    const step = roundTripStep(graph);
+    expect(step.config.value).toMatchObject({
+      valueType: 'reference',
+      value: 'data.items',
+      type: 'json',
     });
   });
 });

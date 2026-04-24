@@ -1168,8 +1168,9 @@ function cleanNodeData(steps: Record<string, any>) {
     let cleanedInputMapping = inputMapping;
     // console.log("[DEBUG] cleanNodeData - inputMapping for node', id, ':', inputMapping);
 
-    // Helper function to recursively process composite values
-    // Preserves typeHint for immediate values (uses API ValueType convention directly)
+    // Helper function to recursively process composite values.
+    // Mirror of convertCompositeToUIFormat below — preserves typeHint/defaultValue for
+    // every non-composite valueType (not only `immediate`) so the UI→backend round-trip is lossless.
     const processCompositeValue = (
       compositeVal: any
     ): {
@@ -1177,111 +1178,83 @@ function cleanNodeData(steps: Record<string, any>) {
       value: any;
       type?: string;
     } => {
+      const processEntry = (val: any) => {
+        if (
+          typeof val !== 'object' ||
+          val === null ||
+          !('valueType' in (val as Record<string, unknown>))
+        ) {
+          return {
+            valueType: 'immediate',
+            value: val,
+          };
+        }
+
+        const typedVal = val as {
+          valueType: 'reference' | 'immediate' | 'composite' | 'template';
+          value: any;
+          typeHint?: string;
+          defaultValue?: any;
+        };
+
+        if (typedVal.valueType === 'composite') {
+          const nestedValue =
+            typedVal.value && typeof typedVal.value === 'object'
+              ? typedVal.value
+              : {};
+          return {
+            valueType: 'composite',
+            value: processCompositeValue(nestedValue).value,
+          };
+        }
+
+        const coercedValue =
+          typedVal.valueType === 'immediate' && typedVal.typeHint
+            ? coerceValueToType(typedVal.value, typedVal.typeHint)
+            : typedVal.value === undefined || typedVal.value === null
+              ? ''
+              : typedVal.value;
+
+        const out: {
+          valueType: string;
+          value: any;
+          type?: string;
+          default?: any;
+        } = {
+          valueType: typedVal.valueType || 'immediate',
+          value: coercedValue,
+        };
+        if (isValidValueType(typedVal.typeHint)) {
+          out.type = typedVal.typeHint;
+        }
+        if (
+          typedVal.valueType === 'reference' &&
+          typedVal.defaultValue !== undefined
+        ) {
+          out.default = typedVal.defaultValue;
+        }
+        return out;
+      };
+
       // Handle composite object
       if (
         compositeVal &&
         typeof compositeVal === 'object' &&
         !Array.isArray(compositeVal)
       ) {
-        const processedObject: Record<
-          string,
-          {
-            valueType: 'reference' | 'immediate' | 'composite';
-            value: any;
-            type?: string;
-          }
-        > = {};
+        const processedObject: Record<string, any> = {};
         for (const [key, val] of Object.entries(compositeVal)) {
-          if (
-            typeof val !== 'object' ||
-            val === null ||
-            !('valueType' in (val as Record<string, unknown>))
-          ) {
-            processedObject[key] = {
-              valueType: 'immediate',
-              value: val,
-            };
-            continue;
-          }
-
-          const typedVal = val as {
-            valueType: 'reference' | 'immediate' | 'composite';
-            value: any;
-            typeHint?: string;
-          };
-          if (typedVal.valueType === 'composite') {
-            const nestedValue =
-              typedVal.value && typeof typedVal.value === 'object'
-                ? typedVal.value
-                : {};
-            processedObject[key] = {
-              valueType: 'composite',
-              value: processCompositeValue(nestedValue).value,
-            };
-          } else if (typedVal.valueType === 'immediate' && typedVal.typeHint) {
-            processedObject[key] = {
-              valueType: typedVal.valueType,
-              value: coerceValueToType(typedVal.value, typedVal.typeHint),
-              type: typedVal.typeHint,
-            };
-          } else {
-            processedObject[key] = {
-              valueType: typedVal.valueType || 'immediate',
-              value:
-                typedVal.value === undefined || typedVal.value === null
-                  ? ''
-                  : typedVal.value,
-            };
-          }
+          processedObject[key] = processEntry(val);
         }
         return { valueType: 'composite', value: processedObject };
       }
 
       // Handle composite array
       if (Array.isArray(compositeVal)) {
-        const processedArray = compositeVal.map((item) => {
-          if (
-            typeof item !== 'object' ||
-            item === null ||
-            !('valueType' in (item as Record<string, unknown>))
-          ) {
-            return {
-              valueType: 'immediate' as const,
-              value: item,
-            };
-          }
-
-          const typedItem = item as {
-            valueType: 'reference' | 'immediate' | 'composite';
-            value: any;
-            typeHint?: string;
-          };
-          if (typedItem.valueType === 'composite') {
-            const nestedValue =
-              typedItem.value && typeof typedItem.value === 'object'
-                ? typedItem.value
-                : {};
-            return {
-              valueType: 'composite',
-              value: processCompositeValue(nestedValue).value,
-            };
-          }
-          if (typedItem.valueType === 'immediate' && typedItem.typeHint) {
-            return {
-              valueType: typedItem.valueType,
-              value: coerceValueToType(typedItem.value, typedItem.typeHint),
-              type: typedItem.typeHint,
-            };
-          }
-          return {
-            valueType: typedItem.valueType || 'immediate',
-            value:
-              typedItem.value === undefined || typedItem.value === null
-                ? ''
-                : typedItem.value,
-          };
-        });
-        return { valueType: 'composite', value: processedArray };
+        return {
+          valueType: 'composite',
+          value: compositeVal.map(processEntry),
+        };
       }
 
       // Fallback - shouldn't happen for properly structured data
@@ -1294,11 +1267,13 @@ function cleanNodeData(steps: Record<string, any>) {
       value,
       typeHint,
       valueType,
+      defaultValue,
     }: {
       type: string;
       value: any;
       typeHint?: string;
       valueType?: 'reference' | 'immediate' | 'composite' | 'template';
+      defaultValue?: any;
     }) => {
       // Handle template values - always a string, no type coercion
       if (valueType === 'template') {
@@ -1373,11 +1348,12 @@ function cleanNodeData(steps: Record<string, any>) {
           ? 'reference'
           : 'immediate');
 
-      // Create the new format per DSL v2.0.0 spec: { valueType, value, type? }
+      // Create the new format per DSL v2.0.0 spec: { valueType, value, type?, default? }
       const mappingValue: {
         valueType: 'reference' | 'immediate' | 'template';
         value: any;
         type?: string;
+        default?: any;
       } = {
         valueType: resolvedValueType,
         value: finalValue,
@@ -1388,7 +1364,11 @@ function cleanNodeData(steps: Record<string, any>) {
         mappingValue.type = typeHint;
       }
 
-      // console.log("[DEBUG] processMappingEntry result:', { type, mappingValue, typeOfFinalValue: typeof finalValue });
+      // Preserve ReferenceValue.default — only references carry this field on the backend.
+      if (resolvedValueType === 'reference' && defaultValue !== undefined) {
+        mappingValue.default = defaultValue;
+      }
+
       return [type, mappingValue];
     };
 
@@ -1528,7 +1508,12 @@ function cleanNodeData(steps: Record<string, any>) {
 
       // Build the config object for Split step
       const splitConfig: {
-        value?: { valueType: 'reference' | 'immediate'; value: unknown };
+        value?: {
+          valueType: 'reference' | 'immediate';
+          value: unknown;
+          type?: string;
+          default?: unknown;
+        };
         parallelism?: number;
         sequential?: boolean;
         dontStopOnFailed?: boolean;
@@ -1557,6 +1542,13 @@ function cleanNodeData(steps: Record<string, any>) {
           splitConfig.value = {
             valueType: firstMapping.valueType || 'reference',
             value: firstMapping.value,
+            ...(isValidValueType(firstMapping.typeHint)
+              ? { type: firstMapping.typeHint }
+              : {}),
+            ...(firstMapping.valueType === 'reference' &&
+            firstMapping.defaultValue !== undefined
+              ? { default: firstMapping.defaultValue }
+              : {}),
           };
         }
       }
@@ -1579,6 +1571,12 @@ function cleanNodeData(steps: Record<string, any>) {
               ? 'immediate'
               : 'reference',
           value: existingSplitConfig.value.value,
+          ...(existingSplitConfig.value.type
+            ? { type: existingSplitConfig.value.type }
+            : {}),
+          ...(existingSplitConfig.value.default !== undefined
+            ? { default: existingSplitConfig.value.default }
+            : {}),
         };
       }
 
@@ -2115,6 +2113,39 @@ function normalizeNodesAndEdges(
 
     // Helper function to convert composite values from API format (type) to UI format (typeHint)
     const convertCompositeToUIFormat = (compositeVal: any): any => {
+      const convertEntry = (val: any) => {
+        const typedVal = val as {
+          valueType: 'reference' | 'immediate' | 'composite' | 'template';
+          value: any;
+          type?: string;
+          default?: any;
+        };
+        if (typedVal.valueType === 'composite') {
+          return {
+            valueType: 'composite',
+            value: convertCompositeToUIFormat(typedVal.value),
+            ...(typedVal.type ? { typeHint: typedVal.type } : {}),
+          };
+        }
+        const out: Record<string, any> = {
+          valueType: typedVal.valueType,
+          value: typedVal.value,
+        };
+        // Convert backend `type` → UI `typeHint` for every non-composite variant,
+        // not only `immediate` — references/templates can carry type hints too.
+        if (typedVal.type !== undefined) {
+          out.typeHint = typedVal.type;
+        }
+        // Preserve ReferenceValue.default so it survives the UI round-trip.
+        if (
+          typedVal.valueType === 'reference' &&
+          typedVal.default !== undefined
+        ) {
+          out.defaultValue = typedVal.default;
+        }
+        return out;
+      };
+
       // Handle composite object
       if (
         compositeVal &&
@@ -2123,60 +2154,14 @@ function normalizeNodesAndEdges(
       ) {
         const convertedObject: Record<string, any> = {};
         for (const [key, val] of Object.entries(compositeVal)) {
-          const typedVal = val as {
-            valueType: 'reference' | 'immediate' | 'composite';
-            value: any;
-            type?: string;
-          };
-          if (typedVal.valueType === 'composite') {
-            convertedObject[key] = {
-              valueType: 'composite',
-              value: convertCompositeToUIFormat(typedVal.value),
-            };
-          } else if (typedVal.valueType === 'immediate' && typedVal.type) {
-            // Convert 'type' from API to 'typeHint' for UI
-            convertedObject[key] = {
-              valueType: typedVal.valueType,
-              value: typedVal.value,
-              typeHint: typedVal.type,
-            };
-          } else {
-            convertedObject[key] = {
-              valueType: typedVal.valueType,
-              value: typedVal.value,
-            };
-          }
+          convertedObject[key] = convertEntry(val);
         }
         return convertedObject;
       }
 
       // Handle composite array
       if (Array.isArray(compositeVal)) {
-        return compositeVal.map((item) => {
-          const typedItem = item as {
-            valueType: 'reference' | 'immediate' | 'composite';
-            value: any;
-            type?: string;
-          };
-          if (typedItem.valueType === 'composite') {
-            return {
-              valueType: 'composite',
-              value: convertCompositeToUIFormat(typedItem.value),
-            };
-          }
-          if (typedItem.valueType === 'immediate' && typedItem.type) {
-            // Convert 'type' from API to 'typeHint' for UI
-            return {
-              valueType: typedItem.valueType,
-              value: typedItem.value,
-              typeHint: typedItem.type,
-            };
-          }
-          return {
-            valueType: typedItem.valueType,
-            value: typedItem.value,
-          };
-        });
+        return compositeVal.map(convertEntry);
       }
 
       // Return as-is if not a composite structure
@@ -2210,7 +2195,7 @@ function normalizeNodesAndEdges(
         inputMapping: Object.keys(inputMapping).map((input) => {
           const mappingValue = inputMapping[input];
 
-          // Handle new format: { valueType, value, type? }
+          // Handle new format: { valueType, value, type?, default? }
           if (
             typeof mappingValue === 'object' &&
             mappingValue !== null &&
@@ -2219,6 +2204,7 @@ function normalizeNodesAndEdges(
             const typedValue = mappingValue as {
               value: any;
               type?: string;
+              default?: any;
               valueType?: 'reference' | 'immediate' | 'composite' | 'template';
             };
 
@@ -2232,12 +2218,30 @@ function normalizeNodesAndEdges(
               };
             }
 
-            return {
+            const resolvedValueType = typedValue.valueType || 'immediate';
+            const entry: {
+              type: string;
+              value: any;
+              typeHint: ValueType | undefined;
+              valueType: 'reference' | 'immediate' | 'template';
+              defaultValue?: any;
+            } = {
               type: input,
               value: typedValue.value, // Can be string, array, object, or composite structure
               typeHint: typedValue.type as ValueType | undefined,
-              valueType: typedValue.valueType || 'immediate',
+              valueType: resolvedValueType as
+                | 'reference'
+                | 'immediate'
+                | 'template',
             };
+            // Preserve ReferenceValue.default so a subsequent save doesn't drop it.
+            if (
+              resolvedValueType === 'reference' &&
+              typedValue.default !== undefined
+            ) {
+              entry.defaultValue = typedValue.default;
+            }
+            return entry;
           }
 
           // Handle legacy format: string value
@@ -2252,14 +2256,18 @@ function normalizeNodesAndEdges(
         ...(step.stepType === 'Split'
           ? (() => {
               const config = (data as any).config;
-              // Convert config.value to inputMapping format for the UI
+              // Convert config.value to inputMapping format for the UI.
+              // Carry the backend `type` through so the save path can round-trip it.
               const splitInputMapping = config?.value
                 ? [
                     {
                       type: 'value',
                       value: config.value.value,
-                      typeHint: 'auto',
+                      typeHint: config.value.type ?? 'auto',
                       valueType: config.value.valueType || 'reference',
+                      ...(config.value.default !== undefined
+                        ? { defaultValue: config.value.default }
+                        : {}),
                     },
                   ]
                 : [];
@@ -2282,27 +2290,30 @@ function normalizeNodesAndEdges(
                         ? 'composite'
                         : 'reference');
 
+                    // Keep immediates/references as-is so round-trip is lossless.
+                    // Composites: arrays stay arrays; object-shaped values stay objects.
+                    // SplitStepField renders scalars via JSON.stringify when needed, so
+                    // we don't need to coerce at load time.
                     const resolvedValue =
                       resolvedValueType === 'composite'
-                        ? typedVarDef.type === 'array'
-                          ? Array.isArray(typedVarDef.value)
-                            ? typedVarDef.value
-                            : []
+                        ? Array.isArray(typedVarDef.value)
+                          ? typedVarDef.value
                           : typeof typedVarDef.value === 'object' &&
-                              typedVarDef.value !== null &&
-                              !Array.isArray(typedVarDef.value)
+                              typedVarDef.value !== null
                             ? typedVarDef.value
                             : {}
-                        : typeof typedVarDef.value === 'string'
-                          ? typedVarDef.value
-                          : typedVarDef.value === undefined
-                            ? ''
-                            : JSON.stringify(typedVarDef.value);
+                        : typedVarDef.value === undefined
+                          ? ''
+                          : typedVarDef.value;
 
                     return {
                       name,
                       value: resolvedValue,
-                      type: typedVarDef.type || 'string',
+                      // Only forward `type` when backend had it; don't synthesize a default
+                      // or we'll asymmetrically inject a field that wasn't there on load.
+                      ...(typedVarDef.type !== undefined
+                        ? { type: typedVarDef.type }
+                        : {}),
                       valueType: resolvedValueType,
                     };
                   })
