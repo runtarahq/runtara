@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use runtara_core::config::parse_enabled_env;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -339,20 +340,6 @@ impl ImageCleanupWorker {
     }
 }
 
-/// Resolve a `*_CLEANUP_ENABLED` env var with a "default-on, opt-out only"
-/// rule. Cleanup is enabled unless the env var is explicitly set to a
-/// recognised false-like value (case-insensitive). Misconfigurations like
-/// `"yes"`, `"on"`, or a typo do **not** silently disable cleanup.
-fn parse_enabled_env(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "false" | "0" | "no" | "off" | "disabled"
-        ),
-        Err(_) => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,32 +361,6 @@ mod tests {
             config.enabled,
             "Image cleanup should be enabled by default; disable via RUNTARA_IMAGE_CLEANUP_ENABLED=false"
         );
-    }
-
-    #[test]
-    fn test_parse_enabled_env_default_on() {
-        const VAR: &str = "RUNTARA_TEST_IMAGE_CLEANUP_ENABLED_PARSE";
-        unsafe { std::env::remove_var(VAR) };
-        assert!(parse_enabled_env(VAR), "unset must be enabled");
-
-        for v in [
-            "true",
-            "1",
-            "yes",
-            "on",
-            "True",
-            "TRUE",
-            "anything-else",
-            "",
-        ] {
-            unsafe { std::env::set_var(VAR, v) };
-            assert!(parse_enabled_env(VAR), "{v:?} must NOT silently disable");
-        }
-        for v in ["false", "0", "no", "off", "disabled", "FALSE", "Off"] {
-            unsafe { std::env::set_var(VAR, v) };
-            assert!(!parse_enabled_env(VAR), "{v:?} must explicitly disable");
-        }
-        unsafe { std::env::remove_var(VAR) };
     }
 
     #[test]

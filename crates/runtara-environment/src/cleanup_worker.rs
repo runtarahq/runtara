@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use runtara_core::config::parse_enabled_env;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
@@ -299,21 +300,6 @@ impl CleanupWorker {
     }
 }
 
-/// Resolve a `*_CLEANUP_ENABLED` env var with a "default-on, opt-out only"
-/// rule. Cleanup is enabled unless the env var is explicitly set to a
-/// recognised false-like value (case-insensitive). Misconfigurations like
-/// `"yes"`, `"on"`, or a typo do **not** silently disable cleanup — the
-/// inverse of the naive `v == "true" || v == "1"` parse.
-fn parse_enabled_env(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "false" | "0" | "no" | "off" | "disabled"
-        ),
-        Err(_) => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,41 +311,6 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(3600));
         assert_eq!(config.max_age, Duration::from_secs(3 * 24 * 3600));
-    }
-
-    #[test]
-    fn test_parse_enabled_env_default_on() {
-        // Use unique var names so parallel tests don't trample each other.
-        const VAR: &str = "RUNTARA_TEST_RUN_DIR_CLEANUP_ENABLED_PARSE";
-        // SAFETY: tests in this binary run on a single thread for env-mutation
-        unsafe { std::env::remove_var(VAR) };
-        assert!(parse_enabled_env(VAR), "unset must be enabled");
-
-        for v in [
-            "true",
-            "1",
-            "yes",
-            "on",
-            "True",
-            "TRUE",
-            "anything-else",
-            "",
-        ] {
-            unsafe { std::env::set_var(VAR, v) };
-            assert!(
-                parse_enabled_env(VAR),
-                "{v:?} must NOT silently disable cleanup"
-            );
-        }
-
-        for v in ["false", "0", "no", "off", "disabled", "FALSE", "Off"] {
-            unsafe { std::env::set_var(VAR, v) };
-            assert!(
-                !parse_enabled_env(VAR),
-                "{v:?} must explicitly disable cleanup"
-            );
-        }
-        unsafe { std::env::remove_var(VAR) };
     }
 
     #[test]
