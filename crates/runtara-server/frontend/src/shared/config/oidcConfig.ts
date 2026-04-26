@@ -11,6 +11,16 @@ const onSigninCallback = () => {
 // back on the tenant-scoped mount instead of the bare origin.
 const appBaseUrl = document.baseURI;
 
+// Auth0's "Allowed Logout URLs" rejects per-tenant URLs (each tenant has its
+// own `<base href>`), so for the post-logout target we strip the tenant
+// segment down to the parent mount (e.g. `/ui/org_abc/` → `/ui/`). One
+// whitelist entry then covers all tenants. No-op for single-tenant deploys
+// where `<base href>` is already `/ui/`.
+const baseUrlParts = new URL(appBaseUrl);
+const mountSegment =
+  baseUrlParts.pathname.split('/').filter(Boolean)[0] ?? 'ui';
+const logoutReturnUrl = `${baseUrlParts.origin}/${mountSegment}/`;
+
 const OIDC_AUTHORITY = config.oidc.authority;
 const OIDC_CLIENT_ID = config.oidc.clientId;
 const OIDC_AUDIENCE = config.oidc.audience;
@@ -37,7 +47,7 @@ const metadata = isOidcAuth
       token_endpoint: `${authority}/oauth/token`,
       userinfo_endpoint: `${authority}/userinfo`,
       jwks_uri: `${authority}/.well-known/jwks.json`,
-      end_session_endpoint: `${authority}/v2/logout?client_id=${clientId}&returnTo=${encodeURIComponent(appBaseUrl)}`,
+      end_session_endpoint: `${authority}/v2/logout?client_id=${clientId}&returnTo=${encodeURIComponent(logoutReturnUrl)}`,
     }
   : {
       // Non-OIDC stub: endpoints point at the local SPA so the client library
@@ -57,7 +67,7 @@ export const oidcConfig = {
   response_type: 'code',
   scope: 'email openid phone org_id',
   redirect_uri: appBaseUrl,
-  post_logout_redirect_uri: appBaseUrl,
+  post_logout_redirect_uri: logoutReturnUrl,
   extraTokenParams: OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : undefined,
   extraQueryParams: OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : undefined,
   automaticSilentRenew: isOidcAuth,
