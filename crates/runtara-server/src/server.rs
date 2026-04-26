@@ -1809,18 +1809,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     shutdown_coordinator.request_shutdown();
     signal_task.abort();
 
-    // Drain running executions: flip each cancel_flag, send Shutdown signal
-    // via the runtime client, wait up to RUNTARA_SHUTDOWN_GRACE_MS.
-    tracing::info!("Draining running executions before stopping embedded services");
-    shutdown_coordinator.drain_executions().await;
-
-    // Gracefully shutdown embedded Runtara server (core + environment).
-    // Must happen AFTER execution drain — instances need core alive to checkpoint.
-    if let Some(runtara) = embedded_runtara {
-        println!("Draining embedded Runtara environment...");
-        if let Err(e) = runtara.drain(shutdown_coordinator.grace()).await {
-            eprintln!("Error draining embedded Runtara: {}", e);
+    // Drain running executions and embedded instances unless we're in dev
+    // mode — local `cargo run` users want Ctrl+C to exit promptly instead of
+    // waiting up to RUNTARA_SHUTDOWN_GRACE_MS for each in-flight workflow to
+    // checkpoint. Release builds and explicit RUNTARA_DEV_MODE=false keep the
+    // full graceful drain.
+    if config::dev_mode() {
+        tracing::warn!(
+            "Dev mode: skipping graceful drain of executions and instances. \
+             Set RUNTARA_DEV_MODE=false (or run a release build) to enable. \
+             In-flight workers will finish their current task before exiting."
+        );
+    } else {
+        tracing::info!("Draining running executions before stopping embedded services");
+        shutdown_coordinator.drain_executions().await;
+        if let Some(runtara) = embedded_runtara.as_ref() {
+            println!("Draining embedded Runtara environment...");
+            if let Err(e) = runtara.drain(shutdown_coordinator.grace()).await {
+                eprintln!("Error draining embedded Runtara: {}", e);
+            }
         }
+    }
+
+    // Always tear down the embedded server so ports/pools close cleanly.
+    // `shutdown()` aborts the HTTP server and notifies workers; it does not
+    // poll for in-flight work, so it stays fast even when drain was skipped.
+    if let Some(runtara) = embedded_runtara {
         println!("Shutting down embedded Runtara server...");
         if let Err(e) = runtara.shutdown().await {
             eprintln!("Error shutting down embedded Runtara: {}", e);

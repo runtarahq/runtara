@@ -38,6 +38,10 @@ pub struct Config {
     pub object_model_url: String,
     /// Agent service URL forwarded to workflow processes for native-only capabilities.
     pub agent_service_url: String,
+    /// Skip the graceful drain on Ctrl+C / SIGTERM. Defaults to true in debug
+    /// builds so `cargo run` exits promptly; production release builds keep
+    /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
+    pub dev_mode: bool,
 }
 
 /// Global configuration instance.
@@ -94,6 +98,8 @@ impl Config {
         let agent_service_url = std::env::var("RUNTARA_AGENT_SERVICE_URL")
             .unwrap_or_else(|_| format!("http://127.0.0.1:{}/api/internal/agents", internal_port));
 
+        let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
+
         Ok(Self {
             tenant_id,
             max_concurrent_executions,
@@ -111,6 +117,7 @@ impl Config {
             http_proxy_url,
             object_model_url,
             agent_service_url,
+            dev_mode,
         })
     }
 }
@@ -254,6 +261,12 @@ pub fn object_model_bulk_request_limit() -> usize {
     get().object_model_bulk_request_limit
 }
 
+/// Whether the server is running in development mode. When true, shutdown
+/// skips the graceful execution/instance drain so Ctrl+C exits promptly.
+pub fn dev_mode() -> bool {
+    get().dev_mode
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +281,20 @@ mod tests {
         }
         assert_eq!(parse_bool("nope"), None);
         assert_eq!(parse_bool(""), None);
+    }
+
+    #[test]
+    fn parse_bool_or_returns_runtime_default_when_unset() {
+        // Use a name we expect to be unset so we exercise the fallback
+        // branch without touching shared process env (which is not safe to
+        // mutate concurrently from tests).
+        let name = "RUNTARA_TEST_PARSE_BOOL_OR_UNSET_UNIQUE_42";
+        // SAFETY: only this test references this var; harmless if a prior
+        // run leaked it.
+        unsafe {
+            std::env::remove_var(name);
+        }
+        assert_eq!(parse_bool_or(name, true).ok(), Some(true));
+        assert_eq!(parse_bool_or(name, false).ok(), Some(false));
     }
 }
