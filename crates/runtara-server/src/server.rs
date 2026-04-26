@@ -480,12 +480,14 @@ impl axum::extract::FromRef<AppState> for Arc<workers::execution_engine::Executi
 struct HealthResponse {
     status: String,
     version: String,
+    commit: String,
 }
 
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("BUILD_VERSION").to_string(),
+        commit: env!("BUILD_COMMIT").to_string(),
     })
 }
 
@@ -543,6 +545,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Get version for logging context
     let version = env!("BUILD_VERSION");
+    let commit = env!("BUILD_COMMIT");
 
     let tenant_id = server_config.tenant_id.clone();
     config::init(server_config);
@@ -552,6 +555,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         "runtime",
         tenant_id = %tenant_id,
         version = %version,
+        commit = %commit,
         service = "runtara-server"
     );
     let _guard = root_span.enter();

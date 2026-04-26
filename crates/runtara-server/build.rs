@@ -51,13 +51,20 @@ fn main() {
         stable_cache_dir.display()
     );
 
-    // Allow CI to override the version
-    let version = std::env::var("BUILD_VERSION")
-        .or_else(|_| std::env::var("SMO_BUILD_VERSION"))
-        .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap());
+    // Allow CI/release packaging to stamp the binary with the artifact version
+    // and commit that produced it.
+    let version = resolve_build_version();
+    let commit = resolve_build_commit(workspace_root);
     println!("cargo:rustc-env=BUILD_VERSION={}", version);
+    println!("cargo:rustc-env=BUILD_COMMIT={}", commit);
     println!("cargo:rerun-if-env-changed=BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=SMO_BUILD_VERSION");
+    println!("cargo:rerun-if-env-changed=BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    let git_head = workspace_root.join(".git/HEAD");
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed={}", git_head.display());
+    }
 
     // When the `embed-ui` feature is on, rust_embed needs frontend/dist to exist at
     // compile time. Surface a helpful error up-front if it's missing.
@@ -74,6 +81,51 @@ fn main() {
             );
         }
         println!("cargo:rerun-if-changed={}", dist.display());
+    }
+}
+
+fn resolve_build_version() -> String {
+    std::env::var("BUILD_VERSION")
+        .or_else(|_| std::env::var("SMO_BUILD_VERSION"))
+        .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap())
+}
+
+fn resolve_build_commit(workspace_root: &Path) -> String {
+    std::env::var("BUILD_COMMIT")
+        .ok()
+        .and_then(clean_build_value)
+        .or_else(|| std::env::var("GITHUB_SHA").ok().and_then(clean_build_value))
+        .map(|commit| short_commit(&commit))
+        .or_else(|| {
+            git_output(workspace_root, &["rev-parse", "--short=12", "HEAD"])
+                .and_then(clean_build_value)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn clean_build_value(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(12).collect()
+}
+
+fn git_output(workspace_root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
     }
 }
 
