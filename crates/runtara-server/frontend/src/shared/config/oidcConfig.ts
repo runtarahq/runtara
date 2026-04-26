@@ -1,25 +1,41 @@
+import type { User } from 'oidc-client-ts';
 import { WebStorageStateStore } from 'oidc-client-ts';
 import { config, isOidcAuth } from '@/shared/config/runtimeConfig';
 
-const onSigninCallback = () => {
-  window.history.replaceState({}, document.title, window.location.pathname);
-};
-
 // Full absolute URL of the SPA root (protocol + host + mount path), e.g.
 // `http://localhost:7001/ui/org_abc/`. `document.baseURI` reflects the
-// `<base href>` the server injects at startup, so Auth0 redirects land
-// back on the tenant-scoped mount instead of the bare origin.
+// `<base href>` the server injects at startup, so per-tenant deploys see
+// the tenant-scoped path here.
 const appBaseUrl = document.baseURI;
 
-// Auth0's "Allowed Logout URLs" rejects per-tenant URLs (each tenant has its
-// own `<base href>`), so for the post-logout target we strip the tenant
-// segment down to the parent mount (e.g. `/ui/org_abc/` → `/ui/`). One
-// whitelist entry then covers all tenants. No-op for single-tenant deploys
-// where `<base href>` is already `/ui/`.
+// Auth0's "Allowed Callback URLs" / "Allowed Logout URLs" lists are per
+// *application*, not per *tenant* — so a per-tenant `<base href>` (e.g.
+// `/ui/org_abc/`) can never be whitelisted directly. Strip down to the
+// parent mount (`/ui/`); one whitelist entry then covers every tenant.
+// After Auth0 callback lands at `/ui/`, `onSigninCallback` redirects to
+// the per-tenant mount based on the JWT's `org_id` claim. localStorage is
+// keyed by origin (not path), so the per-tenant SPA inherits the OIDC state.
 const baseUrlParts = new URL(appBaseUrl);
 const mountSegment =
   baseUrlParts.pathname.split('/').filter(Boolean)[0] ?? 'ui';
-const logoutReturnUrl = `${baseUrlParts.origin}/${mountSegment}/`;
+const mountReturnUrl = `${baseUrlParts.origin}/${mountSegment}/`;
+const mountReturnPath = new URL(mountReturnUrl).pathname;
+
+const onSigninCallback = (user?: User) => {
+  const orgId = user?.profile?.org_id as string | undefined;
+
+  // Auth0 always returns to the whitelistable parent mount (`/ui/`). When the
+  // JWT carries an `org_id`, swap to the per-tenant SPA — same origin, so
+  // localStorage carries the OIDC state and the new SPA skips re-auth.
+  if (orgId && window.location.pathname === mountReturnPath) {
+    window.location.replace(`${mountReturnPath}${orgId}/`);
+    return;
+  }
+
+  // Already on a per-tenant path (or no org_id): just clean the auth params
+  // off the URL.
+  window.history.replaceState({}, document.title, window.location.pathname);
+};
 
 const OIDC_AUTHORITY = config.oidc.authority;
 const OIDC_CLIENT_ID = config.oidc.clientId;
@@ -47,7 +63,7 @@ const metadata = isOidcAuth
       token_endpoint: `${authority}/oauth/token`,
       userinfo_endpoint: `${authority}/userinfo`,
       jwks_uri: `${authority}/.well-known/jwks.json`,
-      end_session_endpoint: `${authority}/v2/logout?client_id=${clientId}&returnTo=${encodeURIComponent(logoutReturnUrl)}`,
+      end_session_endpoint: `${authority}/v2/logout?client_id=${clientId}&returnTo=${encodeURIComponent(mountReturnUrl)}`,
     }
   : {
       // Non-OIDC stub: endpoints point at the local SPA so the client library
@@ -66,8 +82,8 @@ export const oidcConfig = {
   client_id: clientId,
   response_type: 'code',
   scope: 'email openid phone org_id',
-  redirect_uri: appBaseUrl,
-  post_logout_redirect_uri: logoutReturnUrl,
+  redirect_uri: mountReturnUrl,
+  post_logout_redirect_uri: mountReturnUrl,
   extraTokenParams: OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : undefined,
   extraQueryParams: OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : undefined,
   automaticSilentRenew: isOidcAuth,
