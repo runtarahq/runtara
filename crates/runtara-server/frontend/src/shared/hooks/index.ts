@@ -6,6 +6,7 @@ export * from './usePageTitle';
 export * from './usePagination';
 export * from './useToast';
 export * from './useOrgId';
+export * from './useTenantUrlGuard';
 export * from './useToken';
 export * from './useUserGroups';
 export * from './useDebounce';

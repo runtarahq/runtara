@@ -3,6 +3,7 @@ import { router } from '@/router';
 import { Loader } from '@/shared/components/loader.tsx';
 import { useAutoSignin } from '@/shared/hooks/useAutoSignin';
 import { useOrgId } from '@/shared/hooks/useOrgId';
+import { useTenantUrlGuard } from '@/shared/hooks/useTenantUrlGuard';
 import { useUserGroups } from '@/shared/hooks/useUserGroups';
 import { useEffect } from 'react';
 import { cleanupPointerEvents } from '@/lib/utils';
@@ -16,6 +17,7 @@ function App() {
   const { theme } = useThemeStore();
 
   useOrgId();
+  useTenantUrlGuard();
   useUserGroups();
   const isMaintenanceMode = useHealthCheck();
 

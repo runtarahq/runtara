@@ -16,10 +16,19 @@ const appBaseUrl = document.baseURI;
 // the per-tenant mount based on the JWT's `org_id` claim. localStorage is
 // keyed by origin (not path), so the per-tenant SPA inherits the OIDC state.
 const baseUrlParts = new URL(appBaseUrl);
-const mountSegment =
-  baseUrlParts.pathname.split('/').filter(Boolean)[0] ?? 'ui';
+const baseUrlSegments = baseUrlParts.pathname.split('/').filter(Boolean);
+const mountSegment = baseUrlSegments[0] ?? 'ui';
 const mountReturnUrl = `${baseUrlParts.origin}/${mountSegment}/`;
-const mountReturnPath = new URL(mountReturnUrl).pathname;
+
+/** The path Auth0 callbacks always return to (e.g. `/ui/`). */
+export const mountReturnPath = new URL(mountReturnUrl).pathname;
+
+/**
+ * Tenant id parsed from the SPA's mount path, e.g. `/ui/org_abc/` → `org_abc`.
+ * `undefined` when loaded at the parent mount (`/ui/`) or bare origin — i.e.
+ * during the OIDC callback hop, before we know which tenant to land in.
+ */
+export const tenantIdFromUrl: string | undefined = baseUrlSegments[1];
 
 const onSigninCallback = (user?: User) => {
   const orgId = user?.profile?.org_id as string | undefined;
@@ -85,7 +94,14 @@ export const oidcConfig = {
   redirect_uri: mountReturnUrl,
   post_logout_redirect_uri: mountReturnUrl,
   extraTokenParams: OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : undefined,
-  extraQueryParams: OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : undefined,
+  // Pass the tenant id from the URL as Auth0's `organization` param so a
+  // multi-org user lands directly in the org they tried to deep-link to,
+  // skipping the org-selector. If they aren't a member, Auth0 errors cleanly
+  // instead of silently authenticating them into their default org.
+  extraQueryParams: {
+    ...(OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : {}),
+    ...(tenantIdFromUrl ? { organization: tenantIdFromUrl } : {}),
+  },
   automaticSilentRenew: isOidcAuth,
   userStore: new WebStorageStateStore({ store: window.localStorage }),
   onSigninCallback,
