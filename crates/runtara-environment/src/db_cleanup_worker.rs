@@ -47,7 +47,7 @@ impl Default for DbCleanupWorkerConfig {
             enabled: true, // Enabled by default — retention is
             // bounded; override via env to disable
             poll_interval: Duration::from_secs(3600), // 1 hour
-            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+            max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
             batch_size: 100,
         }
     }
@@ -59,7 +59,7 @@ impl DbCleanupWorkerConfig {
     /// Environment variables:
     /// - `RUNTARA_DB_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
     /// - `RUNTARA_DB_CLEANUP_POLL_INTERVAL_SECS`: seconds between cleanup runs (default: 3600)
-    /// - `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS`: days before terminal instances are deleted (default: 7)
+    /// - `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS`: days before terminal instances are deleted (default: 3)
     /// - `RUNTARA_DB_CLEANUP_BATCH_SIZE`: max instances per batch (default: 100)
     pub fn from_env() -> Self {
         let enabled = std::env::var("RUNTARA_DB_CLEANUP_ENABLED")
@@ -74,7 +74,7 @@ impl DbCleanupWorkerConfig {
         let max_age_days = std::env::var("RUNTARA_DB_CLEANUP_MAX_AGE_DAYS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(7);
+            .unwrap_or(3);
 
         let batch_size = std::env::var("RUNTARA_DB_CLEANUP_BATCH_SIZE")
             .ok()
@@ -134,6 +134,25 @@ impl DbCleanupWorker {
             batch_size = self.config.batch_size,
             "Database cleanup worker started"
         );
+
+        // Eager first pass: enforce retention immediately on startup so that
+        // cleanup runs even when the server restarts more frequently than
+        // `poll_interval`. Race against the shutdown signal so a slow or
+        // hanging cleanup (e.g. unreachable DB) cannot block shutdown.
+        tokio::select! {
+            biased;
+
+            _ = self.shutdown.notified() => {
+                info!("Database cleanup worker received shutdown signal during eager pass");
+                return;
+            }
+
+            res = self.cleanup_old_instances() => {
+                if let Err(e) = res {
+                    error!(error = %e, "Failed to cleanup old instances");
+                }
+            }
+        }
 
         loop {
             tokio::select! {
@@ -279,17 +298,17 @@ mod tests {
         let config = DbCleanupWorkerConfig::default();
         assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(3600));
-        assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(config.max_age, Duration::from_secs(3 * 24 * 3600));
         assert_eq!(config.batch_size, 100);
     }
 
     #[test]
     fn test_config_max_age_days() {
         let config = DbCleanupWorkerConfig {
-            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+            max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
             ..Default::default()
         };
-        assert_eq!(config.max_age.as_secs() / 86400, 7);
+        assert_eq!(config.max_age.as_secs() / 86400, 3);
     }
 
     #[test]
