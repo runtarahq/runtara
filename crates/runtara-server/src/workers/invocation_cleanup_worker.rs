@@ -50,15 +50,16 @@ impl InvocationCleanupWorkerConfig {
     /// Load configuration from environment variables.
     ///
     /// Environment variables:
-    /// - `RUNTARA_INVOCATION_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
+    /// - `RUNTARA_INVOCATION_CLEANUP_ENABLED`: set to `false`/`0`/`no`/`off`
+    ///   (case-insensitive) to disable. **Any other value — including unset,
+    ///   typos, or `"yes"`/`"on"` — leaves cleanup enabled.** Cleanup is on
+    ///   by default; only an explicit opt-out turns it off.
     /// - `RUNTARA_INVOCATION_CLEANUP_POLL_INTERVAL_SECS`: seconds between cycles (default: 3600)
     /// - `RUNTARA_INVOCATION_CLEANUP_MAX_AGE_DAYS`: days before executions are deleted (default: 3)
     /// - `RUNTARA_INVOCATION_CLEANUP_METRICS_MAX_AGE_DAYS`: days before metrics are deleted (default: 365)
     /// - `RUNTARA_INVOCATION_CLEANUP_BATCH_SIZE`: max executions per batch (default: 500)
     pub fn from_env() -> Self {
-        let enabled = std::env::var("RUNTARA_INVOCATION_CLEANUP_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(true);
+        let enabled = parse_enabled_env("RUNTARA_INVOCATION_CLEANUP_ENABLED");
 
         let poll_interval_secs = std::env::var("RUNTARA_INVOCATION_CLEANUP_POLL_INTERVAL_SECS")
             .ok()
@@ -245,6 +246,20 @@ impl InvocationCleanupWorker {
     }
 }
 
+/// Resolve a `*_CLEANUP_ENABLED` env var with a "default-on, opt-out only"
+/// rule. Cleanup is enabled unless the env var is explicitly set to a
+/// recognised false-like value (case-insensitive). Misconfigurations like
+/// `"yes"`, `"on"`, or a typo do **not** silently disable cleanup.
+fn parse_enabled_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off" | "disabled"
+        ),
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +290,32 @@ mod tests {
         assert!(config.enabled, "Enabled-by-default expected");
         assert_eq!(config.max_age.as_secs() / 86400, 3);
         assert_eq!(config.metrics_max_age.as_secs() / 86400, 365);
+    }
+
+    #[test]
+    fn test_parse_enabled_env_default_on() {
+        const VAR: &str = "RUNTARA_TEST_INVOCATION_CLEANUP_ENABLED_PARSE";
+        unsafe { std::env::remove_var(VAR) };
+        assert!(parse_enabled_env(VAR), "unset must be enabled");
+
+        for v in [
+            "true",
+            "1",
+            "yes",
+            "on",
+            "True",
+            "TRUE",
+            "anything-else",
+            "",
+        ] {
+            unsafe { std::env::set_var(VAR, v) };
+            assert!(parse_enabled_env(VAR), "{v:?} must NOT silently disable");
+        }
+        for v in ["false", "0", "no", "off", "disabled", "FALSE", "Off"] {
+            unsafe { std::env::set_var(VAR, v) };
+            assert!(!parse_enabled_env(VAR), "{v:?} must explicitly disable");
+        }
+        unsafe { std::env::remove_var(VAR) };
     }
 
     #[tokio::test]

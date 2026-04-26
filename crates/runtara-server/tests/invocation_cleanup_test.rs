@@ -441,3 +441,82 @@ async fn test_run_loop_exits_on_coordinator_shutdown() {
         .expect("worker exited within 2s of shutdown")
         .expect("task did not panic");
 }
+
+/// `run()` must perform an eager cleanup pass *before* the first
+/// `poll_interval` elapses. This is the prod-shaped guard for the bug that
+/// motivated the 3-day default change: if the worker only cleaned up after
+/// `sleep(poll_interval)`, every server restart would push cleanup another
+/// hour out and tables would grow unboundedly on a churny box.
+///
+/// Test setup uses `poll_interval = 1h` and `max_age = 3d`, then seeds a
+/// 10-day-old terminal execution. If the eager pass works, the row is gone
+/// within a few hundred ms. If it doesn't, the test would hang for an hour
+/// (and time out at 5s with a clear regression message).
+#[tokio::test]
+async fn test_run_performs_eager_cleanup_on_startup() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await.expect("pool");
+    let tenant_id = format!("test-eager-{}", Uuid::new_v4());
+    let workflow_id = format!("wf-{}", Uuid::new_v4());
+    insert_workflow(&pool, &tenant_id, &workflow_id).await;
+
+    let old = Utc::now() - ChronoDuration::days(10);
+    let old_completed = Uuid::new_v4();
+    insert_execution(
+        &pool,
+        old_completed,
+        &tenant_id,
+        &workflow_id,
+        "completed",
+        old,
+        Some(old),
+    )
+    .await;
+    assert!(
+        execution_exists(&pool, old_completed).await,
+        "seed precondition: old execution exists before worker starts"
+    );
+
+    let coord = std::sync::Arc::new(runtara_server::shutdown::ShutdownCoordinator::from_env(
+        std::sync::Arc::new(dashmap::DashMap::new()),
+        None,
+    ));
+    let signal = coord.signal();
+
+    // poll_interval is intentionally an hour: only the eager pass can fire
+    // within the 5s test budget. max_age matches the new prod default (3d).
+    let config = InvocationCleanupWorkerConfig {
+        enabled: true,
+        poll_interval: Duration::from_secs(3600),
+        max_age: Duration::from_secs(3 * 24 * 3600),
+        metrics_max_age: Duration::from_secs(365 * 24 * 3600),
+        batch_size: 100,
+    };
+    let worker = InvocationCleanupWorker::new(pool.clone(), config, signal);
+
+    let handle = tokio::spawn(async move { worker.run().await });
+
+    // Poll the DB until the row disappears. Locally this lands in <100ms;
+    // give CI runners 5s of headroom.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut deleted = false;
+    while std::time::Instant::now() < deadline {
+        if !execution_exists(&pool, old_completed).await {
+            deleted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    coord.request_shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    cleanup_tenant(&pool, &tenant_id).await;
+
+    assert!(
+        deleted,
+        "Eager cleanup did not delete the 10-day-old terminal execution \
+         within 5s. The eager-first-pass behavior in `run()` may be \
+         regressed — without it, cleanup would not fire until \
+         `poll_interval` (1h) elapsed."
+    );
+}

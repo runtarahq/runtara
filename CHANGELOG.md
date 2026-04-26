@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously, each worker waited a full `poll_interval` (default 1 hour)
   before its first run, so frequent server restarts could prevent cleanup
   from ever happening.
+- `runtara-server` integration tests in CI now run against a real Postgres
+  service (previously skipped via `skip_if_no_db!()` because the CI
+  workflow had no DB). New regression test
+  `test_run_performs_eager_cleanup_on_startup` (in
+  `crates/runtara-server/tests/invocation_cleanup_test.rs`) seeds an old
+  terminal execution and asserts it is swept within seconds — guarding
+  the eager-pass behavior described above.
 
 ### Changed
 
@@ -48,6 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `RUNTARA_INVOCATION_CLEANUP_ENABLED=false` / `RUNTARA_INVOCATION_CLEANUP_MAX_AGE_DAYS=<n>`
   On first run after upgrade, existing data older than 3 days in terminal
   states will be deleted.
+
+### Fixed
+
+- `*_CLEANUP_ENABLED` env-var parsing across all four cleanup workers
+  previously treated **any** value other than `"true"` or `"1"` as
+  disabled — including misconfigurations like `"yes"`, `"on"`, `"True"`,
+  or a typo, all of which silently turned cleanup off. The parse is now
+  inverted: cleanup is enabled by default and only an explicit false-like
+  value (`"false"`, `"0"`, `"no"`, `"off"`, `"disabled"`,
+  case-insensitive) disables it. Anything else — unset, malformed, or
+  truthy in any common spelling — leaves cleanup running.
 
 ## [3.0.0]
 
