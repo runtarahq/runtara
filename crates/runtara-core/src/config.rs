@@ -65,6 +65,27 @@ pub enum ConfigError {
     Invalid(&'static str, &'static str),
 }
 
+/// Resolve a boolean "enabled" env var with a "default-on, opt-out only" rule.
+///
+/// Returns `true` unless the env var is set to a recognised false-like value
+/// (case-insensitive, trimmed): `"false"`, `"0"`, `"no"`, `"off"`, or
+/// `"disabled"`. **Any other value — including unset, malformed input, typos,
+/// or truthy spellings like `"yes"`/`"on"`/`"True"` — leaves the feature
+/// enabled.** This is the inverse of the naive `v == "true" || v == "1"`
+/// parse: it cannot silently disable a feature because of a misconfiguration.
+///
+/// Used by all four cleanup workers (`*_CLEANUP_ENABLED`); pull it in via
+/// `use runtara_core::config::parse_enabled_env;`.
+pub fn parse_enabled_env(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off" | "disabled"
+        ),
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +321,50 @@ mod tests {
             config.max_concurrent_instances,
             cloned.max_concurrent_instances
         );
+    }
+
+    #[test]
+    fn test_parse_enabled_env_default_on() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let mut guard = EnvGuard::new();
+        const VAR: &str = "RUNTARA_TEST_PARSE_ENABLED_HELPER";
+
+        // Unset → enabled
+        guard.remove(VAR);
+        assert!(parse_enabled_env(VAR), "unset must be enabled");
+
+        // Truthy spellings (and typos) leave the feature on
+        for v in [
+            "true",
+            "1",
+            "yes",
+            "on",
+            "True",
+            "TRUE",
+            "anything-else",
+            "",
+            "  true  ",
+        ] {
+            guard.set(VAR, v);
+            assert!(
+                parse_enabled_env(VAR),
+                "{v:?} must NOT silently disable the feature"
+            );
+        }
+
+        // Only explicit false-like values disable
+        for v in [
+            "false",
+            "0",
+            "no",
+            "off",
+            "disabled",
+            "FALSE",
+            "Off",
+            "  false  ",
+        ] {
+            guard.set(VAR, v);
+            assert!(!parse_enabled_env(VAR), "{v:?} must explicitly disable");
+        }
     }
 }

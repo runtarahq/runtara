@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use runtara_core::config::parse_enabled_env;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -49,7 +50,7 @@ impl Default for ImageCleanupWorkerConfig {
         Self {
             enabled: true, // Enabled by default — override via env to disable
             poll_interval: Duration::from_secs(6 * 3600), // 6 hours
-            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+            max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
             batch_size: 50,
             data_dir: PathBuf::new(), // Set by runtime
         }
@@ -60,14 +61,15 @@ impl ImageCleanupWorkerConfig {
     /// Load configuration from environment variables.
     ///
     /// Environment variables:
-    /// - `RUNTARA_IMAGE_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
+    /// - `RUNTARA_IMAGE_CLEANUP_ENABLED`: set to `false`/`0`/`no`/`off`
+    ///   (case-insensitive) to disable. **Any other value — including unset,
+    ///   typos, or `"yes"`/`"on"` — leaves cleanup enabled.** Cleanup is on
+    ///   by default; only an explicit opt-out turns it off.
     /// - `RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS`: seconds between cleanup runs (default: 21600)
-    /// - `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS`: days before stale images are deleted (default: 7)
+    /// - `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS`: days before stale images are deleted (default: 3)
     /// - `RUNTARA_IMAGE_CLEANUP_BATCH_SIZE`: max images per cycle (default: 50)
     pub fn from_env() -> Self {
-        let enabled = std::env::var("RUNTARA_IMAGE_CLEANUP_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(true);
+        let enabled = parse_enabled_env("RUNTARA_IMAGE_CLEANUP_ENABLED");
 
         let poll_interval_secs = std::env::var("RUNTARA_IMAGE_CLEANUP_POLL_INTERVAL_SECS")
             .ok()
@@ -77,7 +79,7 @@ impl ImageCleanupWorkerConfig {
         let max_age_days = std::env::var("RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(7);
+            .unwrap_or(3);
 
         let batch_size = std::env::var("RUNTARA_IMAGE_CLEANUP_BATCH_SIZE")
             .ok()
@@ -132,6 +134,25 @@ impl ImageCleanupWorker {
             batch_size = self.config.batch_size,
             "Image cleanup worker started"
         );
+
+        // Eager first pass: enforce retention immediately on startup so that
+        // cleanup runs even when the server restarts more frequently than
+        // `poll_interval`. Race against the shutdown signal so a slow or
+        // hanging cleanup (e.g. unreachable DB) cannot block shutdown.
+        tokio::select! {
+            biased;
+
+            _ = self.shutdown.notified() => {
+                info!("Image cleanup worker received shutdown signal during eager pass");
+                return;
+            }
+
+            res = self.cleanup_images() => {
+                if let Err(e) = res {
+                    error!(error = %e, "Failed to cleanup images");
+                }
+            }
+        }
 
         loop {
             tokio::select! {
@@ -329,7 +350,7 @@ mod tests {
         let config = ImageCleanupWorkerConfig::default();
         assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(6 * 3600));
-        assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(config.max_age, Duration::from_secs(3 * 24 * 3600));
         assert_eq!(config.batch_size, 50);
     }
 

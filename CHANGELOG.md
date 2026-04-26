@@ -21,27 +21,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working unchanged.
 - `InvocationCleanupWorker` (runtara-server) deletes terminal
   `workflow_executions` older than `RUNTARA_INVOCATION_CLEANUP_MAX_AGE_DAYS`
-  (default 7) and `workflow_metrics_hourly` rows older than
+  (default 3) and `workflow_metrics_hourly` rows older than
   `RUNTARA_INVOCATION_CLEANUP_METRICS_MAX_AGE_DAYS` (default 365). Events
   and side-effect usage rows cascade with their parent execution. Tune via
   `RUNTARA_INVOCATION_CLEANUP_ENABLED`, `_POLL_INTERVAL_SECS`,
   `_MAX_AGE_DAYS`, `_METRICS_MAX_AGE_DAYS`, `_BATCH_SIZE`.
 - `CleanupWorker` (runtara-environment) now reads configuration from env:
   `RUNTARA_RUN_DIR_CLEANUP_ENABLED`, `_POLL_INTERVAL_SECS`, `_MAX_AGE_DAYS`.
+- All four cleanup workers (`InvocationCleanupWorker`, `DbCleanupWorker`,
+  `ImageCleanupWorker`, run-dir `CleanupWorker`) now perform an **eager
+  first cleanup pass on startup**, before entering the poll loop.
+  Previously, each worker waited a full `poll_interval` (default 1 hour)
+  before its first run, so frequent server restarts could prevent cleanup
+  from ever happening.
+- `runtara-server` integration tests in CI now run against a real Postgres
+  service (previously skipped via `skip_if_no_db!()` because the CI
+  workflow had no DB). New regression test
+  `test_run_performs_eager_cleanup_on_startup` (in
+  `crates/runtara-server/tests/invocation_cleanup_test.rs`) seeds an old
+  terminal execution and asserts it is swept within seconds — guarding
+  the eager-pass behavior described above.
 
 ### Changed
 
-- **Retention defaults are now on and aligned at 7 days.** Previously
+- **Retention defaults are now on and aligned at 3 days.** Previously
   `DbCleanupWorker` and `ImageCleanupWorker` were off-by-default and the
-  `CleanupWorker` ran at a 24-hour retention. All three workers now default
-  to enabled, 7-day retention. Operators who relied on long retention (or
+  `CleanupWorker` ran at a 24-hour retention. All four workers now default
+  to enabled, 3-day retention. Operators who relied on long retention (or
   silent cleanup) must opt out before upgrading:
   - `RUNTARA_DB_CLEANUP_ENABLED=false` / `RUNTARA_DB_CLEANUP_MAX_AGE_DAYS=<n>`
   - `RUNTARA_IMAGE_CLEANUP_ENABLED=false` / `RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS=<n>`
   - `RUNTARA_RUN_DIR_CLEANUP_ENABLED=false` / `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS=<n>`
   - `RUNTARA_INVOCATION_CLEANUP_ENABLED=false` / `RUNTARA_INVOCATION_CLEANUP_MAX_AGE_DAYS=<n>`
-  On first run after upgrade, existing data older than 7 days in terminal
+  On first run after upgrade, existing data older than 3 days in terminal
   states will be deleted.
+
+### Fixed
+
+- `*_CLEANUP_ENABLED` env-var parsing across all four cleanup workers
+  previously treated **any** value other than `"true"` or `"1"` as
+  disabled — including misconfigurations like `"yes"`, `"on"`, `"True"`,
+  or a typo, all of which silently turned cleanup off. The parse is now
+  inverted: cleanup is enabled by default and only an explicit false-like
+  value (`"false"`, `"0"`, `"no"`, `"off"`, `"disabled"`,
+  case-insensitive) disables it. Anything else — unset, malformed, or
+  truthy in any common spelling — leaves cleanup running.
 
 ## [3.0.0]
 

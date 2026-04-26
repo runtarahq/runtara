@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use runtara_core::config::parse_enabled_env;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
@@ -36,7 +37,7 @@ impl Default for CleanupWorkerConfig {
             enabled: true,
             data_dir: PathBuf::from(".data"),
             poll_interval: Duration::from_secs(3600), // 1 hour
-            max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+            max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
         }
     }
 }
@@ -45,13 +46,14 @@ impl CleanupWorkerConfig {
     /// Load configuration from environment variables.
     ///
     /// Environment variables:
-    /// - `RUNTARA_RUN_DIR_CLEANUP_ENABLED`: "true" or "1" to enable (default: true)
+    /// - `RUNTARA_RUN_DIR_CLEANUP_ENABLED`: set to `false`/`0`/`no`/`off`
+    ///   (case-insensitive) to disable. **Any other value — including unset,
+    ///   typos, or `"yes"`/`"on"` — leaves cleanup enabled.** Cleanup is on
+    ///   by default; only an explicit opt-out turns it off.
     /// - `RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS`: seconds between scans (default: 3600)
-    /// - `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS`: days before run dirs are removed (default: 7)
+    /// - `RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS`: days before run dirs are removed (default: 3)
     pub fn from_env() -> Self {
-        let enabled = std::env::var("RUNTARA_RUN_DIR_CLEANUP_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(true);
+        let enabled = parse_enabled_env("RUNTARA_RUN_DIR_CLEANUP_ENABLED");
 
         let poll_interval_secs = std::env::var("RUNTARA_RUN_DIR_CLEANUP_POLL_INTERVAL_SECS")
             .ok()
@@ -61,7 +63,7 @@ impl CleanupWorkerConfig {
         let max_age_days = std::env::var("RUNTARA_RUN_DIR_CLEANUP_MAX_AGE_DAYS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(7);
+            .unwrap_or(3);
 
         Self {
             enabled,
@@ -108,6 +110,25 @@ impl CleanupWorker {
             max_age_hours = self.config.max_age.as_secs() / 3600,
             "Cleanup worker started"
         );
+
+        // Eager first pass: enforce retention immediately on startup so that
+        // cleanup runs even when the server restarts more frequently than
+        // `poll_interval`. Race against the shutdown signal so a slow or
+        // hanging cleanup cannot block shutdown.
+        tokio::select! {
+            biased;
+
+            _ = self.shutdown.notified() => {
+                info!("Cleanup worker received shutdown signal during eager pass");
+                return;
+            }
+
+            res = self.cleanup_old_directories() => {
+                if let Err(e) = res {
+                    error!(error = %e, "Failed to cleanup old directories");
+                }
+            }
+        }
 
         loop {
             tokio::select! {
@@ -289,7 +310,7 @@ mod tests {
         let config = CleanupWorkerConfig::default();
         assert!(config.enabled);
         assert_eq!(config.poll_interval, Duration::from_secs(3600));
-        assert_eq!(config.max_age, Duration::from_secs(7 * 24 * 3600));
+        assert_eq!(config.max_age, Duration::from_secs(3 * 24 * 3600));
     }
 
     #[test]

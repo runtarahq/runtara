@@ -127,7 +127,7 @@ impl Default for EnvironmentRuntimeBuilder {
             wake_batch_size: 10,
             request_timeout: Duration::from_secs(30),
             cleanup_poll_interval: Duration::from_secs(3600), // 1 hour
-            cleanup_max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+            cleanup_max_age: Duration::from_secs(3 * 24 * 3600), // 3 days
             heartbeat_poll_interval: Duration::from_secs(30), // 30 seconds
             heartbeat_timeout: Duration::from_secs(120),      // 2 minutes
             db_cleanup_config: DbCleanupWorkerConfig::from_env(),
