@@ -16,6 +16,7 @@ import {
   useSidebar,
 } from '@/shared/components/ui/sidebar.tsx';
 import { menu } from '@/shared/config';
+import { config } from '@/shared/config/runtimeConfig';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
@@ -80,8 +81,7 @@ function HeaderMenu() {
                 );
               }
             }}
-          >
-          </span>
+          ></span>
         </div>
       </Link>
     </SidebarMenuButton>
@@ -145,6 +145,14 @@ function AppMenu() {
 
 function FooterMenu() {
   const navigate = useNavigate();
+  const versionLabel = formatBuildLabel(
+    config.build.version,
+    config.build.commit
+  );
+  const versionTitle = formatBuildTitle(
+    config.build.version,
+    config.build.commit
+  );
   const { mutate: createPortalSession, isPending } = useCustomMutation({
     mutationFn: createBillingPortalSession,
     onSuccess: (data: { url: string }) => {
@@ -156,33 +164,77 @@ function FooterMenu() {
   });
 
   return (
-    <div className="flex items-center justify-center gap-2 px-2 py-2 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
-      <AuthSidebar />
-      <Button
-        variant="ghost"
-        size="icon"
-        className="relative h-9 w-9 shrink-0"
-        aria-label="Settings"
-        onClick={() => navigate('/settings/api-keys')}
+    <div className="flex min-w-0 flex-col gap-1 px-2 py-2">
+      <div className="flex items-center justify-center gap-2 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
+        <AuthSidebar />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="relative h-9 w-9 shrink-0"
+          aria-label="Settings"
+          onClick={() => navigate('/settings/api-keys')}
+        >
+          <Settings className="h-4 w-4" />
+          <span className="sr-only">Settings</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="relative h-9 w-9 shrink-0"
+          aria-label="Manage billing"
+          onClick={() => createPortalSession({})}
+          disabled={isPending}
+        >
+          <DollarSign className="h-4 w-4" />
+          <span className="sr-only">Manage billing</span>
+        </Button>
+        <ThemeSwitcher />
+        <SidebarTrigger className="w-min px-0 mx-0 shrink-0" />
+      </div>
+      <div
+        className="min-w-0 px-1 text-center text-[11px] font-medium text-muted-foreground/80 group-data-[state=collapsed]:hidden"
+        title={versionTitle}
+        aria-label={`Runtara version ${versionLabel}`}
       >
-        <Settings className="h-4 w-4" />
-        <span className="sr-only">Settings</span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="relative h-9 w-9 shrink-0"
-        aria-label="Manage billing"
-        onClick={() => createPortalSession({})}
-        disabled={isPending}
-      >
-        <DollarSign className="h-4 w-4" />
-        <span className="sr-only">Manage billing</span>
-      </Button>
-      <ThemeSwitcher />
-      <SidebarTrigger className="w-min px-0 mx-0 shrink-0" />
+        <span className="block truncate">{versionLabel}</span>
+      </div>
     </div>
   );
+}
+
+function formatBuildLabel(version: string, commit?: string): string {
+  const normalizedVersion = normalizeVersion(version);
+  const normalizedCommit = normalizeCommit(commit);
+
+  if (normalizedVersion === 'dev' && normalizedCommit) {
+    return `dev@${normalizedCommit}`;
+  }
+
+  return normalizedVersion;
+}
+
+function formatBuildTitle(version: string, commit?: string): string {
+  const normalizedVersion = normalizeVersion(version);
+  const normalizedCommit = normalizeCommit(commit);
+
+  if (normalizedCommit) {
+    return `Runtara ${normalizedVersion} (${normalizedCommit})`;
+  }
+
+  return `Runtara ${normalizedVersion}`;
+}
+
+function normalizeVersion(version: string): string {
+  const trimmed = version.trim();
+  if (!trimmed) return 'dev';
+  if (trimmed === 'dev' || trimmed.startsWith('v')) return trimmed;
+  return `v${trimmed}`;
+}
+
+function normalizeCommit(commit?: string): string | undefined {
+  const trimmed = commit?.trim();
+  if (!trimmed || trimmed === 'unknown') return undefined;
+  return trimmed.slice(0, 12);
 }
 
 function SideBarNavLink({

@@ -15,6 +15,8 @@ type RuntimeConfig = {
   apiBaseUrl?: string;
   plausibleDomain?: string;
   plausibleHost?: string;
+  version?: string;
+  commit?: string;
   /** Selected server-side auth provider. Defaults to "oidc" when unset. */
   authMode?: AuthMode;
   /** Configured tenant — injected when the server runs without an IdP that
@@ -72,6 +74,11 @@ export const config = {
       import.meta.env.VITE_RUNTARA_PLAUSIBLE_HOST
     ),
   },
+  build: {
+    version:
+      pick(runtime.version, import.meta.env.VITE_RUNTARA_VERSION) ?? 'dev',
+    commit: pick(runtime.commit, import.meta.env.VITE_RUNTARA_COMMIT),
+  },
 };
 
 /** True when the server expects the SPA to perform OIDC auth itself. */
@@ -80,8 +87,7 @@ export const isOidcAuth = config.authMode === 'oidc';
 // Diagnostic: make the resolved auth mode visible during boot so mismatches
 // between server-injected config and what the SPA observes are easy to spot.
 // Safe to leave in — logs at most once per page load.
-// eslint-disable-next-line no-console
 console.info(
-  `[runtara] authMode=${config.authMode} tenantId=${config.tenantId ?? '<unset>'}`,
+  `[runtara] authMode=${config.authMode} tenantId=${config.tenantId ?? '<unset>'} version=${config.build.version} commit=${config.build.commit ?? '<unset>'}`,
   window.__RUNTARA_CONFIG__
 );

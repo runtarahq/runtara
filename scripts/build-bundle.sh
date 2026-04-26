@@ -85,6 +85,7 @@ detect_platform() {
 resolve_versions() {
     # Runtara version: override or from workspace Cargo.toml
     RUNTARA_VERSION="${RUNTARA_VERSION_OVERRIDE:-$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')}"
+    RUNTARA_COMMIT="${BUILD_COMMIT:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
 
     # Rust version from the active toolchain (pinned by rust-toolchain.toml)
     RUSTC_VERSION="$(rustc --version | cut -d' ' -f2)"
@@ -93,6 +94,7 @@ resolve_versions() {
     TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
     info "Runtara version: ${RUNTARA_VERSION}"
+    info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
     info "Wasmtime version: ${WASMTIME_VERSION}"
     info "Target dir:      ${TARGET_DIR}"
@@ -136,7 +138,8 @@ build_server() {
     fi
 
     step "Building runtara-server (release, with embed-ui)"
-    cargo build --release -p runtara-server --features embed-ui
+    BUILD_VERSION="$RUNTARA_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" \
+        cargo build --release -p runtara-server --features embed-ui
 }
 
 # ─── Build workflow stdlib ───────────────────────────────────────────────────
@@ -322,6 +325,7 @@ assemble_bundle() {
     cat > "$bundle/MANIFEST.json" <<MANIFEST
 {
   "runtara_version": "${RUNTARA_VERSION}",
+  "runtara_commit": "${RUNTARA_COMMIT}",
   "rustc_version": "${RUSTC_VERSION}",
   "wasmtime_version": "${WASMTIME_VERSION}",
   "host_target": "${HOST_TARGET}",

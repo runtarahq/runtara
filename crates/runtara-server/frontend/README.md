@@ -27,14 +27,15 @@ The bundle is **mount-agnostic and tenant-agnostic**: one build deploys
 anywhere. At startup, `runtara-server` injects `<base href>` and
 `window.__RUNTARA_CONFIG__` into `index.html` from `RUNTARA_UI_*` env vars:
 
-| Runtime env (`RUNTARA_UI_*`) | Build-time fallback (`VITE_*`) | Consumer |
-| --- | --- | --- |
-| `RUNTARA_UI_OIDC_AUTHORITY` | `VITE_OIDC_AUTHORITY` | OIDC |
-| `RUNTARA_UI_OIDC_CLIENT_ID` | `VITE_OIDC_CLIENT_ID` | OIDC |
-| `RUNTARA_UI_OIDC_AUDIENCE` | `VITE_OIDC_AUDIENCE` | OIDC |
-| `RUNTARA_UI_API_BASE_URL` | `VITE_RUNTARA_API_BASE_URL` | API client |
-| `RUNTARA_UI_PLAUSIBLE_DOMAIN` | `VITE_RUNTARA_PLAUSIBLE_DOMAIN` | Analytics (opt-in) |
-| `RUNTARA_UI_PLAUSIBLE_HOST` | `VITE_RUNTARA_PLAUSIBLE_HOST` | Analytics (opt-in) |
+| Runtime env (`RUNTARA_UI_*`)  | Build-time fallback (`VITE_*`)                 | Consumer                |
+| ----------------------------- | ---------------------------------------------- | ----------------------- |
+| `RUNTARA_UI_OIDC_AUTHORITY`   | `VITE_OIDC_AUTHORITY`                          | OIDC                    |
+| `RUNTARA_UI_OIDC_CLIENT_ID`   | `VITE_OIDC_CLIENT_ID`                          | OIDC                    |
+| `RUNTARA_UI_OIDC_AUDIENCE`    | `VITE_OIDC_AUDIENCE`                           | OIDC                    |
+| `RUNTARA_UI_API_BASE_URL`     | `VITE_RUNTARA_API_BASE_URL`                    | API client              |
+| `RUNTARA_UI_PLAUSIBLE_DOMAIN` | `VITE_RUNTARA_PLAUSIBLE_DOMAIN`                | Analytics (opt-in)      |
+| `RUNTARA_UI_PLAUSIBLE_HOST`   | `VITE_RUNTARA_PLAUSIBLE_HOST`                  | Analytics (opt-in)      |
+| server build stamp            | `VITE_RUNTARA_VERSION` / `VITE_RUNTARA_COMMIT` | Sidebar version display |
 
 Config resolution lives in [`src/shared/config/runtimeConfig.ts`](src/shared/config/runtimeConfig.ts).
 Vite dev server and tests use the build-time fallbacks; the embedded

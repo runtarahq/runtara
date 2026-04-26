@@ -153,6 +153,9 @@ fn runtime_config_json() -> String {
         }
     }
 
+    entries.push(("version".to_string(), env!("BUILD_VERSION").to_string()));
+    entries.push(("commit".to_string(), env!("BUILD_COMMIT").to_string()));
+
     // Normalize the provider name to the three values the SPA branches on.
     // Anything unrecognized degrades to "oidc" so the SPA behaves like before.
     let auth_mode = match std::env::var("AUTH_PROVIDER")
