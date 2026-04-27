@@ -50,6 +50,18 @@ pub enum ColumnType {
         /// List of allowed string values
         values: Vec<String>,
     },
+
+    /// Generated `tsvector` column derived from another text column on the
+    /// same schema. Read-only; populated automatically.
+    Tsvector {
+        /// Name of the text column to derive the tsvector from. Must be a
+        /// `String` or `Enum` column declared in the same schema.
+        #[serde(rename = "sourceColumn")]
+        source_column: String,
+        /// Postgres text-search configuration. Defaults to `"english"`.
+        #[serde(default = "default_tsvector_language")]
+        language: String,
+    },
 }
 
 fn default_precision() -> u8 {
@@ -58,6 +70,10 @@ fn default_precision() -> u8 {
 
 fn default_scale() -> u8 {
     4
+}
+
+fn default_tsvector_language() -> String {
+    "english".to_string()
 }
 
 impl ColumnType {
@@ -85,6 +101,7 @@ impl ColumnType {
                         .join(", ")
                 )
             }
+            ColumnType::Tsvector { .. } => "TSVECTOR".to_string(),
         }
     }
 
@@ -131,6 +148,9 @@ impl ColumnType {
                 } else {
                     Err(format!("Value '{}' not in enum values: {:?}", s, values))
                 }
+            }
+            (ColumnType::Tsvector { .. }, _) => {
+                Err("Generated tsvector columns are read-only; do not set a value".to_string())
             }
             _ => Err(format!(
                 "Type mismatch: expected {:?}, got {:?}",
@@ -843,6 +863,13 @@ impl From<StoreColumnType> for ColumnType {
             StoreColumnType::Timestamp => ColumnType::Timestamp,
             StoreColumnType::Json => ColumnType::Json,
             StoreColumnType::Enum { values } => ColumnType::Enum { values },
+            StoreColumnType::Tsvector {
+                source_column,
+                language,
+            } => ColumnType::Tsvector {
+                source_column,
+                language,
+            },
         }
     }
 }
@@ -859,6 +886,13 @@ impl From<ColumnType> for StoreColumnType {
             ColumnType::Timestamp => StoreColumnType::Timestamp,
             ColumnType::Json => StoreColumnType::Json,
             ColumnType::Enum { values } => StoreColumnType::Enum { values },
+            ColumnType::Tsvector {
+                source_column,
+                language,
+            } => StoreColumnType::Tsvector {
+                source_column,
+                language,
+            },
         }
     }
 }

@@ -195,6 +195,13 @@ impl ObjectStore {
             sqlx::query(&trigram_sql).execute(&self.pool).await?;
         }
 
+        // Create GIN indexes for any tsvector-typed columns. Tsvector
+        // columns are useless without a GIN index — full-text queries fall
+        // back to seq scans otherwise.
+        for tsv_sql in ddl.generate_tsvector_indexes(&request.table_name, &request.columns) {
+            sqlx::query(&tsv_sql).execute(&self.pool).await?;
+        }
+
         // Create any specified indexes
         if let Some(indexes) = &request.indexes {
             for index in indexes {
@@ -454,6 +461,17 @@ impl ObjectStore {
 
         // Validate and collect columns
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                if let Some(v) = properties_obj.get(&col.name)
+                    && !v.is_null()
+                {
+                    return Err(ObjectStoreError::validation(format!(
+                        "Column '{}' is generated and cannot be set",
+                        col.name
+                    )));
+                }
+                continue;
+            }
             if let Some(value) = properties_obj.get(&col.name) {
                 // Validate type
                 if let Err(e) = col.column_type.validate_value(value) {
@@ -496,6 +514,9 @@ impl ObjectStore {
         }
 
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             if let Some(value) = properties_obj.get(&col.name) {
                 query = Self::bind_value(query, &col.column_type, &col.name, value)?;
             }
@@ -531,6 +552,9 @@ impl ObjectStore {
         }
 
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             select_columns.push(quote_identifier(&col.name));
         }
 
@@ -697,6 +721,17 @@ impl ObjectStore {
         }
 
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                if let Some(v) = properties_obj.get(&col.name)
+                    && !v.is_null()
+                {
+                    return Err(ObjectStoreError::validation(format!(
+                        "Column '{}' is generated and cannot be set",
+                        col.name
+                    )));
+                }
+                continue;
+            }
             if let Some(value) = properties_obj.get(&col.name) {
                 // Validate type
                 if let Err(e) = col.column_type.validate_value(value) {
@@ -725,6 +760,9 @@ impl ObjectStore {
         let mut query = sqlx::query(&update_sql).bind(instance_id);
 
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             if let Some(value) = properties_obj.get(&col.name) {
                 query = Self::bind_value(query, &col.column_type, &col.name, value)?;
             }
@@ -826,6 +864,9 @@ impl ObjectStore {
         }
 
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             if let Some(value) = properties_obj.get(&col.name) {
                 // Validate type
                 if let Err(e) = col.column_type.validate_value(value) {
@@ -1009,6 +1050,9 @@ impl ObjectStore {
 
             // Validate each column
             for col in &schema.columns {
+                if col.column_type.is_generated() {
+                    continue;
+                }
                 if let Some(value) = properties_obj.get(&col.name) {
                     if let Err(e) = col.column_type.validate_value(value) {
                         return Err(ObjectStoreError::validation(format!(
@@ -1049,6 +1093,9 @@ impl ObjectStore {
             column_names.push("id".to_string());
         }
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             column_names.push(quote_identifier(&col.name));
         }
 
@@ -1064,6 +1111,9 @@ impl ObjectStore {
                     param_idx += 1;
                 }
                 for col in &schema.columns {
+                    if col.column_type.is_generated() {
+                        continue;
+                    }
                     match classify_slot(col, properties_obj) {
                         Slot::Default => row_placeholders.push("DEFAULT".to_string()),
                         Slot::TypedNull | Slot::Value(_) => {
@@ -1090,6 +1140,9 @@ impl ObjectStore {
                     query = query.bind(instance_id);
                 }
                 for col in &schema.columns {
+                    if col.column_type.is_generated() {
+                        continue;
+                    }
                     query = match classify_slot(col, properties_obj) {
                         Slot::Default => query,
                         Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
@@ -1175,6 +1228,9 @@ impl ObjectStore {
 
             // Validate each column
             for col in &schema.columns {
+                if col.column_type.is_generated() {
+                    continue;
+                }
                 if let Some(value) = properties_obj.get(&col.name)
                     && let Err(e) = col.column_type.validate_value(value)
                 {
@@ -1195,6 +1251,9 @@ impl ObjectStore {
             column_names.push("id".to_string());
         }
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             column_names.push(quote_identifier(&col.name));
         }
 
@@ -1248,6 +1307,9 @@ impl ObjectStore {
                         param_idx += 1;
                     }
                     for col in &schema.columns {
+                        if col.column_type.is_generated() {
+                            continue;
+                        }
                         match classify_slot(col, properties_obj) {
                             Slot::Default => row_placeholders.push("DEFAULT".to_string()),
                             Slot::TypedNull | Slot::Value(_) => {
@@ -1286,6 +1348,9 @@ impl ObjectStore {
                         query = query.bind(instance_id);
                     }
                     for col in &schema.columns {
+                        if col.column_type.is_generated() {
+                            continue;
+                        }
                         query = match classify_slot(col, properties_obj) {
                             Slot::Default => query,
                             Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
@@ -1409,6 +1474,9 @@ impl ObjectStore {
             column_names.push("id".to_string());
         }
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             column_names.push(quote_identifier(&col.name));
         }
 
@@ -1483,6 +1551,9 @@ impl ObjectStore {
                         param_idx += 1;
                     }
                     for col in &schema.columns {
+                        if col.column_type.is_generated() {
+                            continue;
+                        }
                         match classify_slot(col, properties_obj) {
                             Slot::Default => row_placeholders.push("DEFAULT".to_string()),
                             Slot::TypedNull | Slot::Value(_) => {
@@ -1508,6 +1579,9 @@ impl ObjectStore {
                         query = query.bind(instance_id);
                     }
                     for col in &schema.columns {
+                        if col.column_type.is_generated() {
+                            continue;
+                        }
                         query = match classify_slot(col, properties_obj) {
                             Slot::Default => query,
                             Slot::TypedNull => Self::bind_typed_null(query, &col.column_type),
@@ -1574,6 +1648,9 @@ impl ObjectStore {
                 ))
             })?;
             for col in &schema.columns {
+                if col.column_type.is_generated() {
+                    continue;
+                }
                 if let Some(value) = properties_obj.get(&col.name)
                     && let Err(e) = col.column_type.validate_value(value)
                 {
@@ -1599,6 +1676,9 @@ impl ObjectStore {
 
             let mut bind_cols: Vec<(&ColumnDefinition, &serde_json::Value)> = Vec::new();
             for col in &schema.columns {
+                if col.column_type.is_generated() {
+                    continue;
+                }
                 if let Some(value) = properties_obj.get(&col.name) {
                     set_clauses.push(format!("{} = ${}", quote_identifier(&col.name), param_idx));
                     bind_cols.push((col, value));
@@ -1678,6 +1758,9 @@ impl ObjectStore {
         }
 
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             select_columns.push(quote_identifier(&col.name));
         }
 
@@ -1825,6 +1908,9 @@ impl ObjectStore {
         // Build properties from columns
         let mut properties = serde_json::Map::new();
         for col in &schema.columns {
+            if col.column_type.is_generated() {
+                continue;
+            }
             if let Some(value) = Self::extract_column_value(row, col) {
                 properties.insert(col.name.clone(), value);
             }
@@ -1893,6 +1979,10 @@ impl ObjectStore {
                 .try_get::<Option<serde_json::Value>, _>(col.name.as_str())
                 .ok()
                 .flatten(),
+            // Generated tsvector columns are not surfaced in row payloads —
+            // their printed form (`'foo':1 'bar':2`) is noise for clients;
+            // queryable access is via MATCH / TS_RANK.
+            ColumnType::Tsvector { .. } => None,
         }
     }
 
@@ -1993,6 +2083,16 @@ impl ObjectStore {
                 }
             }
             ColumnType::Json => query.bind(value),
+            // Defensive: every iteration over `schema.columns` skips
+            // generated columns before reaching this path. If we ever do
+            // hit it, surface a clear error rather than silently corrupting
+            // an INSERT/UPDATE.
+            ColumnType::Tsvector { .. } => {
+                return Err(ObjectStoreError::validation(format!(
+                    "internal error: attempted to bind a value to generated tsvector column '{}'",
+                    column_name
+                )));
+            }
         })
     }
 
@@ -2013,6 +2113,9 @@ impl ObjectStore {
             ColumnType::Boolean => query.bind(None::<bool>),
             ColumnType::Timestamp => query.bind(None::<chrono::DateTime<chrono::Utc>>),
             ColumnType::Json => query.bind(None::<serde_json::Value>),
+            // Same defensive handling as `bind_value` — should never be
+            // reached because callers filter generated columns out first.
+            ColumnType::Tsvector { .. } => query.bind(None::<String>),
         }
     }
 }
@@ -2077,6 +2180,17 @@ fn validate_instance_for_insert(
         .ok_or_else(|| "properties must be a JSON object".to_string())?;
 
     for col in &schema.columns {
+        if col.column_type.is_generated() {
+            if let Some(v) = properties_obj.get(&col.name)
+                && !v.is_null()
+            {
+                return Err(format!(
+                    "Column '{}' is generated and cannot be set",
+                    col.name
+                ));
+            }
+            continue;
+        }
         if let Some(value) = properties_obj.get(&col.name) {
             if let Err(e) = col.column_type.validate_value(value) {
                 return Err(format!("Invalid value for column '{}': {}", col.name, e));

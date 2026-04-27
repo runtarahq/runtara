@@ -77,6 +77,13 @@ impl<'a> DdlGenerator<'a> {
                 if new_col.requires_trigram_index() {
                     statements.push(Self::trigram_index_create(table_name, &new_col.name));
                 }
+                // tsvector columns get a GIN index automatically.
+                if matches!(
+                    new_col.column_type,
+                    crate::types::ColumnType::Tsvector { .. }
+                ) {
+                    statements.push(Self::tsvector_index_create(table_name, &new_col.name));
+                }
             }
         }
 
@@ -85,6 +92,12 @@ impl<'a> DdlGenerator<'a> {
             if !new_columns.iter().any(|c| c.name == old_col.name) {
                 if old_col.requires_trigram_index() {
                     statements.push(Self::trigram_index_drop(table_name, &old_col.name));
+                }
+                if matches!(
+                    old_col.column_type,
+                    crate::types::ColumnType::Tsvector { .. }
+                ) {
+                    statements.push(Self::tsvector_index_drop(table_name, &old_col.name));
                 }
                 statements.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
@@ -221,6 +234,39 @@ impl<'a> DdlGenerator<'a> {
         format!("DROP INDEX IF EXISTS {}", quoted_index)
     }
 
+    /// Emit a `CREATE INDEX … USING GIN (col)` for every `tsvector`-typed
+    /// column. tsvector columns are useless without a GIN index — full-text
+    /// queries fall back to seq scans otherwise.
+    pub fn generate_tsvector_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| matches!(c.column_type, crate::types::ColumnType::Tsvector { .. }))
+            .map(|c| Self::tsvector_index_create(table_name, &c.name))
+            .collect()
+    }
+
+    fn tsvector_index_create(table_name: &str, column: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        let index_name = format!("idx_{}_{}_fts", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} USING GIN ({}) \
+             WHERE deleted = FALSE",
+            quoted_index, quoted_table, quoted_column
+        )
+    }
+
+    fn tsvector_index_drop(table_name: &str, column: &str) -> String {
+        let index_name = format!("idx_{}_{}_fts", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!("DROP INDEX IF EXISTS {}", quoted_index)
+    }
+
     /// Format a single column definition for CREATE TABLE or ALTER TABLE ADD COLUMN
     pub fn format_column_definition(col: &ColumnDefinition) -> String {
         let mut parts = vec![
@@ -238,8 +284,22 @@ impl<'a> DdlGenerator<'a> {
             parts.push("NOT NULL".to_string());
         }
 
-        // DEFAULT value
-        if let Some(default) = &col.default_value {
+        // Generated-column expression for tsvector columns. Mutually exclusive
+        // with DEFAULT (Postgres rejects both on the same column).
+        if let crate::types::ColumnType::Tsvector {
+            source_column,
+            language,
+        } = &col.column_type
+        {
+            // Single quotes inside the language config are escaped defensively.
+            let lang_lit = language.replace('\'', "''");
+            parts.push(format!(
+                "GENERATED ALWAYS AS (to_tsvector('{}', coalesce({}, ''))) STORED",
+                lang_lit,
+                quote_identifier(source_column)
+            ));
+        } else if let Some(default) = &col.default_value {
+            // DEFAULT value
             parts.push(format!("DEFAULT {}", default));
         }
 
@@ -806,6 +866,92 @@ mod tests {
     }
 
     // ==================== Edge Cases ====================
+
+    // ==================== Tsvector Column Tests ====================
+
+    fn tsv_col(name: &str, source: &str) -> ColumnDefinition {
+        ColumnDefinition::new(
+            name,
+            ColumnType::Tsvector {
+                source_column: source.to_string(),
+                language: "english".to_string(),
+            },
+        )
+        .not_null()
+    }
+
+    #[test]
+    fn test_format_column_definition_tsvector_emits_generated_clause() {
+        let col = tsv_col("keywords_tsv", "keywords");
+        let formatted = DdlGenerator::format_column_definition(&col);
+        assert_eq!(
+            formatted,
+            "\"keywords_tsv\" TSVECTOR NOT NULL \
+             GENERATED ALWAYS AS (to_tsvector('english', coalesce(\"keywords\", ''))) STORED"
+        );
+    }
+
+    #[test]
+    fn test_format_column_definition_tsvector_skips_default_clause() {
+        // DEFAULT must not appear on a generated column — Postgres rejects both.
+        let mut col = tsv_col("keywords_tsv", "keywords");
+        col.default_value = Some("'ignored'".to_string());
+        let formatted = DdlGenerator::format_column_definition(&col);
+        assert!(!formatted.contains("DEFAULT"), "{}", formatted);
+        assert!(formatted.contains("GENERATED ALWAYS AS"));
+    }
+
+    #[test]
+    fn test_generate_tsvector_indexes_emits_partial_gin() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String),
+            tsv_col("keywords_tsv", "keywords"),
+        ];
+        let statements = generator.generate_tsvector_indexes("products", &columns);
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "CREATE INDEX IF NOT EXISTS \"idx_products_keywords_tsv_fts\" \
+             ON \"products\" USING GIN (\"keywords_tsv\") \
+             WHERE deleted = FALSE"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_table_emits_tsvector_index_for_added_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![ColumnDefinition::new("keywords", ColumnType::String)];
+        let new_columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String),
+            tsv_col("keywords_tsv", "keywords"),
+        ];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("ADD COLUMN"));
+        assert!(statements[0].contains("GENERATED ALWAYS AS"));
+        assert!(statements[1].contains("CREATE INDEX IF NOT EXISTS"));
+        assert!(statements[1].contains("USING GIN"));
+        assert!(statements[1].contains("idx_products_keywords_tsv_fts"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drops_tsvector_index_with_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String),
+            tsv_col("keywords_tsv", "keywords"),
+        ];
+        let new_columns = vec![ColumnDefinition::new("keywords", ColumnType::String)];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("DROP INDEX IF EXISTS"));
+        assert!(statements[0].contains("idx_products_keywords_tsv_fts"));
+        assert!(statements[1].contains("DROP COLUMN"));
+    }
 
     // ==================== Trigram Index Tests ====================
 

@@ -62,6 +62,7 @@ run_test "Basic Workflow" "${SCRIPT_DIR}/test_basic_workflow.sh"
 run_test "Delay Workflow" "${SCRIPT_DIR}/test_delay_workflow.sh"
 run_test "SMO Trigram Similarity (Tier 1)" "${SCRIPT_DIR}/test_smo_trigram_similarity.sh"
 run_test "SMO Categorization Workflow (Tier 1)" "${SCRIPT_DIR}/test_smo_categorization_workflow.sh"
+run_test "SMO FTS Match + TS_RANK (Tier 2)" "${SCRIPT_DIR}/test_smo_fts_match.sh"
 
 # Summary
 echo "=========================================="

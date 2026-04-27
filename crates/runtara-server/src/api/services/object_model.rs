@@ -365,7 +365,11 @@ impl InstanceService {
             .create_instance(&schema_name, request.properties.clone())
             .await
             .map_err(|e| {
-                if e.to_string().contains("validation") || e.to_string().contains("type") {
+                let lower = e.to_string().to_lowercase();
+                if lower.contains("validation")
+                    || lower.contains("type")
+                    || lower.contains("generated")
+                {
                     ServiceError::ValidationError(e.to_string())
                 } else {
                     ServiceError::DatabaseError(e.to_string())

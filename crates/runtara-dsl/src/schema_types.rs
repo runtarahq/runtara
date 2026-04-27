@@ -1657,6 +1657,10 @@ pub enum ConditionOperator {
 
     // Similarity (server-side only; valid inside object-model query conditions)
     SimilarityGte,
+
+    // Full-text search (server-side only; valid on tsvector columns inside
+    // object-model query conditions). Maps to `field @@ plainto_tsquery(...)`.
+    Match,
 }
 
 /// A condition expression for conditional branching.

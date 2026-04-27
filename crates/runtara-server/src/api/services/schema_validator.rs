@@ -67,6 +67,11 @@ impl SchemaValidator {
             Self::validate_column(col, &mut column_names)?;
         }
 
+        // Cross-column validation: tsvector columns reference another column
+        // on the same schema, so we have to wait until every column has been
+        // visited before checking those references.
+        Self::validate_cross_column(columns)?;
+
         // Validate indexes
         if let Some(idx_list) = indexes {
             for idx in idx_list {
@@ -74,6 +79,44 @@ impl SchemaValidator {
             }
         }
 
+        Ok(())
+    }
+
+    /// Cross-column checks that need to see every column at once.
+    fn validate_cross_column(columns: &[ColumnDefinition]) -> Result<(), ValidationError> {
+        for col in columns {
+            if let crate::api::dto::object_model::ColumnType::Tsvector {
+                source_column,
+                language,
+            } = &col.column_type
+            {
+                if language.trim().is_empty() {
+                    return Err(ValidationError::UnsupportedType(format!(
+                        "Tsvector column '{}' has an empty language",
+                        col.name
+                    )));
+                }
+                let src = columns.iter().find(|c| c.name == *source_column);
+                match src {
+                    None => {
+                        return Err(ValidationError::UnsupportedType(format!(
+                            "Tsvector column '{}' references unknown source column '{}'",
+                            col.name, source_column
+                        )));
+                    }
+                    Some(c) => match &c.column_type {
+                        crate::api::dto::object_model::ColumnType::String
+                        | crate::api::dto::object_model::ColumnType::Enum { .. } => {}
+                        other => {
+                            return Err(ValidationError::UnsupportedType(format!(
+                                "Tsvector column '{}' source '{}' must be a string/enum column, got {:?}",
+                                col.name, source_column, other
+                            )));
+                        }
+                    },
+                }
+            }
+        }
         Ok(())
     }
 

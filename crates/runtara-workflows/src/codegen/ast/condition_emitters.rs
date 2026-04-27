@@ -175,6 +175,19 @@ pub fn emit_operation(
                 }
             }
         }
+        // MATCH (full-text search) is server-side-only for the same reason.
+        ConditionOperator::Match => {
+            quote! {
+                {
+                    eprintln!(
+                        "warning: MATCH is a server-side-only operator; \
+                         use it inside an object-model `query-instances` condition \
+                         on a tsvector column. Falling back to false."
+                    );
+                    false
+                }
+            }
+        }
     }
 }
 

@@ -38,10 +38,26 @@ pub(crate) fn resolve_sql_cast(field: &str, schema: &Schema) -> &'static str {
             ColumnType::Boolean => "boolean",
             ColumnType::Timestamp => "timestamptz",
             ColumnType::Json => "text",
+            // tsvector columns are only meaningful inside MATCH / TS_RANK;
+            // the generic comparison arms reject this cast.
+            ColumnType::Tsvector { .. } => "tsvector",
         }
     } else {
         "text"
     }
+}
+
+/// Look up a column's `text_search_configuration` (e.g. `"english"`). Used by
+/// MATCH / TS_RANK to render `plainto_tsquery('<lang>', $N)` against the
+/// column's declared language. Returns `"english"` for unknown / non-tsvector
+/// fields.
+pub(crate) fn resolve_tsvector_language(field: &str, schema: &Schema) -> String {
+    if let Some(col) = schema.columns.iter().find(|c| c.name == field)
+        && let ColumnType::Tsvector { language, .. } = &col.column_type
+    {
+        return language.clone();
+    }
+    "english".to_string()
 }
 
 /// Build SQL WHERE clause from condition structure
@@ -444,6 +460,50 @@ pub fn build_condition_clause(
             let clause = format!(
                 "similarity(\"{}\"::text, ${}::text) >= {:.6}",
                 field, param_offset, threshold
+            );
+            *param_offset += 1;
+            Ok((clause, params))
+        }
+        "MATCH" => {
+            let args = args.ok_or("MATCH operation requires arguments")?;
+            if args.len() != 2 {
+                return Err(
+                    "MATCH operation requires exactly 2 arguments (field, query)".to_string(),
+                );
+            }
+            let raw_field = args[0]
+                .as_str()
+                .ok_or("First argument must be a field name")?;
+            if raw_field.is_empty() {
+                return Err("Field name cannot be empty".to_string());
+            }
+            if !raw_field
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err("Field name contains invalid characters".to_string());
+            }
+            let field = field_to_sql(raw_field);
+
+            // Reject MATCH on anything that isn't a tsvector column.
+            let cast = resolve_sql_cast(field, schema);
+            if cast != "tsvector" {
+                return Err(format!(
+                    "MATCH requires a tsvector column; '{}' has SQL cast {}",
+                    field, cast
+                ));
+            }
+
+            let query = args[1]
+                .as_str()
+                .ok_or("Second argument must be a query string")?;
+
+            let language = resolve_tsvector_language(field, schema);
+            let lang_lit = language.replace('\'', "''");
+            params.push(serde_json::Value::String(query.to_string()));
+            let clause = format!(
+                "\"{}\" @@ plainto_tsquery('{}', ${})",
+                field, lang_lit, param_offset
             );
             *param_offset += 1;
             Ok((clause, params))
@@ -1276,6 +1336,72 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid sort order"));
+    }
+
+    // ==================== MATCH ====================
+
+    fn schema_with_tsv() -> Schema {
+        Schema {
+            id: "test-id".to_string(),
+            name: "fts_schema".to_string(),
+            description: None,
+            table_name: "fts_table".to_string(),
+            columns: vec![
+                ColumnDefinition::new("name", crate::types::ColumnType::String),
+                ColumnDefinition::new(
+                    "name_tsv",
+                    crate::types::ColumnType::Tsvector {
+                        source_column: "name".to_string(),
+                        language: "english".to_string(),
+                    },
+                )
+                .not_null(),
+            ],
+            indexes: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_match_basic() {
+        let schema = schema_with_tsv();
+        let condition = Condition {
+            op: "MATCH".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name_tsv"),
+                serde_json::json!("blue jacket"),
+            ]),
+        };
+        let mut offset = 1;
+        let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
+        assert_eq!(clause, "\"name_tsv\" @@ plainto_tsquery('english', $1)");
+        assert_eq!(params, vec![serde_json::json!("blue jacket")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_match_rejects_non_tsvector_column() {
+        let schema = schema_with_tsv();
+        let condition = Condition {
+            op: "MATCH".to_string(),
+            arguments: Some(vec![serde_json::json!("name"), serde_json::json!("blue")]),
+        };
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("tsvector"), "{}", err);
+    }
+
+    #[test]
+    fn test_match_wrong_arity() {
+        let schema = schema_with_tsv();
+        let condition = Condition {
+            op: "MATCH".to_string(),
+            arguments: Some(vec![serde_json::json!("name_tsv")]),
+        };
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("exactly 2 arguments"), "{}", err);
     }
 
     // ==================== SIMILARITY_GTE ====================

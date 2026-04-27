@@ -122,6 +122,10 @@ pub enum ExprFn {
     Greatest,
     /// PostgreSQL `LEAST(numeric, ...)` — takes >= 1 numeric arguments.
     Least,
+    /// PostgreSQL `ts_rank(tsvector, tsquery) -> real` for full-text scoring.
+    /// Two arguments: a column reference to a `tsvector` column and a string
+    /// query to be tokenized via `plainto_tsquery`.
+    TsRank,
 }
 
 impl ExprFn {
@@ -130,6 +134,7 @@ impl ExprFn {
             ExprFn::Similarity => "SIMILARITY",
             ExprFn::Greatest => "GREATEST",
             ExprFn::Least => "LEAST",
+            ExprFn::TsRank => "TS_RANK",
         }
     }
 }
@@ -178,9 +183,22 @@ pub(crate) fn column_kind(sql_field: &str, schema: &Schema) -> AliasKind {
             ColumnType::Boolean => AliasKind::Bool,
             ColumnType::Timestamp => AliasKind::Timestamp,
             ColumnType::Json => AliasKind::Json,
+            // tsvector columns surface as Json so generic aggregate/expression
+            // operators reject them; TS_RANK does its own column-type check
+            // via `is_tsvector_column` below.
+            ColumnType::Tsvector { .. } => AliasKind::Json,
         },
         None => AliasKind::Text,
     }
+}
+
+fn is_tsvector_column(name: &str, schema: &Schema) -> bool {
+    schema
+        .columns
+        .iter()
+        .find(|c| c.name == name)
+        .map(|c| matches!(c.column_type, ColumnType::Tsvector { .. }))
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -519,6 +537,47 @@ pub(crate) fn validate_row_expression(
 }
 
 fn validate_fn_call(call: &ExprFnCall, schema: &Schema, depth: u8) -> Result<AliasKind, String> {
+    // TS_RANK does its own column-type check on the first argument before
+    // recursive validation (we need to *allow* a tsvector column reference
+    // even though `validate_row_expression`'s default ColumnType::Tsvector
+    // mapping is `AliasKind::Json`).
+    if matches!(call.fn_, ExprFn::TsRank) {
+        if call.arguments.len() != 2 {
+            return Err(format!(
+                "{}: expected 2 arguments, got {}",
+                call.fn_.name(),
+                call.arguments.len()
+            ));
+        }
+        // First arg must be a column reference pointing to a tsvector column.
+        let col_name = match &call.arguments[0] {
+            ExprNode::Value(ExprValue::Reference { value }) => value.clone(),
+            _ => {
+                return Err(format!(
+                    "{}: first argument must reference a tsvector column",
+                    call.fn_.name()
+                ));
+            }
+        };
+        if !is_tsvector_column(&col_name, schema) {
+            return Err(format!(
+                "{}: column '{}' is not declared as a tsvector",
+                call.fn_.name(),
+                col_name
+            ));
+        }
+        // Second arg must be a text immediate (the query string).
+        let q_kind = validate_row_expression(&call.arguments[1], schema, depth + 1)?;
+        if !matches!(q_kind, AliasKind::Text | AliasKind::Nullable) {
+            return Err(format!(
+                "{}: query argument must be text, got {:?}",
+                call.fn_.name(),
+                q_kind
+            ));
+        }
+        return Ok(AliasKind::Numeric);
+    }
+
     let kinds: Vec<AliasKind> = call
         .arguments
         .iter()
@@ -561,6 +620,7 @@ fn validate_fn_call(call: &ExprFnCall, schema: &Schema, depth: u8) -> Result<Ali
             }
             Ok(AliasKind::Numeric)
         }
+        ExprFn::TsRank => unreachable!("handled at top of function"),
     }
 }
 
@@ -654,6 +714,38 @@ pub(crate) fn render_row_expression(
             Ok(render_op(op.op, &children))
         }
         ExprNode::Fn(call) => {
+            // TS_RANK has bespoke rendering — it needs the tsvector column's
+            // declared language (looked up on the schema) and binds the
+            // query through `plainto_tsquery('<lang>', $N)` rather than as
+            // a plain text immediate.
+            if matches!(call.fn_, ExprFn::TsRank) {
+                let col_name = match &call.arguments[0] {
+                    ExprNode::Value(ExprValue::Reference { value }) => value.clone(),
+                    _ => unreachable!("validated above"),
+                };
+                let language = schema
+                    .columns
+                    .iter()
+                    .find(|c| c.name == col_name)
+                    .and_then(|c| match &c.column_type {
+                        ColumnType::Tsvector { language, .. } => Some(language.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "english".to_string());
+                let query_sql = render_row_expression(
+                    &call.arguments[1],
+                    schema,
+                    params,
+                    param_offset,
+                    depth + 1,
+                )?;
+                let lang_lit = language.replace('\'', "''");
+                return Ok(format!(
+                    "ts_rank(\"{}\", plainto_tsquery('{}', {}))",
+                    col_name, lang_lit, query_sql
+                ));
+            }
+
             let children: Vec<String> = call
                 .arguments
                 .iter()
@@ -699,6 +791,8 @@ fn render_fn(f: ExprFn, children: &[String]) -> String {
         }
         ExprFn::Greatest => format!("GREATEST({})", children.join(", ")),
         ExprFn::Least => format!("LEAST({})", children.join(", ")),
+        // Handled inline by `render_row_expression`; this arm is unreachable.
+        ExprFn::TsRank => unreachable!("TS_RANK is rendered inline in render_row_expression"),
     }
 }
 
@@ -1003,6 +1097,14 @@ mod tests {
                 ColumnDefinition::new("name", ColumnType::String),
                 ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
                 ColumnDefinition::new("price", ColumnType::Integer),
+                ColumnDefinition::new(
+                    "keywords_tsv",
+                    ColumnType::Tsvector {
+                        source_column: "keywords".to_string(),
+                        language: "english".to_string(),
+                    },
+                )
+                .not_null(),
             ],
         )
     }
@@ -1166,5 +1268,74 @@ mod tests {
         let node = fn_call(ExprFn::Similarity, vec![imm(serde_json::json!("x"))]);
         let err = validate_expression(&node, &prior, 0).unwrap_err();
         assert!(err.contains("function call"), "{}", err);
+    }
+
+    // ===== TS_RANK =====
+
+    #[test]
+    fn ts_rank_accepts_tsvector_column_and_text_query() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::TsRank,
+            vec![
+                col_ref("keywords_tsv"),
+                imm(serde_json::json!("blue jacket")),
+            ],
+        );
+        assert_eq!(
+            validate_row_expression(&node, &schema, 0).unwrap(),
+            AliasKind::Numeric
+        );
+    }
+
+    #[test]
+    fn ts_rank_rejects_non_tsvector_column() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::TsRank,
+            vec![col_ref("keywords"), imm(serde_json::json!("blue"))],
+        );
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("not declared as a tsvector"), "{}", err);
+    }
+
+    #[test]
+    fn ts_rank_rejects_non_reference_first_arg() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::TsRank,
+            vec![imm(serde_json::json!("col")), imm(serde_json::json!("q"))],
+        );
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("must reference a tsvector column"), "{}", err);
+    }
+
+    #[test]
+    fn ts_rank_arity() {
+        let schema = product_schema();
+        let node = fn_call(ExprFn::TsRank, vec![col_ref("keywords_tsv")]);
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("expected 2 arguments"), "{}", err);
+    }
+
+    #[test]
+    fn ts_rank_renders_with_column_language() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::TsRank,
+            vec![
+                col_ref("keywords_tsv"),
+                imm(serde_json::json!("blue jacket")),
+            ],
+        );
+        let mut params = vec![];
+        let mut offset = 1_i32;
+        let sql = render_row_expression(&node, &schema, &mut params, &mut offset, 0).unwrap();
+        assert_eq!(
+            sql,
+            r#"ts_rank("keywords_tsv", plainto_tsquery('english', $1::text))"#
+        );
+        assert_eq!(params, vec![serde_json::json!("blue jacket")]);
+        assert_eq!(offset, 2);
     }
 }
