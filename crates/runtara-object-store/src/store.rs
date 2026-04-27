@@ -7,11 +7,14 @@ use sqlx::{PgPool, Row};
 
 use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
 use crate::error::{ObjectStoreError, Result};
-use crate::instance::{Condition, FilterRequest, Instance, SimpleFilter};
+use crate::instance::{
+    Condition, FilterRequest, Instance, OrderByEntry, OrderByTarget, SimpleFilter,
+};
 use crate::schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 use crate::sql::aggregate::{AggregateRequest, AggregateResult, build_aggregate_query};
-use crate::sql::condition::{build_condition_clause, build_order_by_clause};
+use crate::sql::condition::{build_condition_clause, build_order_by_clause, field_to_sql};
 use crate::sql::ddl::DdlGenerator;
+use crate::sql::expr::{ExprNode, render_row_expression, validate_row_expression};
 use crate::sql::sanitize::quote_identifier;
 use crate::types::{ColumnDefinition, ColumnType};
 
@@ -36,6 +39,7 @@ impl ObjectStore {
     /// This will:
     /// 1. Connect to the database
     /// 2. Create the metadata table if it doesn't exist
+    /// 3. Try to enable required extensions (e.g. `pg_trgm`)
     pub async fn new(config: StoreConfig) -> Result<Self> {
         let pool = PgPool::connect(&config.database_url).await.map_err(|e| {
             ObjectStoreError::Connection(format!("Database connection failed: {}", e))
@@ -43,6 +47,7 @@ impl ObjectStore {
 
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;
+        store.ensure_extensions().await;
 
         Ok(store)
     }
@@ -54,7 +59,29 @@ impl ObjectStore {
     pub async fn from_pool(pool: PgPool, config: StoreConfig) -> Result<Self> {
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;
+        store.ensure_extensions().await;
         Ok(store)
+    }
+
+    /// Best-effort enable of required Postgres extensions.
+    ///
+    /// `pg_trgm` is required for `SIMILARITY_GTE` and trigram indexes. The
+    /// migration runner already issues this for the metadata DB, but
+    /// per-tenant DBs that bootstrap through `from_pool` may not pass through
+    /// the migration path. We soft-fail with a warning so a hardened
+    /// permissions setup doesn't crash startup; trigram-dependent operations
+    /// will surface a clear error later.
+    async fn ensure_extensions(&self) {
+        if let Err(e) = sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS "pg_trgm""#)
+            .execute(&self.pool)
+            .await
+        {
+            eprintln!(
+                "warning: failed to ensure pg_trgm extension ({}); \
+                 SIMILARITY_GTE / trigram indexes will not work until it is installed",
+                e
+            );
+        }
     }
 
     /// Get a reference to the connection pool
@@ -161,6 +188,12 @@ impl ObjectStore {
         // Create default index
         let default_index_sql = ddl.generate_default_index(&request.table_name);
         sqlx::query(&default_index_sql).execute(&self.pool).await?;
+
+        // Create trigram (`gin_trgm_ops`) indexes for any column that wants
+        // them. Empty if no column has `text_index = trigram`.
+        for trigram_sql in ddl.generate_trigram_indexes(&request.table_name, &request.columns) {
+            sqlx::query(&trigram_sql).execute(&self.pool).await?;
+        }
 
         // Create any specified indexes
         if let Some(indexes) = &request.indexes {
@@ -512,7 +545,7 @@ impl ObjectStore {
             .fetch_optional(&self.pool)
             .await?;
 
-        Ok(row.map(|row| self.row_to_instance(&row, &schema)))
+        Ok(row.map(|row| self.row_to_instance(&row, &schema, None)))
     }
 
     /// Query instances using simple filters
@@ -1648,8 +1681,8 @@ impl ObjectStore {
             select_columns.push(quote_identifier(&col.name));
         }
 
-        // Build WHERE clause from condition
-        let (where_clause, params) = if let Some(condition) = filter.condition {
+        // Build WHERE clause from condition (params: $1..$N1)
+        let (where_clause, where_params) = if let Some(condition) = filter.condition {
             let mut param_offset = 1;
             build_condition_clause(&condition, &mut param_offset, schema)
                 .map_err(ObjectStoreError::InvalidCondition)?
@@ -1657,33 +1690,72 @@ impl ObjectStore {
             ("TRUE".to_string(), Vec::new())
         };
 
-        // Build ORDER BY clause
-        let order_by_clause = build_order_by_clause(&filter.sort_by, &filter.sort_order, schema)
-            .map_err(ObjectStoreError::validation)?;
+        // Validate + render `score_expression` if provided. Score-expression
+        // params append after WHERE params, so placeholders continue at
+        // $(where_params.len() + 1).
+        let mut score_params: Vec<serde_json::Value> = Vec::new();
+        let mut score_alias: Option<String> = None;
+        if let Some(score_expr) = filter.score_expression.as_ref() {
+            validate_score_alias(&score_expr.alias).map_err(ObjectStoreError::validation)?;
+
+            let node: ExprNode =
+                serde_json::from_value(score_expr.expression.clone()).map_err(|e| {
+                    ObjectStoreError::validation(format!(
+                        "score_expression: invalid expression JSON: {}",
+                        e
+                    ))
+                })?;
+            validate_row_expression(&node, schema, 0).map_err(ObjectStoreError::validation)?;
+
+            let mut score_offset = (where_params.len() as i32) + 1;
+            let score_sql =
+                render_row_expression(&node, schema, &mut score_params, &mut score_offset, 0)
+                    .map_err(ObjectStoreError::validation)?;
+
+            select_columns.push(format!(
+                "{} AS {}",
+                score_sql,
+                quote_identifier(&score_expr.alias)
+            ));
+            score_alias = Some(score_expr.alias.clone());
+        }
+
+        // Build ORDER BY: prefer the new structured `order_by` if set,
+        // otherwise fall back to the legacy `sort_by` / `sort_order`.
+        let order_by_clause = if let Some(entries) = filter.order_by.as_ref() {
+            render_order_by_entries(entries, schema, score_alias.as_deref())
+                .map_err(ObjectStoreError::validation)?
+        } else {
+            build_order_by_clause(&filter.sort_by, &filter.sort_order, schema)
+                .map_err(ObjectStoreError::validation)?
+        };
 
         let base_where = format!("deleted = FALSE AND ({})", where_clause);
 
-        // Count query
+        // Count query: only WHERE params bind, no score params (score column
+        // isn't referenced from a count(*)).
         let count_query = format!(
             "SELECT COUNT(*) FROM {} WHERE {}",
             quote_identifier(&schema.table_name),
             base_where
         );
 
-        // Select query
+        // Select query: WHERE params, then score params, then LIMIT and
+        // OFFSET (in that bind order).
+        let total_param_count = where_params.len() + score_params.len();
         let select_query = format!(
             "SELECT {} FROM {} WHERE {} ORDER BY {} LIMIT ${} OFFSET ${}",
             select_columns.join(", "),
             quote_identifier(&schema.table_name),
             base_where,
             order_by_clause,
-            params.len() + 1,
-            params.len() + 2
+            total_param_count + 1,
+            total_param_count + 2
         );
 
         // Execute count query
         let mut count_query_builder = sqlx::query_as::<_, (i64,)>(&count_query);
-        for param in &params {
+        for param in &where_params {
             let param_str = match param {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -1694,7 +1766,14 @@ impl ObjectStore {
 
         // Execute select query
         let mut select_query_builder = sqlx::query(&select_query);
-        for param in &params {
+        for param in &where_params {
+            let param_str = match param {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            select_query_builder = select_query_builder.bind(param_str);
+        }
+        for param in &score_params {
             let param_str = match param {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -1709,13 +1788,18 @@ impl ObjectStore {
 
         let instances: Vec<Instance> = rows
             .iter()
-            .map(|row| self.row_to_instance(row, schema))
+            .map(|row| self.row_to_instance(row, schema, score_alias.as_deref()))
             .collect();
 
         Ok((instances, total_count))
     }
 
-    fn row_to_instance(&self, row: &sqlx::postgres::PgRow, schema: &Schema) -> Instance {
+    fn row_to_instance(
+        &self,
+        row: &sqlx::postgres::PgRow,
+        schema: &Schema,
+        score_alias: Option<&str>,
+    ) -> Instance {
         let id: String = if self.config.auto_columns.id {
             row.try_get("id").unwrap_or_default()
         } else {
@@ -1746,6 +1830,20 @@ impl ObjectStore {
             }
         }
 
+        // Pull the score-expression column out of the row, if requested.
+        // pg_trgm `similarity()` returns `real`; sqlx maps it to `f32`.
+        let computed = score_alias.and_then(|alias| {
+            row.try_get::<Option<f32>, _>(alias)
+                .ok()
+                .flatten()
+                .and_then(|f| serde_json::Number::from_f64(f as f64))
+                .map(|num| {
+                    let mut map = serde_json::Map::new();
+                    map.insert(alias.to_string(), serde_json::Value::Number(num));
+                    map
+                })
+        });
+
         Instance {
             id,
             created_at,
@@ -1753,6 +1851,7 @@ impl ObjectStore {
             schema_id: Some(schema.id.clone()),
             schema_name: Some(schema.name.clone()),
             properties: serde_json::Value::Object(properties),
+            computed,
         }
     }
 
@@ -1991,4 +2090,81 @@ fn validate_instance_for_insert(
     }
 
     Ok(properties_obj.clone())
+}
+
+/// Validate the alias on a [`ScoreExpression`]. Mirrors the rule used by
+/// aggregate aliases: `[a-zA-Z_][a-zA-Z0-9_]*`.
+fn validate_score_alias(alias: &str) -> std::result::Result<(), String> {
+    if alias.is_empty() {
+        return Err("score_expression alias cannot be empty".to_string());
+    }
+    let mut chars = alias.chars();
+    let first = chars.next().unwrap();
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(format!(
+            "score_expression alias '{}' must start with a letter or underscore",
+            alias
+        ));
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "score_expression alias '{}' must match [a-zA-Z_][a-zA-Z0-9_]*",
+            alias
+        ));
+    }
+    Ok(())
+}
+
+/// Render structured `order_by` entries to a SQL ORDER BY clause body. Each
+/// entry's target is either a schema column (validated like the legacy
+/// `sort_by`) or the alias declared on `score_expression`.
+fn render_order_by_entries(
+    entries: &[OrderByEntry],
+    schema: &Schema,
+    score_alias: Option<&str>,
+) -> std::result::Result<String, String> {
+    if entries.is_empty() {
+        return Ok("created_at ASC".to_string());
+    }
+
+    let system_fields = ["id", "createdAt", "updatedAt", "created_at", "updated_at"];
+    let mut parts = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        match &entry.expression {
+            OrderByTarget::Column { name } => {
+                let sql_field = field_to_sql(name);
+                let is_system =
+                    system_fields.contains(&name.as_str()) || system_fields.contains(&sql_field);
+                let is_schema_column = schema.columns.iter().any(|c| c.name == *name);
+                if !is_system && !is_schema_column {
+                    return Err(format!(
+                        "Invalid order_by column: '{}'. Must be a system field or schema column.",
+                        name
+                    ));
+                }
+                parts.push(format!(
+                    "{} {}",
+                    quote_identifier(sql_field),
+                    entry.direction.as_sql()
+                ));
+            }
+            OrderByTarget::Alias { name } => {
+                if score_alias.map(|a| a == name).unwrap_or(false) {
+                    parts.push(format!(
+                        "{} {}",
+                        quote_identifier(name),
+                        entry.direction.as_sql()
+                    ));
+                } else {
+                    return Err(format!(
+                        "order_by alias '{}' does not match a declared score_expression alias",
+                        name
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(parts.join(", "))
 }

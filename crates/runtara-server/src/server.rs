@@ -272,6 +272,10 @@ use runtime_client::RuntimeClient;
             api::dto::object_model::ColumnType,
             api::dto::object_model::ColumnDefinition,
             api::dto::object_model::IndexDefinition,
+            api::dto::object_model::TextIndexKind,
+            api::dto::object_model::ScoreExpression,
+            api::dto::object_model::OrderByTarget,
+            api::dto::object_model::OrderByEntry,
             // CSV Import/Export DTOs
             api::dto::csv_import_export::CsvExportRequest,
             api::dto::csv_import_export::CsvPreviewJsonRequest,

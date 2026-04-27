@@ -1654,6 +1654,9 @@ pub enum ConditionOperator {
     IsDefined,
     IsEmpty,
     IsNotEmpty,
+
+    // Similarity (server-side only; valid inside object-model query conditions)
+    SimilarityGte,
 }
 
 /// A condition expression for conditional branching.

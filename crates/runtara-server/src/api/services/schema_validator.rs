@@ -128,6 +128,24 @@ impl SchemaValidator {
             }
         }
 
+        // Validate text-index annotation only on string-compatible types.
+        if matches!(
+            col.text_index,
+            crate::api::dto::object_model::TextIndexKind::Trigram
+        ) {
+            match &col.column_type {
+                crate::api::dto::object_model::ColumnType::String
+                | crate::api::dto::object_model::ColumnType::Enum { .. } => {}
+                other => {
+                    return Err(ValidationError::UnsupportedType(format!(
+                        "Trigram text index is only supported on string/enum columns; \
+                         column '{}' has type {:?}",
+                        col.name, other
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -199,6 +217,7 @@ mod tests {
                 unique: true,
                 nullable: false,
                 default_value: None,
+                text_index: crate::api::dto::object_model::TextIndexKind::None,
             },
             ColumnDefinition {
                 name: "price".to_string(),
@@ -209,6 +228,7 @@ mod tests {
                 unique: false,
                 nullable: true,
                 default_value: None,
+                text_index: crate::api::dto::object_model::TextIndexKind::None,
             },
         ];
 
@@ -239,6 +259,7 @@ mod tests {
                 unique: false,
                 nullable: true,
                 default_value: None,
+                text_index: crate::api::dto::object_model::TextIndexKind::None,
             },
             ColumnDefinition {
                 name: "sku".to_string(), // duplicate
@@ -246,6 +267,7 @@ mod tests {
                 unique: false,
                 nullable: true,
                 default_value: None,
+                text_index: crate::api::dto::object_model::TextIndexKind::None,
             },
         ];
 
@@ -263,6 +285,7 @@ mod tests {
             unique: false,
             nullable: true,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }];
 
         assert!(matches!(
@@ -279,6 +302,7 @@ mod tests {
             unique: false,
             nullable: true,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }];
 
         let indexes = Some(vec![IndexDefinition {
@@ -301,6 +325,7 @@ mod tests {
             unique: false,
             nullable: true,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }];
 
         let indexes = Some(vec![IndexDefinition {
@@ -323,6 +348,7 @@ mod tests {
             unique: false,
             nullable: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }];
 
         assert!(matches!(
@@ -341,6 +367,7 @@ mod tests {
             unique: false,
             nullable: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }];
 
         assert!(matches!(

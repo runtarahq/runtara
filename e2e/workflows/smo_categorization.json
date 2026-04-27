@@ -1,0 +1,86 @@
+{
+  "name": "SMO Categorization (Tier 1 e2e)",
+  "description": "Split over customer-category strings, look up the closest matching Product by trigram similarity using a per-iteration reference RHS. Exercises the codegen-side reference resolver and SIMILARITY_GTE end-to-end.",
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": {
+        "value": {
+          "valueType": "reference",
+          "value": "data.queries"
+        },
+        "sequential": true
+      },
+      "subgraph": {
+        "name": "Categorize one query",
+        "steps": {
+          "lookup": {
+            "stepType": "Agent",
+            "id": "lookup",
+            "agentId": "object_model",
+            "capabilityId": "query-instances",
+            "inputMapping": {
+              "schema_name": {
+                "valueType": "immediate",
+                "value": "Product"
+              },
+              "limit": {
+                "valueType": "immediate",
+                "value": 1
+              },
+              "condition": {
+                "valueType": "immediate",
+                "value": {
+                  "type": "operation",
+                  "op": "SIMILARITY_GTE",
+                  "arguments": [
+                    {"valueType": "immediate", "value": "keywords"},
+                    {"valueType": "reference", "value": "item"},
+                    {"valueType": "immediate", "value": 0.3}
+                  ]
+                }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "result": {
+                "valueType": "reference",
+                "value": "steps.lookup.outputs"
+              }
+            }
+          }
+        },
+        "entryPoint": "lookup",
+        "executionPlan": [
+          {"fromStep": "lookup", "toStep": "finish"}
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "matches": {
+          "valueType": "reference",
+          "value": "steps.split.outputs"
+        }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    {"fromStep": "split", "toStep": "finish"}
+  ],
+  "variables": {},
+  "inputSchema": {
+    "queries": {
+      "type": "array",
+      "description": "List of customer-category strings to look up against the Product schema."
+    }
+  },
+  "outputSchema": {}
+}

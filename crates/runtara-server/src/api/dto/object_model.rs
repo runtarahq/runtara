@@ -140,6 +140,22 @@ impl ColumnType {
     }
 }
 
+/// Optional secondary text-index annotation for string-typed columns.
+///
+/// `Trigram` causes a `gin_trgm_ops` GIN index to be created alongside the
+/// table, which speeds up `SIMILARITY_GTE` and `similarity()` scoring.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TextIndexKind {
+    #[default]
+    None,
+    Trigram,
+}
+
+fn is_default_text_index(t: &TextIndexKind) -> bool {
+    matches!(t, TextIndexKind::None)
+}
+
 /// Column definition for dynamic schema
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct ColumnDefinition {
@@ -162,6 +178,15 @@ pub struct ColumnDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "default")]
     pub default_value: Option<String>,
+
+    /// Optional secondary text index. Only valid for `string` / `enum`
+    /// columns; rejected at validation otherwise.
+    #[serde(
+        default,
+        rename = "textIndex",
+        skip_serializing_if = "is_default_text_index"
+    )]
+    pub text_index: TextIndexKind,
 }
 
 fn default_nullable() -> bool {
@@ -207,6 +232,41 @@ pub struct FilterRequest {
     /// Sort order for each field (e.g., ["desc", "asc"]). Defaults to "asc" for unspecified fields.
     #[serde(rename = "sortOrder", skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<Vec<String>>,
+    /// Optional computed score column. Adds `<expression> AS <alias>` to
+    /// the SELECT and surfaces under `instance.computed[alias]`.
+    #[serde(
+        rename = "scoreExpression",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub score_expression: Option<ScoreExpression>,
+    /// Optional ORDER BY entries. When set, supersedes `sortBy` / `sortOrder`.
+    #[serde(rename = "orderBy", skip_serializing_if = "Option::is_none", default)]
+    pub order_by: Option<Vec<OrderByEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ScoreExpression {
+    /// Output alias. Must be `[a-zA-Z_][a-zA-Z0-9_]*`.
+    pub alias: String,
+    /// Expression tree. Same shape as aggregate `EXPR`, plus the
+    /// whitelisted function-call form `{fn: "SIMILARITY"|"GREATEST"|"LEAST",
+    /// arguments: [...]}`.
+    pub expression: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum OrderByTarget {
+    Column { name: String },
+    Alias { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OrderByEntry {
+    pub expression: OrderByTarget,
+    #[serde(default)]
+    pub direction: SortDirection,
 }
 
 fn default_offset() -> i64 {
@@ -334,6 +394,10 @@ pub struct Instance {
     #[serde(rename = "schemaName")]
     pub schema_name: Option<String>,
     pub properties: serde_json::Value,
+    /// Computed columns (e.g. `score_expression` output). Absent when
+    /// no score expression was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computed: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -718,6 +782,25 @@ impl Instance {
             schema_id: store_instance.schema_id,
             schema_name: store_instance.schema_name,
             properties: store_instance.properties,
+            computed: store_instance.computed,
+        }
+    }
+}
+
+impl From<TextIndexKind> for runtara_object_store::TextIndexKind {
+    fn from(t: TextIndexKind) -> Self {
+        match t {
+            TextIndexKind::None => runtara_object_store::TextIndexKind::None,
+            TextIndexKind::Trigram => runtara_object_store::TextIndexKind::Trigram,
+        }
+    }
+}
+
+impl From<runtara_object_store::TextIndexKind> for TextIndexKind {
+    fn from(t: runtara_object_store::TextIndexKind) -> Self {
+        match t {
+            runtara_object_store::TextIndexKind::None => TextIndexKind::None,
+            runtara_object_store::TextIndexKind::Trigram => TextIndexKind::Trigram,
         }
     }
 }
@@ -730,6 +813,7 @@ impl From<StoreColumnDefinition> for ColumnDefinition {
             nullable: col.nullable,
             unique: col.unique,
             default_value: col.default_value,
+            text_index: col.text_index.into(),
         }
     }
 }
@@ -742,6 +826,7 @@ impl From<ColumnDefinition> for StoreColumnDefinition {
             nullable: col.nullable,
             unique: col.unique,
             default_value: col.default_value,
+            text_index: col.text_index.into(),
         }
     }
 }
@@ -844,6 +929,43 @@ impl From<FilterRequest> for StoreFilterRequest {
             condition: req.condition.map(|c| c.into()),
             sort_by: req.sort_by,
             sort_order: req.sort_order,
+            score_expression: req.score_expression.map(|s| s.into()),
+            order_by: req
+                .order_by
+                .map(|entries| entries.into_iter().map(Into::into).collect()),
+        }
+    }
+}
+
+impl From<ScoreExpression> for runtara_object_store::ScoreExpression {
+    fn from(s: ScoreExpression) -> Self {
+        runtara_object_store::ScoreExpression {
+            alias: s.alias,
+            expression: s.expression,
+        }
+    }
+}
+
+impl From<OrderByTarget> for runtara_object_store::OrderByTarget {
+    fn from(t: OrderByTarget) -> Self {
+        match t {
+            OrderByTarget::Column { name } => runtara_object_store::OrderByTarget::Column { name },
+            OrderByTarget::Alias { name } => runtara_object_store::OrderByTarget::Alias { name },
+        }
+    }
+}
+
+impl From<OrderByEntry> for runtara_object_store::OrderByEntry {
+    fn from(e: OrderByEntry) -> Self {
+        // Reuse the SortDirection conversion — both DTO and store use the
+        // same uppercase enum.
+        let direction = match e.direction {
+            SortDirection::Asc => runtara_object_store::SortDirection::Asc,
+            SortDirection::Desc => runtara_object_store::SortDirection::Desc,
+        };
+        runtara_object_store::OrderByEntry {
+            expression: e.expression.into(),
+            direction,
         }
     }
 }

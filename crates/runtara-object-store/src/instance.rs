@@ -26,6 +26,10 @@ pub struct Instance {
     pub schema_name: Option<String>,
     /// Dynamic properties stored as JSON
     pub properties: serde_json::Value,
+    /// Computed columns produced by `score_expression`. Keyed by alias; absent
+    /// when no scoring was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computed: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Instance {
@@ -39,6 +43,7 @@ impl Instance {
             schema_id: None,
             schema_name: None,
             properties,
+            computed: None,
         }
     }
 
@@ -305,6 +310,41 @@ fn default_limit() -> i64 {
     100
 }
 
+/// A computed column to add to the SELECT list.
+///
+/// `expression` is an [`crate::sql::expr::ExprNode`] in JSON form, validated
+/// at execution time. The result is exposed on the response under
+/// `Instance::computed[alias]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreExpression {
+    /// Output alias. Must be `[a-zA-Z_][a-zA-Z0-9_]*`.
+    pub alias: String,
+    /// Expression tree — same JSON shape as aggregate `EXPR`, plus the
+    /// whitelisted function-call form `{fn: "...", arguments: [...]}`.
+    pub expression: serde_json::Value,
+}
+
+/// Target of an [`OrderByEntry`] — either a schema column or the alias of a
+/// `score_expression`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum OrderByTarget {
+    /// Column on the queried schema (or a system field). Validated against
+    /// the schema like `sort_by`.
+    Column { name: String },
+    /// Alias declared on `score_expression`.
+    Alias { name: String },
+}
+
+/// One ORDER BY entry. When `order_by` is set on a [`FilterRequest`] it
+/// supersedes the legacy `sort_by` / `sort_order` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderByEntry {
+    pub expression: OrderByTarget,
+    #[serde(default)]
+    pub direction: crate::sql::aggregate::SortDirection,
+}
+
 /// Request to filter instances
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterRequest {
@@ -323,6 +363,19 @@ pub struct FilterRequest {
     /// Sort order for each field (e.g., ["desc", "asc"])
     #[serde(rename = "sortOrder", skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<Vec<String>>,
+    /// Optional computed score column that gets appended to the SELECT and
+    /// surfaces on the response under `Instance::computed[alias]`.
+    #[serde(
+        rename = "scoreExpression",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub score_expression: Option<ScoreExpression>,
+    /// Optional ORDER BY entries that may reference either a schema column
+    /// or a `score_expression` alias. When present, supersedes `sort_by` /
+    /// `sort_order`.
+    #[serde(rename = "orderBy", skip_serializing_if = "Option::is_none", default)]
+    pub order_by: Option<Vec<OrderByEntry>>,
 }
 
 impl Default for FilterRequest {
@@ -333,6 +386,8 @@ impl Default for FilterRequest {
             condition: None,
             sort_by: None,
             sort_order: None,
+            score_expression: None,
+            order_by: None,
         }
     }
 }
@@ -360,6 +415,20 @@ impl FilterRequest {
     pub fn with_sort(mut self, sort_by: Vec<String>, sort_order: Vec<String>) -> Self {
         self.sort_by = Some(sort_by);
         self.sort_order = Some(sort_order);
+        self
+    }
+
+    /// Attach a score expression. The alias appears under `Instance::computed`
+    /// on each row.
+    pub fn with_score_expression(mut self, score_expression: ScoreExpression) -> Self {
+        self.score_expression = Some(score_expression);
+        self
+    }
+
+    /// Replace the ORDER BY entries. Supersedes `sort_by` / `sort_order` when
+    /// set.
+    pub fn with_order_by(mut self, order_by: Vec<OrderByEntry>) -> Self {
+        self.order_by = Some(order_by);
         self
     }
 }
@@ -458,6 +527,8 @@ impl SimpleFilter {
             condition,
             sort_by: None,
             sort_order: None,
+            score_expression: None,
+            order_by: None,
         }
     }
 }

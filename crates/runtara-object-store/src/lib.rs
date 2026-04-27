@@ -102,12 +102,12 @@ pub use config::{
 pub use error::{ObjectStoreError, Result};
 pub use instance::{
     BulkCreateOptions, BulkCreateResult, BulkRowError, Condition, ConflictMode,
-    CreateInstanceRequest, FilterRequest, Instance, SimpleFilter, UpdateInstanceRequest,
-    ValidationMode,
+    CreateInstanceRequest, FilterRequest, Instance, OrderByEntry, OrderByTarget, ScoreExpression,
+    SimpleFilter, UpdateInstanceRequest, ValidationMode,
 };
 pub use schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 pub use store::ObjectStore;
-pub use types::{ColumnDefinition, ColumnType, IndexDefinition};
+pub use types::{ColumnDefinition, ColumnType, IndexDefinition, TextIndexKind};
 
 // Re-export SQL utilities for advanced users
 pub use sql::aggregate::{
@@ -116,5 +116,5 @@ pub use sql::aggregate::{
 };
 pub use sql::condition::{build_condition_clause, build_order_by_clause};
 pub use sql::ddl::DdlGenerator;
-pub use sql::expr::{ExprNode, ExprOp, ExprOperation, ExprValue};
+pub use sql::expr::{ExprFn, ExprFnCall, ExprNode, ExprOp, ExprOperation, ExprValue};
 pub use sql::sanitize::{quote_identifier, validate_identifier};

@@ -39,6 +39,10 @@ pub mod connections;
 // Instance output handling (for Environment communication)
 pub mod instance_output;
 
+// Deep-resolve nested {valueType:"reference"} envelopes inside capability
+// inputs (e.g. references buried inside a `condition: ConditionExpression`).
+pub mod value_resolver;
+
 // Re-export serde at top level
 pub use serde;
 pub use serde_json;

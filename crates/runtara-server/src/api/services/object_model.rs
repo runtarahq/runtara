@@ -454,18 +454,24 @@ impl InstanceService {
             limit: filter_request.limit,
             sort_by: filter_request.sort_by,
             sort_order: filter_request.sort_order,
+            score_expression: filter_request.score_expression.map(|s| s.into()),
+            order_by: filter_request
+                .order_by
+                .map(|entries| entries.into_iter().map(Into::into).collect()),
         };
 
         let (store_instances, total) = store
             .filter_instances(schema_name, store_filter)
             .await
             .map_err(|e| {
-                if e.to_string().contains("validation") || e.to_string().contains("Invalid") {
+                let msg = e.to_string();
+                let lower = msg.to_lowercase();
+                if lower.contains("validation") || lower.contains("invalid") {
                     ServiceError::ValidationError(format!("Invalid condition: {}", e))
-                } else if e.to_string().contains("not found") {
-                    ServiceError::NotFound(e.to_string())
+                } else if lower.contains("not found") {
+                    ServiceError::NotFound(msg)
                 } else {
-                    ServiceError::DatabaseError(e.to_string())
+                    ServiceError::DatabaseError(msg)
                 }
             })?;
 

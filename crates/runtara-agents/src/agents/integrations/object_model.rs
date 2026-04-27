@@ -12,7 +12,7 @@
 use crate::connections::RawConnection;
 use crate::types::AgentError;
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
-use runtara_dsl::{ConditionExpression, MappingValue};
+use runtara_dsl::{ConditionExpression, ConditionOperator, MappingValue};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1298,13 +1298,39 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
 }
 
 /// Convert a `MappingValue` to a JSON value for use in conditions.
+///
+/// `MappingValue::Reference` is expected to have been pre-resolved by the
+/// workflow codegen (see `runtara_workflow_stdlib::value_resolver`). If a
+/// `Reference` survives to this point we cannot produce a sane condition
+/// argument — the path string is *not* a value — so emit `null` and warn
+/// loudly so the failure is visible in logs.
 fn mapping_value_to_json(mv: &MappingValue) -> serde_json::Value {
     match mv {
-        MappingValue::Reference(r) => json!(r.value),
+        MappingValue::Reference(r) => {
+            eprintln!(
+                "warning: object_model condition received an unresolved reference \
+                 '{}'. The workflow runtime should have resolved this before \
+                 dispatching the capability; emitting null.",
+                r.value
+            );
+            serde_json::Value::Null
+        }
         MappingValue::Immediate(i) => i.value.clone(),
         MappingValue::Composite(c) => serde_json::to_value(c).unwrap_or(json!(null)),
         MappingValue::Template(t) => json!(t.value),
     }
+}
+
+/// Map a `ConditionOperator` to its wire form (SCREAMING_SNAKE_CASE).
+///
+/// Goes through serde to honor `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]`
+/// on the enum — `format!("{:?}", op).to_uppercase()` mangles multi-word
+/// variants like `STARTS_WITH` into `STARTSWITH`.
+fn condition_operator_wire_name(op: &ConditionOperator) -> String {
+    serde_json::to_value(op)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| format!("{:?}", op).to_uppercase())
 }
 
 /// Convert a runtara-dsl `ConditionExpression` to a JSON condition
@@ -1312,7 +1338,7 @@ fn mapping_value_to_json(mv: &MappingValue) -> serde_json::Value {
 fn condition_expr_to_json(expr: &ConditionExpression) -> Value {
     match expr {
         ConditionExpression::Operation(op) => {
-            let op_str = format!("{:?}", op.op).to_uppercase();
+            let op_str = condition_operator_wire_name(&op.op);
 
             let arguments: Vec<Value> = op
                 .arguments

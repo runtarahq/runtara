@@ -58,7 +58,7 @@ pub enum SortDirection {
 }
 
 impl SortDirection {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             SortDirection::Asc => "ASC",
             SortDirection::Desc => "DESC",
@@ -698,6 +698,7 @@ mod tests {
                     nullable: true,
                     unique: false,
                     default_value: None,
+                    text_index: crate::types::TextIndexKind::None,
                 },
                 ColumnDefinition {
                     name: "qty".into(),
@@ -705,6 +706,7 @@ mod tests {
                     nullable: true,
                     unique: false,
                     default_value: None,
+                    text_index: crate::types::TextIndexKind::None,
                 },
                 ColumnDefinition {
                     name: "price".into(),
@@ -715,6 +717,7 @@ mod tests {
                     nullable: true,
                     unique: false,
                     default_value: None,
+                    text_index: crate::types::TextIndexKind::None,
                 },
                 ColumnDefinition {
                     name: "snapshot_date".into(),
@@ -722,6 +725,7 @@ mod tests {
                     nullable: true,
                     unique: false,
                     default_value: None,
+                    text_index: crate::types::TextIndexKind::None,
                 },
                 ColumnDefinition {
                     name: "notes".into(),
@@ -729,6 +733,7 @@ mod tests {
                     nullable: true,
                     unique: false,
                     default_value: None,
+                    text_index: crate::types::TextIndexKind::None,
                 },
             ],
             indexes: None,

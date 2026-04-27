@@ -60,6 +60,8 @@ run_test() {
 # Run tests
 run_test "Basic Workflow" "${SCRIPT_DIR}/test_basic_workflow.sh"
 run_test "Delay Workflow" "${SCRIPT_DIR}/test_delay_workflow.sh"
+run_test "SMO Trigram Similarity (Tier 1)" "${SCRIPT_DIR}/test_smo_trigram_similarity.sh"
+run_test "SMO Categorization Workflow (Tier 1)" "${SCRIPT_DIR}/test_smo_categorization_workflow.sh"
 
 # Summary
 echo "=========================================="

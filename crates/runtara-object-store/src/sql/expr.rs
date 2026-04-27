@@ -91,6 +91,9 @@ impl ExprOp {
 #[serde(untagged)]
 pub enum ExprNode {
     Operation(ExprOperation),
+    /// Whitelisted function call (e.g. `similarity`, `greatest`). Distinguished
+    /// from `Operation` by serde via the `fn` field.
+    Fn(ExprFnCall),
     Value(ExprValue),
 }
 
@@ -98,6 +101,37 @@ pub enum ExprNode {
 pub struct ExprOperation {
     pub op: ExprOp,
     pub arguments: Vec<ExprNode>,
+}
+
+/// A whitelisted function-call node. Currently only used by row-level
+/// scoring (`score_expression`), not by aggregate `EXPR`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExprFnCall {
+    #[serde(rename = "fn")]
+    pub fn_: ExprFn,
+    pub arguments: Vec<ExprNode>,
+}
+
+/// Whitelisted SQL functions exposed to row-level scoring expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ExprFn {
+    /// `pg_trgm` `similarity(text, text) -> real` (range 0.0..1.0).
+    Similarity,
+    /// PostgreSQL `GREATEST(numeric, ...)` — takes >= 1 numeric arguments.
+    Greatest,
+    /// PostgreSQL `LEAST(numeric, ...)` — takes >= 1 numeric arguments.
+    Least,
+}
+
+impl ExprFn {
+    fn name(self) -> &'static str {
+        match self {
+            ExprFn::Similarity => "SIMILARITY",
+            ExprFn::Greatest => "GREATEST",
+            ExprFn::Least => "LEAST",
+        }
+    }
 }
 
 /// Operand variants — tagged by `valueType` (matches existing `MappingValue`
@@ -189,6 +223,11 @@ pub(crate) fn validate_expression(
             }),
         ExprNode::Value(ExprValue::Immediate { value }) => literal_kind(value),
         ExprNode::Operation(op) => validate_operation(op, prior, depth),
+        ExprNode::Fn(call) => Err(format!(
+            "function call '{}' is not allowed inside EXPR — only \
+             arithmetic / comparison / boolean operators",
+            call.fn_.name()
+        )),
     }
 }
 
@@ -356,8 +395,8 @@ pub(crate) fn render_expression(
         ));
     }
     match node {
-        ExprNode::Value(ExprValue::Reference { .. }) => {
-            unreachable!("references are rejected during validation")
+        ExprNode::Value(ExprValue::Reference { .. }) | ExprNode::Fn(_) => {
+            unreachable!("references / fn calls are rejected during EXPR validation")
         }
         ExprNode::Value(ExprValue::Alias { value }) => alias_sql
             .get(value)
@@ -420,6 +459,247 @@ fn render_literal(v: &serde_json::Value) -> Result<String, String> {
             );
         }
     })
+}
+
+// ============================================================================
+// Row-level expression validation + rendering (for `score_expression`)
+// ============================================================================
+
+/// Validate a row-level expression tree.
+///
+/// Inverse policy from [`validate_expression`]: column references are accepted
+/// (validated against `schema`) and alias references are rejected, since
+/// row-level scoring runs in the same SELECT as the columns it computes from
+/// and has no aggregate aliases to substitute.
+pub(crate) fn validate_row_expression(
+    node: &ExprNode,
+    schema: &Schema,
+    depth: u8,
+) -> Result<AliasKind, String> {
+    if depth > EXPR_MAX_DEPTH {
+        return Err(format!(
+            "expression tree exceeds max depth ({})",
+            EXPR_MAX_DEPTH
+        ));
+    }
+    match node {
+        ExprNode::Value(ExprValue::Alias { value }) => Err(format!(
+            "alias reference '{}' is not allowed inside a row-level \
+             score expression; reference a column instead",
+            value
+        )),
+        ExprNode::Value(ExprValue::Reference { value }) => {
+            let exists = matches!(value.as_str(), "id" | "created_at" | "updated_at")
+                || schema.columns.iter().any(|c| c.name == *value);
+            if !exists {
+                return Err(format!(
+                    "column '{}' is not declared on schema '{}'",
+                    value, schema.name
+                ));
+            }
+            Ok(column_kind(value, schema))
+        }
+        ExprNode::Value(ExprValue::Immediate { value }) => literal_kind(value),
+        ExprNode::Operation(op) => {
+            // Reuse the aggregate validator's operator semantics by mapping
+            // schema column references through `column_kind`. We construct an
+            // ad-hoc `prior` list of "alias-y" entries on the fly so the
+            // existing `validate_operation` does the arity / kind checks.
+            // For simplicity we recurse manually here.
+            check_arity(op)?;
+            let kinds: Vec<AliasKind> = op
+                .arguments
+                .iter()
+                .map(|a| validate_row_expression(a, schema, depth + 1))
+                .collect::<Result<_, _>>()?;
+            row_op_result_kind(op.op, &kinds)
+        }
+        ExprNode::Fn(call) => validate_fn_call(call, schema, depth),
+    }
+}
+
+fn validate_fn_call(call: &ExprFnCall, schema: &Schema, depth: u8) -> Result<AliasKind, String> {
+    let kinds: Vec<AliasKind> = call
+        .arguments
+        .iter()
+        .map(|a| validate_row_expression(a, schema, depth + 1))
+        .collect::<Result<_, _>>()?;
+    match call.fn_ {
+        ExprFn::Similarity => {
+            if kinds.len() != 2 {
+                return Err(format!(
+                    "{}: expected 2 arguments, got {}",
+                    call.fn_.name(),
+                    kinds.len()
+                ));
+            }
+            for (i, k) in kinds.iter().enumerate() {
+                if !matches!(k, AliasKind::Text | AliasKind::Nullable) {
+                    return Err(format!(
+                        "{}: argument {} must be text, got {:?}",
+                        call.fn_.name(),
+                        i,
+                        k
+                    ));
+                }
+            }
+            Ok(AliasKind::Numeric)
+        }
+        ExprFn::Greatest | ExprFn::Least => {
+            if kinds.is_empty() {
+                return Err(format!("{}: requires at least 1 argument", call.fn_.name()));
+            }
+            for (i, k) in kinds.iter().enumerate() {
+                if !matches!(k, AliasKind::Numeric | AliasKind::Nullable) {
+                    return Err(format!(
+                        "{}: argument {} must be numeric, got {:?}",
+                        call.fn_.name(),
+                        i,
+                        k
+                    ));
+                }
+            }
+            Ok(AliasKind::Numeric)
+        }
+    }
+}
+
+fn row_op_result_kind(op: ExprOp, kinds: &[AliasKind]) -> Result<AliasKind, String> {
+    match op {
+        ExprOp::Add | ExprOp::Sub | ExprOp::Mul | ExprOp::Div | ExprOp::Neg | ExprOp::Abs => {
+            for (i, k) in kinds.iter().enumerate() {
+                if !is_numeric_compatible(*k) {
+                    return Err(format!(
+                        "{}: argument {} must be numeric, got {:?}",
+                        op.name(),
+                        i,
+                        k
+                    ));
+                }
+            }
+            Ok(AliasKind::Numeric)
+        }
+        ExprOp::Coalesce => coalesce_kind(op, kinds),
+        ExprOp::Eq | ExprOp::Ne | ExprOp::Gt | ExprOp::Gte | ExprOp::Lt | ExprOp::Lte => {
+            check_comparable(op, kinds[0], kinds[1])?;
+            Ok(AliasKind::Bool)
+        }
+        ExprOp::And | ExprOp::Or => {
+            for (i, k) in kinds.iter().enumerate() {
+                if !matches!(k, AliasKind::Bool | AliasKind::Nullable) {
+                    return Err(format!(
+                        "{}: argument {} must be boolean, got {:?}",
+                        op.name(),
+                        i,
+                        k
+                    ));
+                }
+            }
+            Ok(AliasKind::Bool)
+        }
+        ExprOp::Not => {
+            if !matches!(kinds[0], AliasKind::Bool | AliasKind::Nullable) {
+                return Err(format!("NOT: argument must be boolean, got {:?}", kinds[0]));
+            }
+            Ok(AliasKind::Bool)
+        }
+        ExprOp::IsDefined | ExprOp::IsEmpty | ExprOp::IsNotEmpty => Ok(AliasKind::Bool),
+    }
+}
+
+/// Render a row-level expression tree to SQL, threading `params` and
+/// `param_offset` so string immediates bind positionally rather than being
+/// inlined.
+///
+/// Validation must have already passed. Columns are emitted as quoted
+/// identifiers (`"name"`). String immediates are appended to `params` and
+/// emitted as `$N::text`. Numeric / bool / null immediates inline. Function
+/// calls expand to their SQL builtins.
+// `schema` is currently only consulted via the recursion path so it can grow
+// schema-aware behaviour later (e.g. type-driven casts) without a signature
+// churn.
+#[allow(clippy::only_used_in_recursion)]
+pub(crate) fn render_row_expression(
+    node: &ExprNode,
+    schema: &Schema,
+    params: &mut Vec<serde_json::Value>,
+    param_offset: &mut i32,
+    depth: u8,
+) -> Result<String, String> {
+    if depth > EXPR_MAX_DEPTH {
+        return Err(format!(
+            "expression tree exceeds max depth ({})",
+            EXPR_MAX_DEPTH
+        ));
+    }
+    match node {
+        ExprNode::Value(ExprValue::Alias { .. }) => {
+            unreachable!("aliases are rejected during row-expression validation")
+        }
+        ExprNode::Value(ExprValue::Reference { value }) => {
+            // Validation already confirmed the column exists; emit a quoted
+            // identifier with no cast so callers (e.g. `similarity`) can apply
+            // their own.
+            Ok(format!("\"{}\"", value))
+        }
+        ExprNode::Value(ExprValue::Immediate { value }) => {
+            render_row_immediate(value, params, param_offset)
+        }
+        ExprNode::Operation(op) => {
+            let children: Vec<String> = op
+                .arguments
+                .iter()
+                .map(|a| render_row_expression(a, schema, params, param_offset, depth + 1))
+                .collect::<Result<_, _>>()?;
+            Ok(render_op(op.op, &children))
+        }
+        ExprNode::Fn(call) => {
+            let children: Vec<String> = call
+                .arguments
+                .iter()
+                .map(|a| render_row_expression(a, schema, params, param_offset, depth + 1))
+                .collect::<Result<_, _>>()?;
+            Ok(render_fn(call.fn_, &children))
+        }
+    }
+}
+
+fn render_row_immediate(
+    value: &serde_json::Value,
+    params: &mut Vec<serde_json::Value>,
+    param_offset: &mut i32,
+) -> Result<String, String> {
+    match value {
+        serde_json::Value::String(_) => {
+            let placeholder = format!("${}::text", *param_offset);
+            params.push(value.clone());
+            *param_offset += 1;
+            Ok(placeholder)
+        }
+        serde_json::Value::Null => Ok("NULL".to_string()),
+        serde_json::Value::Bool(true) => Ok("TRUE".to_string()),
+        serde_json::Value::Bool(false) => Ok("FALSE".to_string()),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(
+            "composite literals (arrays / objects) are not allowed in score expressions"
+                .to_string(),
+        ),
+    }
+}
+
+fn render_fn(f: ExprFn, children: &[String]) -> String {
+    match f {
+        ExprFn::Similarity => {
+            // Both args coerced to text so column refs work without an
+            // explicit cast in the wire payload.
+            format!(
+                "similarity(({})::text, ({})::text)",
+                children[0], children[1]
+            )
+        }
+        ExprFn::Greatest => format!("GREATEST({})", children.join(", ")),
+        ExprFn::Least => format!("LEAST({})", children.join(", ")),
+    }
 }
 
 // ============================================================================
@@ -706,5 +986,185 @@ mod tests {
             }
             _ => panic!("expected operation"),
         }
+    }
+
+    // =========================================================================
+    // Row-level expression tests
+    // =========================================================================
+
+    use crate::types::{ColumnDefinition, ColumnType};
+
+    fn product_schema() -> Schema {
+        Schema::new(
+            "test",
+            "Product",
+            "product",
+            vec![
+                ColumnDefinition::new("name", ColumnType::String),
+                ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+                ColumnDefinition::new("price", ColumnType::Integer),
+            ],
+        )
+    }
+
+    fn col_ref(name: &str) -> ExprNode {
+        ExprNode::Value(ExprValue::Reference {
+            value: name.to_string(),
+        })
+    }
+
+    fn fn_call(f: ExprFn, args: Vec<ExprNode>) -> ExprNode {
+        ExprNode::Fn(ExprFnCall {
+            fn_: f,
+            arguments: args,
+        })
+    }
+
+    #[test]
+    fn row_expr_accepts_column_ref() {
+        let schema = product_schema();
+        let node = col_ref("name");
+        assert_eq!(
+            validate_row_expression(&node, &schema, 0).unwrap(),
+            AliasKind::Text
+        );
+    }
+
+    #[test]
+    fn row_expr_rejects_alias() {
+        let schema = product_schema();
+        let node = num_alias("score");
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("alias reference"), "{}", err);
+    }
+
+    #[test]
+    fn row_expr_rejects_unknown_column() {
+        let schema = product_schema();
+        let node = col_ref("nope");
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("not declared"), "{}", err);
+    }
+
+    #[test]
+    fn row_expr_similarity_two_text_args() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::Similarity,
+            vec![col_ref("keywords"), imm(serde_json::json!("blue jacket"))],
+        );
+        assert_eq!(
+            validate_row_expression(&node, &schema, 0).unwrap(),
+            AliasKind::Numeric
+        );
+    }
+
+    #[test]
+    fn row_expr_similarity_rejects_non_text() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::Similarity,
+            vec![col_ref("price"), imm(serde_json::json!("blue"))],
+        );
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("must be text"), "{}", err);
+    }
+
+    #[test]
+    fn row_expr_similarity_arity() {
+        let schema = product_schema();
+        let node = fn_call(ExprFn::Similarity, vec![col_ref("keywords")]);
+        let err = validate_row_expression(&node, &schema, 0).unwrap_err();
+        assert!(err.contains("expected 2 arguments"), "{}", err);
+    }
+
+    #[test]
+    fn row_expr_greatest_numeric() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::Greatest,
+            vec![
+                fn_call(
+                    ExprFn::Similarity,
+                    vec![col_ref("name"), imm(serde_json::json!("foo"))],
+                ),
+                fn_call(
+                    ExprFn::Similarity,
+                    vec![col_ref("keywords"), imm(serde_json::json!("foo"))],
+                ),
+            ],
+        );
+        assert_eq!(
+            validate_row_expression(&node, &schema, 0).unwrap(),
+            AliasKind::Numeric
+        );
+    }
+
+    #[test]
+    fn row_expr_render_similarity_binds_param() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::Similarity,
+            vec![col_ref("keywords"), imm(serde_json::json!("blue jacket"))],
+        );
+        let mut params = vec![];
+        let mut offset = 1_i32;
+        let sql = render_row_expression(&node, &schema, &mut params, &mut offset, 0).unwrap();
+        assert_eq!(sql, r#"similarity(("keywords")::text, ($1::text)::text)"#);
+        assert_eq!(params, vec![serde_json::json!("blue jacket")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn row_expr_render_greatest_two_similarities() {
+        let schema = product_schema();
+        let node = fn_call(
+            ExprFn::Greatest,
+            vec![
+                fn_call(
+                    ExprFn::Similarity,
+                    vec![col_ref("name"), imm(serde_json::json!("blue"))],
+                ),
+                fn_call(
+                    ExprFn::Similarity,
+                    vec![col_ref("keywords"), imm(serde_json::json!("blue"))],
+                ),
+            ],
+        );
+        let mut params = vec![];
+        let mut offset = 5_i32;
+        let sql = render_row_expression(&node, &schema, &mut params, &mut offset, 0).unwrap();
+        assert!(sql.starts_with("GREATEST("), "{}", sql);
+        assert!(sql.contains(r#"("name")::text"#), "{}", sql);
+        assert!(sql.contains(r#"("keywords")::text"#), "{}", sql);
+        assert_eq!(params.len(), 2);
+        assert_eq!(offset, 7);
+    }
+
+    #[test]
+    fn row_expr_serde_roundtrip_fn_call() {
+        let json = serde_json::json!({
+            "fn": "SIMILARITY",
+            "arguments": [
+                {"valueType": "reference", "value": "keywords"},
+                {"valueType": "immediate", "value": "blue"}
+            ]
+        });
+        let node: ExprNode = serde_json::from_value(json).unwrap();
+        match node {
+            ExprNode::Fn(call) => {
+                assert_eq!(call.fn_, ExprFn::Similarity);
+                assert_eq!(call.arguments.len(), 2);
+            }
+            _ => panic!("expected fn call"),
+        }
+    }
+
+    #[test]
+    fn aggregate_validate_rejects_fn() {
+        let prior = prior_numeric(&["a"]);
+        let node = fn_call(ExprFn::Similarity, vec![imm(serde_json::json!("x"))]);
+        let err = validate_expression(&node, &prior, 0).unwrap_err();
+        assert!(err.contains("function call"), "{}", err);
     }
 }

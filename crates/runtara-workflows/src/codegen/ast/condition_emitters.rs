@@ -156,6 +156,25 @@ pub fn emit_operation(
                 }
             }
         }
+
+        // SIMILARITY_GTE is a server-side-only operator. It is valid only
+        // inside `query-instances` conditions, where validation rejects it
+        // before reaching codegen. If we somehow generate emit code (e.g. a
+        // workflow author put it inside a Conditional/Filter step), emit a
+        // safe `false` and a runtime warning so the workflow doesn't silently
+        // produce wrong results.
+        ConditionOperator::SimilarityGte => {
+            quote! {
+                {
+                    eprintln!(
+                        "warning: SIMILARITY_GTE is a server-side-only operator; \
+                         use it inside an object-model `query-instances` condition. \
+                         Falling back to false."
+                    );
+                    false
+                }
+            }
+        }
     }
 }
 

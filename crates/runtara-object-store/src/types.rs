@@ -140,6 +140,23 @@ fn default_nullable() -> bool {
     true
 }
 
+/// Optional secondary index annotation for text-typed columns. Drives DDL only;
+/// the underlying storage type is unchanged.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TextIndexKind {
+    /// No additional text index. Default; back-compat with existing schema JSON.
+    #[default]
+    None,
+    /// pg_trgm GIN index using `gin_trgm_ops`. Enables `SIMILARITY_GTE` and
+    /// `similarity()` scoring.
+    Trigram,
+}
+
+fn is_default_text_index(t: &TextIndexKind) -> bool {
+    matches!(t, TextIndexKind::None)
+}
+
 /// Column definition for dynamic schema
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ColumnDefinition {
@@ -162,6 +179,14 @@ pub struct ColumnDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "default")]
     pub default_value: Option<String>,
+
+    /// Optional secondary text index. Only valid for `String` / `Enum` columns.
+    #[serde(
+        default,
+        rename = "textIndex",
+        skip_serializing_if = "is_default_text_index"
+    )]
+    pub text_index: TextIndexKind,
 }
 
 impl ColumnDefinition {
@@ -173,6 +198,7 @@ impl ColumnDefinition {
             nullable: true,
             unique: false,
             default_value: None,
+            text_index: TextIndexKind::None,
         }
     }
 
@@ -192,6 +218,32 @@ impl ColumnDefinition {
     pub fn default(mut self, value: impl Into<String>) -> Self {
         self.default_value = Some(value.into());
         self
+    }
+
+    /// Annotate the column with a `pg_trgm` GIN index. Only meaningful for
+    /// string-typed columns; `validate_text_index` rejects other types.
+    pub fn with_trigram_index(mut self) -> Self {
+        self.text_index = TextIndexKind::Trigram;
+        self
+    }
+
+    /// True if the column wants a `gin_trgm_ops` index emitted alongside the
+    /// table.
+    pub fn requires_trigram_index(&self) -> bool {
+        matches!(self.text_index, TextIndexKind::Trigram)
+    }
+
+    /// Reject text-index annotations on non-text column types.
+    pub fn validate_text_index(&self) -> Result<(), String> {
+        match (self.text_index, &self.column_type) {
+            (TextIndexKind::None, _) => Ok(()),
+            (TextIndexKind::Trigram, ColumnType::String) => Ok(()),
+            (TextIndexKind::Trigram, ColumnType::Enum { .. }) => Ok(()),
+            (TextIndexKind::Trigram, other) => Err(format!(
+                "Trigram index is only supported on string/enum columns; column '{}' has type {:?}",
+                self.name, other
+            )),
+        }
     }
 }
 

@@ -72,12 +72,20 @@ impl<'a> DdlGenerator<'a> {
                     quoted_table,
                     Self::format_column_definition(new_col)
                 ));
+                // If the new column wants a trigram index, emit the partial
+                // GIN/`gin_trgm_ops` index alongside the ADD COLUMN statement.
+                if new_col.requires_trigram_index() {
+                    statements.push(Self::trigram_index_create(table_name, &new_col.name));
+                }
             }
         }
 
         // Find dropped columns
         for old_col in old_columns {
             if !new_columns.iter().any(|c| c.name == old_col.name) {
+                if old_col.requires_trigram_index() {
+                    statements.push(Self::trigram_index_drop(table_name, &old_col.name));
+                }
                 statements.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     quoted_table,
@@ -178,6 +186,39 @@ impl<'a> DdlGenerator<'a> {
             "CREATE INDEX {} ON {}(created_at DESC) WHERE deleted = FALSE",
             quoted_index, quoted_table
         )
+    }
+
+    /// Emit `CREATE INDEX … USING GIN … gin_trgm_ops` statements for every
+    /// column annotated with `text_index = trigram`. Empty if no column wants
+    /// trigram indexing.
+    pub fn generate_trigram_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| c.requires_trigram_index())
+            .map(|c| Self::trigram_index_create(table_name, &c.name))
+            .collect()
+    }
+
+    fn trigram_index_create(table_name: &str, column: &str) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        let index_name = format!("idx_{}_{}_trgm", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} USING GIN ({} gin_trgm_ops) \
+             WHERE deleted = FALSE",
+            quoted_index, quoted_table, quoted_column
+        )
+    }
+
+    fn trigram_index_drop(table_name: &str, column: &str) -> String {
+        let index_name = format!("idx_{}_{}_trgm", table_name, column);
+        let quoted_index = quote_identifier(&index_name);
+        format!("DROP INDEX IF EXISTS {}", quoted_index)
     }
 
     /// Format a single column definition for CREATE TABLE or ALTER TABLE ADD COLUMN
@@ -765,6 +806,69 @@ mod tests {
     }
 
     // ==================== Edge Cases ====================
+
+    // ==================== Trigram Index Tests ====================
+
+    #[test]
+    fn test_generate_trigram_indexes_empty_when_no_flag() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("price", ColumnType::Integer),
+        ];
+        let statements = generator.generate_trigram_indexes("products", &columns);
+        assert!(statements.is_empty());
+    }
+
+    #[test]
+    fn test_generate_trigram_indexes_emits_partial_gin() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let columns = vec![
+            ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+            ColumnDefinition::new("name", ColumnType::String),
+        ];
+        let statements = generator.generate_trigram_indexes("products", &columns);
+        assert_eq!(statements.len(), 1);
+        assert_eq!(
+            statements[0],
+            "CREATE INDEX IF NOT EXISTS \"idx_products_keywords_trgm\" \
+             ON \"products\" USING GIN (\"keywords\" gin_trgm_ops) \
+             WHERE deleted = FALSE"
+        );
+    }
+
+    #[test]
+    fn test_generate_alter_table_emits_trigram_index_for_added_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+        let new_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+        ];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("ADD COLUMN"));
+        assert!(statements[1].contains("CREATE INDEX IF NOT EXISTS"));
+        assert!(statements[1].contains("gin_trgm_ops"));
+    }
+
+    #[test]
+    fn test_generate_alter_table_drops_trigram_index_with_column() {
+        let config = default_config();
+        let generator = DdlGenerator::new(&config);
+        let old_columns = vec![
+            ColumnDefinition::new("name", ColumnType::String),
+            ColumnDefinition::new("keywords", ColumnType::String).with_trigram_index(),
+        ];
+        let new_columns = vec![ColumnDefinition::new("name", ColumnType::String)];
+        let statements = generator.generate_alter_table("products", &old_columns, &new_columns);
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("DROP INDEX IF EXISTS"));
+        assert!(statements[1].contains("DROP COLUMN"));
+    }
 
     #[test]
     fn test_ddl_generator_with_quoted_table_name() {

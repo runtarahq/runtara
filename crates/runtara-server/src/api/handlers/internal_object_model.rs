@@ -367,6 +367,8 @@ pub async fn query_instances(
             condition: request.condition,
             sort_by: request.sort_by,
             sort_order: request.sort_order,
+            score_expression: None,
+            order_by: None,
         };
 
         match service
@@ -407,6 +409,8 @@ pub async fn query_instances(
             condition: Some(condition),
             sort_by: request.sort_by,
             sort_order: request.sort_order,
+            score_expression: None,
+            order_by: None,
         };
 
         match service
@@ -456,6 +460,8 @@ pub async fn check_instance_exists(
         condition: Some(condition),
         sort_by: None,
         sort_order: None,
+        score_expression: None,
+        order_by: None,
     };
 
     match service
@@ -509,6 +515,8 @@ pub async fn create_if_not_exists(
         condition: Some(condition),
         sort_by: None,
         sort_order: None,
+        score_expression: None,
+        order_by: None,
     };
 
     let exists_result = service

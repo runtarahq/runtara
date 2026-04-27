@@ -177,7 +177,10 @@ pub fn emit(step: &AgentStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 
     Ok(quote! {
         let #source_var = #build_source;
-        let #step_inputs_var = #base_inputs_code;
+        let #step_inputs_var = ::runtara_workflow_stdlib::value_resolver::resolve_nested_references(
+            #base_inputs_code,
+            &#source_var,
+        );
 
         // Breakpoint (after input mapping, before execution)
         #breakpoint_check

@@ -88,6 +88,8 @@ pub async fn export_csv(
             condition: request.condition.clone().map(|c| c.into()),
             sort_by: request.sort_by.clone(),
             sort_order: request.sort_order.clone(),
+            score_expression: None,
+            order_by: None,
         };
 
         let (instances, _total_count) =
@@ -679,6 +681,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 
@@ -689,6 +692,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 
@@ -702,6 +706,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 
@@ -712,6 +717,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 
@@ -722,6 +728,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 
@@ -734,6 +741,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 
@@ -744,6 +752,7 @@ mod tests {
             nullable,
             unique: false,
             default_value: None,
+            text_index: crate::api::dto::object_model::TextIndexKind::None,
         }
     }
 

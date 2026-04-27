@@ -396,6 +396,58 @@ pub fn build_condition_clause(
                 Err("IS_DEFINED operation requires an argument".to_string())
             }
         }
+        "SIMILARITY_GTE" => {
+            let args = args.ok_or("SIMILARITY_GTE operation requires arguments")?;
+            if args.len() != 3 {
+                return Err("SIMILARITY_GTE operation requires exactly 3 arguments \
+                     (field, value, threshold)"
+                    .to_string());
+            }
+            let raw_field = args[0]
+                .as_str()
+                .ok_or("First argument must be a field name")?;
+            if raw_field.is_empty() {
+                return Err("Field name cannot be empty".to_string());
+            }
+            if !raw_field
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err("Field name contains invalid characters".to_string());
+            }
+            let field = field_to_sql(raw_field);
+
+            // Reject SIMILARITY_GTE on non-text columns (covers schema columns
+            // *and* system fields like `created_at`/`updated_at`).
+            let cast = resolve_sql_cast(field, schema);
+            if cast != "text" {
+                return Err(format!(
+                    "SIMILARITY_GTE requires a string/enum column; '{}' has SQL cast {}",
+                    field, cast
+                ));
+            }
+
+            let value = args[1]
+                .as_str()
+                .ok_or("Second argument must be a string value")?;
+            let threshold = args[2]
+                .as_f64()
+                .ok_or("Third argument must be a numeric threshold")?;
+            if !(0.0..=1.0).contains(&threshold) || threshold.is_nan() {
+                return Err(format!(
+                    "SIMILARITY_GTE threshold must be between 0.0 and 1.0, got {}",
+                    threshold
+                ));
+            }
+
+            params.push(serde_json::Value::String(value.to_string()));
+            let clause = format!(
+                "similarity(\"{}\"::text, ${}::text) >= {:.6}",
+                field, param_offset, threshold
+            );
+            *param_offset += 1;
+            Ok((clause, params))
+        }
         _ => Err(format!("Unsupported operation: {}", op)),
     }
 }
@@ -1224,6 +1276,91 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid sort order"));
+    }
+
+    // ==================== SIMILARITY_GTE ====================
+
+    #[test]
+    fn test_similarity_gte_basic() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "SIMILARITY_GTE".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!("blue jacket"),
+                serde_json::json!(0.3),
+            ]),
+        };
+        let mut offset = 1;
+        let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
+        assert_eq!(clause, "similarity(\"name\"::text, $1::text) >= 0.300000");
+        assert_eq!(params, vec![serde_json::json!("blue jacket")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_similarity_gte_threshold_out_of_range() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "SIMILARITY_GTE".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!("x"),
+                serde_json::json!(1.5),
+            ]),
+        };
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("between 0.0 and 1.0"), "{}", err);
+    }
+
+    #[test]
+    fn test_similarity_gte_rejects_non_text_column() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "SIMILARITY_GTE".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("quantity"),
+                serde_json::json!("x"),
+                serde_json::json!(0.3),
+            ]),
+        };
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("string/enum column"), "{}", err);
+    }
+
+    #[test]
+    fn test_similarity_gte_wrong_arity() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "SIMILARITY_GTE".to_string(),
+            arguments: Some(vec![serde_json::json!("name"), serde_json::json!("x")]),
+        };
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("exactly 3 arguments"), "{}", err);
+    }
+
+    #[test]
+    fn test_similarity_gte_param_offset_after_other_clause() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "AND".to_string(),
+            arguments: Some(vec![
+                serde_json::json!({"op": "EQ", "arguments": ["name", "active"]}),
+                serde_json::json!({
+                    "op": "SIMILARITY_GTE",
+                    "arguments": ["name", "blue", 0.3]
+                }),
+            ]),
+        };
+        let mut offset = 1;
+        let (clause, params) = build_condition_clause(&condition, &mut offset, &schema).unwrap();
+        assert!(clause.contains("$1::text"));
+        assert!(clause.contains("similarity(\"name\"::text, $2::text)"));
+        assert_eq!(params.len(), 2);
+        assert_eq!(offset, 3);
     }
 
     #[test]

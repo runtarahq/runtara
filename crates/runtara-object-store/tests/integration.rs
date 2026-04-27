@@ -558,6 +558,8 @@ async fn test_filter_instances_with_condition() {
         sort_order: None,
         limit: 100,
         offset: 0,
+        score_expression: None,
+        order_by: None,
     };
 
     let (instances, count) = store
@@ -915,6 +917,8 @@ async fn test_sorting() {
         sort_order: Some(vec!["asc".to_string()]),
         limit: 100,
         offset: 0,
+        score_expression: None,
+        order_by: None,
     };
 
     let (instances, _) = store
@@ -933,6 +937,8 @@ async fn test_sorting() {
         sort_order: Some(vec!["desc".to_string()]),
         limit: 100,
         offset: 0,
+        score_expression: None,
+        order_by: None,
     };
 
     let (instances, _) = store
@@ -985,6 +991,8 @@ async fn test_pagination() {
         sort_order: Some(vec!["asc".to_string()]),
         limit: 3,
         offset: 0,
+        score_expression: None,
+        order_by: None,
     };
 
     let (instances, total) = store
@@ -1002,6 +1010,8 @@ async fn test_pagination() {
         sort_order: Some(vec!["asc".to_string()]),
         limit: 3,
         offset: 3,
+        score_expression: None,
+        order_by: None,
     };
 
     let (instances, _) = store
@@ -1946,6 +1956,8 @@ async fn test_create_instances_extended_skip_conflict() {
                 limit: 10,
                 sort_by: None,
                 sort_order: None,
+                score_expression: None,
+                order_by: None,
             },
         )
         .await
@@ -2020,6 +2032,8 @@ async fn test_create_instances_extended_upsert_conflict() {
                 limit: 10,
                 sort_by: None,
                 sort_order: None,
+                score_expression: None,
+                order_by: None,
             },
         )
         .await
@@ -2173,6 +2187,8 @@ async fn test_create_instances_extended_partial_columns_typed_null() {
                 limit: 10,
                 sort_by: None,
                 sort_order: None,
+                score_expression: None,
+                order_by: None,
             },
         )
         .await
