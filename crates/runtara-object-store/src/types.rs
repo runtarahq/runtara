@@ -58,6 +58,44 @@ pub enum ColumnType {
         #[serde(default = "default_tsvector_language")]
         language: String,
     },
+
+    /// pgvector `vector(N)` column for storing embedding vectors.
+    ///
+    /// Write-once at ingest (typically via the `openai-create-embedding`
+    /// capability composed in a workflow); not generated, so writes go
+    /// through `validate_value` / `bind_value`. Queryable via the four
+    /// distance ExprFns: `COSINE_DISTANCE`, `L2_DISTANCE`, `INNER_PRODUCT`.
+    Vector {
+        /// Number of dimensions. Must match the embedding model's output
+        /// size. Range: 1..=16000 (pgvector's hard limit).
+        dimension: u32,
+        /// Optional approximate-nearest-neighbor index. None ⇒ no index
+        /// (queries fall back to exact KNN seq scan).
+        #[serde(
+            default,
+            rename = "indexMethod",
+            skip_serializing_if = "Option::is_none"
+        )]
+        index_method: Option<VectorIndexMethod>,
+    },
+}
+
+/// pgvector index method for a `Vector` column. Both methods use the
+/// `vector_cosine_ops` opclass by default — the standard for text embeddings
+/// and aligned with the `COSINE_DISTANCE` ExprFn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum VectorIndexMethod {
+    /// HNSW (hierarchical navigable small world). Better recall, slower
+    /// build, larger on disk. Default for embedding workloads.
+    Hnsw,
+    /// IVFFlat. Faster build, smaller index, recall depends on tuning
+    /// `lists` against row count.
+    IvfFlat {
+        /// Number of inverted lists. Should be ~ rows / 1000 for ≤ 1M rows
+        /// or sqrt(rows) for larger tables.
+        lists: u32,
+    },
 }
 
 fn default_precision() -> u8 {
@@ -104,6 +142,7 @@ impl ColumnType {
             // Storage type only — the GENERATED ALWAYS AS clause is appended
             // by the DDL emitter (see `format_column_definition`).
             ColumnType::Tsvector { .. } => "TSVECTOR".to_string(),
+            ColumnType::Vector { dimension, .. } => format!("vector({})", dimension),
         }
     }
 
@@ -161,6 +200,29 @@ impl ColumnType {
             // Tsvector columns are generated; users cannot set them.
             (ColumnType::Tsvector { .. }, _) => {
                 Err("Generated tsvector columns are read-only; do not set a value".to_string())
+            }
+            // Vector columns accept JSON arrays of finite numbers whose
+            // length matches the declared dimension.
+            (ColumnType::Vector { dimension, .. }, serde_json::Value::Array(arr)) => {
+                if arr.len() as u32 != *dimension {
+                    return Err(format!(
+                        "Vector dimension mismatch: expected {}, got {}",
+                        dimension,
+                        arr.len()
+                    ));
+                }
+                for (i, v) in arr.iter().enumerate() {
+                    let f = v
+                        .as_f64()
+                        .ok_or_else(|| format!("Vector element at index {} is not a number", i))?;
+                    if !f.is_finite() {
+                        return Err(format!(
+                            "Vector element at index {} is not finite ({})",
+                            i, f
+                        ));
+                    }
+                }
+                Ok(())
             }
             _ => Err(format!(
                 "Type mismatch: expected {:?}, got {:?}",

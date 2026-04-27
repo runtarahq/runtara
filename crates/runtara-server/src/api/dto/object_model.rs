@@ -62,6 +62,32 @@ pub enum ColumnType {
         #[serde(default = "default_tsvector_language")]
         language: String,
     },
+
+    /// pgvector `vector(N)` column for storing embedding vectors. Populated
+    /// at ingest time (typically via the `openai-create-embedding`
+    /// capability composed in a workflow). Queryable via the four distance
+    /// ExprFns: `COSINE_DISTANCE`, `L2_DISTANCE`, `INNER_PRODUCT`.
+    Vector {
+        /// Number of dimensions. Range: 1..=16000.
+        dimension: u32,
+        /// Optional approximate-nearest-neighbor index. None ⇒ no index.
+        #[serde(
+            default,
+            rename = "indexMethod",
+            skip_serializing_if = "Option::is_none"
+        )]
+        index_method: Option<VectorIndexMethod>,
+    },
+}
+
+/// Mirror of `runtara_object_store::VectorIndexMethod` for the HTTP DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum VectorIndexMethod {
+    /// HNSW. Default for embedding workloads.
+    Hnsw,
+    /// IVFFlat with `lists` inverted lists.
+    IvfFlat { lists: u32 },
 }
 
 fn default_precision() -> u8 {
@@ -102,6 +128,7 @@ impl ColumnType {
                 )
             }
             ColumnType::Tsvector { .. } => "TSVECTOR".to_string(),
+            ColumnType::Vector { dimension, .. } => format!("vector({})", dimension),
         }
     }
 
@@ -151,6 +178,27 @@ impl ColumnType {
             }
             (ColumnType::Tsvector { .. }, _) => {
                 Err("Generated tsvector columns are read-only; do not set a value".to_string())
+            }
+            (ColumnType::Vector { dimension, .. }, serde_json::Value::Array(arr)) => {
+                if arr.len() as u32 != *dimension {
+                    return Err(format!(
+                        "Vector dimension mismatch: expected {}, got {}",
+                        dimension,
+                        arr.len()
+                    ));
+                }
+                for (i, v) in arr.iter().enumerate() {
+                    let f = v
+                        .as_f64()
+                        .ok_or_else(|| format!("Vector element at index {} is not a number", i))?;
+                    if !f.is_finite() {
+                        return Err(format!(
+                            "Vector element at index {} is not finite ({})",
+                            i, f
+                        ));
+                    }
+                }
+                Ok(())
             }
             _ => Err(format!(
                 "Type mismatch: expected {:?}, got {:?}",
@@ -870,6 +918,13 @@ impl From<StoreColumnType> for ColumnType {
                 source_column,
                 language,
             },
+            StoreColumnType::Vector {
+                dimension,
+                index_method,
+            } => ColumnType::Vector {
+                dimension,
+                index_method: index_method.map(VectorIndexMethod::from),
+            },
         }
     }
 }
@@ -893,6 +948,35 @@ impl From<ColumnType> for StoreColumnType {
                 source_column,
                 language,
             },
+            ColumnType::Vector {
+                dimension,
+                index_method,
+            } => StoreColumnType::Vector {
+                dimension,
+                index_method: index_method.map(runtara_object_store::VectorIndexMethod::from),
+            },
+        }
+    }
+}
+
+impl From<runtara_object_store::VectorIndexMethod> for VectorIndexMethod {
+    fn from(m: runtara_object_store::VectorIndexMethod) -> Self {
+        match m {
+            runtara_object_store::VectorIndexMethod::Hnsw => VectorIndexMethod::Hnsw,
+            runtara_object_store::VectorIndexMethod::IvfFlat { lists } => {
+                VectorIndexMethod::IvfFlat { lists }
+            }
+        }
+    }
+}
+
+impl From<VectorIndexMethod> for runtara_object_store::VectorIndexMethod {
+    fn from(m: VectorIndexMethod) -> Self {
+        match m {
+            VectorIndexMethod::Hnsw => runtara_object_store::VectorIndexMethod::Hnsw,
+            VectorIndexMethod::IvfFlat { lists } => {
+                runtara_object_store::VectorIndexMethod::IvfFlat { lists }
+            }
         }
     }
 }

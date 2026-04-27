@@ -65,22 +65,31 @@ impl ObjectStore {
 
     /// Best-effort enable of required Postgres extensions.
     ///
-    /// `pg_trgm` is required for `SIMILARITY_GTE` and trigram indexes. The
-    /// migration runner already issues this for the metadata DB, but
+    /// `pg_trgm` is required for `SIMILARITY_GTE` and trigram indexes,
+    /// `vector` (pgvector) is required for `Vector` columns and the four
+    /// distance ExprFns, and `fuzzystrmatch` is required for `LEVENSHTEIN`.
+    /// The migration runner already issues these for the metadata DB, but
     /// per-tenant DBs that bootstrap through `from_pool` may not pass through
     /// the migration path. We soft-fail with a warning so a hardened
-    /// permissions setup doesn't crash startup; trigram-dependent operations
-    /// will surface a clear error later.
+    /// permissions setup doesn't crash startup; dependent operations will
+    /// surface a clear error later. pgvector availability varies across
+    /// managed Postgres providers, so the soft-fail matters more for it.
     async fn ensure_extensions(&self) {
-        if let Err(e) = sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS "pg_trgm""#)
-            .execute(&self.pool)
-            .await
-        {
-            eprintln!(
-                "warning: failed to ensure pg_trgm extension ({}); \
-                 SIMILARITY_GTE / trigram indexes will not work until it is installed",
-                e
-            );
+        for (ext, hint) in [
+            ("pg_trgm", "SIMILARITY_GTE / trigram indexes"),
+            (
+                "vector",
+                "Vector columns / COSINE_DISTANCE / L2_DISTANCE / INNER_PRODUCT",
+            ),
+            ("fuzzystrmatch", "LEVENSHTEIN"),
+        ] {
+            let stmt = format!(r#"CREATE EXTENSION IF NOT EXISTS "{}""#, ext);
+            if let Err(e) = sqlx::query(&stmt).execute(&self.pool).await {
+                eprintln!(
+                    "warning: failed to ensure {} extension ({}); {} will not work until it is installed",
+                    ext, e, hint
+                );
+            }
         }
     }
 
@@ -200,6 +209,13 @@ impl ObjectStore {
         // back to seq scans otherwise.
         for tsv_sql in ddl.generate_tsvector_indexes(&request.table_name, &request.columns) {
             sqlx::query(&tsv_sql).execute(&self.pool).await?;
+        }
+
+        // Create HNSW / IVFFlat indexes for any vector-typed columns whose
+        // declaration opts in to an index method. Without an index, KNN
+        // queries fall back to a seq scan with exact distance computation.
+        for vec_sql in ddl.generate_vector_indexes(&request.table_name, &request.columns) {
+            sqlx::query(&vec_sql).execute(&self.pool).await?;
         }
 
         // Create any specified indexes
@@ -1983,6 +1999,19 @@ impl ObjectStore {
             // their printed form (`'foo':1 'bar':2`) is noise for clients;
             // queryable access is via MATCH / TS_RANK.
             ColumnType::Tsvector { .. } => None,
+            ColumnType::Vector { .. } => row
+                .try_get::<Option<pgvector::Vector>, _>(col.name.as_str())
+                .ok()
+                .flatten()
+                .map(|v| {
+                    serde_json::Value::Array(
+                        v.to_vec()
+                            .into_iter()
+                            .filter_map(|f| serde_json::Number::from_f64(f as f64))
+                            .map(serde_json::Value::Number)
+                            .collect(),
+                    )
+                }),
         }
     }
 
@@ -2093,6 +2122,38 @@ impl ObjectStore {
                     column_name
                 )));
             }
+            ColumnType::Vector { dimension, .. } => {
+                if value.is_null() {
+                    query.bind(None::<pgvector::Vector>)
+                } else {
+                    let arr = value.as_array().ok_or_else(|| {
+                        ObjectStoreError::validation(format!(
+                            "Column '{}' expected JSON array of numbers for vector",
+                            column_name
+                        ))
+                    })?;
+                    if arr.len() as u32 != *dimension {
+                        return Err(ObjectStoreError::validation(format!(
+                            "Column '{}' vector dimension mismatch: expected {}, got {}",
+                            column_name,
+                            dimension,
+                            arr.len()
+                        )));
+                    }
+                    let floats: Vec<f32> = arr
+                        .iter()
+                        .map(|v| {
+                            v.as_f64().map(|f| f as f32).ok_or_else(|| {
+                                ObjectStoreError::validation(format!(
+                                    "Column '{}' vector element is not a number",
+                                    column_name
+                                ))
+                            })
+                        })
+                        .collect::<Result<_>>()?;
+                    query.bind(pgvector::Vector::from(floats))
+                }
+            }
         })
     }
 
@@ -2116,6 +2177,7 @@ impl ObjectStore {
             // Same defensive handling as `bind_value` — should never be
             // reached because callers filter generated columns out first.
             ColumnType::Tsvector { .. } => query.bind(None::<String>),
+            ColumnType::Vector { .. } => query.bind(None::<pgvector::Vector>),
         }
     }
 }

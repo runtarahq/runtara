@@ -126,6 +126,18 @@ pub enum ExprFn {
     /// Two arguments: a column reference to a `tsvector` column and a string
     /// query to be tokenized via `plainto_tsquery`.
     TsRank,
+    /// pgvector `<=>` cosine distance (range [0, 2], lower = more similar).
+    /// Two arguments: a vector column reference and a literal vector
+    /// (JSON array of numbers) with matching dimension.
+    CosineDistance,
+    /// pgvector `<->` Euclidean (L2) distance.
+    L2Distance,
+    /// pgvector `<#>` operator. Note: returns the **negative** inner
+    /// product (so ORDER BY ASC still surfaces the closest vector).
+    InnerProduct,
+    /// `fuzzystrmatch` `levenshtein(text, text) -> int` edit distance.
+    /// O(N*M) per pair — only for short identifiers.
+    Levenshtein,
 }
 
 impl ExprFn {
@@ -135,6 +147,30 @@ impl ExprFn {
             ExprFn::Greatest => "GREATEST",
             ExprFn::Least => "LEAST",
             ExprFn::TsRank => "TS_RANK",
+            ExprFn::CosineDistance => "COSINE_DISTANCE",
+            ExprFn::L2Distance => "L2_DISTANCE",
+            ExprFn::InnerProduct => "INNER_PRODUCT",
+            ExprFn::Levenshtein => "LEVENSHTEIN",
+        }
+    }
+
+    /// True if this fn takes (vector_column_ref, vector_literal) and emits
+    /// a pgvector distance operator. Used to dispatch the bespoke
+    /// validation + render path.
+    fn is_distance(self) -> bool {
+        matches!(
+            self,
+            ExprFn::CosineDistance | ExprFn::L2Distance | ExprFn::InnerProduct
+        )
+    }
+
+    /// pgvector operator string for the three distance fns.
+    fn distance_op(self) -> Option<&'static str> {
+        match self {
+            ExprFn::CosineDistance => Some("<=>"),
+            ExprFn::L2Distance => Some("<->"),
+            ExprFn::InnerProduct => Some("<#>"),
+            _ => None,
         }
     }
 }
@@ -187,6 +223,10 @@ pub(crate) fn column_kind(sql_field: &str, schema: &Schema) -> AliasKind {
             // operators reject them; TS_RANK does its own column-type check
             // via `is_tsvector_column` below.
             ColumnType::Tsvector { .. } => AliasKind::Json,
+            // Vector columns surface as Json for the same reason — generic
+            // ops reject them; the distance ExprFns do their own check via
+            // `is_vector_column`.
+            ColumnType::Vector { .. } => AliasKind::Json,
         },
         None => AliasKind::Text,
     }
@@ -199,6 +239,24 @@ fn is_tsvector_column(name: &str, schema: &Schema) -> bool {
         .find(|c| c.name == name)
         .map(|c| matches!(c.column_type, ColumnType::Tsvector { .. }))
         .unwrap_or(false)
+}
+
+/// Returns the declared dimension of a vector column, or None if `name` is
+/// not a vector column. (The distance ExprFns dispatch off the `Some` arm,
+/// so this also serves as the "is vector column?" check — mirror of
+/// `is_tsvector_column`.)
+fn vector_column_dimension(name: &str, schema: &Schema) -> Option<u32> {
+    schema
+        .columns
+        .iter()
+        .find(|c| c.name == name)
+        .and_then(|c| {
+            if let ColumnType::Vector { dimension, .. } = &c.column_type {
+                Some(*dimension)
+            } else {
+                None
+            }
+        })
 }
 
 // ============================================================================
@@ -578,6 +636,98 @@ fn validate_fn_call(call: &ExprFnCall, schema: &Schema, depth: u8) -> Result<Ali
         return Ok(AliasKind::Numeric);
     }
 
+    // Distance fns short-circuit similarly: first arg must be a vector
+    // column reference, second arg a vector literal (or another vector
+    // column with matching dimension). Recursing into `validate_row_expression`
+    // for arg 0 would map the vector column to AliasKind::Json and reject it.
+    if call.fn_.is_distance() {
+        if call.arguments.len() != 2 {
+            return Err(format!(
+                "{}: expected 2 arguments, got {}",
+                call.fn_.name(),
+                call.arguments.len()
+            ));
+        }
+        let col_name = match &call.arguments[0] {
+            ExprNode::Value(ExprValue::Reference { value }) => value.clone(),
+            _ => {
+                return Err(format!(
+                    "{}: first argument must reference a vector column",
+                    call.fn_.name()
+                ));
+            }
+        };
+        let col_dim = vector_column_dimension(&col_name, schema).ok_or_else(|| {
+            format!(
+                "{}: column '{}' is not declared as a vector",
+                call.fn_.name(),
+                col_name
+            )
+        })?;
+        match &call.arguments[1] {
+            ExprNode::Value(ExprValue::Immediate { value }) => {
+                let arr = value.as_array().ok_or_else(|| {
+                    format!(
+                        "{}: second argument must be a JSON array of numbers",
+                        call.fn_.name()
+                    )
+                })?;
+                if arr.len() as u32 != col_dim {
+                    return Err(format!(
+                        "{}: vector literal dimension {} does not match column '{}' dimension {}",
+                        call.fn_.name(),
+                        arr.len(),
+                        col_name,
+                        col_dim
+                    ));
+                }
+                for (i, v) in arr.iter().enumerate() {
+                    let f = v.as_f64().ok_or_else(|| {
+                        format!(
+                            "{}: vector element at index {} is not a number",
+                            call.fn_.name(),
+                            i
+                        )
+                    })?;
+                    if !f.is_finite() {
+                        return Err(format!(
+                            "{}: vector element at index {} is not finite ({})",
+                            call.fn_.name(),
+                            i,
+                            f
+                        ));
+                    }
+                }
+            }
+            ExprNode::Value(ExprValue::Reference { value }) => {
+                let other_dim = vector_column_dimension(value, schema).ok_or_else(|| {
+                    format!(
+                        "{}: second argument column '{}' is not declared as a vector",
+                        call.fn_.name(),
+                        value
+                    )
+                })?;
+                if other_dim != col_dim {
+                    return Err(format!(
+                        "{}: column '{}' dimension {} does not match column '{}' dimension {}",
+                        call.fn_.name(),
+                        value,
+                        other_dim,
+                        col_name,
+                        col_dim
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "{}: second argument must be an immediate vector literal or a vector column reference",
+                    call.fn_.name()
+                ));
+            }
+        }
+        return Ok(AliasKind::Numeric);
+    }
+
     let kinds: Vec<AliasKind> = call
         .arguments
         .iter()
@@ -620,7 +770,29 @@ fn validate_fn_call(call: &ExprFnCall, schema: &Schema, depth: u8) -> Result<Ali
             }
             Ok(AliasKind::Numeric)
         }
-        ExprFn::TsRank => unreachable!("handled at top of function"),
+        ExprFn::Levenshtein => {
+            if kinds.len() != 2 {
+                return Err(format!(
+                    "{}: expected 2 arguments, got {}",
+                    call.fn_.name(),
+                    kinds.len()
+                ));
+            }
+            for (i, k) in kinds.iter().enumerate() {
+                if !matches!(k, AliasKind::Text | AliasKind::Nullable) {
+                    return Err(format!(
+                        "{}: argument {} must be text, got {:?}",
+                        call.fn_.name(),
+                        i,
+                        k
+                    ));
+                }
+            }
+            Ok(AliasKind::Numeric)
+        }
+        ExprFn::TsRank | ExprFn::CosineDistance | ExprFn::L2Distance | ExprFn::InnerProduct => {
+            unreachable!("handled in dedicated branches above")
+        }
     }
 }
 
@@ -746,6 +918,57 @@ pub(crate) fn render_row_expression(
                 ));
             }
 
+            // Distance fns also need bespoke rendering: arg 0 is a vector
+            // column reference (no cast), arg 1 is either a vector literal
+            // (rendered as a `[a,b,c]` text immediate cast to ::vector) or
+            // another vector column reference (no cast). The result is cast
+            // to ::real to match the f32 score-extraction path used for
+            // `similarity()` and `ts_rank`.
+            if call.fn_.is_distance() {
+                let op = call.fn_.distance_op().expect("validated as distance fn");
+                let col_name = match &call.arguments[0] {
+                    ExprNode::Value(ExprValue::Reference { value }) => value.clone(),
+                    _ => unreachable!("validated above"),
+                };
+                let rhs_sql = match &call.arguments[1] {
+                    ExprNode::Value(ExprValue::Immediate { value }) => {
+                        let arr = value.as_array().expect("validated as array");
+                        let parts: Vec<String> = arr
+                            .iter()
+                            .map(|v| {
+                                let f = v.as_f64().expect("validated as number");
+                                format_pg_float(f)
+                            })
+                            .collect();
+                        let lit = format!("[{}]", parts.join(","));
+                        let placeholder = format!("${}::vector", *param_offset);
+                        params.push(serde_json::Value::String(lit));
+                        *param_offset += 1;
+                        placeholder
+                    }
+                    ExprNode::Value(ExprValue::Reference { value }) => {
+                        format!("\"{}\"", value)
+                    }
+                    _ => unreachable!("validated above"),
+                };
+                return Ok(format!("(\"{}\" {} {})::real", col_name, op, rhs_sql));
+            }
+
+            // Levenshtein renders as `levenshtein(($1)::text, ($2)::text)::real`.
+            // Cast to real keeps it shape-compatible with the f32 score
+            // extraction; integer edit distances fit losslessly.
+            if matches!(call.fn_, ExprFn::Levenshtein) {
+                let children: Vec<String> = call
+                    .arguments
+                    .iter()
+                    .map(|a| render_row_expression(a, schema, params, param_offset, depth + 1))
+                    .collect::<Result<_, _>>()?;
+                return Ok(format!(
+                    "levenshtein(({})::text, ({})::text)::real",
+                    children[0], children[1]
+                ));
+            }
+
             let children: Vec<String> = call
                 .arguments
                 .iter()
@@ -754,6 +977,16 @@ pub(crate) fn render_row_expression(
             Ok(render_fn(call.fn_, &children))
         }
     }
+}
+
+/// Format an f64 in a way pgvector's text input accepts. PG vector accepts
+/// JSON-like number literals; we just need to avoid scientific notation
+/// surprises and trailing-decimal issues.
+fn format_pg_float(f: f64) -> String {
+    // serde_json stringifies finite f64 in a stable, vector-parser-friendly form.
+    serde_json::Number::from_f64(f)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| f.to_string())
 }
 
 fn render_row_immediate(
@@ -791,8 +1024,16 @@ fn render_fn(f: ExprFn, children: &[String]) -> String {
         }
         ExprFn::Greatest => format!("GREATEST({})", children.join(", ")),
         ExprFn::Least => format!("LEAST({})", children.join(", ")),
-        // Handled inline by `render_row_expression`; this arm is unreachable.
-        ExprFn::TsRank => unreachable!("TS_RANK is rendered inline in render_row_expression"),
+        // The remaining fns are rendered inline in `render_row_expression`
+        // because they need schema lookups or per-arg type-aware encoding
+        // that the generic children-pre-rendered shape doesn't support.
+        ExprFn::TsRank
+        | ExprFn::CosineDistance
+        | ExprFn::L2Distance
+        | ExprFn::InnerProduct
+        | ExprFn::Levenshtein => {
+            unreachable!("{} is rendered inline in render_row_expression", f.name())
+        }
     }
 }
 

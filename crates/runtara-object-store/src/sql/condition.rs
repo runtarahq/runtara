@@ -41,6 +41,11 @@ pub(crate) fn resolve_sql_cast(field: &str, schema: &Schema) -> &'static str {
             // tsvector columns are only meaningful inside MATCH / TS_RANK;
             // the generic comparison arms reject this cast.
             ColumnType::Tsvector { .. } => "tsvector",
+            // Vector columns are only meaningful inside the distance ExprFns
+            // (COSINE_DISTANCE / L2_DISTANCE / INNER_PRODUCT). Any condition
+            // operator that reaches `resolve_sql_cast` for a vector column is
+            // semantically wrong and the SQL it emits will fail at execution.
+            ColumnType::Vector { .. } => "vector",
         }
     } else {
         "text"

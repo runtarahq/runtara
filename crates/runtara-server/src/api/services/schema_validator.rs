@@ -171,6 +171,30 @@ impl SchemaValidator {
             }
         }
 
+        // Vector columns: dimension must be in pgvector's supported range and
+        // any IVFFlat index needs a positive `lists` parameter.
+        if let crate::api::dto::object_model::ColumnType::Vector {
+            dimension,
+            index_method,
+        } = &col.column_type
+        {
+            if *dimension == 0 || *dimension > 16000 {
+                return Err(ValidationError::UnsupportedType(format!(
+                    "Vector column '{}' dimension {} is out of range; pgvector supports 1..=16000",
+                    col.name, dimension
+                )));
+            }
+            if let Some(crate::api::dto::object_model::VectorIndexMethod::IvfFlat { lists }) =
+                index_method
+                && *lists == 0
+            {
+                return Err(ValidationError::UnsupportedType(format!(
+                    "Vector column '{}' IVFFlat index requires lists > 0",
+                    col.name
+                )));
+            }
+        }
+
         // Validate text-index annotation only on string-compatible types.
         if matches!(
             col.text_index,

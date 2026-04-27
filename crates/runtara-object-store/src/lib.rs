@@ -107,7 +107,7 @@ pub use instance::{
 };
 pub use schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
 pub use store::ObjectStore;
-pub use types::{ColumnDefinition, ColumnType, IndexDefinition, TextIndexKind};
+pub use types::{ColumnDefinition, ColumnType, IndexDefinition, TextIndexKind, VectorIndexMethod};
 
 // Re-export SQL utilities for advanced users
 pub use sql::aggregate::{

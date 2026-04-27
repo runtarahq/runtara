@@ -46,11 +46,20 @@ pub async fn export_csv(
         .map(ColumnDefinition::from)
         .collect();
 
-    // Determine which columns to export. Generated columns (e.g. tsvector)
-    // are skipped: their printed form is internal noise, not user data.
+    // Determine which columns to export. Generated columns (tsvector) and
+    // vector columns are skipped: tsvector's printed form is internal noise,
+    // and vector columns hold large float arrays that don't round-trip well
+    // through CSV (and are populated via the embedding workflow, not CSV).
+    let is_csv_excluded = |ct: &crate::api::dto::object_model::ColumnType| -> bool {
+        matches!(
+            ct,
+            crate::api::dto::object_model::ColumnType::Tsvector { .. }
+                | crate::api::dto::object_model::ColumnType::Vector { .. }
+        )
+    };
     let export_columns: Vec<&str> = match &request.columns {
         Some(selected) => {
-            // Validate all requested columns exist and aren't generated.
+            // Validate all requested columns exist and aren't excluded.
             for col_name in selected {
                 let col = columns.iter().find(|c| c.name == *col_name);
                 match col {
@@ -60,15 +69,10 @@ pub async fn export_csv(
                             col_name, schema_name
                         )));
                     }
-                    Some(c)
-                        if matches!(
-                            c.column_type,
-                            crate::api::dto::object_model::ColumnType::Tsvector { .. }
-                        ) =>
-                    {
+                    Some(c) if is_csv_excluded(&c.column_type) => {
                         return Err(ServiceError::ValidationError(format!(
-                            "Column '{}' is a generated tsvector and cannot be exported",
-                            col_name
+                            "Column '{}' (type {:?}) cannot be exported to CSV",
+                            col_name, c.column_type
                         )));
                     }
                     _ => {}
@@ -78,12 +82,7 @@ pub async fn export_csv(
         }
         None => columns
             .iter()
-            .filter(|c| {
-                !matches!(
-                    c.column_type,
-                    crate::api::dto::object_model::ColumnType::Tsvector { .. }
-                )
-            })
+            .filter(|c| !is_csv_excluded(&c.column_type))
             .map(|c| c.name.as_str())
             .collect(),
     };
@@ -285,6 +284,7 @@ fn column_type_name(ct: &ColumnType) -> String {
         ColumnType::Json => "json".to_string(),
         ColumnType::Enum { .. } => "enum".to_string(),
         ColumnType::Tsvector { .. } => "tsvector".to_string(),
+        ColumnType::Vector { .. } => "vector".to_string(),
     }
 }
 
@@ -687,6 +687,11 @@ fn csv_string_to_json_value(
         ColumnType::Tsvector { .. } => {
             Err("tsvector columns are generated; they cannot be set from a CSV import".to_string())
         }
+
+        ColumnType::Vector { .. } => Err(
+            "vector columns cannot be set from CSV import; populate via the embedding workflow"
+                .to_string(),
+        ),
     }
 }
 

@@ -267,6 +267,57 @@ impl<'a> DdlGenerator<'a> {
         format!("DROP INDEX IF EXISTS {}", quoted_index)
     }
 
+    /// Emit `CREATE INDEX ... USING hnsw|ivfflat (col vector_cosine_ops)`
+    /// statements for every `Vector` column whose declaration opts in to an
+    /// index method. Empty if no column wants a vector index. Vector
+    /// columns without an index method still work — KNN queries fall back
+    /// to a seq scan with exact distance computation.
+    pub fn generate_vector_indexes(
+        &self,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Vec<String> {
+        columns
+            .iter()
+            .filter_map(|c| match &c.column_type {
+                crate::types::ColumnType::Vector {
+                    index_method: Some(method),
+                    ..
+                } => Some(Self::vector_index_create(table_name, &c.name, method)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn vector_index_create(
+        table_name: &str,
+        column: &str,
+        method: &crate::types::VectorIndexMethod,
+    ) -> String {
+        let quoted_table = quote_identifier(table_name);
+        let quoted_column = quote_identifier(column);
+        match method {
+            crate::types::VectorIndexMethod::Hnsw => {
+                let index_name = format!("idx_{}_{}_hnsw", table_name, column);
+                let quoted_index = quote_identifier(&index_name);
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {} USING hnsw ({} vector_cosine_ops) \
+                     WHERE deleted = FALSE",
+                    quoted_index, quoted_table, quoted_column
+                )
+            }
+            crate::types::VectorIndexMethod::IvfFlat { lists } => {
+                let index_name = format!("idx_{}_{}_ivf", table_name, column);
+                let quoted_index = quote_identifier(&index_name);
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {} USING ivfflat ({} vector_cosine_ops) \
+                     WITH (lists = {}) WHERE deleted = FALSE",
+                    quoted_index, quoted_table, quoted_column, lists
+                )
+            }
+        }
+    }
+
     /// Format a single column definition for CREATE TABLE or ALTER TABLE ADD COLUMN
     pub fn format_column_definition(col: &ColumnDefinition) -> String {
         let mut parts = vec![
