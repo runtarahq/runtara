@@ -1,0 +1,61 @@
+{
+  "name": "Split with output_schema enforcing missing field",
+  "description": "outputSchema requires `row`, but the inner Finish only produces `wrong_key`. Each iteration should fail with a clear missing-required-field error naming `row`.",
+  "inputSchema": {
+    "items": { "type": "array", "required": true }
+  },
+  "steps": {
+    "split": {
+      "stepType": "Split",
+      "id": "split",
+      "config": {
+        "value": { "valueType": "reference", "value": "data.items" },
+        "sequential": true,
+        "dontStopOnFailed": true
+      },
+      "outputSchema": {
+        "row": { "type": "object", "required": true }
+      },
+      "subgraph": {
+        "name": "Item Processing",
+        "steps": {
+          "transform": {
+            "stepType": "Agent",
+            "id": "transform",
+            "agentId": "transform",
+            "capabilityId": "map-fields",
+            "inputMapping": {
+              "source": { "valueType": "reference", "value": "data" },
+              "mapping": {
+                "valueType": "immediate",
+                "value": { "value": "$.value" }
+              }
+            }
+          },
+          "finish": {
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+              "wrong_key": { "valueType": "reference", "value": "steps.transform.outputs" }
+            }
+          }
+        },
+        "entryPoint": "transform",
+        "executionPlan": [
+          { "fromStep": "transform", "toStep": "finish" }
+        ]
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "results": { "valueType": "reference", "value": "steps.split.outputs" }
+      }
+    }
+  },
+  "entryPoint": "split",
+  "executionPlan": [
+    { "fromStep": "split", "toStep": "finish" }
+  ]
+}

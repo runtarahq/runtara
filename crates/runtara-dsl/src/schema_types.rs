@@ -328,10 +328,17 @@ pub struct StepCommon {
     pub name: Option<String>,
 }
 
-/// Exit point step - defines workflow outputs
+/// Exit point step - defines workflow outputs.
+///
+/// The Finish step's `inputMapping` IS the workflow's (or, when nested in a
+/// Split subgraph, the iteration's) output: each map key becomes a field on
+/// the resulting object, and the values reference workflow data via the
+/// standard mapping system (`data.*`, `steps.<id>.outputs.*`, `variables.*`).
+///
+/// There is no `outputMapping` field — Finish only takes `inputMapping`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FinishStep {
     /// Unique step identifier
     pub id: String,
@@ -340,7 +347,12 @@ pub struct FinishStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Maps workflow data to output values
+    /// Defines the workflow's final output (or a Split iteration's per-item
+    /// result when nested in a Split subgraph). Each map key becomes a field
+    /// on the resulting object; values reference workflow data via the
+    /// standard mapping system (`data.*`, `steps.<id>.outputs.*`,
+    /// `variables.*`). Finish has no `outputMapping` — `inputMapping` *is*
+    /// the output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
@@ -355,7 +367,7 @@ pub struct FinishStep {
 /// enabling distributed transaction rollback.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompensationConfig {
     /// Step ID to execute for compensation (rollback)
     pub compensation_step: String,
@@ -376,7 +388,7 @@ pub struct CompensationConfig {
 /// Executes an agent capability
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentStep {
     /// Unique step identifier
     pub id: String,
@@ -430,7 +442,7 @@ pub struct AgentStep {
 /// Evaluates conditions and branches execution
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConditionalStep {
     /// Unique step identifier
     pub id: String,
@@ -447,11 +459,18 @@ pub struct ConditionalStep {
     pub breakpoint: Option<bool>,
 }
 
-/// Iterates over an array, executing subgraph for each item
+/// Iterates over an array, executing subgraph for each item.
+///
+/// Each iteration's outer-array entry is whatever the subgraph's reachable
+/// `Finish` step returns (via its `inputMapping`). If `output_schema` is
+/// non-empty, the per-iteration result is checked for required fields before
+/// being collected — extra fields are allowed, missing required fields fail
+/// the iteration. Likewise `input_schema` validates each iteration's `data`
+/// (the array element) before the subgraph runs.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "SplitStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitStep {
     /// Unique step identifier
     pub id: String,
@@ -470,11 +489,19 @@ pub struct SplitStep {
 
     /// Schema defining the expected shape of each item in the array.
     /// Keys are field names, values define the field type and constraints.
+    ///
+    /// Validation is permissive: required fields must be present and
+    /// type-compatible; extra fields are allowed. A missing required field
+    /// causes the iteration to fail (see `SplitConfig.dontStopOnFailed`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub input_schema: HashMap<String, SchemaField>,
 
     /// Schema defining the expected output from each iteration.
     /// Keys are field names, values define the field type and constraints.
+    ///
+    /// Validation is permissive: required fields must be present and
+    /// type-compatible in the iteration's result; extra fields are allowed.
+    /// The result is whatever the subgraph's reachable Finish step returned.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub output_schema: HashMap<String, SchemaField>,
 
@@ -494,7 +521,7 @@ pub struct SplitStep {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "SwitchStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchStep {
     /// Unique step identifier
     pub id: String,
@@ -515,7 +542,7 @@ pub struct SwitchStep {
 /// Executes a nested child workflow
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EmbedWorkflowStep {
     /// Unique step identifier
     pub id: String,
@@ -573,7 +600,7 @@ pub enum ChildVersion {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "WhileStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhileStep {
     /// Unique step identifier
     pub id: String,
@@ -603,7 +630,7 @@ pub struct WhileStep {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "WhileConfig")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhileConfig {
     /// Maximum number of iterations (default: 10).
     /// Prevents infinite loops.
@@ -628,7 +655,7 @@ impl Default for WhileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "LogStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogStep {
     /// Unique step identifier
     pub id: String,
@@ -689,7 +716,7 @@ pub enum LogLevel {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "ErrorStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ErrorStep {
     /// Unique step identifier
     pub id: String,
@@ -794,7 +821,7 @@ pub enum ErrorSeverity {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "FilterStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterStep {
     /// Unique step identifier
     pub id: String,
@@ -815,7 +842,7 @@ pub struct FilterStep {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "FilterConfig")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterConfig {
     /// Array to filter (MappingValue resolving to array).
     /// If null or non-array, treated as empty array.
@@ -846,7 +873,7 @@ pub struct FilterConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "GroupByStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupByStep {
     /// Unique step identifier
     pub id: String,
@@ -867,7 +894,7 @@ pub struct GroupByStep {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "GroupByConfig")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupByConfig {
     /// Array to group (MappingValue resolving to array).
     /// If null or non-array, treated as empty array.
@@ -913,7 +940,7 @@ pub struct GroupByConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "DelayStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DelayStep {
     /// Unique step identifier
     pub id: String,
@@ -983,7 +1010,7 @@ pub struct DelayStep {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "WaitForSignalStep")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WaitForSignalStep {
     /// Unique step identifier
     pub id: String,
@@ -1057,7 +1084,7 @@ pub struct WaitForSignalStep {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiAgentStep {
     /// Unique step identifier
     pub id: String,
@@ -1088,7 +1115,7 @@ pub struct AiAgentStep {
 /// Configuration for the AI Agent step.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiAgentConfig {
     /// System prompt / instructions for the LLM
     pub system_prompt: MappingValue,
@@ -1151,7 +1178,7 @@ pub struct AiAgentConfig {
 /// `save_memory` capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiAgentMemory {
     /// Identifier for the conversation thread.
     /// Can be a reference (e.g., `data.sessionId`) or an immediate value.
@@ -1167,7 +1194,7 @@ pub struct AiAgentMemory {
 /// Controls how conversation memory is compacted when it grows too large.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompactionConfig {
     /// Maximum number of messages before compaction triggers.
     /// Default: 50
@@ -1257,7 +1284,7 @@ pub enum MappingValue {
 /// With type hint: `{ "valueType": "reference", "value": "steps.http.outputs.body.count", "type": "int" }`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReferenceValue {
     /// Path to the data using dot notation (e.g., "data.user.name")
     pub value: String,
@@ -1282,7 +1309,7 @@ pub struct ReferenceValue {
 /// Example: `{ "valueType": "immediate", "value": "Hello World" }`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImmediateValue {
     /// The literal value (string, number, boolean, object, or array)
     pub value: serde_json::Value,
@@ -1317,7 +1344,7 @@ pub struct ImmediateValue {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompositeValue {
     /// Either an object (HashMap) or array (Vec) of nested MappingValues.
     #[cfg_attr(feature = "utoipa", schema(no_recursion))]
@@ -1351,7 +1378,7 @@ pub enum CompositeInner {
 /// With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TemplateValue {
     /// Minijinja template string
     pub value: String,
@@ -1735,7 +1762,7 @@ pub enum SwitchMatchType {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "SwitchConfig")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchConfig {
     /// The value to switch on (evaluated at runtime)
     pub value: MappingValue,
@@ -1774,7 +1801,7 @@ impl SwitchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "SwitchCase")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchCase {
     /// The type of match to perform
     pub match_type: SwitchMatchType,
@@ -1802,7 +1829,7 @@ pub struct SwitchCase {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[schemars(title = "SplitConfig")]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitConfig {
     /// The array to iterate over
     pub value: MappingValue,

@@ -18,13 +18,17 @@
       "stepType": "Log",
       "id": "handle_success",
       "message": "API call succeeded",
-      "data": { "valueType": "reference", "value": "call_api.output" }
+      "context": {
+        "response": { "valueType": "reference", "value": "steps.call_api.outputs" }
+      }
     },
     "handle_transient_error": {
       "stepType": "Log",
       "id": "handle_transient_error",
       "message": "Transient error - will be retried by #[resilient]",
-      "data": { "valueType": "reference", "value": "__error" }
+      "context": {
+        "error": { "valueType": "reference", "value": "__error" }
+      }
     },
     "handle_permanent_error": {
       "stepType": "Error",

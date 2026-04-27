@@ -235,7 +235,9 @@ Connection data is sensitive and must be protected:
 
 3. **Compile-time validation** - Code generation fails if:
    - Connection output is referenced in non-secure agent input
-   - Connection output is used in Finish step outputMapping
+   - Connection output is used in a Finish step's `inputMapping`
+     (the Finish step has no `outputMapping` — its `inputMapping` *is* the
+     workflow output)
    - Connection output is used in Log step context
 
 **Secure Agents:**

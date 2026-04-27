@@ -117,6 +117,14 @@ pub enum ValidationError {
     },
     /// A step is not reachable from the entry point.
     UnreachableStep { step_id: String },
+    /// A `Finish` step is defined but not reachable from the entry point.
+    /// Calls out the missing edge specifically — without it, the subgraph
+    /// silently falls through to a `null` result.
+    UnreachableFinish {
+        step_id: String,
+        entry_point: String,
+        defined_edges: usize,
+    },
     /// Workflow has no steps defined.
     EmptyWorkflow,
 
@@ -309,6 +317,20 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "[E002] Step '{}' is unreachable from the entry point",
                     step_id
+                )
+            }
+            ValidationError::UnreachableFinish {
+                step_id,
+                entry_point,
+                defined_edges,
+            } => {
+                write!(
+                    f,
+                    "[E003] Finish step '{}' is defined but not reachable from entry point '{}'. \
+                     Without an executionPlan edge ending at '{}', the workflow (or Split iteration) \
+                     silently returns null. Add an edge ending at '{}' (the executionPlan currently has \
+                     {} edge(s)), or remove the step.",
+                    step_id, entry_point, step_id, step_id, defined_edges
                 )
             }
             ValidationError::EmptyWorkflow => {
@@ -1204,12 +1226,22 @@ fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResul
     // Build reachability set from entry point
     let reachable = compute_reachable_steps(graph);
 
-    // Check for unreachable steps
-    for step_id in graph.steps.keys() {
+    // Check for unreachable steps. Finish steps get a more pointed message
+    // because their absence is what causes the silent `null` fallback in
+    // generated subgraph code (e.g. inside a Split iteration).
+    for (step_id, step) in &graph.steps {
         if !reachable.contains(step_id) {
-            result.errors.push(ValidationError::UnreachableStep {
-                step_id: step_id.clone(),
-            });
+            if matches!(step, Step::Finish(_)) {
+                result.errors.push(ValidationError::UnreachableFinish {
+                    step_id: step_id.clone(),
+                    entry_point: graph.entry_point.clone(),
+                    defined_edges: graph.execution_plan.len(),
+                });
+            } else {
+                result.errors.push(ValidationError::UnreachableStep {
+                    step_id: step_id.clone(),
+                });
+            }
         }
     }
 
@@ -3405,9 +3437,13 @@ mod tests {
         let graph = create_basic_graph(steps, "start");
         let result = validate_workflow(&graph);
 
-        assert!(result.errors.iter().any(
-            |e| matches!(e, ValidationError::UnreachableStep { step_id } if step_id == "orphan")
-        ));
+        // Finish steps get the more specific UnreachableFinish variant —
+        // their absence is what causes the silent `null` fallback in
+        // generated subgraph code, so it's worth calling out.
+        assert!(result.errors.iter().any(|e| matches!(
+            e,
+            ValidationError::UnreachableFinish { step_id, .. } if step_id == "orphan"
+        )));
     }
 
     #[test]
@@ -3444,6 +3480,124 @@ mod tests {
                 .iter()
                 .any(|w| matches!(w, ValidationWarning::DanglingStep { .. }))
         );
+    }
+
+    /// Reproduces the runtime-`null` failure mode from the LLM debugging
+    /// session: a Split subgraph where the inner Finish exists in `steps` but
+    /// has no executionPlan edge ending at it. Validation should now flag
+    /// this with the dedicated `UnreachableFinish` variant whose message
+    /// explicitly tells the author to add the missing edge.
+    #[test]
+    fn test_unreachable_finish_in_subgraph_has_actionable_message() {
+        use runtara_dsl::{
+            AgentStep, ExecutionGraph, ExecutionPlanEdge, MappingValue, ReferenceValue,
+            SplitConfig, SplitStep, Step,
+        };
+        use std::collections::HashMap;
+
+        // Subgraph with a Finish step that's NOT wired into the executionPlan
+        // — the entry_point goes to `classify` and stops there.
+        let mut sub_steps = HashMap::new();
+        sub_steps.insert(
+            "classify".to_string(),
+            Step::Agent(AgentStep {
+                id: "classify".to_string(),
+                name: None,
+                agent_id: "transform".to_string(),
+                capability_id: "passthrough".to_string(),
+                connection_id: None,
+                input_mapping: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                compensation: None,
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        sub_steps.insert(
+            "finish_iter".to_string(),
+            Step::Finish(runtara_dsl::FinishStep {
+                id: "finish_iter".to_string(),
+                name: None,
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+        let subgraph = ExecutionGraph {
+            entry_point: "classify".to_string(),
+            steps: sub_steps,
+            execution_plan: vec![], // no edge to finish_iter — silent null bug
+            ..Default::default()
+        };
+
+        let mut top_steps = HashMap::new();
+        top_steps.insert(
+            "split_rows".to_string(),
+            Step::Split(SplitStep {
+                id: "split_rows".to_string(),
+                name: None,
+                subgraph: Box::new(subgraph),
+                config: Some(SplitConfig {
+                    value: MappingValue::Reference(ReferenceValue {
+                        value: "data.items".to_string(),
+                        type_hint: None,
+                        default: None,
+                    }),
+                    variables: None,
+                    parallelism: None,
+                    sequential: None,
+                    dont_stop_on_failed: None,
+                    max_retries: None,
+                    retry_delay: None,
+                    timeout: None,
+                    allow_null: None,
+                    convert_single_value: None,
+                    batch_size: None,
+                }),
+                input_schema: HashMap::new(),
+                output_schema: HashMap::new(),
+                breakpoint: None,
+                durable: None,
+            }),
+        );
+        top_steps.insert(
+            "finish".to_string(),
+            Step::Finish(runtara_dsl::FinishStep {
+                id: "finish".to_string(),
+                name: None,
+                input_mapping: None,
+                breakpoint: None,
+            }),
+        );
+        let graph = ExecutionGraph {
+            entry_point: "split_rows".to_string(),
+            steps: top_steps,
+            execution_plan: vec![ExecutionPlanEdge {
+                from_step: "split_rows".to_string(),
+                to_step: "finish".to_string(),
+                label: None,
+                condition: None,
+                priority: None,
+            }],
+            ..Default::default()
+        };
+
+        let result = validate_workflow(&graph);
+
+        let unreachable = result
+            .errors
+            .iter()
+            .find(|e| matches!(e, ValidationError::UnreachableFinish { step_id, .. } if step_id == "finish_iter"))
+            .expect("must report UnreachableFinish for the orphaned inner Finish");
+
+        // The message must point at the missing edge, name the entry point,
+        // and warn about the silent-null fallback so an LLM can self-correct.
+        let msg = format!("{}", unreachable);
+        assert!(msg.contains("finish_iter"), "msg={}", msg);
+        assert!(msg.contains("classify"), "msg={}", msg);
+        assert!(msg.contains("executionPlan"), "msg={}", msg);
+        assert!(msg.contains("null"), "msg={}", msg);
     }
 
     // === Self-Reference Warning ===
@@ -6189,7 +6343,7 @@ mod tests {
                         "provided_field": { "valueType": "immediate", "value": "test" }
                     }
                 },
-                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+                "finish": { "stepType": "Finish", "id": "finish" }
             },
             "entryPoint": "start",
             "executionPlan": [{ "fromStep": "start", "toStep": "finish" }]
@@ -6198,7 +6352,7 @@ mod tests {
         // Child workflow with required fields
         let child_json = r#"{
             "steps": {
-                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+                "finish": { "stepType": "Finish", "id": "finish" }
             },
             "entryPoint": "finish",
             "inputSchema": {
@@ -6234,7 +6388,7 @@ mod tests {
                     "childWorkflowId": "workflow-b",
                     "childVersion": "latest"
                 },
-                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+                "finish": { "stepType": "Finish", "id": "finish" }
             },
             "entryPoint": "call_b",
             "executionPlan": [{ "fromStep": "call_b", "toStep": "finish" }]
@@ -6248,7 +6402,7 @@ mod tests {
                     "childWorkflowId": "workflow-a",
                     "childVersion": "latest"
                 },
-                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+                "finish": { "stepType": "Finish", "id": "finish" }
             },
             "entryPoint": "call_a",
             "executionPlan": [{ "fromStep": "call_a", "toStep": "finish" }]
@@ -6374,7 +6528,7 @@ mod template_validation_tests {
                         }
                     }
                 },
-                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+                "finish": { "stepType": "Finish", "id": "finish" }
             },
             "entryPoint": "fetch",
             "executionPlan": [
@@ -6408,7 +6562,7 @@ mod template_validation_tests {
                         }
                     }
                 },
-                "finish": { "stepType": "Finish", "id": "finish", "outputs": {} }
+                "finish": { "stepType": "Finish", "id": "finish" }
             },
             "entryPoint": "fetch",
             "executionPlan": [

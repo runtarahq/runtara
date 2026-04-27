@@ -59,6 +59,21 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            ValidationError::UnreachableFinish {
+                step_id,
+                entry_point,
+                ..
+            } => (
+                "E003".to_string(),
+                format!(
+                    "Finish step '{}' is defined but not reachable from entry point '{}'. \
+                     Add an executionPlan edge ending at '{}', or remove the step.",
+                    step_id, entry_point, step_id
+                ),
+                Some(step_id.clone()),
+                None,
+                None,
+            ),
             ValidationError::EmptyWorkflow => (
                 "E004".to_string(),
                 "Workflow has no steps defined".to_string(),

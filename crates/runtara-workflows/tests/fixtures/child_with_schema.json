@@ -5,7 +5,7 @@
       "finish": {
         "stepType": "Finish",
         "id": "finish",
-        "outputs": {
+        "inputMapping": {
           "received": { "valueType": "reference", "value": "data.required_field" }
         }
       }

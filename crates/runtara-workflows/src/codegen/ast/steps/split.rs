@@ -158,6 +158,306 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
     let retry_delay_lit = retry_delay;
     let durable_lit = ctx.durable && step.durable.unwrap_or(true);
 
+    // Serialize input/output schemas for runtime validation. Empty schemas mean
+    // "no validation" — we skip the per-iteration check entirely.
+    let has_input_schema = !step.input_schema.is_empty();
+    let has_output_schema = !step.output_schema.is_empty();
+    let input_schema_json =
+        serde_json::to_string(&step.input_schema).unwrap_or_else(|_| "{}".to_string());
+    let output_schema_json =
+        serde_json::to_string(&step.output_schema).unwrap_or_else(|_| "{}".to_string());
+
+    // The validator is only emitted when at least one schema is non-empty —
+    // otherwise the closure and its types are dead and would warn.
+    let validator_def = if has_input_schema || has_output_schema {
+        quote! {
+            // Permissive schema check: required fields must be present and
+            // type-compatible; extra fields are allowed.
+            let __validate_required_fields = |
+                value: &serde_json::Value,
+                schema: &serde_json::Value,
+                ctx: &str,
+            | -> std::result::Result<(), String> {
+                let schema_obj = match schema.as_object() {
+                    Some(o) if !o.is_empty() => o,
+                    _ => return Ok(()),
+                };
+                let value_obj = match value.as_object() {
+                    Some(o) => o,
+                    None => {
+                        let actual = match value {
+                            serde_json::Value::Null => "null",
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::Object(_) => "object",
+                        };
+                        return Err(format!("{}: expected object, got {}", ctx, actual));
+                    }
+                };
+                let mut missing: Vec<String> = Vec::new();
+                let mut wrong_type: Vec<String> = Vec::new();
+                for (field_name, field_schema) in schema_obj {
+                    let required = field_schema.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let field_type = field_schema.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match value_obj.get(field_name) {
+                        None => {
+                            if required {
+                                missing.push(field_name.clone());
+                            }
+                        }
+                        Some(actual_value) => {
+                            if !field_type.is_empty() && !actual_value.is_null() {
+                                let matches = match field_type {
+                                    "string" => actual_value.is_string(),
+                                    "integer" => actual_value.is_i64() || actual_value.is_u64(),
+                                    "number" => actual_value.is_number(),
+                                    "boolean" => actual_value.is_boolean(),
+                                    "array" => actual_value.is_array(),
+                                    "object" => actual_value.is_object(),
+                                    _ => true,
+                                };
+                                if !matches {
+                                    let actual_type = match actual_value {
+                                        serde_json::Value::Null => "null",
+                                        serde_json::Value::Bool(_) => "boolean",
+                                        serde_json::Value::Number(_) => "number",
+                                        serde_json::Value::String(_) => "string",
+                                        serde_json::Value::Array(_) => "array",
+                                        serde_json::Value::Object(_) => "object",
+                                    };
+                                    wrong_type.push(format!(
+                                        "'{}' (expected {}, got {})",
+                                        field_name, field_type, actual_type
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                if missing.is_empty() && wrong_type.is_empty() {
+                    return Ok(());
+                }
+                let mut parts: Vec<String> = Vec::new();
+                if !missing.is_empty() {
+                    let mut got: Vec<String> = value_obj.keys().cloned().collect();
+                    got.sort();
+                    parts.push(format!(
+                        "required field(s) [{}] missing (got fields: [{}])",
+                        missing.join(", "), got.join(", ")
+                    ));
+                }
+                if !wrong_type.is_empty() {
+                    parts.push(format!("type mismatches: {}", wrong_type.join(", ")));
+                }
+                Err(format!("{}: {}", ctx, parts.join("; ")))
+            };
+        }
+    } else {
+        quote! {}
+    };
+
+    let input_schema_setup = if has_input_schema {
+        quote! {
+            let __split_input_schema: serde_json::Value =
+                serde_json::from_str(#input_schema_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        }
+    } else {
+        quote! {}
+    };
+
+    let output_schema_setup = if has_output_schema {
+        quote! {
+            let __split_output_schema: serde_json::Value =
+                serde_json::from_str(#output_schema_json)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        }
+    } else {
+        quote! {}
+    };
+
+    // Sequential-path checks. These return Err strings that the caller routes
+    // through the existing dont_stop_on_failed branch.
+    let seq_input_check = if has_input_schema {
+        quote! {
+            if let Err(__err) = __validate_required_fields(
+                item,
+                &__split_input_schema,
+                &format!("Split '{}' iteration {}: input", step_id, idx),
+            ) {
+                if dont_stop_on_failed {
+                    errors.push(serde_json::json!({"error": __err, "index": idx}));
+                    return Ok::<_, String>(());
+                } else {
+                    return Err(__err);
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let seq_output_check = if has_output_schema {
+        quote! {
+            if let Err(__err) = __validate_required_fields(
+                &__result_value,
+                &__split_output_schema,
+                &format!("Split '{}' iteration {}: output", step_id, idx),
+            ) {
+                if dont_stop_on_failed {
+                    errors.push(serde_json::json!({"error": __err, "index": idx}));
+                } else {
+                    return Err(__err);
+                }
+            } else {
+                results.push(__result_value);
+            }
+        }
+    } else {
+        quote! { results.push(__result_value); }
+    };
+
+    // Parallel-path checks. Inside the spawn closure we only have access to
+    // the schema via Arc (so the closures stay 'static-friendly). We turn
+    // a validation failure into Err(...) and let the post-join loop dispatch
+    // it through dont_stop_on_failed like any other iteration error.
+    let par_input_setup = if has_input_schema {
+        quote! {
+            let __input_schema_arc = std::sync::Arc::new(__split_input_schema.clone());
+        }
+    } else {
+        quote! {}
+    };
+    let par_output_setup = if has_output_schema {
+        quote! {
+            let __output_schema_arc = std::sync::Arc::new(__split_output_schema.clone());
+        }
+    } else {
+        quote! {}
+    };
+    let par_input_clone = if has_input_schema {
+        quote! { let __input_schema_arc = __input_schema_arc.clone(); }
+    } else {
+        quote! {}
+    };
+    let par_output_clone = if has_output_schema {
+        quote! { let __output_schema_arc = __output_schema_arc.clone(); }
+    } else {
+        quote! {}
+    };
+    let par_input_check = if has_input_schema {
+        quote! {
+            // Inline validator (matches the sequential one above) so the
+            // spawned thread doesn't borrow the outer closure.
+            let __validate = |value: &serde_json::Value, schema: &serde_json::Value, ctx: &str| -> std::result::Result<(), String> {
+                let schema_obj = match schema.as_object() {
+                    Some(o) if !o.is_empty() => o,
+                    _ => return Ok(()),
+                };
+                let value_obj = match value.as_object() {
+                    Some(o) => o,
+                    None => return Err(format!("{}: expected object", ctx)),
+                };
+                let mut missing: Vec<String> = Vec::new();
+                let mut wrong_type: Vec<String> = Vec::new();
+                for (field_name, field_schema) in schema_obj {
+                    let required = field_schema.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let field_type = field_schema.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match value_obj.get(field_name) {
+                        None => if required { missing.push(field_name.clone()); }
+                        Some(av) => {
+                            if !field_type.is_empty() && !av.is_null() {
+                                let ok = match field_type {
+                                    "string" => av.is_string(),
+                                    "integer" => av.is_i64() || av.is_u64(),
+                                    "number" => av.is_number(),
+                                    "boolean" => av.is_boolean(),
+                                    "array" => av.is_array(),
+                                    "object" => av.is_object(),
+                                    _ => true,
+                                };
+                                if !ok { wrong_type.push(format!("'{}' (expected {})", field_name, field_type)); }
+                            }
+                        }
+                    }
+                }
+                if missing.is_empty() && wrong_type.is_empty() { return Ok(()); }
+                let mut parts: Vec<String> = Vec::new();
+                if !missing.is_empty() {
+                    let mut got: Vec<String> = value_obj.keys().cloned().collect();
+                    got.sort();
+                    parts.push(format!("required field(s) [{}] missing (got fields: [{}])", missing.join(", "), got.join(", ")));
+                }
+                if !wrong_type.is_empty() { parts.push(format!("type mismatches: {}", wrong_type.join(", "))); }
+                Err(format!("{}: {}", ctx, parts.join("; ")))
+            };
+            if let Err(e) = __validate(&item, &*__input_schema_arc, &format!("Split '{}' iteration {}: input", step_id, idx)) {
+                return (idx, Err(e));
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let par_output_check = if has_output_schema {
+        quote! {
+            // Reuse the same inline validator shape used for input.
+            let __validate = |value: &serde_json::Value, schema: &serde_json::Value, ctx: &str| -> std::result::Result<(), String> {
+                let schema_obj = match schema.as_object() {
+                    Some(o) if !o.is_empty() => o,
+                    _ => return Ok(()),
+                };
+                let value_obj = match value.as_object() {
+                    Some(o) => o,
+                    None => return Err(format!("{}: expected object", ctx)),
+                };
+                let mut missing: Vec<String> = Vec::new();
+                let mut wrong_type: Vec<String> = Vec::new();
+                for (field_name, field_schema) in schema_obj {
+                    let required = field_schema.get("required").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let field_type = field_schema.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match value_obj.get(field_name) {
+                        None => if required { missing.push(field_name.clone()); }
+                        Some(av) => {
+                            if !field_type.is_empty() && !av.is_null() {
+                                let ok = match field_type {
+                                    "string" => av.is_string(),
+                                    "integer" => av.is_i64() || av.is_u64(),
+                                    "number" => av.is_number(),
+                                    "boolean" => av.is_boolean(),
+                                    "array" => av.is_array(),
+                                    "object" => av.is_object(),
+                                    _ => true,
+                                };
+                                if !ok { wrong_type.push(format!("'{}' (expected {})", field_name, field_type)); }
+                            }
+                        }
+                    }
+                }
+                if missing.is_empty() && wrong_type.is_empty() { return Ok(()); }
+                let mut parts: Vec<String> = Vec::new();
+                if !missing.is_empty() {
+                    let mut got: Vec<String> = value_obj.keys().cloned().collect();
+                    got.sort();
+                    parts.push(format!("required field(s) [{}] missing (got fields: [{}])", missing.join(", "), got.join(", ")));
+                }
+                if !wrong_type.is_empty() { parts.push(format!("type mismatches: {}", wrong_type.join(", "))); }
+                Err(format!("{}: {}", ctx, parts.join("; ")))
+            };
+            let __out_value = match result {
+                Ok(v) => v,
+                Err(e) => return (idx, Err(e)),
+            };
+            if let Err(e) = __validate(&__out_value, &*__output_schema_arc, &format!("Split '{}' iteration {}: output", step_id, idx)) {
+                return (idx, Err(e));
+            }
+            let result: std::result::Result<serde_json::Value, String> = Ok(__out_value);
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         let #source_var = #build_source;
         let #split_inputs_var = #inputs_code;
@@ -295,6 +595,12 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
             let mut results: Vec<serde_json::Value> = Vec::with_capacity(split_array.len());
             let mut errors: Vec<serde_json::Value> = Vec::new();
 
+            // Per-iteration schema validation setup. These blocks expand only
+            // when input_schema or output_schema is non-empty on the SplitStep.
+            #input_schema_setup
+            #output_schema_setup
+            #validator_def
+
             // Helper to build iteration inputs
             let build_iteration_inputs = |idx: usize, item: &serde_json::Value, variables_base: &serde_json::Value, extra_variables: &serde_json::Value| {
                 let mut merged_vars = match variables_base {
@@ -359,10 +665,18 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             return Err(format!("Split step {} cancelled before iteration {}", step_id, idx));
                         }
 
+                        // Input schema check (no-op when input_schema is empty).
+                        #seq_input_check
+
                         let subgraph_inputs = build_iteration_inputs(idx, item, &variables_base, &extra_variables);
 
                         match #subgraph_fn_name(Arc::new(subgraph_inputs)) {
-                            Ok(result) => results.push(result),
+                            Ok(__result_value) => {
+                                // Output schema check (no-op when output_schema
+                                // is empty; pushes the value into results on
+                                // success, routes errors via dont_stop_on_failed).
+                                #seq_output_check
+                            }
                             Err(e) => {
                                 if dont_stop_on_failed {
                                     errors.push(serde_json::json!({"error": e, "index": idx}));
@@ -392,6 +706,11 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                 let extra_variables = Arc::new(extra_variables);
                 let step_id_owned = step_id.to_string();
 
+                // Wrap schemas in Arcs so each spawned thread gets its own
+                // cheap reference. Only emitted when the schema is non-empty.
+                #par_input_setup
+                #par_output_setup
+
                 let thread_results: Vec<(usize, std::result::Result<serde_json::Value, String>)> = std::thread::scope(|s| {
                     let handles: Vec<_> = split_array.iter().enumerate()
                         .map(|(idx, item)| {
@@ -400,6 +719,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                             let extra_variables = extra_variables.clone();
                             let step_id = step_id_owned.clone();
                             let item = item.clone();
+                            #par_input_clone
+                            #par_output_clone
 
                             s.spawn(move || {
                                 let __iter_span = tracing::info_span!(
@@ -414,6 +735,9 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                         return (idx, Err("Cancelled".to_string()));
                                     }
 
+                                    // Input schema check (no-op when not configured).
+                                    #par_input_check
+
                                     let subgraph_inputs = build_iteration_inputs(idx, &item, &variables_base, &extra_variables);
                                     let result = #subgraph_fn_name(Arc::new(subgraph_inputs));
 
@@ -424,6 +748,10 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
                                             return (idx, Err(format!("{}", e)));
                                         }
                                     }
+
+                                    // Output schema check. When configured this
+                                    // unwraps `result`, validates, and rebinds.
+                                    #par_output_check
 
                                     (idx, result)
                                 })
@@ -518,7 +846,8 @@ pub fn emit(step: &SplitStep, ctx: &mut EmitContext) -> Result<TokenStream, Code
 mod tests {
     use super::*;
     use runtara_dsl::{
-        ExecutionGraph, FinishStep, ImmediateValue, MappingValue, ReferenceValue, SplitConfig, Step,
+        ExecutionGraph, FinishStep, ImmediateValue, MappingValue, ReferenceValue, SchemaField,
+        SchemaFieldType, SplitConfig, Step,
     };
     use std::collections::HashMap;
 
@@ -1691,6 +2020,182 @@ mod tests {
         assert!(
             code.contains("object") || code.contains("string") || code.contains("number"),
             "Should detect value type in error handling"
+        );
+    }
+
+    // ========================================================================
+    // Schema validation codegen tests — Split now emits per-iteration
+    // input/output schema checks when the corresponding schema is non-empty.
+    // ========================================================================
+
+    fn schema_with_required(field: &str, ty: SchemaFieldType) -> HashMap<String, SchemaField> {
+        let mut s = HashMap::new();
+        s.insert(
+            field.to_string(),
+            SchemaField {
+                field_type: ty,
+                description: None,
+                required: true,
+                default: None,
+                example: None,
+                items: None,
+                enum_values: None,
+                label: None,
+                placeholder: None,
+                order: None,
+                format: None,
+                min: None,
+                max: None,
+                pattern: None,
+                properties: None,
+                visible_when: None,
+            },
+        );
+        s
+    }
+
+    fn split_with_schemas(
+        id: &str,
+        input_schema: HashMap<String, SchemaField>,
+        output_schema: HashMap<String, SchemaField>,
+    ) -> SplitStep {
+        SplitStep {
+            id: id.to_string(),
+            name: Some("With Schemas".to_string()),
+            config: Some(SplitConfig {
+                value: MappingValue::Reference(ReferenceValue {
+                    value: "data.items".to_string(),
+                    type_hint: None,
+                    default: None,
+                }),
+                variables: None,
+                parallelism: None,
+                sequential: None,
+                dont_stop_on_failed: None,
+                max_retries: None,
+                retry_delay: None,
+                timeout: None,
+                allow_null: None,
+                convert_single_value: None,
+                batch_size: None,
+            }),
+            subgraph: Box::new(create_minimal_graph("finish")),
+            input_schema,
+            output_schema,
+            breakpoint: None,
+            durable: None,
+        }
+    }
+
+    #[test]
+    fn test_emit_split_no_schemas_skips_validator() {
+        // Sanity: when neither schema is set, the validator is not emitted —
+        // we don't want to pay code-size for nothing.
+        let mut ctx = EmitContext::new(false);
+        let split_step = create_split_step("split-no-schema", "data.items");
+        let code = emit(&split_step, &mut ctx).unwrap().to_string();
+        assert!(
+            !code.contains("__validate_required_fields"),
+            "validator must not be emitted when both schemas are empty"
+        );
+        assert!(
+            !code.contains("__split_input_schema"),
+            "no input schema literal when input_schema is empty"
+        );
+        assert!(
+            !code.contains("__split_output_schema"),
+            "no output schema literal when output_schema is empty"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_input_schema_emits_check_and_literal() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = split_with_schemas(
+            "split-with-input",
+            schema_with_required("sku", SchemaFieldType::String),
+            HashMap::new(),
+        );
+        let code = emit(&split_step, &mut ctx).unwrap().to_string();
+
+        // The schema is serialized as a JSON literal at codegen time and
+        // parsed once inside the durable function. The token stream prints
+        // string literals with escaped quotes, so look for the field name
+        // as a bare substring rather than matching exact quoting.
+        assert!(
+            code.contains("__split_input_schema"),
+            "input schema literal should be present"
+        );
+        assert!(
+            code.contains("sku"),
+            "the required field name should appear in the embedded schema literal"
+        );
+        // The validator helper is emitted once per Split that needs it.
+        assert!(
+            code.contains("__validate_required_fields"),
+            "validator helper must be defined when a schema is set"
+        );
+        // Sequential path uses it before the subgraph call.
+        assert!(
+            code.contains("Split '{}' iteration {}: input")
+                || code.contains("\"Split '{}' iteration {}: input\""),
+            "input check must produce a clearly-labeled error context"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_output_schema_emits_check_and_literal() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = split_with_schemas(
+            "split-with-output",
+            HashMap::new(),
+            schema_with_required("row", SchemaFieldType::Object),
+        );
+        let code = emit(&split_step, &mut ctx).unwrap().to_string();
+
+        assert!(
+            code.contains("__split_output_schema"),
+            "output schema literal should be present"
+        );
+        assert!(
+            code.contains("row"),
+            "the required output field name should appear in the embedded schema literal"
+        );
+        assert!(
+            code.contains("__validate_required_fields"),
+            "validator helper must be defined when a schema is set"
+        );
+        // The output check must route into either results.push() (success) or
+        // the dont_stop_on_failed branch (failure) — both are wired by the
+        // emitter into the `Ok(__result_value)` arm.
+        assert!(
+            code.contains("__result_value"),
+            "output check must run on the subgraph's result value"
+        );
+        assert!(
+            code.contains("Split '{}' iteration {}: output")
+                || code.contains("\"Split '{}' iteration {}: output\""),
+            "output check must produce a clearly-labeled error context"
+        );
+    }
+
+    #[test]
+    fn test_emit_split_both_schemas_share_validator() {
+        let mut ctx = EmitContext::new(false);
+        let split_step = split_with_schemas(
+            "split-both",
+            schema_with_required("sku", SchemaFieldType::String),
+            schema_with_required("row", SchemaFieldType::Object),
+        );
+        let code = emit(&split_step, &mut ctx).unwrap().to_string();
+        assert!(code.contains("__split_input_schema"));
+        assert!(code.contains("__split_output_schema"));
+        // The validator is defined exactly once even when both schemas are
+        // set — split keeps a single shared closure.
+        assert_eq!(
+            code.matches("let __validate_required_fields").count(),
+            1,
+            "validator should be defined exactly once",
         );
     }
 }

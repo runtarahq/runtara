@@ -111,6 +111,104 @@ fn test_parse_conditional_workflow() {
     assert_eq!(graph.execution_plan.len(), 2);
 }
 
+/// Verifies that input/output schemas on a Split step parse correctly and the
+/// codegen pipeline picks them up. Sister fixture to the runtime validation
+/// added for the LLM-debugging feedback.
+#[test]
+fn test_parse_split_with_schemas() {
+    let workflow_json = include_str!("fixtures/split_with_schemas.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse split_with_schemas.json");
+
+    use runtara_dsl::Step;
+    let split = match graph.steps.get("split") {
+        Some(Step::Split(s)) => s,
+        _ => panic!("Expected Split step"),
+    };
+    assert!(
+        split.input_schema.contains_key("value"),
+        "Split.input_schema should declare `value`"
+    );
+    assert!(
+        split.input_schema["value"].required,
+        "`value` should be required"
+    );
+    assert!(
+        split.output_schema.contains_key("processed"),
+        "Split.output_schema should declare `processed`"
+    );
+    assert!(
+        split.output_schema["processed"].required,
+        "`processed` should be required"
+    );
+}
+
+/// Compile the schemas-passing fixture all the way to Rust source and confirm
+/// the generated code embeds the runtime validator + the schema literals.
+/// (We can't run it without the native library — that's gated by `--ignored`
+/// elsewhere — but we can prove the codegen is wiring the validation.)
+#[test]
+fn test_compile_split_with_schemas_emits_validator() {
+    use runtara_workflows::codegen::ast::compile_with_children;
+    use std::collections::HashMap;
+
+    let workflow_json = include_str!("fixtures/split_with_schemas.json");
+    let graph: ExecutionGraph =
+        serde_json::from_str(workflow_json).expect("Failed to parse split_with_schemas.json");
+
+    let rust_source =
+        compile_with_children(&graph, false, HashMap::new(), HashMap::new(), None, None)
+            .expect("codegen should succeed for split_with_schemas.json");
+
+    assert!(
+        rust_source.contains("__validate_required_fields"),
+        "generated code must include the per-iteration validator"
+    );
+    assert!(
+        rust_source.contains("__split_input_schema"),
+        "generated code must embed the input_schema literal"
+    );
+    assert!(
+        rust_source.contains("__split_output_schema"),
+        "generated code must embed the output_schema literal"
+    );
+}
+
+/// Failing-case fixture: outputSchema requires `row`, but the inner Finish
+/// produces `wrong_key`. Validation passes (the schemas themselves are
+/// well-formed); only at runtime does each iteration fail with the missing
+/// required field error.
+#[test]
+fn test_parse_split_with_schemas_failing_fixture_is_well_formed() {
+    let workflow_json = include_str!("fixtures/split_with_schemas_failing.json");
+    let graph: ExecutionGraph = serde_json::from_str(workflow_json)
+        .expect("Failed to parse split_with_schemas_failing.json");
+
+    use runtara_dsl::Step;
+    let split = match graph.steps.get("split") {
+        Some(Step::Split(s)) => s,
+        _ => panic!("Expected Split step"),
+    };
+    assert_eq!(split.output_schema.len(), 1);
+    assert!(split.output_schema.contains_key("row"));
+
+    // Confirm the inner Finish does NOT produce `row` — that's the whole
+    // point of this fixture; runtime validation should catch the mismatch.
+    let inner_finish = match split.subgraph.steps.get("finish") {
+        Some(Step::Finish(f)) => f,
+        _ => panic!("Expected inner Finish step"),
+    };
+    let inner_keys: Vec<&String> = inner_finish
+        .input_mapping
+        .as_ref()
+        .map(|m| m.keys().collect())
+        .unwrap_or_default();
+    assert!(
+        !inner_keys.iter().any(|k| k.as_str() == "row"),
+        "inner Finish must NOT map `row`, otherwise the test wouldn't trigger"
+    );
+}
+
 #[test]
 fn test_parse_split_workflow() {
     let workflow_json = include_str!("fixtures/split_workflow.json");

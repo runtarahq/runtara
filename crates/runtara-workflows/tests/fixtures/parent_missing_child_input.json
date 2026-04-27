@@ -13,8 +13,7 @@
       },
       "finish": {
         "stepType": "Finish",
-        "id": "finish",
-        "outputs": {}
+        "id": "finish"
       }
     },
     "entryPoint": "call_child",

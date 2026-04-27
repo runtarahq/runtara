@@ -2020,4 +2020,100 @@ mod tests {
         // stepName is None, should be skipped
         assert!(json2.get("stepName").is_none());
     }
+
+    // ========================================================================
+    // Schema strictness tests — every step struct now has
+    // `#[serde(deny_unknown_fields)]` so typos like `outputMapping` (which
+    // doesn't exist) error at parse time instead of being silently dropped.
+    // ========================================================================
+
+    /// The original LLM-debugging report: `outputMapping` was used on a Finish
+    /// step and silently ignored, leading to empty per-iteration objects in a
+    /// Split. With deny_unknown_fields this now fails fast and the error
+    /// message lists the valid field names — pointing the author at
+    /// `inputMapping` directly.
+    #[test]
+    fn test_finish_step_rejects_outputmapping_typo() {
+        let json = r#"{
+            "stepType": "Finish",
+            "id": "finish_iter",
+            "outputMapping": {
+                "row": { "valueType": "reference", "value": "steps.build_row.outputs.result" }
+            }
+        }"#;
+        let err = serde_json::from_str::<Step>(json).expect_err("should reject outputMapping");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outputMapping"),
+            "error must name the offending field, got: {msg}"
+        );
+        assert!(
+            msg.contains("inputMapping"),
+            "error must list `inputMapping` so authors can self-correct, got: {msg}"
+        );
+    }
+
+    /// A valid Finish step with `inputMapping` still parses. Sanity check that
+    /// deny_unknown_fields hasn't broken the legitimate use.
+    #[test]
+    fn test_finish_step_accepts_input_mapping() {
+        let json = r#"{
+            "stepType": "Finish",
+            "id": "finish",
+            "inputMapping": {
+                "result": { "valueType": "reference", "value": "data.x" }
+            }
+        }"#;
+        serde_json::from_str::<Step>(json).expect("valid Finish should parse");
+    }
+
+    /// Same protection for Agent steps — typos in field names are caught.
+    #[test]
+    fn test_agent_step_rejects_unknown_field() {
+        let json = r#"{
+            "stepType": "Agent",
+            "id": "step1",
+            "agentId": "transform",
+            "capabilityId": "passthrough",
+            "totallyMadeUpField": "oops"
+        }"#;
+        let err = serde_json::from_str::<Step>(json).expect_err("should reject unknown field");
+        assert!(err.to_string().contains("totallyMadeUpField"));
+    }
+
+    /// Same protection for Split steps — protects against config-shaped typos
+    /// and ensures the `output_schema` field is recognized at the right level.
+    #[test]
+    fn test_split_step_rejects_unknown_field() {
+        let json = r#"{
+            "stepType": "Split",
+            "id": "split1",
+            "subgraph": { "steps": {}, "entryPoint": "x" },
+            "config": {
+                "value": { "valueType": "reference", "value": "data.items" }
+            },
+            "outputSchemmma": {}
+        }"#;
+        let err = serde_json::from_str::<Step>(json).expect_err("should reject typo");
+        assert!(err.to_string().contains("outputSchemmma"));
+    }
+
+    /// Config-level typos are also caught (deny_unknown_fields on SplitConfig).
+    #[test]
+    fn test_split_config_rejects_unknown_field() {
+        let json = r#"{
+            "value": { "valueType": "reference", "value": "data.items" },
+            "parallellism": 4
+        }"#;
+        let err = serde_json::from_str::<SplitConfig>(json).expect_err("typo should be caught");
+        assert!(err.to_string().contains("parallellism"));
+    }
+
+    /// Reference-value typos too.
+    #[test]
+    fn test_reference_value_rejects_unknown_field() {
+        let json = r#"{ "valueType": "reference", "value": "data.x", "default_": null }"#;
+        let err = serde_json::from_str::<MappingValue>(json).expect_err("trailing underscore typo");
+        assert!(err.to_string().contains("default_"));
+    }
 }
