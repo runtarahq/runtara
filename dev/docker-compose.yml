@@ -1,0 +1,55 @@
+# Local development stack for runtara.
+#
+# Brings up the two services that the runtime, e2e tests, and start.sh
+# connect to: Postgres (with pgvector + pg_trgm + fuzzystrmatch) and
+# Valkey. Self-contained — no dependency on smo-runtime.
+#
+# Usage:
+#   docker compose -f dev/docker-compose.yml up -d
+#   docker compose -f dev/docker-compose.yml down
+#   docker compose -f dev/docker-compose.yml logs -f
+#
+# Default ports (5432 / 6379) match what the e2e scripts expect; if you
+# already have postgres or valkey on those ports, stop them first.
+
+services:
+    postgres:
+        image: pgvector/pgvector:pg18
+        container_name: runtara-dev-postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: smo_worker
+            POSTGRES_PASSWORD: GueUkDKea0CjKP4Rn5Bk0FDV
+            POSTGRES_DB: smo_container
+        ports:
+            - "5432:5432"
+        volumes:
+            # Postgres 18+ stores data under a major-version subdir
+            # (`/var/lib/postgresql/<major>/docker`); mount the parent so
+            # the volume covers the active subdir without bind-boundary
+            # issues. See https://github.com/docker-library/postgres/pull/1259
+            - postgres_data:/var/lib/postgresql
+            - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U smo_worker -d smo_container"]
+            interval: 2s
+            timeout: 5s
+            retries: 10
+
+    valkey:
+        image: valkey/valkey:8-alpine
+        container_name: runtara-dev-valkey
+        restart: unless-stopped
+        ports:
+            - "6379:6379"
+        volumes:
+            - valkey_data:/data
+        healthcheck:
+            test: ["CMD", "valkey-cli", "ping"]
+            interval: 2s
+            timeout: 5s
+            retries: 10
+
+volumes:
+    postgres_data:
+    valkey_data:
