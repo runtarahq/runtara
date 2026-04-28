@@ -3,9 +3,11 @@ import { RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { ReportBlockDefinition, ReportBlockResult } from '../types';
 import { useReportBlockData } from '../hooks/useReports';
+import { getFilterDefaultValue } from '../utils';
 import { ChartBlock } from './blocks/ChartBlock';
 import { MetricBlock } from './blocks/MetricBlock';
 import { TableBlock } from './blocks/TableBlock';
+import { ReportFilterBar } from './ReportFilterBar';
 
 type ReportBlockHostProps = {
   reportId: string;
@@ -24,6 +26,18 @@ export function ReportBlockHost({
   const [isVisible, setIsVisible] = useState(!block.lazy);
   const defaultPageSize = getDefaultPageSize(block);
   const [page, setPage] = useState({ offset: 0, size: defaultPageSize });
+  const initialBlockFilters = useMemo(
+    () =>
+      Object.fromEntries(
+        (block.filters ?? []).map((filter) => [
+          filter.id,
+          getFilterDefaultValue(filter),
+        ])
+      ),
+    [block.filters]
+  );
+  const [blockFilters, setBlockFilters] =
+    useState<Record<string, unknown>>(initialBlockFilters);
 
   useEffect(() => {
     if (!block.lazy || isVisible) return;
@@ -46,20 +60,23 @@ export function ReportBlockHost({
 
   useEffect(() => {
     setPage({ offset: 0, size: defaultPageSize });
-  }, [block.id, defaultPageSize, filters]);
+    setBlockFilters(initialBlockFilters);
+  }, [block.id, defaultPageSize, filters, initialBlockFilters]);
 
+  const hasBlockFilters = (block.filters?.length ?? 0) > 0;
   const needsBlockFetch =
-    isVisible && (block.lazy || !initialResult || page.offset > 0);
+    isVisible &&
+    (block.lazy || hasBlockFilters || !initialResult || page.offset > 0);
 
   const request = useMemo(
     () => ({
       filters,
       page: block.type === 'table' ? page : undefined,
       sort: block.table?.defaultSort ?? [],
-      blockFilters: {},
+      blockFilters,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     }),
-    [block.table?.defaultSort, block.type, filters, page]
+    [block.table?.defaultSort, block.type, blockFilters, filters, page]
   );
 
   const {
@@ -83,6 +100,25 @@ export function ReportBlockHost({
               Retry
             </Button>
           )}
+        </div>
+      )}
+      {(block.filters?.length ?? 0) > 0 && (
+        <div className="mb-3 rounded-lg border bg-muted/20 p-3">
+          <ReportFilterBar
+            definition={{
+              definitionVersion: 1,
+              markdown: '',
+              filters: block.filters ?? [],
+              blocks: [block],
+            }}
+            values={blockFilters}
+            onChange={(filterId, value) =>
+              setBlockFilters((current) => ({
+                ...current,
+                [filterId]: value,
+              }))
+            }
+          />
         </div>
       )}
       {!isVisible || isFetching ? (

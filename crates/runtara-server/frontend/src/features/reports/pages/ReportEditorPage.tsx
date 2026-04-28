@@ -20,12 +20,13 @@ import {
   useReport,
   useUpdateReport,
 } from '../hooks/useReports';
+import { ReportDefinitionBuilder } from '../components/ReportDefinitionBuilder';
 import { ReportDefinition, ReportStatus } from '../types';
-import { slugify } from '../utils';
+import { extractBlockPlaceholders, slugify } from '../utils';
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
-  markdown: '# Report\n\n{{ block.records }}',
+  markdown: '# Report',
   filters: [],
   blocks: [],
 };
@@ -45,9 +46,8 @@ export function ReportEditorPage() {
   const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<ReportStatus>('published');
-  const [definitionText, setDefinitionText] = useState(
-    JSON.stringify(EMPTY_DEFINITION, null, 2)
-  );
+  const [definition, setDefinition] =
+    useState<ReportDefinition>(EMPTY_DEFINITION);
   const [selectedSchema, setSelectedSchema] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
 
@@ -57,7 +57,7 @@ export function ReportEditorPage() {
     setSlug(existingReport.slug);
     setDescription(existingReport.description ?? '');
     setStatus(existingReport.status);
-    setDefinitionText(JSON.stringify(existingReport.definition, null, 2));
+    setDefinition(existingReport.definition);
   }, [existingReport]);
 
   useEffect(() => {
@@ -65,18 +65,15 @@ export function ReportEditorPage() {
     setSelectedSchema(schemas[0]?.name ?? '');
   }, [schemas, selectedSchema]);
 
-  const parsedDefinition = useMemo(() => {
-    try {
-      return JSON.parse(definitionText) as ReportDefinition;
-    } catch {
-      return null;
-    }
-  }, [definitionText]);
+  const definitionErrors = useMemo(
+    () => validateReportDefinition(definition),
+    [definition]
+  );
 
   const canSave =
     name.trim().length > 0 &&
     slug.trim().length > 0 &&
-    parsedDefinition !== null &&
+    definitionErrors.length === 0 &&
     !createReport.isPending &&
     !updateReport.isPending;
 
@@ -144,13 +141,13 @@ export function ReportEditorPage() {
       ],
     };
 
-    setDefinitionText(JSON.stringify(starter, null, 2));
+    setDefinition(starter);
     setLocalError(null);
   };
 
   const handleSave = async () => {
-    if (!parsedDefinition) {
-      setLocalError('Report definition JSON is invalid.');
+    if (definitionErrors.length > 0) {
+      setLocalError(definitionErrors[0]);
       return;
     }
 
@@ -161,7 +158,7 @@ export function ReportEditorPage() {
       description: description.trim() || null,
       tags: [],
       status,
-      definition: parsedDefinition,
+      definition,
     };
 
     if (isEditing && reportId) {
@@ -281,26 +278,51 @@ export function ReportEditorPage() {
           </div>
         </section>
 
-        <section className="space-y-3 rounded-lg border bg-background p-4">
-          <div>
-            <Label htmlFor="report-definition">Definition JSON</Label>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Markdown and typed blocks are saved as the report definition.
-            </p>
-          </div>
-          <Textarea
-            id="report-definition"
-            className="min-h-[560px] font-mono text-sm"
-            value={definitionText}
-            onChange={(event) => setDefinitionText(event.target.value)}
+        <div className="flex flex-col gap-3">
+          <ReportDefinitionBuilder
+            value={definition}
+            schemas={schemas}
+            selectedSchema={selectedSchema}
+            onSelectedSchemaChange={setSelectedSchema}
+            onChange={(nextDefinition) => {
+              setDefinition(nextDefinition);
+              setLocalError(null);
+            }}
           />
-          {(localError || parsedDefinition === null) && (
+          {(localError || definitionErrors.length > 0) && (
             <p className="text-sm text-destructive">
-              {localError ?? 'Report definition JSON is invalid.'}
+              {localError ?? definitionErrors[0]}
             </p>
           )}
-        </section>
+        </div>
       </div>
     </TilesPage>
   );
+}
+
+function validateReportDefinition(definition: ReportDefinition): string[] {
+  const errors: string[] = [];
+  const blockIds = new Set<string>();
+
+  for (const block of definition.blocks) {
+    if (!block.id.trim()) {
+      errors.push('Every report block needs an ID.');
+      continue;
+    }
+    if (blockIds.has(block.id)) {
+      errors.push(`Duplicate report block ID: ${block.id}`);
+    }
+    blockIds.add(block.id);
+    if (!block.source.schema.trim()) {
+      errors.push(`Block "${block.id}" needs a schema.`);
+    }
+  }
+
+  for (const placeholder of extractBlockPlaceholders(definition.markdown)) {
+    if (!blockIds.has(placeholder)) {
+      errors.push(`Markdown references unknown block: ${placeholder}`);
+    }
+  }
+
+  return errors;
 }

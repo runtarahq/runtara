@@ -14,6 +14,15 @@ export type ReportFilterType =
 
 export type ReportChartKind = 'line' | 'bar' | 'area' | 'pie' | 'donut';
 
+export type ReportAggregateFn =
+  | 'count'
+  | 'sum'
+  | 'avg'
+  | 'min'
+  | 'max'
+  | 'first_value'
+  | 'last_value';
+
 export interface ReportFilterOption {
   label: string;
   value: string | number | boolean;
@@ -54,7 +63,7 @@ export interface ReportSource {
   groupBy?: string[];
   aggregates?: Array<{
     alias: string;
-    op: 'count' | 'sum' | 'avg' | 'min' | 'max' | 'first_value' | 'last_value';
+    op: ReportAggregateFn;
     field?: string;
     distinct?: boolean;
   }>;
