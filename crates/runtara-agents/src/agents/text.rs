@@ -703,6 +703,18 @@ pub enum CompareMode {
     LevenshteinDistance,
     /// Check if first string contains second
     Contains,
+    /// Jaro string similarity in `[0.0, 1.0]` (1.0 = identical).
+    JaroSimilarity,
+    /// Jaro-Winkler similarity — Jaro with a bonus for matching common
+    /// prefixes (up to 4 chars). Returns a score in `[0.0, 1.0]`.
+    JaroWinklerSimilarity,
+    /// Jaccard coefficient over character n-grams (shingles): |A ∩ B| / |A ∪ B|.
+    /// `n` defaults to 3; configurable via `ngram_n` (range 2..=8). Inputs
+    /// are lowercased and compared by Unicode codepoint.
+    NgramJaccard,
+    /// Overlap coefficient over character n-grams: |A ∩ B| / min(|A|, |B|).
+    /// Same `ngram_n` rules as `NgramJaccard`.
+    NgramOverlap,
 }
 
 impl EnumVariants for CompareMode {
@@ -742,6 +754,16 @@ pub struct CompareTextInput {
     )]
     #[serde(default)]
     pub mode: CompareMode,
+
+    /// N-gram size for `ngram-jaccard` / `ngram-overlap` modes. Range 2..=8.
+    /// Defaults to 3 when omitted.
+    #[field(
+        display_name = "N-gram Size",
+        description = "Shingle length for n-gram comparison modes (2..=8). Defaults to 3.",
+        example = "3"
+    )]
+    #[serde(default)]
+    pub ngram_n: Option<u8>,
 }
 
 /// Input for count occurrences operations
@@ -1647,9 +1669,33 @@ pub fn compare_text(input: CompareTextInput) -> Result<Value, String> {
             Value::Number(serde_json::Number::from(distance))
         }
         CompareMode::Contains => Value::Bool(text_a.contains(&text_b)),
+        CompareMode::JaroSimilarity => {
+            let score = jaro_similarity(&text_a, &text_b);
+            json_score(score)
+        }
+        CompareMode::JaroWinklerSimilarity => {
+            let score = jaro_winkler_similarity(&text_a, &text_b);
+            json_score(score)
+        }
+        CompareMode::NgramJaccard => {
+            let n = resolve_ngram_n(input.ngram_n)?;
+            let score = ngram_jaccard(&text_a, &text_b, n);
+            json_score(score)
+        }
+        CompareMode::NgramOverlap => {
+            let n = resolve_ngram_n(input.ngram_n)?;
+            let score = ngram_overlap(&text_a, &text_b, n);
+            json_score(score)
+        }
     };
 
     Ok(result)
+}
+
+fn json_score(score: f64) -> Value {
+    serde_json::Number::from_f64(score)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 /// Count occurrences of a pattern in text
@@ -1740,6 +1786,147 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     }
 
     prev_row[b_len]
+}
+
+/// Jaro string similarity in `[0.0, 1.0]`. Operates on Unicode codepoints
+/// (chars), not bytes — multibyte UTF-8 sequences are handled correctly.
+/// Returns 1.0 for identical inputs (including two empty strings) and 0.0
+/// when there are no character matches inside the Jaro window.
+fn jaro_similarity(a: &str, b: &str) -> f64 {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 && b_len == 0 {
+        return 1.0;
+    }
+    if a_len == 0 || b_len == 0 {
+        return 0.0;
+    }
+
+    // Match window: floor(max(|a|, |b|) / 2) - 1, never negative.
+    let match_window = (a_len.max(b_len) / 2).saturating_sub(1);
+
+    let mut a_matches = vec![false; a_len];
+    let mut b_matches = vec![false; b_len];
+    let mut matches = 0usize;
+
+    for (i, ac) in a_chars.iter().enumerate() {
+        let start = i.saturating_sub(match_window);
+        let end = (i + match_window + 1).min(b_len);
+        for j in start..end {
+            if !b_matches[j] && *ac == b_chars[j] {
+                a_matches[i] = true;
+                b_matches[j] = true;
+                matches += 1;
+                break;
+            }
+        }
+    }
+
+    if matches == 0 {
+        return 0.0;
+    }
+
+    // Count transpositions: pairs of matched chars that appear in different orders.
+    let mut transpositions = 0usize;
+    let mut k = 0usize;
+    for i in 0..a_len {
+        if !a_matches[i] {
+            continue;
+        }
+        while !b_matches[k] {
+            k += 1;
+        }
+        if a_chars[i] != b_chars[k] {
+            transpositions += 1;
+        }
+        k += 1;
+    }
+    let m = matches as f64;
+    let t = (transpositions as f64) / 2.0;
+    (m / a_len as f64 + m / b_len as f64 + (m - t) / m) / 3.0
+}
+
+/// Jaro-Winkler similarity. Boosts the Jaro score by `p * l * (1 - jaro)` where
+/// `l` is the length of the common prefix (capped at 4) and `p = 0.1`. Result
+/// stays in `[0.0, 1.0]`.
+fn jaro_winkler_similarity(a: &str, b: &str) -> f64 {
+    let jaro = jaro_similarity(a, b);
+    if jaro == 0.0 {
+        return 0.0;
+    }
+    let prefix = a
+        .chars()
+        .zip(b.chars())
+        .take(4)
+        .take_while(|(x, y)| x == y)
+        .count();
+    jaro + (prefix as f64) * 0.1 * (1.0 - jaro)
+}
+
+const NGRAM_MAX_INPUT_BYTES: usize = 64 * 1024;
+
+fn resolve_ngram_n(n: Option<u8>) -> Result<usize, String> {
+    let n = n.unwrap_or(3) as usize;
+    if !(2..=8).contains(&n) {
+        return Err(format!(
+            "ngram_n must be in 2..=8, got {} — pick a small shingle length",
+            n
+        ));
+    }
+    Ok(n)
+}
+
+/// Build the set of character n-grams from `s`, lowercased, by Unicode
+/// codepoint. Returns an empty set when `s` has fewer than `n` chars.
+fn shingles(s: &str, n: usize) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = s.to_lowercase().chars().collect();
+    let mut out = std::collections::HashSet::new();
+    if chars.len() < n {
+        return out;
+    }
+    for i in 0..=chars.len() - n {
+        out.insert(chars[i..i + n].iter().collect::<String>());
+    }
+    out
+}
+
+/// Jaccard coefficient over character n-grams.
+fn ngram_jaccard(a: &str, b: &str, n: usize) -> f64 {
+    if a.len() > NGRAM_MAX_INPUT_BYTES || b.len() > NGRAM_MAX_INPUT_BYTES {
+        return 0.0;
+    }
+    let sa = shingles(a, n);
+    let sb = shingles(b, n);
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    if sa.is_empty() || sb.is_empty() {
+        return 0.0;
+    }
+    let intersection = sa.intersection(&sb).count() as f64;
+    let union = sa.union(&sb).count() as f64;
+    intersection / union
+}
+
+/// Overlap coefficient: intersection size over the smaller set's size.
+fn ngram_overlap(a: &str, b: &str, n: usize) -> f64 {
+    if a.len() > NGRAM_MAX_INPUT_BYTES || b.len() > NGRAM_MAX_INPUT_BYTES {
+        return 0.0;
+    }
+    let sa = shingles(a, n);
+    let sb = shingles(b, n);
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    if sa.is_empty() || sb.is_empty() {
+        return 0.0;
+    }
+    let intersection = sa.intersection(&sb).count() as f64;
+    let denom = sa.len().min(sb.len()) as f64;
+    intersection / denom
 }
 
 /// Decode bytes into text using provided encoding.
@@ -2770,6 +2957,7 @@ mod tests {
             text_a: Some("Hello".to_string()),
             text_b: Some("Hello".to_string()),
             mode: CompareMode::Exact,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(true));
@@ -2781,6 +2969,7 @@ mod tests {
             text_a: Some("Hello".to_string()),
             text_b: Some("hello".to_string()),
             mode: CompareMode::Exact,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(false));
@@ -2792,6 +2981,7 @@ mod tests {
             text_a: Some("Hello".to_string()),
             text_b: Some("hello".to_string()),
             mode: CompareMode::CaseInsensitive,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(true));
@@ -2803,6 +2993,7 @@ mod tests {
             text_a: Some("kitten".to_string()),
             text_b: Some("sitting".to_string()),
             mode: CompareMode::LevenshteinDistance,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(3)); // kitten -> sitten -> sittin -> sitting
@@ -2814,6 +3005,7 @@ mod tests {
             text_a: Some("hello".to_string()),
             text_b: Some("hello".to_string()),
             mode: CompareMode::LevenshteinDistance,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(0));
@@ -2825,6 +3017,7 @@ mod tests {
             text_a: Some("Hello World".to_string()),
             text_b: Some("World".to_string()),
             mode: CompareMode::Contains,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(true));
@@ -2836,9 +3029,178 @@ mod tests {
             text_a: Some("Hello World".to_string()),
             text_b: Some("Universe".to_string()),
             mode: CompareMode::Contains,
+            ngram_n: None,
         };
         let result = compare_text(input).unwrap();
         assert_eq!(result, json!(false));
+    }
+
+    #[test]
+    fn test_compare_text_jaro_identical() {
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        let result = compare_text(input).unwrap();
+        assert_eq!(result.as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_classic_example() {
+        // The canonical example: "MARTHA" vs "MARHTA" → Jaro ≈ 0.9444
+        let input = CompareTextInput {
+            text_a: Some("MARTHA".to_string()),
+            text_b: Some("MARHTA".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        let v = compare_text(input).unwrap().as_f64().unwrap();
+        assert!((v - 0.9444444444444444).abs() < 1e-9, "got {}", v);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_winkler_classic_example() {
+        // "MARTHA"/"MARHTA": Jaro ≈ 0.9444, common prefix 3 ("MAR") so JW
+        // = 0.9444 + 3*0.1*(1 - 0.9444) ≈ 0.9611
+        let input = CompareTextInput {
+            text_a: Some("MARTHA".to_string()),
+            text_b: Some("MARHTA".to_string()),
+            mode: CompareMode::JaroWinklerSimilarity,
+            ngram_n: None,
+        };
+        let v = compare_text(input).unwrap().as_f64().unwrap();
+        assert!((v - 0.9611111111111111).abs() < 1e-9, "got {}", v);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_disjoint() {
+        let input = CompareTextInput {
+            text_a: Some("abc".to_string()),
+            text_b: Some("xyz".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_winkler_empty() {
+        // Both empty → identical (1.0).
+        let input = CompareTextInput {
+            text_a: Some(String::new()),
+            text_b: Some(String::new()),
+            mode: CompareMode::JaroWinklerSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+        // One empty → 0.0.
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some(String::new()),
+            mode: CompareMode::JaroWinklerSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_compare_text_jaro_unicode() {
+        // Multi-byte chars are compared by codepoint, not bytes.
+        let input = CompareTextInput {
+            text_a: Some("café".to_string()),
+            text_b: Some("café".to_string()),
+            mode: CompareMode::JaroSimilarity,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_jaccard_identical() {
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_jaccard_disjoint() {
+        let input = CompareTextInput {
+            text_a: Some("aaaaa".to_string()),
+            text_b: Some("bbbbb".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_jaccard_partial() {
+        // "abcde" → {abc, bcd, cde}; "abcef" → {abc, bce, cef}
+        // intersection = {abc} = 1, union = 5 → 1/5 = 0.2
+        let input = CompareTextInput {
+            text_a: Some("abcde".to_string()),
+            text_b: Some("abcef".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        let v = compare_text(input).unwrap().as_f64().unwrap();
+        assert!((v - 0.2).abs() < 1e-9, "got {}", v);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_overlap_smaller_set() {
+        // "ab" → {ab}; "abc" → {ab, bc}. intersection = 1, min(1, 2) = 1 → 1.0
+        let input = CompareTextInput {
+            text_a: Some("ab".to_string()),
+            text_b: Some("abc".to_string()),
+            mode: CompareMode::NgramOverlap,
+            ngram_n: Some(2),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_n_validation() {
+        for n in [0u8, 1, 9, 99] {
+            let input = CompareTextInput {
+                text_a: Some("hi".to_string()),
+                text_b: Some("hi".to_string()),
+                mode: CompareMode::NgramJaccard,
+                ngram_n: Some(n),
+            };
+            let err = compare_text(input).unwrap_err();
+            assert!(err.contains("ngram_n must be in 2..=8"), "n={}: {}", n, err);
+        }
+    }
+
+    #[test]
+    fn test_compare_text_ngram_default_n() {
+        // Omit ngram_n → defaults to 3.
+        let input = CompareTextInput {
+            text_a: Some("hello".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: None,
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn test_compare_text_ngram_case_insensitive() {
+        // shingles() lowercases, so "HELLO" / "hello" should be 1.0.
+        let input = CompareTextInput {
+            text_a: Some("HELLO".to_string()),
+            text_b: Some("hello".to_string()),
+            mode: CompareMode::NgramJaccard,
+            ngram_n: Some(3),
+        };
+        assert_eq!(compare_text(input).unwrap().as_f64().unwrap(), 1.0);
     }
 
     #[test]

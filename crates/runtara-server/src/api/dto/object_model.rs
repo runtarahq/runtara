@@ -684,6 +684,16 @@ pub enum AggregateFn {
     Max,
     FirstValue,
     LastValue,
+    /// Continuous percentile (PostgreSQL `percentile_cont`). Requires
+    /// `percentile` ∈ [0.0, 1.0] and exactly one numeric `orderBy` entry.
+    PercentileCont,
+    /// Discrete percentile (PostgreSQL `percentile_disc`). Same shape as
+    /// `PERCENTILE_CONT`.
+    PercentileDisc,
+    /// Sample standard deviation over a numeric column.
+    StddevSamp,
+    /// Sample variance over a numeric column.
+    VarSamp,
     /// Computed column — the value is derived from prior aliases via an
     /// `expression` tree. Reads no DB column. See v1.1 spec.
     Expr,
@@ -726,6 +736,10 @@ pub struct AggregateSpec {
     /// constants. Rejected for every other function.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<serde_json::Value>,
+    /// Fraction in `[0.0, 1.0]` for `PERCENTILE_CONT` / `PERCENTILE_DISC`.
+    /// Required for those functions, rejected otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -775,6 +789,10 @@ impl From<AggregateFn> for runtara_object_store::AggregateFn {
             AggregateFn::Max => runtara_object_store::AggregateFn::Max,
             AggregateFn::FirstValue => runtara_object_store::AggregateFn::FirstValue,
             AggregateFn::LastValue => runtara_object_store::AggregateFn::LastValue,
+            AggregateFn::PercentileCont => runtara_object_store::AggregateFn::PercentileCont,
+            AggregateFn::PercentileDisc => runtara_object_store::AggregateFn::PercentileDisc,
+            AggregateFn::StddevSamp => runtara_object_store::AggregateFn::StddevSamp,
+            AggregateFn::VarSamp => runtara_object_store::AggregateFn::VarSamp,
             AggregateFn::Expr => runtara_object_store::AggregateFn::Expr,
         }
     }
@@ -798,6 +816,7 @@ impl From<AggregateSpec> for runtara_object_store::AggregateSpec {
             distinct: s.distinct,
             order_by: s.order_by.into_iter().map(Into::into).collect(),
             expression: s.expression,
+            percentile: s.percentile,
         }
     }
 }

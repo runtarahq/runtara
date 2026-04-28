@@ -1169,6 +1169,104 @@ pub fn openai_create_embedding(
     Ok(OpenaiCreateEmbeddingOutput { data, model, usage })
 }
 
+/// Internal adapter used by `ai_tools::ai_embed_text` — accepts a clean batch
+/// shape and returns `Vec<Vec<f32>>` ready to write into a pgvector column.
+pub struct EmbedTextRequest {
+    pub texts: Vec<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<u32>,
+}
+
+pub struct EmbedTextResult {
+    pub embeddings: Vec<Vec<f32>>,
+    pub model: String,
+    pub dimension: u32,
+    pub usage: LlmUsage,
+}
+
+pub fn embed_text(
+    connection: &RawConnection,
+    request: EmbedTextRequest,
+) -> Result<EmbedTextResult, AgentError> {
+    let model = request
+        .model
+        .unwrap_or_else(|| "text-embedding-3-small".to_string());
+
+    let mut body = json!({
+        "model": model,
+        "input": request.texts,
+        "encoding_format": "float",
+    });
+    if let Some(dim) = request.dimensions {
+        body["dimensions"] = json!(dim);
+    }
+
+    let response_json = openai_post_json(connection, "/v1/embeddings", body, 60_000)?;
+
+    let mut data: Vec<Value> = response_json["data"]
+        .as_array()
+        .ok_or_else(|| {
+            AgentError::permanent(
+                "OPENAI_INVALID_RESPONSE",
+                "Missing `data` array in OpenAI embeddings response",
+            )
+            .with_attrs(json!({}))
+        })?
+        .clone();
+
+    // OpenAI returns rows with an `index` field — sort by it to be safe.
+    data.sort_by_key(|row| row["index"].as_i64().unwrap_or(0));
+
+    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(data.len());
+    for row in &data {
+        let arr = row["embedding"].as_array().ok_or_else(|| {
+            AgentError::permanent(
+                "OPENAI_INVALID_RESPONSE",
+                "Embedding row missing `embedding` array",
+            )
+            .with_attrs(json!({}))
+        })?;
+        let vec: Vec<f32> = arr
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        embeddings.push(vec);
+    }
+
+    let dimension = embeddings.first().map(|v| v.len() as u32).unwrap_or(0);
+    if let Some(req_dim) = request.dimensions
+        && dimension != req_dim
+    {
+        return Err(AgentError::permanent(
+            "OPENAI_DIMENSION_MISMATCH",
+            format!(
+                "Requested dimension {} but OpenAI returned {}",
+                req_dim, dimension
+            ),
+        )
+        .with_attrs(json!({"requested": req_dim, "actual": dimension})));
+    }
+
+    let actual_model = response_json["model"]
+        .as_str()
+        .unwrap_or(&model)
+        .to_string();
+    let usage = LlmUsage {
+        prompt_tokens: response_json["usage"]["prompt_tokens"]
+            .as_i64()
+            .unwrap_or(0) as i32,
+        completion_tokens: 0,
+        total_tokens: response_json["usage"]["total_tokens"].as_i64().unwrap_or(0) as i32,
+    };
+
+    Ok(EmbedTextResult {
+        embeddings,
+        model: actual_model,
+        dimension,
+        usage,
+    })
+}
+
 #[derive(Serialize, Deserialize, CapabilityInput)]
 #[capability_input(display_name = "OpenAI Moderate Content Input")]
 pub struct OpenaiModerateContentInput {

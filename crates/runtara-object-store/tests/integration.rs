@@ -2870,6 +2870,7 @@ async fn test_aggregate_first_last_value_per_group() {
                     direction: SortDirection::Asc,
                 }],
                 expression: None,
+                percentile: None,
             },
             AggregateSpec {
                 alias: "last_qty".into(),
@@ -2881,6 +2882,7 @@ async fn test_aggregate_first_last_value_per_group() {
                     direction: SortDirection::Asc,
                 }],
                 expression: None,
+                percentile: None,
             },
         ],
         order_by: vec![AggregateOrderBy {
@@ -2948,6 +2950,7 @@ async fn test_aggregate_count_sum_grouped() {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             },
             AggregateSpec {
                 alias: "total_qty".into(),
@@ -2956,6 +2959,7 @@ async fn test_aggregate_count_sum_grouped() {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             },
         ],
         order_by: vec![AggregateOrderBy {
@@ -3012,6 +3016,7 @@ async fn test_aggregate_count_star_no_group_by() {
             distinct: false,
             order_by: vec![],
             expression: None,
+            percentile: None,
         }],
         order_by: vec![],
         limit: None,
@@ -3054,6 +3059,7 @@ async fn test_aggregate_with_condition_filter() {
             distinct: false,
             order_by: vec![],
             expression: None,
+            percentile: None,
         }],
         order_by: vec![],
         limit: None,
@@ -3095,6 +3101,7 @@ async fn test_aggregate_unknown_column_rejected_at_store() {
             distinct: false,
             order_by: vec![],
             expression: None,
+            percentile: None,
         }],
         order_by: vec![],
         limit: None,
@@ -3135,6 +3142,7 @@ fn first_last_qty_agg_specs() -> Vec<AggregateSpec> {
                 direction: SortDirection::Asc,
             }],
             expression: None,
+            percentile: None,
         },
         AggregateSpec {
             alias: "last_qty".into(),
@@ -3146,6 +3154,7 @@ fn first_last_qty_agg_specs() -> Vec<AggregateSpec> {
                 direction: SortDirection::Asc,
             }],
             expression: None,
+            percentile: None,
         },
     ]
 }
@@ -3158,6 +3167,7 @@ fn make_expr_spec(alias: &str, expression: serde_json::Value) -> AggregateSpec {
         distinct: false,
         order_by: vec![],
         expression: Some(expression),
+        percentile: None,
     }
 }
 
@@ -3355,6 +3365,179 @@ async fn test_aggregate_expr_boolean_column() {
             _ => panic!("unexpected sku {}", sku),
         }
     }
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_percentile_cont_per_sku() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    // Median (p=0.5) of qty per SKU. Sorted qtys per SKU:
+    //   A: [0, 10, 15] → median = 10
+    //   B: [5, 7, 9]  → median = 7
+    //   C: [50, 100, 100] → median = 100
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec!["sku".into()],
+        aggregates: vec![AggregateSpec {
+            alias: "p50_qty".into(),
+            fn_: AggregateFn::PercentileCont,
+            column: None,
+            distinct: false,
+            order_by: vec![AggregateOrderBy {
+                column: "qty".into(),
+                direction: SortDirection::Asc,
+            }],
+            expression: None,
+            percentile: Some(0.5),
+        }],
+        order_by: vec![AggregateOrderBy {
+            column: "sku".into(),
+            direction: SortDirection::Asc,
+        }],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    let by_sku: std::collections::HashMap<String, f64> = result
+        .rows
+        .iter()
+        .map(|row| {
+            let sku = row[0].as_str().unwrap().to_string();
+            let p = row[1]
+                .as_str()
+                .map(|s| s.parse::<f64>().unwrap())
+                .or_else(|| row[1].as_f64())
+                .unwrap_or_else(|| panic!("unexpected p50 cell {:?}", row[1]));
+            (sku, p)
+        })
+        .collect();
+    assert!((by_sku["A"] - 10.0).abs() < 1e-9, "A: {}", by_sku["A"]);
+    assert!((by_sku["B"] - 7.0).abs() < 1e-9, "B: {}", by_sku["B"]);
+    assert!((by_sku["C"] - 100.0).abs() < 1e-9, "C: {}", by_sku["C"]);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_percentile_disc_no_group() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    // P95 over all qtys: sorted = [0, 5, 7, 9, 10, 15, 50, 100, 100].
+    // PERCENTILE_DISC picks the value at the 95th percentile rank (rounded
+    // up): rank ceil(0.95 * 9) = 9 → 100.
+    let req = AggregateRequest {
+        condition: None,
+        group_by: vec![],
+        aggregates: vec![AggregateSpec {
+            alias: "p95_qty".into(),
+            fn_: AggregateFn::PercentileDisc,
+            column: None,
+            distinct: false,
+            order_by: vec![AggregateOrderBy {
+                column: "qty".into(),
+                direction: SortDirection::Asc,
+            }],
+            expression: None,
+            percentile: Some(0.95),
+        }],
+        order_by: vec![],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+    assert_eq!(result.rows.len(), 1);
+    let p = result.rows[0][0]
+        .as_i64()
+        .or_else(|| result.rows[0][0].as_f64().map(|f| f as i64))
+        .unwrap_or_else(|| panic!("unexpected p95 cell {:?}", result.rows[0][0]));
+    assert_eq!(p, 100);
+
+    cleanup_test(&store, &prefix).await;
+}
+
+#[tokio::test]
+async fn test_aggregate_stddev_samp_with_condition() {
+    let Some((store, prefix)) = create_test_store().await else {
+        eprintln!("Skipping test: TEST_DATABASE_URL not set");
+        return;
+    };
+    seed_stock_snapshot(&store, &prefix, "stock_snapshot").await;
+
+    // Filter qty > 0, group by sku. Sample stddev:
+    //   A: qtys after filter = [10, 15] → stddev_samp = sqrt(((10-12.5)^2 + (15-12.5)^2)/1) = sqrt(12.5) ≈ 3.5355
+    //   B: qtys = [5, 7, 9] → mean=7, variance=(4+0+4)/2=4, stddev≈2.0
+    //   C: qtys = [100, 100, 50] → mean=83.333..., var=((16.6667)^2 + (16.6667)^2 + (33.3333)^2)/2 = (277.78+277.78+1111.11)/2 = 833.33, stddev≈28.8675
+    let req = AggregateRequest {
+        condition: Some(Condition {
+            op: "GT".into(),
+            arguments: Some(vec![serde_json::json!("qty"), serde_json::json!(0)]),
+        }),
+        group_by: vec!["sku".into()],
+        aggregates: vec![AggregateSpec {
+            alias: "vol".into(),
+            fn_: AggregateFn::StddevSamp,
+            column: Some("qty".into()),
+            distinct: false,
+            order_by: vec![],
+            expression: None,
+            percentile: None,
+        }],
+        order_by: vec![AggregateOrderBy {
+            column: "sku".into(),
+            direction: SortDirection::Asc,
+        }],
+        limit: None,
+        offset: None,
+    };
+
+    let result = store
+        .aggregate_instances("stock_snapshot", req)
+        .await
+        .expect("aggregate_instances");
+
+    let by_sku: std::collections::HashMap<String, f64> = result
+        .rows
+        .iter()
+        .map(|row| {
+            let sku = row[0].as_str().unwrap().to_string();
+            let v = row[1]
+                .as_str()
+                .map(|s| s.parse::<f64>().unwrap())
+                .or_else(|| row[1].as_f64())
+                .unwrap_or_else(|| panic!("unexpected stddev cell {:?}", row[1]));
+            (sku, v)
+        })
+        .collect();
+    assert!(
+        (by_sku["A"] - 12.5_f64.sqrt()).abs() < 1e-6,
+        "A: {}",
+        by_sku["A"]
+    );
+    assert!((by_sku["B"] - 2.0).abs() < 1e-6, "B: {}", by_sku["B"]);
+    assert!(
+        (by_sku["C"] - (2500.0_f64 / 3.0).sqrt()).abs() < 1e-6,
+        "C: {}",
+        by_sku["C"]
+    );
 
     cleanup_test(&store, &prefix).await;
 }

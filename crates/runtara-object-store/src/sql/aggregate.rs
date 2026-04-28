@@ -47,6 +47,21 @@ pub enum AggregateFn {
     Max,
     FirstValue,
     LastValue,
+    /// Continuous percentile over a numeric column. Renders as
+    /// `percentile_cont(p) WITHIN GROUP (ORDER BY col::numeric <dir>)`.
+    /// Requires `percentile` ∈ [0.0, 1.0] and exactly one numeric `order_by`
+    /// entry. Returns `numeric` (NULL on an empty filtered set).
+    PercentileCont,
+    /// Discrete percentile over a numeric column. Same shape as
+    /// `PERCENTILE_CONT` but renders `percentile_disc(p) WITHIN GROUP (...)`.
+    PercentileDisc,
+    /// Sample standard deviation over a numeric column. Renders as
+    /// `STDDEV_SAMP(col::numeric)`. Returns NULL when fewer than 2 rows match
+    /// (standard SQL).
+    StddevSamp,
+    /// Sample variance over a numeric column. Renders as
+    /// `VAR_SAMP(col::numeric)`. Returns NULL when fewer than 2 rows match.
+    VarSamp,
     /// A column computed from previously-declared aliases and constants via
     /// arithmetic / comparison / logical operators. Reads no DB column.
     Expr,
@@ -115,6 +130,11 @@ pub struct AggregateSpec {
     /// [`ExprNode`] inside `build_aggregate_query`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<serde_json::Value>,
+
+    /// Fraction in `[0.0, 1.0]` for `PERCENTILE_CONT` / `PERCENTILE_DISC`.
+    /// Required for those two functions, rejected for every other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
 }
 
 /// Request for [`ObjectStore::aggregate_instances`].
@@ -421,6 +441,16 @@ fn validate_spec(
             spec.alias
         ));
     }
+    if !matches!(
+        spec.fn_,
+        AggregateFn::PercentileCont | AggregateFn::PercentileDisc
+    ) && spec.percentile.is_some()
+    {
+        return Err(format!(
+            "Aggregate '{}': `percentile` is only valid for PERCENTILE_CONT/PERCENTILE_DISC",
+            spec.alias
+        ));
+    }
     match spec.fn_ {
         AggregateFn::Count => {
             if spec.distinct && spec.column.is_none() {
@@ -521,6 +551,102 @@ fn validate_spec(
                 ));
             }
             Ok((column_kind(sql, schema), None))
+        }
+        AggregateFn::StddevSamp | AggregateFn::VarSamp => {
+            let fn_name = if matches!(spec.fn_, AggregateFn::StddevSamp) {
+                "STDDEV_SAMP"
+            } else {
+                "VAR_SAMP"
+            };
+            let col = spec.column.as_ref().ok_or_else(|| {
+                format!("Aggregate '{}': {} requires a column", spec.alias, fn_name)
+            })?;
+            if spec.distinct {
+                return Err(format!(
+                    "Aggregate '{}': distinct is only valid for COUNT",
+                    spec.alias
+                ));
+            }
+            validate_field_chars(col, "aggregate column")?;
+            let sql = field_to_sql(col);
+            match column_type(sql, schema) {
+                Some(ColumnType::Integer) | Some(ColumnType::Decimal { .. }) => {}
+                Some(_) => {
+                    return Err(format!(
+                        "Aggregate '{}': {} requires a numeric column, '{}' is not numeric",
+                        spec.alias, fn_name, col
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "Aggregate '{}': unknown column '{}'",
+                        spec.alias, col
+                    ));
+                }
+            }
+            if !spec.order_by.is_empty() {
+                return Err(format!(
+                    "Aggregate '{}': order_by is only valid for FIRST_VALUE/LAST_VALUE/PERCENTILE_*",
+                    spec.alias
+                ));
+            }
+            Ok((AliasKind::Numeric, None))
+        }
+        AggregateFn::PercentileCont | AggregateFn::PercentileDisc => {
+            let fn_name = if matches!(spec.fn_, AggregateFn::PercentileCont) {
+                "PERCENTILE_CONT"
+            } else {
+                "PERCENTILE_DISC"
+            };
+            if spec.column.is_some() {
+                return Err(format!(
+                    "Aggregate '{}': {} takes its value column from order_by, not `column`",
+                    spec.alias, fn_name
+                ));
+            }
+            if spec.distinct {
+                return Err(format!(
+                    "Aggregate '{}': distinct is only valid for COUNT",
+                    spec.alias
+                ));
+            }
+            let p = spec.percentile.ok_or_else(|| {
+                format!(
+                    "Aggregate '{}': {} requires `percentile` ∈ [0.0, 1.0]",
+                    spec.alias, fn_name
+                )
+            })?;
+            if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+                return Err(format!(
+                    "Aggregate '{}': {} `percentile` must be a finite number in [0.0, 1.0], got {}",
+                    spec.alias, fn_name, p
+                ));
+            }
+            if spec.order_by.len() != 1 {
+                return Err(format!(
+                    "Aggregate '{}': {} requires exactly one order_by entry (the value column)",
+                    spec.alias, fn_name
+                ));
+            }
+            let ob = &spec.order_by[0];
+            validate_field_chars(&ob.column, "aggregate order_by")?;
+            let osql = field_to_sql(&ob.column);
+            match column_type(osql, schema) {
+                Some(ColumnType::Integer) | Some(ColumnType::Decimal { .. }) => {}
+                Some(_) => {
+                    return Err(format!(
+                        "Aggregate '{}': {} requires a numeric order_by column, '{}' is not numeric",
+                        spec.alias, fn_name, ob.column
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "Aggregate '{}': order_by column '{}' not found in schema",
+                        spec.alias, ob.column
+                    ));
+                }
+            }
+            Ok((AliasKind::Numeric, None))
         }
         AggregateFn::FirstValue | AggregateFn::LastValue => {
             let col = spec.column.as_ref().ok_or_else(|| {
@@ -676,6 +802,33 @@ fn render_aggregate_expr(
                 order_parts.join(", "),
             ))
         }
+        AggregateFn::StddevSamp | AggregateFn::VarSamp => {
+            let col = spec.column.as_ref().unwrap();
+            let sql = field_to_sql(col);
+            let fn_name = if matches!(spec.fn_, AggregateFn::StddevSamp) {
+                "STDDEV_SAMP"
+            } else {
+                "VAR_SAMP"
+            };
+            Ok(format!("{}({}::numeric)", fn_name, quote_identifier(sql)))
+        }
+        AggregateFn::PercentileCont | AggregateFn::PercentileDisc => {
+            let p = spec.percentile.unwrap();
+            let fn_name = if matches!(spec.fn_, AggregateFn::PercentileCont) {
+                "percentile_cont"
+            } else {
+                "percentile_disc"
+            };
+            let ob = &spec.order_by[0];
+            let osql = field_to_sql(&ob.column);
+            Ok(format!(
+                "{}({:.6}) WITHIN GROUP (ORDER BY {}::numeric {})",
+                fn_name,
+                p,
+                quote_identifier(osql),
+                ob.direction.as_sql(),
+            ))
+        }
         AggregateFn::Expr => {
             // Use the ExprNode that was parsed during validation — saves a
             // second serde round-trip and guarantees the rendered tree is
@@ -763,6 +916,7 @@ mod tests {
             distinct: false,
             order_by: vec![],
             expression: None,
+            percentile: None,
         }
     }
 
@@ -794,6 +948,7 @@ mod tests {
                 distinct: true,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -824,6 +979,7 @@ mod tests {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             order_by: vec![AggregateOrderBy {
                 column: "total".into(),
@@ -859,6 +1015,7 @@ mod tests {
                         direction: SortDirection::Asc,
                     }],
                     expression: None,
+                    percentile: None,
                 },
                 AggregateSpec {
                     alias: "last_qty".into(),
@@ -870,6 +1027,7 @@ mod tests {
                         direction: SortDirection::Asc,
                     }],
                     expression: None,
+                    percentile: None,
                 },
             ],
             order_by: vec![AggregateOrderBy {
@@ -905,6 +1063,7 @@ mod tests {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -923,6 +1082,7 @@ mod tests {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -991,6 +1151,7 @@ mod tests {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1065,6 +1226,7 @@ mod tests {
                     direction: SortDirection::Asc,
                 }],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1119,6 +1281,7 @@ mod tests {
                     direction: SortDirection::Asc,
                 }],
                 expression: None,
+                percentile: None,
             },
             AggregateSpec {
                 alias: "last_qty".into(),
@@ -1130,6 +1293,7 @@ mod tests {
                     direction: SortDirection::Asc,
                 }],
                 expression: None,
+                percentile: None,
             },
         ]
     }
@@ -1142,6 +1306,7 @@ mod tests {
             distinct: false,
             order_by: vec![],
             expression: Some(expression),
+            percentile: None,
         }
     }
 
@@ -1198,6 +1363,7 @@ mod tests {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1218,6 +1384,7 @@ mod tests {
                 expression: Some(serde_json::json!({
                     "valueType": "immediate", "value": 1
                 })),
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1238,6 +1405,7 @@ mod tests {
                 expression: Some(serde_json::json!({
                     "valueType": "immediate", "value": 1
                 })),
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1261,6 +1429,7 @@ mod tests {
                 order_by: vec![],
                 // Missing both `op` and `valueType` — matches no ExprNode variant.
                 expression: Some(serde_json::json!({"nope": 1})),
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1352,6 +1521,7 @@ mod tests {
                     distinct: false,
                     order_by: vec![],
                     expression: None,
+                    percentile: None,
                 },
                 expr_spec(
                     "bad",
@@ -1424,6 +1594,7 @@ mod tests {
                 distinct: false,
                 order_by: vec![],
                 expression: None,
+                percentile: None,
             }],
             ..Default::default()
         };
@@ -1440,12 +1611,218 @@ mod tests {
             distinct: false,
             order_by: vec![],
             expression: None,
+            percentile: None,
         };
         let json = serde_json::to_value(&spec).unwrap();
         assert!(
             json.get("expression").is_none(),
             "v1.0 specs should not emit `expression`: {}",
             json
+        );
+    }
+
+    // ========================================================================
+    // PERCENTILE / STDDEV / VARIANCE tests
+    // ========================================================================
+
+    fn percentile_spec(alias: &str, p: f64, value_col: &str) -> AggregateSpec {
+        AggregateSpec {
+            alias: alias.into(),
+            fn_: AggregateFn::PercentileCont,
+            column: None,
+            distinct: false,
+            order_by: vec![AggregateOrderBy {
+                column: value_col.into(),
+                direction: SortDirection::Asc,
+            }],
+            expression: None,
+            percentile: Some(p),
+        }
+    }
+
+    #[test]
+    fn percentile_cont_renders_within_group() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates: vec![percentile_spec("p50_qty", 0.5, "qty")],
+            ..Default::default()
+        };
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(
+            sql.data_sql
+                .contains("percentile_cont(0.500000) WITHIN GROUP (ORDER BY \"qty\"::numeric ASC)"),
+            "{}",
+            sql.data_sql
+        );
+    }
+
+    #[test]
+    fn percentile_disc_renders_within_group() {
+        let schema = stock_snapshot_schema();
+        let mut spec = percentile_spec("p95_price", 0.95, "price");
+        spec.fn_ = AggregateFn::PercentileDisc;
+        let req = AggregateRequest {
+            aggregates: vec![spec],
+            ..Default::default()
+        };
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(
+            sql.data_sql.contains(
+                "percentile_disc(0.950000) WITHIN GROUP (ORDER BY \"price\"::numeric ASC)"
+            ),
+            "{}",
+            sql.data_sql
+        );
+    }
+
+    #[test]
+    fn percentile_requires_fraction_in_unit_interval() {
+        let schema = stock_snapshot_schema();
+        let mut spec = percentile_spec("bad", 1.5, "qty");
+        let req = AggregateRequest {
+            aggregates: vec![spec.clone()],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("must be a finite number in [0.0, 1.0]"),
+            "{}",
+            err
+        );
+
+        spec.percentile = Some(f64::NAN);
+        let req = AggregateRequest {
+            aggregates: vec![spec.clone()],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("must be a finite number"), "{}", err);
+
+        spec.percentile = None;
+        let req = AggregateRequest {
+            aggregates: vec![spec],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(err.contains("requires `percentile`"), "{}", err);
+    }
+
+    #[test]
+    fn percentile_requires_single_numeric_order_by() {
+        let schema = stock_snapshot_schema();
+        // zero entries
+        let mut spec = percentile_spec("p", 0.5, "qty");
+        spec.order_by.clear();
+        let req = AggregateRequest {
+            aggregates: vec![spec],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("requires exactly one order_by entry"),
+            "{}",
+            err
+        );
+
+        // non-numeric column
+        let spec = percentile_spec("p", 0.5, "sku");
+        let req = AggregateRequest {
+            aggregates: vec![spec],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("requires a numeric order_by column"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn percentile_rejects_column_field() {
+        let schema = stock_snapshot_schema();
+        let mut spec = percentile_spec("p", 0.5, "qty");
+        spec.column = Some("price".into());
+        let req = AggregateRequest {
+            aggregates: vec![spec],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("takes its value column from order_by"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn percentile_field_rejected_on_non_percentile_fn() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![AggregateSpec {
+                alias: "total".into(),
+                fn_: AggregateFn::Sum,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+                percentile: Some(0.5),
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("`percentile` is only valid for PERCENTILE_CONT/PERCENTILE_DISC"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn stddev_samp_renders_numeric_cast() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            group_by: vec!["sku".into()],
+            aggregates: vec![AggregateSpec {
+                alias: "vol".into(),
+                fn_: AggregateFn::StddevSamp,
+                column: Some("qty".into()),
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+                percentile: None,
+            }],
+            ..Default::default()
+        };
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(
+            sql.data_sql.contains("STDDEV_SAMP(\"qty\"::numeric)"),
+            "{}",
+            sql.data_sql
+        );
+    }
+
+    #[test]
+    fn var_samp_rejects_text_column() {
+        let schema = stock_snapshot_schema();
+        let req = AggregateRequest {
+            aggregates: vec![AggregateSpec {
+                alias: "vv".into(),
+                fn_: AggregateFn::VarSamp,
+                column: Some("sku".into()),
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+                percentile: None,
+            }],
+            ..Default::default()
+        };
+        let err = build_aggregate_query(&schema, &req).unwrap_err();
+        assert!(
+            err.contains("VAR_SAMP requires a numeric column"),
+            "{}",
+            err
         );
     }
 }

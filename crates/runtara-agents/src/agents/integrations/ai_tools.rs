@@ -824,3 +824,257 @@ pub fn ai_vision_to_image(
         .with_attrs(json!({"integration_id": connection.integration_id}))),
     }
 }
+
+// ============================================================================
+// Operation 5: Text Embedding
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, Default, CapabilityInput)]
+#[capability_input(display_name = "AI Embed Text Input")]
+pub struct AiEmbedTextInput {
+    #[field(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _connection: Option<RawConnection>,
+
+    #[field(
+        display_name = "Texts",
+        description = "Batch of input strings to embed. Provider-specific batch limits apply (OpenAI ≤2048; Bedrock Titan loops sequentially).",
+        example = "[\"hello\", \"world\"]"
+    )]
+    #[serde(default)]
+    pub texts: Vec<String>,
+
+    #[field(
+        display_name = "Model",
+        description = "Embedding model override. Defaults: OpenAI = text-embedding-3-small, Bedrock = amazon.titan-embed-text-v2:0",
+        example = "text-embedding-3-small"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[field(
+        display_name = "Dimension",
+        description = "Optional output dimension. Must match the target Vector column. Workflow author is responsible for alignment.",
+        example = "1536"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "AI Embed Text Output")]
+pub struct AiEmbedTextOutput {
+    #[field(
+        display_name = "Embeddings",
+        description = "One f32 vector per input string, in the same order as the input. Cast to f32 to match pgvector storage."
+    )]
+    pub embeddings: Vec<Vec<f32>>,
+
+    #[field(
+        display_name = "Model",
+        description = "The model that produced the embeddings"
+    )]
+    pub model: String,
+
+    #[field(
+        display_name = "Dimension",
+        description = "Dimensionality of each returned vector"
+    )]
+    pub dimension: u32,
+
+    #[field(display_name = "Usage", description = "Token usage statistics")]
+    pub usage: LlmUsage,
+}
+
+const AI_EMBED_TEXT_BATCH_CAP: usize = 2048;
+const AI_EMBED_TEXT_MAX_DIM: u32 = 4096;
+
+#[capability(
+    module = "ai_tools",
+    display_name = "Embed Text",
+    description = "Generate vector embeddings for one or more strings. Use the result to populate a Vector column for similarity search.",
+    module_supports_connections = true,
+    module_integration_ids = "openai_api_key,aws_credentials",
+    module_secure = true
+)]
+pub fn ai_embed_text(input: AiEmbedTextInput) -> Result<AiEmbedTextOutput, AgentError> {
+    let connection = input._connection.as_ref().ok_or_else(|| {
+        AgentError::permanent("AI_TOOLS_MISSING_CONNECTION", "LLM connection is required")
+            .with_attrs(json!({}))
+    })?;
+
+    if input.texts.is_empty() {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_INVALID_INPUT",
+            "`texts` must contain at least one entry",
+        )
+        .with_attrs(json!({})));
+    }
+    if input.texts.iter().any(|t| t.is_empty()) {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_INVALID_INPUT",
+            "`texts` entries must be non-empty",
+        )
+        .with_attrs(json!({})));
+    }
+    if input.texts.len() > AI_EMBED_TEXT_BATCH_CAP {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_BATCH_TOO_LARGE",
+            format!(
+                "`texts` batch size {} exceeds cap {}",
+                input.texts.len(),
+                AI_EMBED_TEXT_BATCH_CAP
+            ),
+        )
+        .with_attrs(json!({"batch": input.texts.len(), "cap": AI_EMBED_TEXT_BATCH_CAP})));
+    }
+    if let Some(d) = input.dimension
+        && (d == 0 || d > AI_EMBED_TEXT_MAX_DIM)
+    {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_INVALID_INPUT",
+            format!("`dimension` must be in 1..={}", AI_EMBED_TEXT_MAX_DIM),
+        )
+        .with_attrs(json!({"dimension": d, "max": AI_EMBED_TEXT_MAX_DIM})));
+    }
+
+    let integration_id = resolve_integration_id(connection)?;
+    let (embeddings, model, dimension, usage) = match integration_id.as_str() {
+        "openai_api_key" => {
+            let r = openai::embed_text(
+                connection,
+                openai::EmbedTextRequest {
+                    texts: input.texts,
+                    model: input.model,
+                    dimensions: input.dimension,
+                },
+            )?;
+            (r.embeddings, r.model, r.dimension, r.usage)
+        }
+        "aws_credentials" => {
+            let r = bedrock::embed_text(
+                connection,
+                bedrock::EmbedTextRequest {
+                    texts: input.texts,
+                    model: input.model,
+                    dimensions: input.dimension,
+                },
+            )?;
+            (r.embeddings, r.model, r.dimension, r.usage)
+        }
+        _ => {
+            return Err(AgentError::permanent(
+                "AI_TOOLS_UNSUPPORTED_PROVIDER",
+                format!(
+                    "Embedding provider not supported: {}",
+                    connection.integration_id
+                ),
+            )
+            .with_attrs(json!({"integration_id": connection.integration_id})));
+        }
+    };
+
+    Ok(AiEmbedTextOutput {
+        embeddings,
+        model,
+        dimension,
+        usage: LlmUsage {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_connection(integration_id: &str) -> RawConnection {
+        RawConnection {
+            connection_id: "test-conn".into(),
+            connection_subtype: None,
+            integration_id: integration_id.into(),
+            parameters: serde_json::Value::Null,
+            rate_limit_config: None,
+        }
+    }
+
+    #[test]
+    fn embed_text_rejects_missing_connection() {
+        let input = AiEmbedTextInput {
+            _connection: None,
+            texts: vec!["hi".into()],
+            model: None,
+            dimension: None,
+        };
+        let err = ai_embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_MISSING_CONNECTION");
+    }
+
+    #[test]
+    fn embed_text_rejects_empty_batch() {
+        let input = AiEmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec![],
+            model: None,
+            dimension: None,
+        };
+        let err = ai_embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+        assert!(err.message.contains("at least one"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_text_rejects_empty_text_entry() {
+        let input = AiEmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec!["ok".into(), String::new()],
+            model: None,
+            dimension: None,
+        };
+        let err = ai_embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+        assert!(err.message.contains("non-empty"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_text_rejects_oversize_dimension() {
+        let input = AiEmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec!["x".into()],
+            model: None,
+            dimension: Some(99_999),
+        };
+        let err = ai_embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+        assert!(err.message.contains("dimension"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_text_rejects_zero_dimension() {
+        let input = AiEmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts: vec!["x".into()],
+            model: None,
+            dimension: Some(0),
+        };
+        let err = ai_embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_INVALID_INPUT");
+    }
+
+    #[test]
+    fn embed_text_rejects_oversize_batch() {
+        let texts = (0..AI_EMBED_TEXT_BATCH_CAP + 1)
+            .map(|i| format!("t-{}", i))
+            .collect();
+        let input = AiEmbedTextInput {
+            _connection: Some(fake_connection("openai_api_key")),
+            texts,
+            model: None,
+            dimension: None,
+        };
+        let err = ai_embed_text(input).unwrap_err();
+        assert_eq!(err.code, "AI_TOOLS_BATCH_TOO_LARGE");
+    }
+}

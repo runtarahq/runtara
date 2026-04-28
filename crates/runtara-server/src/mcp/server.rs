@@ -389,10 +389,12 @@ impl SmoMcpServer {
 
     #[tool(
         description = "Aggregate object model instances with GROUP BY. Supports \
-                       COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE. Returns \
-                       columnar {columns, rows, groupCount}. Prefer this over \
-                       query_object_instances + client-side folding for any \
-                       GROUP BY workload (e.g. first/last snapshot per SKU)."
+                       COUNT, SUM, AVG, MIN, MAX, FIRST_VALUE, LAST_VALUE, \
+                       STDDEV_SAMP, VAR_SAMP, PERCENTILE_CONT, PERCENTILE_DISC, \
+                       EXPR. Returns columnar {columns, rows, groupCount}. Prefer \
+                       this over query_object_instances + client-side folding for \
+                       any GROUP BY workload (e.g. first/last snapshot per SKU, \
+                       median/p95 latency per endpoint, sample stddev per cohort)."
     )]
     async fn query_aggregate(
         &self,

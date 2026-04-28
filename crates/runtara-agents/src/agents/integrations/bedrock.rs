@@ -1037,3 +1037,95 @@ pub fn bedrock_list_models(
 
     Ok(BedrockListModelsOutput { model_summaries })
 }
+
+// ============================================================================
+// Internal: Text Embedding (used by ai_tools::ai_embed_text)
+// ============================================================================
+
+pub struct EmbedTextRequest {
+    pub texts: Vec<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<u32>,
+}
+
+pub struct EmbedTextResult {
+    pub embeddings: Vec<Vec<f32>>,
+    pub model: String,
+    pub dimension: u32,
+    pub usage: LlmUsage,
+}
+
+/// Generate embeddings using a Bedrock embedding model. Titan v2 has no batch
+/// endpoint, so we issue one HTTP call per input and accumulate token usage.
+pub fn embed_text(
+    connection: &RawConnection,
+    request: EmbedTextRequest,
+) -> Result<EmbedTextResult, AgentError> {
+    let model = request
+        .model
+        .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string());
+
+    if model.starts_with("anthropic") {
+        return Err(AgentError::permanent(
+            "BEDROCK_UNSUPPORTED_MODEL",
+            format!("Bedrock model '{}' does not support embeddings", model),
+        )
+        .with_attrs(json!({"model": model})));
+    }
+
+    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(request.texts.len());
+    let mut prompt_tokens = 0i32;
+
+    for text in &request.texts {
+        let mut body = json!({"inputText": text});
+        // Titan v2 supports 256/512/1024; pass through if caller asked for one.
+        if let Some(dim) = request.dimensions {
+            body["dimensions"] = json!(dim);
+        }
+        let response_json = bedrock_client(connection)
+            .post(format!("/model/{}/invoke", model))
+            .timeout_ms(60_000)
+            .json_body(body)
+            .send_json()?;
+
+        let arr = response_json["embedding"].as_array().ok_or_else(|| {
+            AgentError::permanent(
+                "BEDROCK_INVALID_RESPONSE",
+                "Bedrock embedding response missing `embedding` array",
+            )
+            .with_attrs(json!({"model": model}))
+        })?;
+        let vec: Vec<f32> = arr
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        embeddings.push(vec);
+
+        prompt_tokens += response_json["inputTextTokenCount"].as_i64().unwrap_or(0) as i32;
+    }
+
+    let dimension = embeddings.first().map(|v| v.len() as u32).unwrap_or(0);
+    if let Some(req_dim) = request.dimensions
+        && dimension != req_dim
+    {
+        return Err(AgentError::permanent(
+            "BEDROCK_DIMENSION_MISMATCH",
+            format!(
+                "Requested dimension {} but Bedrock returned {}",
+                req_dim, dimension
+            ),
+        )
+        .with_attrs(json!({"requested": req_dim, "actual": dimension})));
+    }
+
+    Ok(EmbedTextResult {
+        embeddings,
+        model,
+        dimension,
+        usage: LlmUsage {
+            prompt_tokens,
+            completion_tokens: 0,
+            total_tokens: prompt_tokens,
+        },
+    })
+}

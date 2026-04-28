@@ -1135,6 +1135,7 @@ fn build_aggregate_request(
                     .expression
                     .as_ref()
                     .map(normalize_report_aggregate_expression),
+                percentile: aggregate.percentile,
             })
             .collect(),
         order_by: block.source.order_by.iter().map(map_order_by).collect(),
@@ -1158,6 +1159,10 @@ fn map_aggregate_fn(value: ReportAggregateFn) -> AggregateFn {
         ReportAggregateFn::Max => AggregateFn::Max,
         ReportAggregateFn::FirstValue => AggregateFn::FirstValue,
         ReportAggregateFn::LastValue => AggregateFn::LastValue,
+        ReportAggregateFn::PercentileCont => AggregateFn::PercentileCont,
+        ReportAggregateFn::PercentileDisc => AggregateFn::PercentileDisc,
+        ReportAggregateFn::StddevSamp => AggregateFn::StddevSamp,
+        ReportAggregateFn::VarSamp => AggregateFn::VarSamp,
         ReportAggregateFn::Expr => AggregateFn::Expr,
     }
 }

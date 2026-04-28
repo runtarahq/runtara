@@ -110,15 +110,19 @@ pub struct QueryAggregateParams {
     pub group_by: Option<Vec<String>>,
     #[schemars(
         description = "Array of aggregate specs: [{alias, fn, column?, distinct?, \
-                       orderBy?, expression?}]. `fn` is one of COUNT, SUM, MIN, MAX, \
-                       FIRST_VALUE, LAST_VALUE, EXPR. Each alias must be a unique \
-                       [a-zA-Z_][a-zA-Z0-9_]* identifier. `column` is optional for \
-                       COUNT (→ COUNT(*)) and required for SUM/MIN/MAX/FIRST_VALUE/\
-                       LAST_VALUE; must be omitted for EXPR. `distinct: true` is \
-                       valid only with COUNT + column. FIRST_VALUE/LAST_VALUE require \
-                       non-empty orderBy: [{column, direction: ASC|DESC}]. EXPR \
-                       requires `expression`: a tree over previously-declared aliases \
-                       and constants. Operators: arithmetic (ADD, SUB, MUL, DIV, NEG, \
+                       orderBy?, expression?, percentile?}]. `fn` is one of COUNT, \
+                       SUM, AVG, MIN, MAX, FIRST_VALUE, LAST_VALUE, STDDEV_SAMP, \
+                       VAR_SAMP, PERCENTILE_CONT, PERCENTILE_DISC, EXPR. Each alias \
+                       must be a unique [a-zA-Z_][a-zA-Z0-9_]* identifier. `column` is \
+                       optional for COUNT (→ COUNT(*)) and required for SUM/AVG/MIN/\
+                       MAX/FIRST_VALUE/LAST_VALUE/STDDEV_SAMP/VAR_SAMP; must be omitted \
+                       for EXPR and PERCENTILE_*. `distinct: true` is valid only with \
+                       COUNT + column. FIRST_VALUE/LAST_VALUE require non-empty \
+                       orderBy: [{column, direction: ASC|DESC}]. PERCENTILE_CONT/\
+                       PERCENTILE_DISC require `percentile` in [0.0, 1.0] and exactly \
+                       one numeric orderBy entry (the value column). EXPR requires \
+                       `expression`: a tree over previously-declared aliases and \
+                       constants. Operators: arithmetic (ADD, SUB, MUL, DIV, NEG, \
                        ABS, COALESCE; DIV returns NULL on divide-by-zero), comparison \
                        (EQ, NE, GT, GTE, LT, LTE), logical (AND, OR, NOT), and \
                        nullability (IS_DEFINED, IS_EMPTY, IS_NOT_EMPTY). Operand forms \

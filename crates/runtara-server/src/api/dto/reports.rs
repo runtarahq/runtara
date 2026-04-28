@@ -184,6 +184,10 @@ pub struct ReportAggregateSpec {
     pub order_by: Vec<ReportOrderBy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<Value>,
+    /// Fraction in `[0.0, 1.0]` for `percentile_cont` / `percentile_disc`
+    /// aggregates. Required for those ops, rejected otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -196,6 +200,10 @@ pub enum ReportAggregateFn {
     Max,
     FirstValue,
     LastValue,
+    PercentileCont,
+    PercentileDisc,
+    StddevSamp,
+    VarSamp,
     Expr,
 }
 
