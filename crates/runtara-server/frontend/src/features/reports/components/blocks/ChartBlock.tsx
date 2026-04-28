@@ -41,8 +41,9 @@ export function ChartBlock({
     }, {})
   );
   const chart = block.chart;
+  const series = getChartSeries(block, columns);
 
-  if (!chart || chartRows.length === 0) {
+  if (!chart || chartRows.length === 0 || series.length === 0) {
     return (
       <div className="flex min-h-72 items-center justify-center rounded-lg border bg-background p-6 text-sm text-muted-foreground">
         No chart data for the current filters.
@@ -51,7 +52,7 @@ export function ChartBlock({
   }
 
   if (chart.kind === 'pie' || chart.kind === 'donut') {
-    const seriesField = chart.series[0]?.field;
+    const seriesField = series[0].field;
     return (
       <div className="h-80 rounded-lg border bg-background p-4">
         <ResponsiveContainer width="100%" height="100%">
@@ -91,7 +92,7 @@ export function ChartBlock({
         {chart.kind === 'bar' ? (
           <BarChart data={chartRows}>
             {common}
-            {chart.series.map((series, index) => (
+            {series.map((series, index) => (
               <Bar
                 key={series.field}
                 dataKey={series.field}
@@ -103,7 +104,7 @@ export function ChartBlock({
         ) : chart.kind === 'area' ? (
           <AreaChart data={chartRows}>
             {common}
-            {chart.series.map((series, index) => (
+            {series.map((series, index) => (
               <Area
                 key={series.field}
                 dataKey={series.field}
@@ -117,7 +118,7 @@ export function ChartBlock({
         ) : (
           <LineChart data={chartRows}>
             {common}
-            {chart.series.map((series, index) => (
+            {series.map((series, index) => (
               <Line
                 key={series.field}
                 type="monotone"
@@ -132,4 +133,25 @@ export function ChartBlock({
       </ResponsiveContainer>
     </div>
   );
+}
+
+function getChartSeries(
+  block: ReportBlockDefinition,
+  columns: string[]
+): Array<{ field: string; label?: string }> {
+  const configuredSeries = block.chart?.series ?? [];
+  if (configuredSeries.length > 0) {
+    return configuredSeries;
+  }
+
+  const aggregateAliases = block.source.aggregates
+    ?.map((aggregate) => aggregate.alias)
+    .filter(Boolean);
+  const inferredField = aggregateAliases?.[aggregateAliases.length - 1];
+  if (inferredField) {
+    return [{ field: inferredField, label: inferredField }];
+  }
+
+  const fallbackField = columns.find((column) => column !== block.chart?.x);
+  return fallbackField ? [{ field: fallbackField, label: fallbackField }] : [];
 }
