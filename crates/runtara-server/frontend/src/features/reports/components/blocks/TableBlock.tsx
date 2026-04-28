@@ -6,6 +6,16 @@ import {
   ChevronsUpDown,
   Search,
 } from 'lucide-react';
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+} from 'recharts';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import {
@@ -27,16 +37,21 @@ import {
   ReportBlockDefinition,
   ReportBlockResult,
   ReportOrderBy,
+  ReportTableColumn,
 } from '../../types';
 import { formatCellValue, humanizeFieldName } from '../../utils';
 
+type TableColumn = {
+  key: string;
+  label?: string;
+  format?: string | null;
+  type?: 'value' | 'chart';
+  chart?: ReportTableColumn['chart'];
+};
+
 type TableData = {
-  columns?: Array<{
-    key: string;
-    label?: string;
-    format?: string | null;
-  }>;
-  rows?: Array<Record<string, unknown>>;
+  columns?: Array<string | TableColumn>;
+  rows?: Array<Record<string, unknown> | unknown[]>;
   page?: {
     offset: number;
     size: number;
@@ -67,14 +82,7 @@ export function TableBlock({
   const data = (result.data ?? {}) as TableData;
   const rows = data.rows ?? [];
   const configuredColumns = block.table?.columns ?? [];
-  const columns =
-    data.columns && data.columns.length > 0
-      ? data.columns
-      : configuredColumns.map((column) => ({
-          key: column.field,
-          label: column.label ?? humanizeFieldName(column.field),
-          format: column.format,
-        }));
+  const columns = normalizeColumns(data.columns, configuredColumns);
   const page = data.page ?? { offset: 0, size: 50, hasNextPage: false };
   const pageSizeOptions = getPageSizeOptions(block, page.size);
 
@@ -105,22 +113,31 @@ export function TableBlock({
           <TableRow>
             {columns.map((column) => {
               const sortDirection = getColumnSortDirection(column.key, sort);
+              const isSortable = column.type !== 'chart';
               return (
                 <TableHead
                   key={column.key}
                   aria-sort={getAriaSort(sortDirection)}
                   className="whitespace-nowrap"
                 >
-                  <button
-                    type="button"
-                    className="flex w-full items-center gap-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground"
-                    onClick={() =>
-                      onSortChange(nextSortForColumn(column.key, sort))
-                    }
-                  >
-                    <span>{column.label ?? humanizeFieldName(column.key)}</span>
-                    <SortIcon direction={sortDirection} />
-                  </button>
+                  {isSortable ? (
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground transition-colors hover:text-foreground"
+                      onClick={() =>
+                        onSortChange(nextSortForColumn(column.key, sort))
+                      }
+                    >
+                      <span>
+                        {column.label ?? humanizeFieldName(column.key)}
+                      </span>
+                      <SortIcon direction={sortDirection} />
+                    </button>
+                  ) : (
+                    <span className="block text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {column.label ?? humanizeFieldName(column.key)}
+                    </span>
+                  )}
                 </TableHead>
               );
             })}
@@ -138,13 +155,13 @@ export function TableBlock({
             </TableRow>
           ) : (
             rows.map((row, rowIndex) => (
-              <TableRow key={String(row.id ?? rowIndex)}>
-                {columns.map((column) => (
+              <TableRow key={getRowKey(row, rowIndex)}>
+                {columns.map((column, columnIndex) => (
                   <TableCell key={column.key}>
-                    {formatCellValue(
-                      row[column.key],
-                      column.format ?? undefined
-                    )}
+                    <TableCellValue
+                      column={column}
+                      value={getCellValue(row, column, columnIndex)}
+                    />
                   </TableCell>
                 ))}
               </TableRow>
@@ -201,6 +218,169 @@ export function TableBlock({
       </div>
     </div>
   );
+}
+
+function normalizeColumns(
+  dataColumns: TableData['columns'],
+  configuredColumns: ReportTableColumn[]
+): TableColumn[] {
+  const configuredByField = new Map(
+    configuredColumns.map((column) => [column.field, column])
+  );
+  const sourceColumns =
+    dataColumns && dataColumns.length > 0
+      ? dataColumns
+      : configuredColumns.map((column) => column.field);
+
+  return sourceColumns.map((column) => {
+    const key = typeof column === 'string' ? column : column.key;
+    const configured = configuredByField.get(key);
+    if (typeof column === 'string') {
+      return {
+        key,
+        label: configured?.label ?? humanizeFieldName(key),
+        format: configured?.format,
+        type: configured?.type,
+        chart: configured?.chart,
+      };
+    }
+
+    return {
+      ...column,
+      label: column.label ?? configured?.label ?? humanizeFieldName(key),
+      format: column.format ?? configured?.format,
+      type: column.type ?? configured?.type,
+      chart: column.chart ?? configured?.chart,
+    };
+  });
+}
+
+function getCellValue(
+  row: Record<string, unknown> | unknown[],
+  column: TableColumn,
+  columnIndex: number
+) {
+  if (Array.isArray(row)) {
+    return row[columnIndex];
+  }
+  return row[column.key];
+}
+
+function getRowKey(row: Record<string, unknown> | unknown[], rowIndex: number) {
+  if (Array.isArray(row)) {
+    return String(row[0] ?? rowIndex);
+  }
+  return String(row.id ?? rowIndex);
+}
+
+function TableCellValue({
+  column,
+  value,
+}: {
+  column: TableColumn;
+  value: unknown;
+}) {
+  if (column.type === 'chart') {
+    return <InlineTableChart column={column} value={value} />;
+  }
+
+  return <>{formatCellValue(value, column.format ?? undefined)}</>;
+}
+
+type InlineChartData = {
+  columns?: string[];
+  rows?: unknown[][];
+};
+
+const INLINE_CHART_COLOR = 'hsl(var(--primary))';
+
+function InlineTableChart({
+  column,
+  value,
+}: {
+  column: TableColumn;
+  value: unknown;
+}) {
+  const data = (value ?? {}) as InlineChartData;
+  const columns = data.columns ?? [];
+  const rows = data.rows ?? [];
+  const chart = column.chart;
+  const series = getInlineChartSeries(column, columns);
+
+  if (!chart || rows.length === 0 || series.length === 0) {
+    return <span className="text-muted-foreground">-</span>;
+  }
+
+  const chartRows = rows.map((row) =>
+    columns.reduce<Record<string, unknown>>((acc, columnName, index) => {
+      acc[columnName] = row[index];
+      return acc;
+    }, {})
+  );
+  const seriesField = series[0].field;
+
+  return (
+    <div className="h-11 min-w-32">
+      <ResponsiveContainer width="100%" height="100%">
+        {chart.kind === 'bar' ? (
+          <BarChart data={chartRows}>
+            <Tooltip
+              cursor={false}
+              contentStyle={{ fontSize: 12 }}
+              labelStyle={{ fontSize: 12 }}
+            />
+            <Bar
+              dataKey={seriesField}
+              fill={INLINE_CHART_COLOR}
+              radius={[3, 3, 0, 0]}
+            />
+          </BarChart>
+        ) : chart.kind === 'area' ? (
+          <AreaChart data={chartRows}>
+            <Tooltip
+              cursor={false}
+              contentStyle={{ fontSize: 12 }}
+              labelStyle={{ fontSize: 12 }}
+            />
+            <Area
+              type="monotone"
+              dataKey={seriesField}
+              stroke={INLINE_CHART_COLOR}
+              fill={INLINE_CHART_COLOR}
+              fillOpacity={0.16}
+              strokeWidth={2}
+              dot={false}
+            />
+          </AreaChart>
+        ) : (
+          <LineChart data={chartRows}>
+            <Tooltip
+              cursor={false}
+              contentStyle={{ fontSize: 12 }}
+              labelStyle={{ fontSize: 12 }}
+            />
+            <Line
+              type="monotone"
+              dataKey={seriesField}
+              stroke={INLINE_CHART_COLOR}
+              strokeWidth={2}
+              dot={false}
+            />
+          </LineChart>
+        )}
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function getInlineChartSeries(column: TableColumn, columns: string[]) {
+  const configuredSeries = column.chart?.series ?? [];
+  if (configuredSeries.length > 0) {
+    return configuredSeries;
+  }
+
+  const fallbackField = columns.find((candidate) => candidate !== column.chart?.x);
+  return fallbackField ? [{ field: fallbackField, label: fallbackField }] : [];
 }
 
 function getColumnSortDirection(field: string, sort: ReportOrderBy[]) {

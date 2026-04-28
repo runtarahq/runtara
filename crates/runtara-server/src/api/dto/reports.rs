@@ -235,6 +235,61 @@ pub struct ReportTableColumn {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub column_type: Option<ReportTableColumnType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart: Option<ReportChartConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ReportTableColumnSource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportTableColumnType {
+    Value,
+    Chart,
+}
+
+impl ReportTableColumn {
+    pub fn is_chart(&self) -> bool {
+        matches!(self.column_type, Some(ReportTableColumnType::Chart))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportTableColumnSource {
+    pub schema: String,
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    #[serde(default = "default_source_mode")]
+    pub mode: ReportSourceMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+    #[serde(default, rename = "filterMappings")]
+    pub filter_mappings: Vec<ReportFilterTarget>,
+    #[serde(default, rename = "groupBy")]
+    pub group_by: Vec<String>,
+    #[serde(default)]
+    pub aggregates: Vec<ReportAggregateSpec>,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub join: Vec<ReportTableColumnJoin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportTableColumnJoin {
+    #[serde(rename = "parentField")]
+    pub parent_field: String,
+    pub field: String,
+    #[serde(default = "default_filter_op")]
+    pub op: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

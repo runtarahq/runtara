@@ -21,7 +21,12 @@ export type ReportAggregateFn =
   | 'min'
   | 'max'
   | 'first_value'
-  | 'last_value';
+  | 'last_value'
+  | 'percentile_cont'
+  | 'percentile_disc'
+  | 'stddev_samp'
+  | 'var_samp'
+  | 'expr';
 
 export interface ReportFilterOption {
   label: string;
@@ -71,15 +76,36 @@ export interface ReportSource {
     op: ReportAggregateFn;
     field?: string;
     distinct?: boolean;
+    orderBy?: ReportOrderBy[];
+    expression?: unknown;
+    percentile?: number;
   }>;
   orderBy?: ReportOrderBy[];
   limit?: number;
+}
+
+export interface ReportTableColumnSource extends ReportSource {
+  join?: Array<{
+    parentField: string;
+    field: string;
+    op?: string;
+  }>;
 }
 
 export interface ReportTableColumn {
   field: string;
   label?: string;
   format?: string;
+  type?: 'value' | 'chart';
+  chart?: {
+    kind: ReportChartKind;
+    x: string;
+    series?: Array<{
+      field: string;
+      label?: string;
+    }>;
+  };
+  source?: ReportTableColumnSource;
 }
 
 export interface ReportBlockDefinition {

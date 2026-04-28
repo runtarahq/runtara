@@ -101,7 +101,22 @@ export function formatCellValue(value: unknown, format?: string): string {
   }
 
   if (format === 'number' && typeof value === 'number') {
-    return new Intl.NumberFormat().format(value);
+    return new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 0,
+    }).format(value);
+  }
+
+  if (format === 'decimal' && typeof value === 'number') {
+    return new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 2,
+    }).format(value);
+  }
+
+  if (format === 'percent' && typeof value === 'number') {
+    return new Intl.NumberFormat(undefined, {
+      style: 'percent',
+      maximumFractionDigits: 2,
+    }).format(value);
   }
 
   if (format === 'datetime' && typeof value === 'string') {
@@ -112,6 +127,10 @@ export function formatCellValue(value: unknown, format?: string): string {
   if (format === 'date' && typeof value === 'string') {
     const date = new Date(value);
     if (!Number.isNaN(date.getTime())) return date.toLocaleDateString();
+  }
+
+  if (format === 'string') {
+    return String(value);
   }
 
   if (typeof value === 'object') return JSON.stringify(value);

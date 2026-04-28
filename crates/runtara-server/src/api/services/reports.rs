@@ -513,25 +513,44 @@ impl ReportService {
                 .await
                 .map_err(map_object_model_error)?;
 
-            let fields: HashSet<_> = schema
+            let schema_fields: HashSet<_> = schema
                 .columns
                 .iter()
-                .map(|column| column.name.as_str())
+                .map(|column| column.name.clone())
                 .collect();
-            let is_known_field = |field: &str| -> bool {
-                fields.contains(field)
-                    || matches!(
-                        field,
-                        "id" | "created_at" | "updated_at" | "createdAt" | "updatedAt"
-                    )
+            let is_known_field = |field: &str| -> bool { is_schema_field(&schema_fields, field) };
+            let aggregate_output_fields = aggregate_output_fields(block);
+            let is_table_value_field = |field: &str| -> bool {
+                match block.source.mode {
+                    ReportSourceMode::Filter => is_known_field(field),
+                    ReportSourceMode::Aggregate => aggregate_output_fields.contains(field),
+                }
             };
 
             if let Some(table) = &block.table {
                 for column in &table.columns {
-                    if !is_known_field(&column.field) {
+                    if column.is_chart() {
+                        self.validate_table_chart_column(
+                            tenant_id,
+                            block,
+                            &schema_fields,
+                            &aggregate_output_fields,
+                            column,
+                        )
+                        .await?;
+                    } else if !is_table_value_field(&column.field) {
                         return Err(ReportServiceError::Validation(format!(
                             "Block '{}' references unknown table field '{}'",
                             block.id, column.field
+                        )));
+                    }
+                }
+
+                for sort in &table.default_sort {
+                    if !is_table_value_field(&sort.field) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' references unknown table sort field '{}'",
+                            block.id, sort.field
                         )));
                     }
                 }
@@ -546,6 +565,21 @@ impl ReportService {
                 }
             }
 
+            for order_by in &block.source.order_by {
+                let is_known_order_field = match block.source.mode {
+                    ReportSourceMode::Filter => is_known_field(&order_by.field),
+                    ReportSourceMode::Aggregate => {
+                        aggregate_output_fields.contains(&order_by.field)
+                    }
+                };
+                if !is_known_order_field {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' references unknown orderBy field '{}'",
+                        block.id, order_by.field
+                    )));
+                }
+            }
+
             for aggregate in &block.source.aggregates {
                 if let Some(field) = &aggregate.field
                     && !is_known_field(field)
@@ -554,6 +588,14 @@ impl ReportService {
                         "Block '{}' references unknown aggregate field '{}'",
                         block.id, field
                     )));
+                }
+                for order_by in &aggregate.order_by {
+                    if !is_known_field(&order_by.field) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' aggregate '{}' references unknown orderBy field '{}'",
+                            block.id, aggregate.alias, order_by.field
+                        )));
+                    }
                 }
             }
         }
@@ -564,6 +606,127 @@ impl ReportService {
                 return Err(ReportServiceError::Validation(format!(
                     "Markdown references unknown report block '{}'",
                     placeholder
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn validate_table_chart_column(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        parent_schema_fields: &HashSet<String>,
+        parent_output_fields: &HashSet<String>,
+        column: &ReportTableColumn,
+    ) -> Result<(), ReportServiceError> {
+        let Some(source) = &column.source else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' must define source",
+                block.id, column.field
+            )));
+        };
+        let Some(chart) = &column.chart else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' must define chart",
+                block.id, column.field
+            )));
+        };
+        if source.mode != ReportSourceMode::Aggregate {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' source.mode must be aggregate",
+                block.id, column.field
+            )));
+        }
+        if source.schema.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' must specify an Object Model schema",
+                block.id, column.field
+            )));
+        }
+
+        let nested_schema = self
+            .schema_service
+            .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
+            .await
+            .map_err(map_object_model_error)?;
+        let nested_schema_fields: HashSet<_> = nested_schema
+            .columns
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
+        let is_nested_field =
+            |field: &str| -> bool { is_schema_field(&nested_schema_fields, field) };
+        let nested_output_fields =
+            aggregate_source_output_fields(&source.group_by, &source.aggregates);
+
+        for join in &source.join {
+            let parent_field_ok = match block.source.mode {
+                ReportSourceMode::Filter => {
+                    is_schema_field(parent_schema_fields, &join.parent_field)
+                }
+                ReportSourceMode::Aggregate => parent_output_fields.contains(&join.parent_field),
+            };
+            if !parent_field_ok {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' chart table column '{}' references unknown parent join field '{}'",
+                    block.id, column.field, join.parent_field
+                )));
+            }
+            if !is_nested_field(&join.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' chart table column '{}' references unknown join field '{}'",
+                    block.id, column.field, join.field
+                )));
+            }
+        }
+
+        for group_field in &source.group_by {
+            if !is_nested_field(group_field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' chart table column '{}' references unknown groupBy field '{}'",
+                    block.id, column.field, group_field
+                )));
+            }
+        }
+        for aggregate in &source.aggregates {
+            if let Some(field) = &aggregate.field
+                && !is_nested_field(field)
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' chart table column '{}' aggregate '{}' references unknown field '{}'",
+                    block.id, column.field, aggregate.alias, field
+                )));
+            }
+            for order_by in &aggregate.order_by {
+                if !is_nested_field(&order_by.field) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' chart table column '{}' aggregate '{}' references unknown orderBy field '{}'",
+                        block.id, column.field, aggregate.alias, order_by.field
+                    )));
+                }
+            }
+        }
+        for order_by in &source.order_by {
+            if !nested_output_fields.contains(&order_by.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' chart table column '{}' references unknown orderBy field '{}'",
+                    block.id, column.field, order_by.field
+                )));
+            }
+        }
+        if !nested_output_fields.contains(&chart.x) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' chart table column '{}' references unknown chart x field '{}'",
+                block.id, column.field, chart.x
+            )));
+        }
+        for series in &chart.series {
+            if !nested_output_fields.contains(&series.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' chart table column '{}' references unknown chart series field '{}'",
+                    block.id, column.field, series.field
                 )));
             }
         }
@@ -624,6 +787,18 @@ impl ReportService {
         resolved_filters: &HashMap<String, Value>,
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<Value, ReportServiceError> {
+        if block.source.mode == ReportSourceMode::Aggregate {
+            return self
+                .render_aggregate_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await;
+        }
+
         let table = block.table.as_ref();
         let page_size = clamp_page_size(
             block_request
@@ -643,8 +818,12 @@ impl ReportService {
         let sort = block_request
             .map(|request| request.sort.clone())
             .filter(|sort| !sort.is_empty())
-            .or_else(|| table.map(|table| table.default_sort.clone()))
-            .unwrap_or_default();
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
 
         let filter_request = FilterRequest {
             offset,
@@ -695,6 +874,9 @@ impl ReportService {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let rows = self
+            .hydrate_table_chart_columns(tenant_id, table, rows)
+            .await?;
 
         Ok(json!({
             "columns": columns,
@@ -705,6 +887,165 @@ impl ReportService {
                 "totalCount": total_count,
                 "hasNextPage": offset + page_size < total_count
             }
+        }))
+    }
+
+    async fn render_aggregate_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
+
+        let request = build_table_aggregate_request(
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+            &sort,
+            page_size,
+            offset,
+        )?;
+        let result = self
+            .instance_service
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        let source_columns = result.columns.clone();
+        let mut row_maps = aggregate_rows_to_maps(&source_columns, &result.rows);
+        let columns = table_output_columns(table, &source_columns);
+        let mut rows = project_aggregate_table_rows(table, &source_columns, result.rows)?;
+
+        if let Some(table) = table {
+            let chart_columns: Vec<_> = table
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, column)| column.is_chart())
+                .collect();
+            if !chart_columns.is_empty() {
+                for (row_index, row) in rows.iter_mut().enumerate() {
+                    let Some(row_map) = row_maps.get_mut(row_index) else {
+                        continue;
+                    };
+                    for (column_index, chart_column) in &chart_columns {
+                        let cell = self
+                            .render_table_chart_cell(tenant_id, chart_column, row_map)
+                            .await?;
+                        row_map.insert(chart_column.field.clone(), cell.clone());
+                        if let Some(slot) = row.get_mut(*column_index) {
+                            *slot = cell;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "columns": columns,
+            "rows": rows,
+            "page": {
+                "offset": offset,
+                "size": page_size,
+                "totalCount": result.group_count,
+                "hasNextPage": offset + page_size < result.group_count
+            }
+        }))
+    }
+
+    async fn hydrate_table_chart_columns(
+        &self,
+        tenant_id: &str,
+        table: Option<&ReportTableConfig>,
+        rows: Vec<Value>,
+    ) -> Result<Vec<Value>, ReportServiceError> {
+        let Some(table) = table else {
+            return Ok(rows);
+        };
+        let chart_columns: Vec<_> = table
+            .columns
+            .iter()
+            .filter(|column| column.is_chart())
+            .collect();
+        if chart_columns.is_empty() {
+            return Ok(rows);
+        }
+
+        let mut hydrated_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let Value::Object(mut object) = row else {
+                hydrated_rows.push(row);
+                continue;
+            };
+            for column in &chart_columns {
+                let cell = self
+                    .render_table_chart_cell(tenant_id, column, &object)
+                    .await?;
+                object.insert(column.field.clone(), cell);
+            }
+            hydrated_rows.push(Value::Object(object));
+        }
+
+        Ok(hydrated_rows)
+    }
+
+    async fn render_table_chart_cell(
+        &self,
+        tenant_id: &str,
+        column: &ReportTableColumn,
+        row: &serde_json::Map<String, Value>,
+    ) -> Result<Value, ReportServiceError> {
+        let Some(source) = &column.source else {
+            return Ok(Value::Null);
+        };
+        let condition = build_table_column_condition(source, row);
+        let request = build_column_aggregate_request(source, condition)?;
+        let result = self
+            .instance_service
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &source.schema,
+                request,
+                source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        Ok(json!({
+            "columns": result.columns,
+            "rows": result.rows,
         }))
     }
 
@@ -953,10 +1294,6 @@ fn searchable_table_fields(
     block: &ReportBlockDefinition,
     search: &ReportTableSearchRequest,
 ) -> Vec<String> {
-    let Some(table) = block.table.as_ref() else {
-        return Vec::new();
-    };
-
     let requested_fields = search
         .fields
         .iter()
@@ -964,9 +1301,32 @@ fn searchable_table_fields(
         .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
 
+    if block.source.mode == ReportSourceMode::Aggregate {
+        return block
+            .source
+            .group_by
+            .iter()
+            .filter(|field| {
+                requested_fields.is_empty() || requested_fields.contains(field.as_str())
+            })
+            .filter_map(|field| {
+                if seen.insert(field.clone()) {
+                    Some(field.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+
+    let Some(table) = block.table.as_ref() else {
+        return Vec::new();
+    };
+
     table
         .columns
         .iter()
+        .filter(|column| !column.is_chart())
         .filter(|column| {
             requested_fields.is_empty() || requested_fields.contains(column.field.as_str())
         })
@@ -1111,19 +1471,78 @@ fn build_aggregate_request(
     block: &ReportBlockDefinition,
     resolved_filters: &HashMap<String, Value>,
 ) -> Result<AggregateRequest, ReportServiceError> {
-    if block.source.aggregates.is_empty() {
+    build_aggregate_request_from_parts(
+        &block.id,
+        &block.source.group_by,
+        &block.source.aggregates,
+        &block.source.order_by,
+        Some(
+            block
+                .source
+                .limit
+                .unwrap_or(MAX_AGGREGATE_ROWS)
+                .min(MAX_AGGREGATE_ROWS),
+        ),
+        Some(0),
+        build_block_condition(definition, block, resolved_filters, None),
+    )
+}
+
+fn build_table_aggregate_request(
+    definition: &ReportDefinition,
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+    block_request: Option<&ReportBlockDataRequest>,
+    sort: &[ReportOrderBy],
+    page_size: i64,
+    offset: i64,
+) -> Result<AggregateRequest, ReportServiceError> {
+    build_aggregate_request_from_parts(
+        &block.id,
+        &block.source.group_by,
+        &block.source.aggregates,
+        sort,
+        Some(page_size),
+        Some(offset),
+        build_block_condition(definition, block, resolved_filters, block_request),
+    )
+}
+
+fn build_column_aggregate_request(
+    source: &ReportTableColumnSource,
+    condition: Option<Condition>,
+) -> Result<AggregateRequest, ReportServiceError> {
+    build_aggregate_request_from_parts(
+        "table column",
+        &source.group_by,
+        &source.aggregates,
+        &source.order_by,
+        Some(source.limit.unwrap_or(30).min(MAX_AGGREGATE_ROWS)),
+        Some(0),
+        condition,
+    )
+}
+
+fn build_aggregate_request_from_parts(
+    block_id: &str,
+    group_by: &[String],
+    aggregates: &[ReportAggregateSpec],
+    order_by: &[ReportOrderBy],
+    limit: Option<i64>,
+    offset: Option<i64>,
+    condition: Option<Condition>,
+) -> Result<AggregateRequest, ReportServiceError> {
+    if aggregates.is_empty() {
         return Err(ReportServiceError::Validation(format!(
             "Block '{}' must define at least one aggregate",
-            block.id
+            block_id
         )));
     }
 
     Ok(AggregateRequest {
-        condition: build_block_condition(definition, block, resolved_filters, None),
-        group_by: block.source.group_by.clone(),
-        aggregates: block
-            .source
-            .aggregates
+        condition,
+        group_by: group_by.to_vec(),
+        aggregates: aggregates
             .iter()
             .map(|aggregate| AggregateSpec {
                 alias: aggregate.alias.clone(),
@@ -1138,15 +1557,9 @@ fn build_aggregate_request(
                 percentile: aggregate.percentile,
             })
             .collect(),
-        order_by: block.source.order_by.iter().map(map_order_by).collect(),
-        limit: Some(
-            block
-                .source
-                .limit
-                .unwrap_or(MAX_AGGREGATE_ROWS)
-                .min(MAX_AGGREGATE_ROWS),
-        ),
-        offset: Some(0),
+        order_by: order_by.iter().map(map_order_by).collect(),
+        limit,
+        offset,
     })
 }
 
@@ -1176,6 +1589,144 @@ fn map_order_by(value: &ReportOrderBy) -> AggregateOrderBy {
             SortDirection::Asc
         },
     }
+}
+
+fn table_output_columns(
+    table: Option<&ReportTableConfig>,
+    source_columns: &[String],
+) -> Vec<String> {
+    table
+        .filter(|table| !table.columns.is_empty())
+        .map(|table| {
+            table
+                .columns
+                .iter()
+                .map(|column| column.field.clone())
+                .collect()
+        })
+        .unwrap_or_else(|| source_columns.to_vec())
+}
+
+fn project_aggregate_table_rows(
+    table: Option<&ReportTableConfig>,
+    source_columns: &[String],
+    rows: Vec<Vec<Value>>,
+) -> Result<Vec<Vec<Value>>, ReportServiceError> {
+    let Some(table) = table.filter(|table| !table.columns.is_empty()) else {
+        return Ok(rows);
+    };
+    let source_indexes: HashMap<_, _> = source_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| (column.as_str(), index))
+        .collect();
+
+    rows.into_iter()
+        .map(|row| {
+            table
+                .columns
+                .iter()
+                .map(|column| {
+                    if column.is_chart() {
+                        return Ok(Value::Null);
+                    }
+                    let Some(source_index) = source_indexes.get(column.field.as_str()) else {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Aggregate table references unavailable field '{}'",
+                            column.field
+                        )));
+                    };
+                    Ok(row.get(*source_index).cloned().unwrap_or(Value::Null))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn aggregate_rows_to_maps(
+    source_columns: &[String],
+    rows: &[Vec<Value>],
+) -> Vec<serde_json::Map<String, Value>> {
+    rows.iter()
+        .map(|row| {
+            source_columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    (
+                        column.clone(),
+                        row.get(index).cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn build_table_column_condition(
+    source: &ReportTableColumnSource,
+    row: &serde_json::Map<String, Value>,
+) -> Option<Condition> {
+    let mut conditions = Vec::new();
+    if let Some(condition) = &source.condition {
+        conditions.push(condition.clone());
+    }
+    for join in &source.join {
+        let Some(value) = row.get(&join.parent_field) else {
+            continue;
+        };
+        if let Some(condition) = condition_from_table_column_join(join, value) {
+            conditions.push(condition);
+        }
+    }
+    combine_conditions(conditions)
+}
+
+fn condition_from_table_column_join(
+    join: &ReportTableColumnJoin,
+    value: &Value,
+) -> Option<Condition> {
+    if value_is_empty(value) {
+        return None;
+    }
+
+    let field = Value::String(join.field.clone());
+    match join.op.to_ascii_lowercase().as_str() {
+        "in" => Some(Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![field, ensure_array(value)]),
+        }),
+        "ne" => Some(binary_condition("NE", field, value.clone())),
+        "gt" => Some(binary_condition("GT", field, value.clone())),
+        "gte" => Some(binary_condition("GTE", field, value.clone())),
+        "lt" => Some(binary_condition("LT", field, value.clone())),
+        "lte" => Some(binary_condition("LTE", field, value.clone())),
+        "contains" | "search" => Some(binary_condition("CONTAINS", field, value.clone())),
+        _ => Some(binary_condition("EQ", field, value.clone())),
+    }
+}
+
+fn aggregate_output_fields(block: &ReportBlockDefinition) -> HashSet<String> {
+    aggregate_source_output_fields(&block.source.group_by, &block.source.aggregates)
+}
+
+fn aggregate_source_output_fields(
+    group_by: &[String],
+    aggregates: &[ReportAggregateSpec],
+) -> HashSet<String> {
+    group_by
+        .iter()
+        .chain(aggregates.iter().map(|aggregate| &aggregate.alias))
+        .cloned()
+        .collect()
+}
+
+fn is_schema_field(schema_fields: &HashSet<String>, field: &str) -> bool {
+    schema_fields.contains(field)
+        || matches!(
+            field,
+            "id" | "created_at" | "updated_at" | "createdAt" | "updatedAt"
+        )
 }
 
 fn normalize_report_aggregate_expression(expression: &Value) -> Value {
@@ -1669,6 +2220,17 @@ mod tests {
         }
     }
 
+    fn table_column(field: &str) -> ReportTableColumn {
+        ReportTableColumn {
+            field: field.to_string(),
+            label: None,
+            format: None,
+            column_type: None,
+            chart: None,
+            source: None,
+        }
+    }
+
     #[test]
     fn resolves_report_block_positions() {
         let blocks = vec![test_block("a"), test_block("b"), test_block("c")];
@@ -1733,18 +2295,7 @@ mod tests {
     fn table_search_condition_uses_configured_columns() {
         let mut block = test_block("orders");
         block.table = Some(ReportTableConfig {
-            columns: vec![
-                ReportTableColumn {
-                    field: "customer_name".to_string(),
-                    label: None,
-                    format: None,
-                },
-                ReportTableColumn {
-                    field: "status".to_string(),
-                    label: None,
-                    format: None,
-                },
-            ],
+            columns: vec![table_column("customer_name"), table_column("status")],
             default_sort: vec![],
             pagination: None,
         });
@@ -1775,11 +2326,7 @@ mod tests {
     fn table_search_condition_rejects_unconfigured_requested_fields() {
         let mut block = test_block("orders");
         block.table = Some(ReportTableConfig {
-            columns: vec![ReportTableColumn {
-                field: "customer_name".to_string(),
-                label: None,
-                format: None,
-            }],
+            columns: vec![table_column("customer_name")],
             default_sort: vec![],
             pagination: None,
         });
@@ -1803,6 +2350,68 @@ mod tests {
             conditions[0].arguments.as_ref().unwrap(),
             &vec![json!("customer_name"), json!("acme")]
         );
+    }
+
+    #[test]
+    fn aggregate_table_search_condition_uses_group_by_fields() {
+        let mut block = test_block("stock");
+        block.source.mode = ReportSourceMode::Aggregate;
+        block.source.group_by = vec!["sku".to_string(), "vendor".to_string()];
+        block.source.aggregates = vec![ReportAggregateSpec {
+            alias: "qty_total".to_string(),
+            op: ReportAggregateFn::Sum,
+            field: Some("qty".to_string()),
+            distinct: false,
+            order_by: vec![],
+            expression: None,
+            percentile: None,
+        }];
+        block.table = Some(ReportTableConfig {
+            columns: vec![table_column("sku"), table_column("qty_total")],
+            default_sort: vec![],
+            pagination: None,
+        });
+        let request = ReportBlockDataRequest {
+            id: "stock".to_string(),
+            page: None,
+            sort: vec![],
+            search: Some(ReportTableSearchRequest {
+                query: "103".to_string(),
+                fields: vec!["qty_total".to_string(), "sku".to_string()],
+            }),
+            block_filters: HashMap::new(),
+        };
+
+        let mut conditions = Vec::new();
+        append_table_search_condition(&mut conditions, &block, &request);
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].op, "CONTAINS");
+        assert_eq!(
+            conditions[0].arguments.as_ref().unwrap(),
+            &vec![json!("sku"), json!("103")]
+        );
+    }
+
+    #[test]
+    fn aggregate_table_rows_project_to_configured_column_order() {
+        let table = ReportTableConfig {
+            columns: vec![table_column("sku"), table_column("delta")],
+            default_sort: vec![],
+            pagination: None,
+        };
+        let rows = project_aggregate_table_rows(
+            Some(&table),
+            &[
+                "sku".to_string(),
+                "first_qty".to_string(),
+                "delta".to_string(),
+            ],
+            vec![vec![json!("10397904"), json!(15473), json!(-15473)]],
+        )
+        .unwrap();
+
+        assert_eq!(rows, vec![vec![json!("10397904"), json!(-15473)]]);
     }
 
     #[test]

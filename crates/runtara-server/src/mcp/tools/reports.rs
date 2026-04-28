@@ -11,7 +11,6 @@ use super::internal_api::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthoringSeverity {
     Error,
-    Warning,
 }
 
 #[derive(Debug, Clone)]
@@ -589,10 +588,10 @@ fn report_authoring_schema() -> Value {
                 "type": "table",
                 "configKey": "table",
                 "columnsPath": "table.columns",
-                "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}],
+                "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
                 "defaultSort": [{"field": "sku", "direction": "asc"}],
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
-                "note": "Tables currently render row-level Object Model data through source.mode='filter'. Configure visible/searchable/sortable fields in table.columns."
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' with its own aggregate source joined to the parent row."
             },
             "chart": {
                 "type": "chart",
@@ -623,7 +622,7 @@ fn report_authoring_schema() -> Value {
             "limit": "Optional row/group cap."
         },
         "aggregateOps": {
-            "core": ["count", "sum", "avg", "min", "max", "first_value", "last_value", "expr"],
+            "core": ["count", "sum", "avg", "min", "max", "first_value", "last_value", "percentile_cont", "percentile_disc", "stddev_samp", "var_samp", "expr"],
             "expr": {
                 "canonical": {"op": "SUB", "arguments": [{"valueType": "alias", "value": "last_qty"}, {"valueType": "alias", "value": "first_qty"}]},
                 "notes": [
@@ -644,6 +643,8 @@ fn report_authoring_schema() -> Value {
         },
         "fieldRules": [
             "For table.columns, use Object Model row fields when source.mode='filter'.",
+            "For aggregate table.columns, use source.groupBy fields and source.aggregates aliases, including expr aliases.",
+            "For chart table columns, field is a synthetic cell key; configure column.chart and column.source.join.",
             "For chart.x, use an aggregate output field, usually a source.groupBy field.",
             "For chart.series[].field and metric.valueField, use aggregate aliases from source.aggregates.",
             "For source.orderBy and table.defaultSort, use field, not column."
@@ -653,6 +654,7 @@ fn report_authoring_schema() -> Value {
             "Do not put chartType, x, or y at block top-level. Use block.chart.kind, block.chart.x, and block.chart.series[].field.",
             "Do not use metric.valueAlias or top-level valueAlias. Use block.metric.valueField.",
             "Do not copy query_aggregate specs directly: report aggregates use op/field while query_aggregate uses fn/column.",
+            "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
             "Always run validate_report before saving or mutating report blocks."
         ],
         "examples": {
@@ -875,18 +877,6 @@ fn collect_report_block_authoring_issues(
                     "Table blocks must define table.columns; otherwise the UI renders 'This table has no configured columns.'",
                 ));
             }
-            if block
-                .get("source")
-                .and_then(|source| source.get("mode"))
-                .and_then(Value::as_str)
-                == Some("aggregate")
-            {
-                issues.push(warning(
-                    format!("{path}.source.mode"),
-                    "AGGREGATE_TABLE_RENDERING",
-                    "Table blocks currently render row-level Object Model data. Use chart or metric for aggregate sources, or add aggregate table support before relying on this shape.",
-                ));
-            }
         }
         Some("chart") => {
             let Some(chart) = block.get("chart").filter(|chart| chart.is_object()) else {
@@ -1050,7 +1040,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
             collect_unknown_keys(
                 &format!("{path}.columns[{index}]"),
                 column,
-                &["field", "label", "format"],
+                &["field", "label", "format", "type", "chart", "source"],
                 issues,
             );
             if column.get("field").and_then(Value::as_str).is_none() {
@@ -1059,6 +1049,30 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "MISSING_TABLE_COLUMN_FIELD",
                     "Each table column must include field.",
                 ));
+            }
+            if column.get("type").and_then(Value::as_str) == Some("chart") {
+                if let Some(chart) = column.get("chart") {
+                    collect_chart_issues(&format!("{path}.columns[{index}].chart"), chart, issues);
+                } else {
+                    issues.push(error(
+                        format!("{path}.columns[{index}].chart"),
+                        "MISSING_TABLE_COLUMN_CHART",
+                        "Chart table columns must include chart.kind, chart.x, and chart.series.",
+                    ));
+                }
+                if let Some(source) = column.get("source") {
+                    collect_table_column_source_issues(
+                        &format!("{path}.columns[{index}].source"),
+                        source,
+                        issues,
+                    );
+                } else {
+                    issues.push(error(
+                        format!("{path}.columns[{index}].source"),
+                        "MISSING_TABLE_COLUMN_SOURCE",
+                        "Chart table columns must include an aggregate source joined to the parent row.",
+                    ));
+                }
             }
         }
     }
@@ -1076,6 +1090,67 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
             &["defaultPageSize", "allowedPageSizes"],
             issues,
         );
+    }
+}
+
+fn collect_table_column_source_issues(
+    path: &str,
+    source: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    collect_unknown_keys_with_messages(
+        path,
+        source,
+        &[
+            "schema",
+            "connectionId",
+            "mode",
+            "condition",
+            "filterMappings",
+            "groupBy",
+            "aggregates",
+            "orderBy",
+            "limit",
+            "join",
+        ],
+        |key| match key {
+            "columns" => Some((
+                "MISPLACED_TABLE_COLUMNS",
+                "Table columns must be configured at table.columns, not source.columns.",
+            )),
+            "group_by" => Some(("MISNAMED_SOURCE_GROUP_BY", "Use groupBy, not group_by.")),
+            "order_by" => Some(("MISNAMED_SOURCE_ORDER_BY", "Use orderBy, not order_by.")),
+            _ => None,
+        },
+        issues,
+    );
+
+    if source.get("mode").and_then(Value::as_str) != Some("aggregate") {
+        issues.push(error(
+            format!("{path}.mode"),
+            "INVALID_TABLE_COLUMN_SOURCE_MODE",
+            "Chart table column sources must use mode='aggregate'.",
+        ));
+    }
+    if let Some(aggregates) = source.get("aggregates").and_then(Value::as_array) {
+        for (index, aggregate) in aggregates.iter().enumerate() {
+            collect_aggregate_issues(&format!("{path}.aggregates[{index}]"), aggregate, issues);
+        }
+    }
+    if let Some(order_by) = source.get("orderBy").and_then(Value::as_array) {
+        for (index, order) in order_by.iter().enumerate() {
+            collect_order_by_issues(&format!("{path}.orderBy[{index}]"), order, issues);
+        }
+    }
+    if let Some(join) = source.get("join").and_then(Value::as_array) {
+        for (index, join_entry) in join.iter().enumerate() {
+            collect_unknown_keys(
+                &format!("{path}.join[{index}]"),
+                join_entry,
+                &["parentField", "field", "op"],
+                issues,
+            );
+        }
     }
 }
 
@@ -1235,7 +1310,7 @@ fn append_validation_issues(result: &mut Value, key: &str, issues: Vec<Value>) {
 
 fn split_authoring_issues(issues: Vec<AuthoringIssue>) -> (Vec<Value>, Vec<Value>) {
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     for issue in issues {
         let value = json!({
@@ -1245,7 +1320,6 @@ fn split_authoring_issues(issues: Vec<AuthoringIssue>) -> (Vec<Value>, Vec<Value
         });
         match issue.severity {
             AuthoringSeverity::Error => errors.push(value),
-            AuthoringSeverity::Warning => warnings.push(value),
         }
     }
 
@@ -1259,19 +1333,6 @@ fn error(
 ) -> AuthoringIssue {
     AuthoringIssue {
         severity: AuthoringSeverity::Error,
-        path: path.into(),
-        code,
-        message: message.into(),
-    }
-}
-
-fn warning(
-    path: impl Into<String>,
-    code: &'static str,
-    message: impl Into<String>,
-) -> AuthoringIssue {
-    AuthoringIssue {
-        severity: AuthoringSeverity::Warning,
         path: path.into(),
         code,
         message: message.into(),
