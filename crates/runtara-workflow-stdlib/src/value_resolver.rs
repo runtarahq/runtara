@@ -320,6 +320,50 @@ mod tests {
     }
 
     #[test]
+    fn agent_pipeline_end_to_end() {
+        // Mirrors the exact two-step pipeline emitted by agent.rs codegen:
+        //   1. resolve_nested_references
+        //   2. unwrap_top_level_immediate_envelopes
+        // This test pins the wire shape the agent's typed deserialiser sees.
+        let inputs = json!({
+            "schema_name": {"valueType": "immediate", "value": "Embedding"},
+            "limit": {"valueType": "immediate", "value": 50},
+            "condition": {
+                "valueType": "immediate",
+                "value": {
+                    "type": "operation",
+                    "op": "COSINE_DISTANCE_LTE",
+                    "arguments": [
+                        {"valueType": "reference", "value": "data.embedding_field"},
+                        {"valueType": "reference", "value": "steps.step1.outputs.first"},
+                        {"valueType": "immediate", "value": 0.6}
+                    ]
+                }
+            }
+        });
+        let resolved = resolve_nested_references(inputs, &source());
+        let final_inputs = unwrap_top_level_immediate_envelopes(resolved);
+        assert_eq!(
+            final_inputs,
+            json!({
+                "schema_name": "Embedding",
+                "limit": 50,
+                "condition": {
+                    "type": "operation",
+                    "op": "COSINE_DISTANCE_LTE",
+                    "arguments": [
+                        // data.embedding_field is missing in source → resolves to null,
+                        // wrapped as MappingValue::Immediate to satisfy ConditionArgument.
+                        {"valueType": "immediate", "value": null},
+                        {"valueType": "immediate", "value": "alpha"},
+                        {"valueType": "immediate", "value": 0.6}
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
     fn unwrap_top_level_ignores_nested_immediates() {
         // Only the outermost wrapper of each field is stripped — nested
         // immediates inside (e.g. inside ConditionExpression arguments)
