@@ -139,7 +139,7 @@ DKEOF
 
 services:
     postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         restart: unless-stopped
         environment:
             POSTGRES_USER: runtara

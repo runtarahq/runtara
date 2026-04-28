@@ -47,7 +47,7 @@ impl ObjectStore {
 
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;
-        store.ensure_extensions().await;
+        store.ensure_extensions().await?;
 
         Ok(store)
     }
@@ -59,38 +59,30 @@ impl ObjectStore {
     pub async fn from_pool(pool: PgPool, config: StoreConfig) -> Result<Self> {
         let store = Self { pool, config };
         store.ensure_metadata_table().await?;
-        store.ensure_extensions().await;
+        store.ensure_extensions().await?;
         Ok(store)
     }
 
-    /// Best-effort enable of required Postgres extensions.
-    ///
-    /// `pg_trgm` is required for `SIMILARITY_GTE` and trigram indexes,
-    /// `vector` (pgvector) is required for `Vector` columns and the four
-    /// distance ExprFns, and `fuzzystrmatch` is required for `LEVENSHTEIN`.
-    /// The migration runner already issues these for the metadata DB, but
-    /// per-tenant DBs that bootstrap through `from_pool` may not pass through
-    /// the migration path. We soft-fail with a warning so a hardened
-    /// permissions setup doesn't crash startup; dependent operations will
-    /// surface a clear error later. pgvector availability varies across
-    /// managed Postgres providers, so the soft-fail matters more for it.
-    async fn ensure_extensions(&self) {
-        for (ext, hint) in [
-            ("pg_trgm", "SIMILARITY_GTE / trigram indexes"),
-            (
-                "vector",
-                "Vector columns / COSINE_DISTANCE / L2_DISTANCE / INNER_PRODUCT",
-            ),
-            ("fuzzystrmatch", "LEVENSHTEIN"),
-        ] {
+    /// Enable required Postgres extensions on this database. Fails hard if
+    /// any extension is unavailable — provisioning must use a Postgres
+    /// image that ships `pg_trgm`, `vector` (pgvector), and `fuzzystrmatch`
+    /// (e.g. `pgvector/pgvector:pg16+`). Migration runner does the same for
+    /// the metadata DB; this covers per-tenant DBs that bootstrap via
+    /// `from_pool` outside the migration path.
+    async fn ensure_extensions(&self) -> Result<()> {
+        for ext in ["pg_trgm", "vector", "fuzzystrmatch"] {
             let stmt = format!(r#"CREATE EXTENSION IF NOT EXISTS "{}""#, ext);
-            if let Err(e) = sqlx::query(&stmt).execute(&self.pool).await {
-                eprintln!(
-                    "warning: failed to ensure {} extension ({}); {} will not work until it is installed",
-                    ext, e, hint
-                );
-            }
+            sqlx::query(&stmt).execute(&self.pool).await.map_err(|e| {
+                ObjectStoreError::Connection(format!(
+                    "failed to enable required Postgres extension '{}': {}. \
+                     Provisioning must install this extension (e.g. use the \
+                     `pgvector/pgvector:pg16+` image which ships pgvector + \
+                     contrib).",
+                    ext, e
+                ))
+            })?;
         }
+        Ok(())
     }
 
     /// Get a reference to the connection pool
