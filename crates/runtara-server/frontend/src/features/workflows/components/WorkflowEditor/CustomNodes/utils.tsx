@@ -936,6 +936,49 @@ export function composeExecutionGraph(
     (node) =>
       node.type !== NODE_TYPES.CreateNode && node.type !== NODE_TYPES.NoteNode
   );
+  const stepNodeIds = new Set(nds.map((node) => node.id));
+
+  if (nds.length > 0) {
+    executionGraph.nodes = nds.map((node) => {
+      const width =
+        typeof node.style?.width === 'number'
+          ? node.style.width
+          : typeof node.width === 'number'
+            ? node.width
+            : undefined;
+      const height =
+        typeof node.style?.height === 'number'
+          ? node.style.height
+          : typeof node.height === 'number'
+            ? node.height
+            : undefined;
+
+      return {
+        id: node.id,
+        type: node.type,
+        position: node.position,
+        ...(width !== undefined ? { width } : {}),
+        ...(height !== undefined ? { height } : {}),
+        ...(node.parentId ? { parentId: node.parentId } : {}),
+      };
+    });
+  }
+
+  const visualEdges = edges
+    .filter(
+      (edge) => stepNodeIds.has(edge.source) && stepNodeIds.has(edge.target)
+    )
+    .map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
+      ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
+    }));
+
+  if (visualEdges.length > 0) {
+    executionGraph.edges = visualEdges;
+  }
 
   if (!nds.length && !noteNodes.length) {
     return null;
@@ -1037,8 +1080,80 @@ export function composeExecutionGraph(
   executionGraph.steps = cleanNodeData(executionGraph.steps);
 
   addStarts(executionGraph);
+  stripEditorOnlyStepFields(executionGraph.steps);
 
   return executionGraph;
+}
+
+function stripEditorOnlyStepFields(steps?: Record<string, any>) {
+  if (!steps) {
+    return;
+  }
+
+  for (const step of Object.values(steps)) {
+    delete step.renderingParameters;
+    if (step.subgraph?.steps) {
+      stripEditorOnlyStepFields(step.subgraph.steps);
+    }
+  }
+}
+
+function applyStoredNodeVisualState(nodes: Node[], storedNodes: unknown) {
+  if (!Array.isArray(storedNodes)) {
+    return nodes;
+  }
+
+  const visualStateById = new Map<string, any>();
+  for (const storedNode of storedNodes) {
+    if (
+      storedNode &&
+      typeof storedNode === 'object' &&
+      typeof storedNode.id === 'string'
+    ) {
+      visualStateById.set(storedNode.id, storedNode);
+    }
+  }
+
+  if (visualStateById.size === 0) {
+    return nodes;
+  }
+
+  return nodes.map((node) => {
+    const visualState = visualStateById.get(node.id);
+    if (!visualState) {
+      return node;
+    }
+
+    const position =
+      visualState.position &&
+      typeof visualState.position.x === 'number' &&
+      typeof visualState.position.y === 'number'
+        ? snapPositionToGrid({
+            x: visualState.position.x,
+            y: visualState.position.y,
+          })
+        : node.position;
+    const width =
+      typeof visualState.width === 'number'
+        ? snapToGrid(visualState.width)
+        : node.width;
+    const height =
+      typeof visualState.height === 'number'
+        ? snapToGrid(visualState.height)
+        : node.height;
+
+    return {
+      ...node,
+      position,
+      width,
+      height,
+      style: {
+        ...node.style,
+        ...(width !== undefined ? { width } : {}),
+        ...(height !== undefined ? { height } : {}),
+      },
+    };
+  });
 }
 
 function addStarts(executionGraph: ExecutionGraphDto) {
@@ -1135,6 +1250,9 @@ function cleanNodeData(steps: Record<string, any>) {
     const {
       inputMapping = [],
       inputSchema,
+      outputSchema,
+      childWorkflowId,
+      childVersion,
       inputSchemaFields: _1,
       variablesFields: _2,
       splitInputSchemaFields: _3,
@@ -1144,6 +1262,17 @@ function cleanNodeData(steps: Record<string, any>) {
       splitParallelism: _7,
       splitSequential: _8,
       splitDontStopOnFailed: _9,
+      formTabs: _10,
+      startMode: _11,
+      selectedTriggerId: _12,
+      executionTimeout: _13,
+      retryStrategy: _14,
+      groupByKey,
+      groupByExpectedKeys,
+      filterCondition,
+      whileCondition,
+      whileMaxIterations,
+      whileTimeout,
       ...restData
     } = data;
     // Suppress unused variable warnings for destructured exclusions
@@ -1156,6 +1285,11 @@ function cleanNodeData(steps: Record<string, any>) {
     void _7;
     void _8;
     void _9;
+    void _10;
+    void _11;
+    void _12;
+    void _13;
+    void _14;
 
     if (subgraph) {
       data.subgraph = {
@@ -1374,9 +1508,9 @@ function cleanNodeData(steps: Record<string, any>) {
 
     // Filter out empty optional fields that shouldn't be sent to the API
     const optionalFieldsToFilterIfEmpty = [
-      'childWorkflowId',
+      'agentId',
+      'capabilityId',
       'connectionId',
-      'selectedTriggerId',
     ];
     const filteredRestData = Object.fromEntries(
       Object.entries(restData).filter(
@@ -1467,9 +1601,28 @@ function cleanNodeData(steps: Record<string, any>) {
       },
     };
 
-    // Ensure capabilityId is preserved for conditional nodes
-    if (data.capabilityId) {
+    if (restData.stepType === 'Agent' && data.capabilityId) {
       cleaned[id].capabilityId = data.capabilityId;
+    }
+
+    if (restData.stepType !== 'Agent') {
+      delete cleaned[id].agentId;
+      delete cleaned[id].capabilityId;
+      delete cleaned[id].compensation;
+    }
+    if (restData.stepType !== 'Agent' && restData.stepType !== 'AiAgent') {
+      delete cleaned[id].connectionId;
+    }
+    if (
+      restData.stepType !== 'Agent' &&
+      restData.stepType !== 'EmbedWorkflow'
+    ) {
+      delete cleaned[id].maxRetries;
+      delete cleaned[id].retryDelay;
+      delete cleaned[id].timeout;
+    }
+    if (restData.stepType !== 'Split') {
+      delete cleaned[id].inputSchema;
     }
 
     // Include processed subgraph for container steps (Split)
@@ -1481,13 +1634,13 @@ function cleanNodeData(steps: Record<string, any>) {
 
     // Ensure EmbedWorkflow has childWorkflowId and childVersion at root level (DSL v2.0.0 requirement)
     if (restData.stepType === 'EmbedWorkflow') {
-      if (data.childWorkflowId) {
-        cleaned[id].childWorkflowId = data.childWorkflowId;
+      if (childWorkflowId) {
+        cleaned[id].childWorkflowId = childWorkflowId;
       }
-      if (data.childVersion !== undefined) {
+      if (childVersion !== undefined) {
         // Backend ChildVersion is an untagged enum: string ("latest"/"current") or integer.
         // Convert numeric strings to integers so serde deserializes to Specific(i32).
-        const v = data.childVersion;
+        const v = childVersion;
         const num = Number(v);
         cleaned[id].childVersion =
           typeof v === 'string' &&
@@ -1652,7 +1805,6 @@ function cleanNodeData(steps: Record<string, any>) {
       }
 
       // Add outputSchema if defined
-      const outputSchema = data.outputSchema;
       if (
         outputSchema &&
         typeof outputSchema === 'object' &&
@@ -1752,8 +1904,8 @@ function cleanNodeData(steps: Record<string, any>) {
       }
 
       // Add condition from form data
-      if (data.filterCondition) {
-        filterConfig.condition = data.filterCondition;
+      if (filterCondition) {
+        filterConfig.condition = filterCondition;
       }
 
       // Only add config if it has the required fields
@@ -1770,21 +1922,18 @@ function cleanNodeData(steps: Record<string, any>) {
       delete cleaned[id].whileTimeout;
 
       // Set condition at root level (API expects WhileStep.condition)
-      if (data.whileCondition) {
-        cleaned[id].condition = data.whileCondition;
+      if (whileCondition) {
+        cleaned[id].condition = whileCondition;
       }
 
       // Build config object
       const whileConfig: { maxIterations?: number; timeout?: number | null } =
         {};
-      if (
-        data.whileMaxIterations !== undefined &&
-        data.whileMaxIterations !== null
-      ) {
-        whileConfig.maxIterations = data.whileMaxIterations;
+      if (whileMaxIterations !== undefined && whileMaxIterations !== null) {
+        whileConfig.maxIterations = whileMaxIterations;
       }
-      if (data.whileTimeout !== undefined && data.whileTimeout !== null) {
-        whileConfig.timeout = data.whileTimeout;
+      if (whileTimeout !== undefined && whileTimeout !== null) {
+        whileConfig.timeout = whileTimeout;
       }
 
       if (Object.keys(whileConfig).length > 0) {
@@ -1816,16 +1965,16 @@ function cleanNodeData(steps: Record<string, any>) {
       }
 
       // Add group key from form data
-      if (data.groupByKey) {
-        groupByConfig.key = data.groupByKey;
+      if (groupByKey) {
+        groupByConfig.key = groupByKey;
       }
 
       // Add expected keys from form data (already an array)
       if (
-        Array.isArray(data.groupByExpectedKeys) &&
-        data.groupByExpectedKeys.length > 0
+        Array.isArray(groupByExpectedKeys) &&
+        groupByExpectedKeys.length > 0
       ) {
-        groupByConfig.expectedKeys = data.groupByExpectedKeys;
+        groupByConfig.expectedKeys = groupByExpectedKeys;
       }
 
       // Only add config if it has the required fields
@@ -2019,7 +2168,7 @@ function cleanNodeData(steps: Record<string, any>) {
 }
 
 export function executionGraphToReactFlow(
-  executionGraph: ExecutionGraphDto & { notes?: Note[] }
+  executionGraph: ExecutionGraphDto & { notes?: Note[]; nodes?: unknown }
 ) {
   // Migrate legacy Start steps if present
   let graphToProcess = executionGraph;
@@ -2040,7 +2189,11 @@ export function executionGraphToReactFlow(
   }
 
   const { steps = {}, executionPlan = [], notes = [] } = graphToProcess;
-  const { nodes, edges } = normalizeNodesAndEdges(steps, executionPlan || []);
+  const { nodes: parsedNodes, edges } = normalizeNodesAndEdges(
+    steps,
+    executionPlan || []
+  );
+  const nodes = applyStoredNodeVisualState(parsedNodes, graphToProcess.nodes);
 
   // Convert notes to React Flow nodes
   // New format uses: { text, position: {x, y} }

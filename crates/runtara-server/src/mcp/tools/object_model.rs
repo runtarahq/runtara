@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_get, api_post, api_put, validate_path_param};
+use super::internal_api::{api_delete, api_get, api_post, api_put, validate_path_param};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -33,6 +33,37 @@ pub struct CreateObjectSchemaParams {
     pub columns: serde_json::Value,
     #[schemars(description = "Index definitions as JSON array (optional)")]
     pub indexes: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateObjectSchemaParams {
+    #[schemars(description = "Existing schema name to update")]
+    pub name: String,
+    #[schemars(description = "New schema name (rename). Omit to keep current name.")]
+    pub new_name: Option<String>,
+    #[schemars(description = "New description. Omit to keep current.")]
+    pub description: Option<String>,
+    #[schemars(
+        description = "FULL replacement column list. The server diffs this against the \
+                       current schema and emits ALTER TABLE ADD/DROP/ALTER COLUMN. To \
+                       add columns without losing existing ones, fetch the current \
+                       schema with get_object_schema, append your new columns, and pass \
+                       the merged array. Omit to leave columns unchanged."
+    )]
+    pub columns: Option<serde_json::Value>,
+    #[schemars(
+        description = "FULL replacement index list (same diff semantics as columns). \
+                       Omit to leave indexes unchanged."
+    )]
+    pub indexes: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteObjectSchemaParams {
+    #[schemars(description = "Schema name to delete")]
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,6 +221,65 @@ fn to_snake_case(s: &str) -> String {
         }
     }
     result
+}
+
+/// Resolve a schema name to its UUID by calling the in-process get-by-name endpoint.
+async fn resolve_schema_id_by_name(
+    server: &SmoMcpServer,
+    name: &str,
+) -> Result<String, rmcp::ErrorData> {
+    validate_path_param("name", name)?;
+    let resp = api_get(
+        server,
+        &format!("/api/runtime/object-model/schemas/name/{}", name),
+    )
+    .await?;
+    resp.get("schema")
+        .and_then(|s| s.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!("schema '{}' not found or response missing schema.id", name),
+                None,
+            )
+        })
+}
+
+pub async fn update_object_schema(
+    server: &SmoMcpServer,
+    params: UpdateObjectSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let id = resolve_schema_id_by_name(server, &params.name).await?;
+    let mut body = serde_json::json!({});
+    if let Some(n) = params.new_name {
+        body["name"] = serde_json::Value::String(n);
+    }
+    if let Some(d) = params.description {
+        body["description"] = serde_json::Value::String(d);
+    }
+    if let Some(c) = params.columns {
+        body["columns"] = c;
+    }
+    if let Some(i) = params.indexes {
+        body["indexes"] = i;
+    }
+    let result = api_put(
+        server,
+        &format!("/api/runtime/object-model/schemas/{}", id),
+        Some(body),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn delete_object_schema(
+    server: &SmoMcpServer,
+    params: DeleteObjectSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let id = resolve_schema_id_by_name(server, &params.name).await?;
+    let result = api_delete(server, &format!("/api/runtime/object-model/schemas/{}", id)).await?;
+    json_result(result)
 }
 
 pub async fn list_object_instances(

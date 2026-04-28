@@ -1,8 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  composeExecutionGraph,
-  executionGraphToReactFlow,
-} from './utils.tsx';
+import { composeExecutionGraph, executionGraphToReactFlow } from './utils.tsx';
 import type { ExecutionGraphDto } from '@/features/workflows/types/execution-graph';
 
 /**
@@ -26,7 +23,9 @@ type StepWithId = {
 };
 
 /** Build a minimal single-step execution graph for round-trip tests. */
-function makeGraph(step: StepWithId): ExecutionGraphDto & { entryPoint: string } {
+function makeGraph(
+  step: StepWithId
+): ExecutionGraphDto & { entryPoint: string } {
   return {
     name: 'round-trip-fixture',
     steps: { [step.id]: step as any },
@@ -388,6 +387,104 @@ describe('Form-input coercion on save', () => {
     });
     expect(out.value).toBe('data.count');
     expect(out.type).toBe('integer');
+  });
+});
+
+describe('Backend DSL serialization', () => {
+  it('does not leak editor-only form defaults into Agent steps', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'random',
+          type: 'basic',
+          position: { x: 24, y: 48 },
+          data: {
+            id: 'random',
+            stepType: 'Agent',
+            name: 'Random double',
+            agentId: 'utils',
+            capabilityId: 'random-double',
+            inputMapping: [],
+            childWorkflowId: '',
+            childVersion: 'latest',
+            embedWorkflowConfig: undefined,
+            executionTimeout: 120,
+            retryStrategy: 'Linear',
+            groupByKey: '',
+            groupByExpectedKeys: [],
+            splitVariablesFields: [],
+            splitParallelism: 0,
+            splitSequential: false,
+            splitDontStopOnFailed: false,
+            selectedTriggerId: '',
+          },
+        },
+      ] as any,
+      [],
+      { name: 'random-workflow' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).random;
+    expect(step).toMatchObject({
+      id: 'random',
+      stepType: 'Agent',
+      name: 'Random double',
+      agentId: 'utils',
+      capabilityId: 'random-double',
+    });
+    expect(step).not.toHaveProperty('childWorkflowId');
+    expect(step).not.toHaveProperty('childVersion');
+    expect(step).not.toHaveProperty('embedWorkflowConfig');
+    expect(step).not.toHaveProperty('executionTimeout');
+    expect(step).not.toHaveProperty('retryStrategy');
+    expect(step).not.toHaveProperty('groupByKey');
+    expect(step).not.toHaveProperty('groupByExpectedKeys');
+    expect(step).not.toHaveProperty('renderingParameters');
+    expect((graph as any).nodes[0].position).toEqual({ x: 24, y: 48 });
+  });
+
+  it('keeps child workflow fields only on EmbedWorkflow steps', () => {
+    const graph = composeExecutionGraph(
+      [
+        {
+          id: 'embed',
+          type: 'basic',
+          position: { x: 12, y: 36 },
+          data: {
+            id: 'embed',
+            stepType: 'EmbedWorkflow',
+            name: 'Run child',
+            agentId: '',
+            capabilityId: '',
+            childWorkflowId: 'child-workflow',
+            childVersion: '2',
+            inputMapping: [],
+            executionTimeout: 120,
+            retryStrategy: 'Linear',
+            groupByKey: '',
+            groupByExpectedKeys: [],
+          },
+        },
+      ] as any,
+      [],
+      { name: 'parent-workflow' }
+    );
+
+    const step = (graph!.steps as Record<string, any>).embed;
+    expect(step).toMatchObject({
+      id: 'embed',
+      stepType: 'EmbedWorkflow',
+      name: 'Run child',
+      childWorkflowId: 'child-workflow',
+      childVersion: 2,
+    });
+    expect(step).not.toHaveProperty('agentId');
+    expect(step).not.toHaveProperty('capabilityId');
+    expect(step).not.toHaveProperty('executionTimeout');
+    expect(step).not.toHaveProperty('retryStrategy');
+    expect(step).not.toHaveProperty('groupByKey');
+    expect(step).not.toHaveProperty('groupByExpectedKeys');
+    expect(step).not.toHaveProperty('renderingParameters');
   });
 });
 

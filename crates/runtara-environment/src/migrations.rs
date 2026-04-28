@@ -26,8 +26,9 @@ use std::borrow::Cow;
 
 /// Environment-specific migrations embedded at compile time.
 ///
-/// These use version numbers starting at 20250101000000 to ensure
-/// they sort after core migrations (001, 002, ...).
+/// These use timestamp-style version numbers after the core migrations
+/// (001, 002, ...). The 20250101000000 version is intentionally avoided
+/// because runtara-server's initial schema uses it.
 static ENV_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// Combined migrator with both core and environment migrations.
