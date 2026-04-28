@@ -4,6 +4,7 @@ pub mod executions;
 pub mod graph_mutations;
 pub mod internal_api;
 pub mod object_model;
+pub mod reports;
 pub mod signals;
 pub mod triggers;
 pub mod workflows;

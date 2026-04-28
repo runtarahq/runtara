@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
+use regex::Regex;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -155,6 +156,169 @@ impl ReportService {
         }
     }
 
+    pub async fn add_report_block(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        request: AddReportBlockRequest,
+    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
+        let mut report = self.get_report(tenant_id, id_or_slug).await?;
+        if report
+            .definition
+            .blocks
+            .iter()
+            .any(|block| block.id == request.block.id)
+        {
+            return Err(ReportServiceError::Conflict(format!(
+                "Report block '{}' already exists",
+                request.block.id
+            )));
+        }
+
+        let position = request.position.unwrap_or_default();
+        let insert_index = resolve_position_index(&report.definition.blocks, &position)?;
+        let block = request.block;
+        let block_id = block.id.clone();
+
+        report.definition.blocks.insert(insert_index, block.clone());
+        if request.insert_markdown_placeholder {
+            insert_markdown_placeholder(
+                &mut report.definition.markdown,
+                &block_id,
+                Some(&position),
+            );
+        }
+
+        let report = self.save_report_definition(tenant_id, report).await?;
+        Ok(ReportBlockMutationResponse {
+            success: true,
+            report,
+            block: Some(block),
+            message: format!("Report block '{}' added", block_id),
+        })
+    }
+
+    pub async fn replace_report_block(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        request: ReplaceReportBlockRequest,
+    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
+        if request.block.id != block_id {
+            return Err(ReportServiceError::Validation(
+                "Replacement block id must match the path block id".to_string(),
+            ));
+        }
+
+        let mut report = self.get_report(tenant_id, id_or_slug).await?;
+        let index = find_block_index(&report.definition.blocks, block_id)?;
+        report.definition.blocks[index] = request.block.clone();
+
+        let report = self.save_report_definition(tenant_id, report).await?;
+        Ok(ReportBlockMutationResponse {
+            success: true,
+            report,
+            block: Some(request.block),
+            message: format!("Report block '{}' replaced", block_id),
+        })
+    }
+
+    pub async fn patch_report_block(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        request: PatchReportBlockRequest,
+    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
+        if !request.patch.is_object() {
+            return Err(ReportServiceError::Validation(
+                "Report block patch must be a JSON object".to_string(),
+            ));
+        }
+        if request.patch.get("id").is_some() {
+            return Err(ReportServiceError::Validation(
+                "Report block id cannot be changed with patch_report_block".to_string(),
+            ));
+        }
+
+        let mut report = self.get_report(tenant_id, id_or_slug).await?;
+        let index = find_block_index(&report.definition.blocks, block_id)?;
+        let mut block_value = serde_json::to_value(&report.definition.blocks[index])
+            .map_err(|e| ReportServiceError::Validation(e.to_string()))?;
+        apply_json_merge_patch(&mut block_value, &request.patch);
+        let patched_block: ReportBlockDefinition = serde_json::from_value(block_value)
+            .map_err(|e| ReportServiceError::Validation(format!("Invalid block patch: {}", e)))?;
+        if patched_block.id != block_id {
+            return Err(ReportServiceError::Validation(
+                "Report block id cannot be changed with patch_report_block".to_string(),
+            ));
+        }
+
+        report.definition.blocks[index] = patched_block.clone();
+        let report = self.save_report_definition(tenant_id, report).await?;
+        Ok(ReportBlockMutationResponse {
+            success: true,
+            report,
+            block: Some(patched_block),
+            message: format!("Report block '{}' updated", block_id),
+        })
+    }
+
+    pub async fn move_report_block(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        request: MoveReportBlockRequest,
+    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
+        let mut report = self.get_report(tenant_id, id_or_slug).await?;
+        let current_index = find_block_index(&report.definition.blocks, block_id)?;
+        let block = report.definition.blocks.remove(current_index);
+        let new_index = resolve_position_index(&report.definition.blocks, &request.position)?;
+        report.definition.blocks.insert(new_index, block.clone());
+
+        if request.move_markdown_placeholder {
+            move_markdown_placeholder(
+                &mut report.definition.markdown,
+                block_id,
+                Some(&request.position),
+            );
+        }
+
+        let report = self.save_report_definition(tenant_id, report).await?;
+        Ok(ReportBlockMutationResponse {
+            success: true,
+            report,
+            block: Some(block),
+            message: format!("Report block '{}' moved", block_id),
+        })
+    }
+
+    pub async fn remove_report_block(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        request: RemoveReportBlockRequest,
+    ) -> Result<ReportBlockMutationResponse, ReportServiceError> {
+        let mut report = self.get_report(tenant_id, id_or_slug).await?;
+        let index = find_block_index(&report.definition.blocks, block_id)?;
+        report.definition.blocks.remove(index);
+
+        if request.remove_markdown_placeholder {
+            remove_markdown_placeholder(&mut report.definition.markdown, block_id);
+        }
+
+        let report = self.save_report_definition(tenant_id, report).await?;
+        Ok(ReportBlockMutationResponse {
+            success: true,
+            report,
+            block: None,
+            message: format!("Report block '{}' removed", block_id),
+        })
+    }
+
     pub async fn validate_report(
         &self,
         tenant_id: &str,
@@ -288,6 +452,23 @@ impl ReportService {
             Some(&block_request),
         )
         .await
+    }
+
+    async fn save_report_definition(
+        &self,
+        tenant_id: &str,
+        mut report: ReportDto,
+    ) -> Result<ReportDto, ReportServiceError> {
+        self.validate_definition(tenant_id, &report.definition)
+            .await?;
+        report.definition_version = report.definition.definition_version;
+        report.updated_at = Utc::now();
+
+        self.repo
+            .update(tenant_id, &report.id, &report)
+            .await
+            .map_err(map_sqlx_error)?
+            .ok_or(ReportServiceError::NotFound)
     }
 
     async fn validate_definition(
@@ -1046,6 +1227,222 @@ fn extract_markdown_block_placeholders(markdown: &str) -> Vec<String> {
     placeholders
 }
 
+fn find_block_index(
+    blocks: &[ReportBlockDefinition],
+    block_id: &str,
+) -> Result<usize, ReportServiceError> {
+    blocks
+        .iter()
+        .position(|block| block.id == block_id)
+        .ok_or_else(|| ReportServiceError::Validation(format!("Unknown block '{}'", block_id)))
+}
+
+fn resolve_position_index(
+    blocks: &[ReportBlockDefinition],
+    position: &ReportBlockPosition,
+) -> Result<usize, ReportServiceError> {
+    let selector_count = usize::from(position.index.is_some())
+        + usize::from(position.before_block_id.is_some())
+        + usize::from(position.after_block_id.is_some());
+
+    if selector_count > 1 {
+        return Err(ReportServiceError::Validation(
+            "Report block position must use only one of index, beforeBlockId, or afterBlockId"
+                .to_string(),
+        ));
+    }
+
+    if let Some(index) = position.index {
+        return Ok(index.min(blocks.len()));
+    }
+
+    if let Some(before_block_id) = &position.before_block_id {
+        if before_block_id.trim().is_empty() {
+            return Err(ReportServiceError::Validation(
+                "beforeBlockId cannot be empty".to_string(),
+            ));
+        }
+        return blocks
+            .iter()
+            .position(|block| block.id == *before_block_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Unknown beforeBlockId '{}'",
+                    before_block_id
+                ))
+            });
+    }
+
+    if let Some(after_block_id) = &position.after_block_id {
+        if after_block_id.trim().is_empty() {
+            return Err(ReportServiceError::Validation(
+                "afterBlockId cannot be empty".to_string(),
+            ));
+        }
+        return blocks
+            .iter()
+            .position(|block| block.id == *after_block_id)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown afterBlockId '{}'", after_block_id))
+            });
+    }
+
+    Ok(blocks.len())
+}
+
+fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target), Value::Object(patch)) => {
+            for (key, patch_value) in patch {
+                if patch_value.is_null() {
+                    target.remove(key);
+                } else {
+                    apply_json_merge_patch(
+                        target.entry(key.clone()).or_insert(Value::Null),
+                        patch_value,
+                    );
+                }
+            }
+        }
+        (target, patch) => {
+            *target = patch.clone();
+        }
+    }
+}
+
+fn placeholder_text(block_id: &str) -> String {
+    format!("{{{{ block.{} }}}}", block_id)
+}
+
+fn find_placeholder_range(markdown: &str, block_id: &str) -> Option<std::ops::Range<usize>> {
+    let pattern = format!(r"\{{\{{\s*block\.{}\s*\}}\}}", regex::escape(block_id));
+    Regex::new(&pattern).ok()?.find(markdown).map(|m| m.range())
+}
+
+fn all_placeholder_ranges(markdown: &str) -> Vec<(String, std::ops::Range<usize>)> {
+    let Ok(regex) = Regex::new(r"\{\{\s*block\.([^}]+?)\s*\}\}") else {
+        return Vec::new();
+    };
+
+    regex
+        .captures_iter(markdown)
+        .filter_map(|captures| {
+            let block_id = captures.get(1)?.as_str().trim().to_string();
+            let range = captures.get(0)?.range();
+            if block_id.is_empty() {
+                None
+            } else {
+                Some((block_id, range))
+            }
+        })
+        .collect()
+}
+
+fn insert_markdown_placeholder(
+    markdown: &mut String,
+    block_id: &str,
+    position: Option<&ReportBlockPosition>,
+) {
+    if find_placeholder_range(markdown, block_id).is_some() {
+        return;
+    }
+
+    let placeholder = placeholder_text(block_id);
+
+    if let Some(position) = position {
+        if let Some(before_block_id) = &position.before_block_id
+            && let Some(range) = find_placeholder_range(markdown, before_block_id)
+        {
+            insert_placeholder_at(markdown, range.start, &placeholder);
+            return;
+        }
+
+        if let Some(after_block_id) = &position.after_block_id
+            && let Some(range) = find_placeholder_range(markdown, after_block_id)
+        {
+            insert_placeholder_at(markdown, range.end, &placeholder);
+            return;
+        }
+
+        if let Some(index) = position.index {
+            let placeholders = all_placeholder_ranges(markdown);
+            if let Some((_, range)) = placeholders.get(index) {
+                insert_placeholder_at(markdown, range.start, &placeholder);
+                return;
+            }
+        }
+    }
+
+    append_placeholder(markdown, &placeholder);
+}
+
+fn insert_placeholder_at(markdown: &mut String, index: usize, placeholder: &str) {
+    let mut insertion = String::new();
+    if index > 0 && !markdown[..index].ends_with("\n\n") {
+        insertion.push_str(if markdown[..index].ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        });
+    }
+    insertion.push_str(placeholder);
+    if index < markdown.len() && !markdown[index..].starts_with("\n\n") {
+        insertion.push_str(if markdown[index..].starts_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        });
+    }
+
+    markdown.insert_str(index, &insertion);
+    compact_blank_lines(markdown);
+}
+
+fn append_placeholder(markdown: &mut String, placeholder: &str) {
+    if markdown.trim().is_empty() {
+        *markdown = placeholder.to_string();
+        return;
+    }
+
+    if !markdown.ends_with('\n') {
+        markdown.push('\n');
+    }
+    if !markdown.ends_with("\n\n") {
+        markdown.push('\n');
+    }
+    markdown.push_str(placeholder);
+}
+
+fn move_markdown_placeholder(
+    markdown: &mut String,
+    block_id: &str,
+    position: Option<&ReportBlockPosition>,
+) {
+    if find_placeholder_range(markdown, block_id).is_none() {
+        return;
+    }
+
+    remove_markdown_placeholder(markdown, block_id);
+    insert_markdown_placeholder(markdown, block_id, position);
+}
+
+fn remove_markdown_placeholder(markdown: &mut String, block_id: &str) {
+    let Some(range) = find_placeholder_range(markdown, block_id) else {
+        return;
+    };
+
+    markdown.replace_range(range, "");
+    compact_blank_lines(markdown);
+    *markdown = markdown.trim().to_string();
+}
+
+fn compact_blank_lines(markdown: &mut String) {
+    while markdown.contains("\n\n\n") {
+        *markdown = markdown.replace("\n\n\n", "\n\n");
+    }
+}
+
 fn map_sqlx_error(error: sqlx::Error) -> ReportServiceError {
     if let sqlx::Error::Database(db_error) = &error
         && db_error
@@ -1066,5 +1463,115 @@ fn map_object_model_error(error: ObjectModelServiceError) -> ReportServiceError 
         ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
         ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
         ObjectModelServiceError::DatabaseError(message) => ReportServiceError::Database(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_block(id: &str) -> ReportBlockDefinition {
+        ReportBlockDefinition {
+            id: id.to_string(),
+            block_type: ReportBlockType::Table,
+            title: None,
+            lazy: false,
+            source: ReportSource {
+                schema: "Order".to_string(),
+                connection_id: None,
+                mode: ReportSourceMode::Filter,
+                condition: None,
+                filter_mappings: vec![],
+                group_by: vec![],
+                aggregates: vec![],
+                order_by: vec![],
+                limit: None,
+            },
+            table: None,
+            chart: None,
+            metric: None,
+            filters: vec![],
+        }
+    }
+
+    #[test]
+    fn resolves_report_block_positions() {
+        let blocks = vec![test_block("a"), test_block("b"), test_block("c")];
+
+        assert_eq!(
+            resolve_position_index(
+                &blocks,
+                &ReportBlockPosition {
+                    index: Some(1),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_position_index(
+                &blocks,
+                &ReportBlockPosition {
+                    before_block_id: Some("b".to_string()),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_position_index(
+                &blocks,
+                &ReportBlockPosition {
+                    after_block_id: Some("b".to_string()),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn moves_markdown_placeholder_to_requested_position() {
+        let mut markdown =
+            "# Report\n\n{{ block.a }}\n\n{{ block.b }}\n\n{{ block.c }}".to_string();
+
+        move_markdown_placeholder(
+            &mut markdown,
+            "c",
+            Some(&ReportBlockPosition {
+                before_block_id: Some("a".to_string()),
+                ..Default::default()
+            }),
+        );
+
+        assert!(markdown.find("{{ block.c }}") < markdown.find("{{ block.a }}"));
+        assert_eq!(
+            extract_markdown_block_placeholders(&markdown),
+            vec!["c".to_string(), "a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn json_merge_patch_updates_and_removes_fields() {
+        let mut value = json!({
+            "id": "orders",
+            "title": "Orders",
+            "table": { "columns": [{ "field": "id" }], "defaultSort": [] }
+        });
+
+        apply_json_merge_patch(
+            &mut value,
+            &json!({
+                "title": "Recent orders",
+                "table": { "defaultSort": null }
+            }),
+        );
+
+        assert_eq!(value["title"], "Recent orders");
+        assert!(value["table"].get("columns").is_some());
+        assert!(value["table"].get("defaultSort").is_none());
     }
 }

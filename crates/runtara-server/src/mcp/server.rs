@@ -390,6 +390,130 @@ impl SmoMcpServer {
         tools::object_model::update_object_instance(self, params.0).await
     }
 
+    // ===== Report Tools =====
+
+    #[tool(description = "List reports available to the tenant.")]
+    async fn list_reports(
+        &self,
+        params: Parameters<tools::reports::ListReportsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::list_reports(self, params.0).await
+    }
+
+    #[tool(description = "Get a report by id or slug, including markdown, filters, and blocks.")]
+    async fn get_report(
+        &self,
+        params: Parameters<tools::reports::GetReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::get_report(self, params.0).await
+    }
+
+    #[tool(
+        description = "Create a report from a full definition: markdown, filters, and blocks. Every block must include a stable id for later MCP mutations."
+    )]
+    async fn create_report(
+        &self,
+        params: Parameters<tools::reports::CreateReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::create_report(self, params.0).await
+    }
+
+    #[tool(
+        description = "Replace a report with a full definition. Prefer add_report_block, replace_report_block, patch_report_block, move_report_block, and remove_report_block for atomic block edits."
+    )]
+    async fn update_report(
+        &self,
+        params: Parameters<tools::reports::UpdateReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::update_report(self, params.0).await
+    }
+
+    #[tool(description = "Delete a report by id or slug.")]
+    async fn delete_report(
+        &self,
+        params: Parameters<tools::reports::DeleteReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::delete_report(self, params.0).await
+    }
+
+    #[tool(description = "Validate a report definition without saving it.")]
+    async fn validate_report(
+        &self,
+        params: Parameters<tools::reports::ValidateReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::validate_report(self, params.0).await
+    }
+
+    #[tool(
+        description = "Render a report's data blocks using optional global filters and optional block data requests. This fetches Object Model data but does not launch workflows."
+    )]
+    async fn render_report(
+        &self,
+        params: Parameters<tools::reports::RenderReportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::render_report(self, params.0).await
+    }
+
+    #[tool(
+        description = "Render one report block by stable block id with optional pagination, sorting, global filters, and block-specific filters."
+    )]
+    async fn get_report_block_data(
+        &self,
+        params: Parameters<tools::reports::GetReportBlockDataParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::get_report_block_data(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically add one report block by stable id. Position with index, before_block_id, or after_block_id. Optionally inserts the markdown placeholder."
+    )]
+    async fn add_report_block(
+        &self,
+        params: Parameters<tools::reports::AddReportBlockParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::add_report_block(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically replace one report block by stable id. The replacement block id must match the path block id."
+    )]
+    async fn replace_report_block(
+        &self,
+        params: Parameters<tools::reports::ReplaceReportBlockParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::replace_report_block(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically update one report block by stable id using an RFC 7386 JSON merge patch. The block id cannot be changed."
+    )]
+    async fn patch_report_block(
+        &self,
+        params: Parameters<tools::reports::PatchReportBlockParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::patch_report_block(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically move one report block by stable id. Position with index, before_block_id, or after_block_id. Optionally moves the markdown placeholder."
+    )]
+    async fn move_report_block(
+        &self,
+        params: Parameters<tools::reports::MoveReportBlockParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::move_report_block(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically remove one report block by stable id. Optionally removes the markdown placeholder."
+    )]
+    async fn remove_report_block(
+        &self,
+        params: Parameters<tools::reports::RemoveReportBlockParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::remove_report_block(self, params.0).await
+    }
+
     // ===== Graph Mutation Tools =====
     // Each mutation: fetches latest graph → mutates → saves in-place via PUT .../versions/{v}/graph.
     // First mutation on a workflow creates a new version; subsequent mutations update that same version.
@@ -681,6 +805,7 @@ impl ServerHandler for SmoMcpServer {
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\
+                **Reports**: list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block — report blocks have stable ids and block mutation tools edit one block per call without launching workflows\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals**: list_pending_signals, get_signal_schema, submit_signal_response — interact with WaitForSignal / human-in-the-loop steps in running executions\n\

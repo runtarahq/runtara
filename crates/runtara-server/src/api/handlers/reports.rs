@@ -167,6 +167,106 @@ pub async fn get_report_block_data(
     }
 }
 
+pub async fn add_report_block(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path(report_id): Path<String>,
+    Json(request): Json<AddReportBlockRequest>,
+) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+
+    match service
+        .add_report_block(&tenant_id, &report_id, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
+pub async fn replace_report_block(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path((report_id, block_id)): Path<(String, String)>,
+    Json(request): Json<ReplaceReportBlockRequest>,
+) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+
+    match service
+        .replace_report_block(&tenant_id, &report_id, &block_id, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
+pub async fn patch_report_block(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path((report_id, block_id)): Path<(String, String)>,
+    Json(request): Json<PatchReportBlockRequest>,
+) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+
+    match service
+        .patch_report_block(&tenant_id, &report_id, &block_id, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
+pub async fn move_report_block(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path((report_id, block_id)): Path<(String, String)>,
+    Json(request): Json<MoveReportBlockRequest>,
+) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+
+    match service
+        .move_report_block(&tenant_id, &report_id, &block_id, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
+pub async fn remove_report_block(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path((report_id, block_id)): Path<(String, String)>,
+    body: Option<Json<RemoveReportBlockRequest>>,
+) -> Result<(StatusCode, Json<ReportBlockMutationResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+    let request = body
+        .map(|Json(request)| request)
+        .unwrap_or(RemoveReportBlockRequest {
+            remove_markdown_placeholder: true,
+        });
+
+    match service
+        .remove_report_block(&tenant_id, &report_id, &block_id, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
 fn error_response(error: ReportServiceError) -> (StatusCode, Json<Value>) {
     match error {
         ReportServiceError::NotFound => (

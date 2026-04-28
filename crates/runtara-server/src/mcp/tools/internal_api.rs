@@ -188,6 +188,46 @@ pub async fn api_put(
     Ok(body)
 }
 
+/// Make an in-process PATCH request via the internal router.
+pub async fn api_patch(
+    server: &SmoMcpServer,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let request = build_request(Method::PATCH, path, body, &server.tenant_id);
+
+    let response = server
+        .internal_router
+        .clone()
+        .oneshot(request)
+        .await
+        .map_err(|e| err(format!("Internal request failed: {}", e)))?;
+
+    let status = response.status();
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| err(format!("Failed to read response: {}", e)))?
+        .to_bytes();
+
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
+        let text = String::from_utf8_lossy(&body_bytes);
+        serde_json::json!({ "error": text.to_string() })
+    });
+
+    if !status.is_success() {
+        let msg = body
+            .get("message")
+            .or(body.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        return Err(err(format!("API error ({}): {}", status, msg)));
+    }
+
+    Ok(body)
+}
+
 /// Make an in-process DELETE request via the internal router.
 #[allow(dead_code)]
 pub async fn api_delete(
@@ -195,6 +235,50 @@ pub async fn api_delete(
     path: &str,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
     let request = build_request(Method::DELETE, path, None, &server.tenant_id);
+
+    let response = server
+        .internal_router
+        .clone()
+        .oneshot(request)
+        .await
+        .map_err(|e| err(format!("Internal request failed: {}", e)))?;
+
+    let status = response.status();
+    let body_bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| err(format!("Failed to read response: {}", e)))?
+        .to_bytes();
+
+    if body_bytes.is_empty() {
+        return Ok(serde_json::json!({"success": true}));
+    }
+
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
+        let text = String::from_utf8_lossy(&body_bytes);
+        serde_json::json!({ "error": text.to_string() })
+    });
+
+    if !status.is_success() {
+        let msg = body
+            .get("message")
+            .or(body.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        return Err(err(format!("API error ({}): {}", status, msg)));
+    }
+
+    Ok(body)
+}
+
+/// Make an in-process DELETE request with a JSON body via the internal router.
+pub async fn api_delete_with_body(
+    server: &SmoMcpServer,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let request = build_request(Method::DELETE, path, body, &server.tenant_id);
 
     let response = server
         .internal_router

@@ -486,3 +486,68 @@ pub struct DeleteReportResponse {
     pub success: bool,
     pub message: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct ReportBlockPosition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    #[serde(
+        default,
+        rename = "beforeBlockId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub before_block_id: Option<String>,
+    #[serde(
+        default,
+        rename = "afterBlockId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub after_block_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AddReportBlockRequest {
+    pub block: ReportBlockDefinition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<ReportBlockPosition>,
+    #[serde(default = "default_true", rename = "insertMarkdownPlaceholder")]
+    pub insert_markdown_placeholder: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReplaceReportBlockRequest {
+    pub block: ReportBlockDefinition,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PatchReportBlockRequest {
+    /// RFC 7386-style JSON merge patch applied to the block definition.
+    /// The block id cannot be changed through this operation.
+    pub patch: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct MoveReportBlockRequest {
+    pub position: ReportBlockPosition,
+    #[serde(default = "default_true", rename = "moveMarkdownPlaceholder")]
+    pub move_markdown_placeholder: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RemoveReportBlockRequest {
+    #[serde(default = "default_true", rename = "removeMarkdownPlaceholder")]
+    pub remove_markdown_placeholder: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportBlockMutationResponse {
+    pub success: bool,
+    pub report: ReportDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<ReportBlockDefinition>,
+    pub message: String,
+}
+
+fn default_true() -> bool {
+    true
+}
