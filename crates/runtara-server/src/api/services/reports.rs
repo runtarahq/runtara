@@ -1131,7 +1131,10 @@ fn build_aggregate_request(
                 column: aggregate.field.clone(),
                 distinct: aggregate.distinct,
                 order_by: aggregate.order_by.iter().map(map_order_by).collect(),
-                expression: aggregate.expression.clone(),
+                expression: aggregate
+                    .expression
+                    .as_ref()
+                    .map(normalize_report_aggregate_expression),
             })
             .collect(),
         order_by: block.source.order_by.iter().map(map_order_by).collect(),
@@ -1167,6 +1170,101 @@ fn map_order_by(value: &ReportOrderBy) -> AggregateOrderBy {
         } else {
             SortDirection::Asc
         },
+    }
+}
+
+fn normalize_report_aggregate_expression(expression: &Value) -> Value {
+    let Value::Object(object) = expression else {
+        return expression.clone();
+    };
+
+    let mut normalized = object.clone();
+
+    if let Some(value_type) = normalized.remove("value_type")
+        && !normalized.contains_key("valueType")
+    {
+        normalized.insert("valueType".to_string(), value_type);
+    }
+
+    if !normalized.contains_key("valueType")
+        && let Some(type_value) = normalized.get("type").and_then(Value::as_str)
+        && matches!(
+            normalize_expression_token(type_value).as_str(),
+            "ALIAS" | "IMMEDIATE" | "REFERENCE"
+        )
+    {
+        normalized.insert(
+            "valueType".to_string(),
+            Value::String(type_value.to_ascii_lowercase()),
+        );
+    }
+
+    if let Some(value_type) = normalized.get_mut("valueType")
+        && let Some(raw) = value_type.as_str()
+    {
+        *value_type = Value::String(raw.to_ascii_lowercase());
+    }
+
+    if let Some(op) = normalized.get_mut("op")
+        && let Some(raw) = op.as_str()
+    {
+        *op = Value::String(normalize_expression_token(raw));
+    }
+
+    if let Some(fn_name) = normalized.get_mut("fn")
+        && let Some(raw) = fn_name.as_str()
+    {
+        *fn_name = Value::String(normalize_expression_token(raw));
+    }
+
+    if let Some(arguments) = normalized.get_mut("arguments")
+        && let Some(arguments) = arguments.as_array_mut()
+    {
+        for argument in arguments {
+            *argument = normalize_report_aggregate_expression(argument);
+        }
+    }
+
+    Value::Object(normalized)
+}
+
+fn normalize_expression_token(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_separator = true;
+    let mut previous_was_lower_or_digit = false;
+
+    for character in value.trim().chars() {
+        if character == '_' || character == '-' || character == ' ' {
+            if !previous_was_separator && !normalized.is_empty() {
+                normalized.push('_');
+            }
+            previous_was_separator = true;
+            previous_was_lower_or_digit = false;
+            continue;
+        }
+
+        if character.is_uppercase() && previous_was_lower_or_digit && !previous_was_separator {
+            normalized.push('_');
+        }
+
+        for upper in character.to_uppercase() {
+            normalized.push(upper);
+        }
+        previous_was_separator = false;
+        previous_was_lower_or_digit = character.is_lowercase() || character.is_ascii_digit();
+    }
+
+    match normalized.as_str() {
+        "EQUALS" => "EQ".to_string(),
+        "NOT_EQUALS" | "NOT_EQUAL" => "NE".to_string(),
+        "GREATER_THAN" => "GT".to_string(),
+        "GREATER_THAN_OR_EQUAL" | "GREATER_THAN_OR_EQUALS" => "GTE".to_string(),
+        "LESS_THAN" => "LT".to_string(),
+        "LESS_THAN_OR_EQUAL" | "LESS_THAN_OR_EQUALS" => "LTE".to_string(),
+        "DEFINED" => "IS_DEFINED".to_string(),
+        "EMPTY" => "IS_EMPTY".to_string(),
+        "NOT_EMPTY" => "IS_NOT_EMPTY".to_string(),
+        _ => normalized,
     }
 }
 
@@ -1700,6 +1798,23 @@ mod tests {
             conditions[0].arguments.as_ref().unwrap(),
             &vec![json!("customer_name"), json!("acme")]
         );
+    }
+
+    #[test]
+    fn aggregate_expr_normalizes_workflow_style_expression() {
+        let expression = normalize_report_aggregate_expression(&json!({
+            "type": "operation",
+            "op": "Sub",
+            "arguments": [
+                {"valueType": "Alias", "value": "last_qty"},
+                {"value_type": "alias", "value": "first_qty"}
+            ]
+        }));
+
+        assert_eq!(expression["op"], json!("SUB"));
+        assert_eq!(expression["arguments"][0]["valueType"], json!("alias"));
+        assert_eq!(expression["arguments"][1]["valueType"], json!("alias"));
+        serde_json::from_value::<runtara_object_store::ExprNode>(expression).unwrap();
     }
 
     #[test]
