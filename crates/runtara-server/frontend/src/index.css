@@ -173,6 +173,10 @@
   }
 }
 
+.report-print-brand {
+  display: none;
+}
+
 @media print {
   @page {
     margin: 12mm;
@@ -248,6 +252,10 @@
     padding: 0 !important;
   }
 
+  .report-print-root [data-tiles-page-content] {
+    padding-bottom: 18mm !important;
+  }
+
   .report-print-root [data-tiles-page-action],
   .report-print-root [data-tiles-page-toolbar],
   .report-print-hidden {
@@ -256,6 +264,24 @@
 
   .report-print-content > div {
     max-width: none !important;
+  }
+
+  .report-print-root .report-print-brand {
+    position: fixed !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    color: #475569 !important;
+    font-size: 9px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0 !important;
+  }
+
+  .report-print-root .report-print-brand img {
+    width: 14px !important;
+    height: 14px !important;
   }
 
   .report-print-root .prose {

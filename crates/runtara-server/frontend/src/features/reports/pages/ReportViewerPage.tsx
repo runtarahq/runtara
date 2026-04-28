@@ -4,6 +4,7 @@ import { Edit, Printer, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
+import RuntaraLogo from '@/assets/logo/runtara-logo-icon.svg';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
 import { useReport, useReportRender } from '../hooks/useReports';
@@ -147,6 +148,10 @@ export function ReportViewerPage() {
         renderResponse={renderResponse}
         filters={filters}
       />
+      <div className="report-print-brand">
+        <img src={RuntaraLogo} alt="" />
+        <span>Generated in Runtara</span>
+      </div>
     </TilesPage>
   );
 }
