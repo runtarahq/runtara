@@ -555,6 +555,54 @@ impl SmoMcpServer {
         tools::reports::remove_report_block(self, params.0).await
     }
 
+    #[tool(
+        description = "Atomically add one structured report layout node by stable id. Prefer layout nodes over Markdown tables for report arrangement. Insert at the root or inside a section/columns node."
+    )]
+    async fn add_report_layout_node(
+        &self,
+        params: Parameters<tools::reports::AddReportLayoutNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::add_report_layout_node(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically replace one structured report layout node by stable id. The replacement node id must match."
+    )]
+    async fn replace_report_layout_node(
+        &self,
+        params: Parameters<tools::reports::ReplaceReportLayoutNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::replace_report_layout_node(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically update one structured report layout node using an RFC 7386 JSON merge patch. The layout node id cannot be changed."
+    )]
+    async fn patch_report_layout_node(
+        &self,
+        params: Parameters<tools::reports::PatchReportLayoutNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::patch_report_layout_node(self, params.0).await
+    }
+
+    #[tool(
+        description = "Atomically move one structured report layout node by stable id. Position with index, before_node_id, or after_node_id at the root or inside a section/columns node."
+    )]
+    async fn move_report_layout_node(
+        &self,
+        params: Parameters<tools::reports::MoveReportLayoutNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::move_report_layout_node(self, params.0).await
+    }
+
+    #[tool(description = "Atomically remove one structured report layout node by stable id.")]
+    async fn remove_report_layout_node(
+        &self,
+        params: Parameters<tools::reports::RemoveReportLayoutNodeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::reports::remove_report_layout_node(self, params.0).await
+    }
+
     // ===== Graph Mutation Tools =====
     // Each mutation: fetches latest graph → mutates → saves in-place via PUT .../versions/{v}/graph.
     // First mutation on a workflow creates a new version; subsequent mutations update that same version.
@@ -846,7 +894,7 @@ impl ServerHandler for SmoMcpServer {
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\
-                **Reports**: get_report_authoring_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block — call get_report_authoring_schema before authoring; report blocks have stable ids and block mutation tools edit one block per call without launching workflows\n\
+                **Reports**: get_report_authoring_schema, list_reports, get_report, create_report, update_report, delete_report, validate_report, render_report, get_report_block_data, add_report_block, replace_report_block, patch_report_block, move_report_block, remove_report_block, add_report_layout_node, replace_report_layout_node, patch_report_layout_node, move_report_layout_node, remove_report_layout_node — call get_report_authoring_schema before authoring; report blocks and layout nodes have stable ids; use layout nodes (metric_row, columns, grid, section) instead of Markdown tables for alignment\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Mutations**: set_workflow_metadata (name/description), add_agent_step (high-level: validates capability, creates step, connects edges), add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema, set_output_schema, set_variable, remove_variable, list_references (returns copy-paste-ready mapping objects) — first call creates a new version, subsequent calls update it in-place. All support nested subgraphs via optional path parameter. Prefer mutation tools over raw graph JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals**: list_pending_signals, get_signal_schema, submit_signal_response — interact with WaitForSignal / human-in-the-loop steps in running executions\n\

@@ -60,6 +60,8 @@ pub struct ReportDefinition {
     pub definition_version: i32,
     #[serde(default)]
     pub markdown: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layout: Vec<Value>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]

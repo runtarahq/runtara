@@ -2,6 +2,7 @@ use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
@@ -63,7 +64,7 @@ pub struct CreateReportParams {
     )]
     pub status: Option<String>,
     #[schemars(
-        description = "Full report definition: {definitionVersion, markdown, filters, blocks}. Every block must include a stable id."
+        description = "Full report definition: {definitionVersion, markdown, layout?, filters, blocks}. Every block must include a stable id; every layout node must include a stable id."
     )]
     pub definition: Value,
 }
@@ -80,7 +81,7 @@ pub struct UpdateReportParams {
     #[schemars(description = "Report status: draft, published, or archived.")]
     pub status: Option<String>,
     #[schemars(
-        description = "Full replacement report definition: {definitionVersion, markdown, filters, blocks}. Use block mutation tools for atomic block edits."
+        description = "Full replacement report definition: {definitionVersion, markdown, layout?, filters, blocks}. Use block/layout mutation tools for atomic edits."
     )]
     pub definition: Value,
 }
@@ -218,6 +219,97 @@ pub struct RemoveReportBlockParams {
         description = "Also remove {{ block.<id> }} from report markdown. Defaults to true."
     )]
     pub remove_markdown_placeholder: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddReportLayoutNodeParams {
+    #[schemars(description = "Report id or slug")]
+    pub report_id: String,
+    #[schemars(description = "Full layout node. Must include stable id and type.")]
+    pub node: Value,
+    #[schemars(
+        description = "Optional container layout node id. Omit to insert at the root layout array. Sections accept children; columns require column_id."
+    )]
+    pub parent_node_id: Option<String>,
+    #[schemars(
+        description = "Target column id when parent_node_id points at a columns layout node."
+    )]
+    pub column_id: Option<String>,
+    #[schemars(
+        description = "Insert at zero-based sibling index. Mutually exclusive with before_node_id and after_node_id."
+    )]
+    pub index: Option<usize>,
+    #[schemars(
+        description = "Insert before this sibling layout node id. Mutually exclusive with index and after_node_id."
+    )]
+    pub before_node_id: Option<String>,
+    #[schemars(
+        description = "Insert after this sibling layout node id. Mutually exclusive with index and before_node_id."
+    )]
+    pub after_node_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceReportLayoutNodeParams {
+    #[schemars(description = "Report id or slug")]
+    pub report_id: String,
+    #[schemars(description = "Stable layout node id to replace.")]
+    pub node_id: String,
+    #[schemars(description = "Full replacement layout node. Its id must match node_id.")]
+    pub node: Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PatchReportLayoutNodeParams {
+    #[schemars(description = "Report id or slug")]
+    pub report_id: String,
+    #[schemars(description = "Stable layout node id to update.")]
+    pub node_id: String,
+    #[schemars(
+        description = "RFC 7386-style JSON merge patch applied to the layout node. The id field cannot be changed."
+    )]
+    pub patch: Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveReportLayoutNodeParams {
+    #[schemars(description = "Report id or slug")]
+    pub report_id: String,
+    #[schemars(description = "Stable layout node id to move.")]
+    pub node_id: String,
+    #[schemars(
+        description = "Optional destination container layout node id. Omit to move to the root layout array. Sections accept children; columns require column_id."
+    )]
+    pub parent_node_id: Option<String>,
+    #[schemars(
+        description = "Target column id when parent_node_id points at a columns layout node."
+    )]
+    pub column_id: Option<String>,
+    #[schemars(
+        description = "Move to zero-based sibling index. Mutually exclusive with before_node_id and after_node_id."
+    )]
+    pub index: Option<usize>,
+    #[schemars(
+        description = "Move before this sibling layout node id. Mutually exclusive with index and after_node_id."
+    )]
+    pub before_node_id: Option<String>,
+    #[schemars(
+        description = "Move after this sibling layout node id. Mutually exclusive with index and before_node_id."
+    )]
+    pub after_node_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveReportLayoutNodeParams {
+    #[schemars(description = "Report id or slug")]
+    pub report_id: String,
+    #[schemars(description = "Stable layout node id to remove.")]
+    pub node_id: String,
 }
 
 // ===== Tool Implementations =====
@@ -540,6 +632,482 @@ pub async fn remove_report_block(
     json_result(result)
 }
 
+pub async fn add_report_layout_node(
+    server: &SmoMcpServer,
+    params: AddReportLayoutNodeParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("report_id", &params.report_id)?;
+    let mut report = get_report_value(server, &params.report_id).await?;
+    let definition = report_definition_mut(&mut report)?;
+    let layout = layout_array_mut(definition)?;
+
+    insert_layout_node(
+        layout,
+        params.parent_node_id.as_deref(),
+        params.column_id.as_deref(),
+        params.node,
+        LayoutPosition {
+            index: params.index,
+            before_node_id: params.before_node_id.as_deref(),
+            after_node_id: params.after_node_id.as_deref(),
+        },
+    )?;
+
+    save_report_value(server, &params.report_id, report).await
+}
+
+pub async fn replace_report_layout_node(
+    server: &SmoMcpServer,
+    params: ReplaceReportLayoutNodeParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("report_id", &params.report_id)?;
+    validate_path_param("node_id", &params.node_id)?;
+    if params.node.get("id").and_then(Value::as_str) != Some(params.node_id.as_str()) {
+        return Err(rmcp::ErrorData::invalid_params(
+            "Replacement layout node id must match node_id.",
+            None,
+        ));
+    }
+
+    let mut report = get_report_value(server, &params.report_id).await?;
+    let definition = report_definition_mut(&mut report)?;
+    let layout = layout_array_mut(definition)?;
+    if !replace_layout_node(layout, &params.node_id, params.node) {
+        return Err(layout_node_not_found(&params.node_id));
+    }
+
+    save_report_value(server, &params.report_id, report).await
+}
+
+pub async fn patch_report_layout_node(
+    server: &SmoMcpServer,
+    params: PatchReportLayoutNodeParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("report_id", &params.report_id)?;
+    validate_path_param("node_id", &params.node_id)?;
+    if !params.patch.is_object() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "Report layout node patch must be a JSON object.",
+            None,
+        ));
+    }
+    if params.patch.get("id").is_some() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "Report layout node id cannot be changed with patch_report_layout_node.",
+            None,
+        ));
+    }
+
+    let mut report = get_report_value(server, &params.report_id).await?;
+    let definition = report_definition_mut(&mut report)?;
+    let layout = layout_array_mut(definition)?;
+    if !patch_layout_node(layout, &params.node_id, &params.patch) {
+        return Err(layout_node_not_found(&params.node_id));
+    }
+
+    save_report_value(server, &params.report_id, report).await
+}
+
+pub async fn move_report_layout_node(
+    server: &SmoMcpServer,
+    params: MoveReportLayoutNodeParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("report_id", &params.report_id)?;
+    validate_path_param("node_id", &params.node_id)?;
+
+    let mut report = get_report_value(server, &params.report_id).await?;
+    let definition = report_definition_mut(&mut report)?;
+    let layout = layout_array_mut(definition)?;
+    let Some(node) = remove_layout_node(layout, &params.node_id) else {
+        return Err(layout_node_not_found(&params.node_id));
+    };
+    insert_layout_node(
+        layout,
+        params.parent_node_id.as_deref(),
+        params.column_id.as_deref(),
+        node,
+        LayoutPosition {
+            index: params.index,
+            before_node_id: params.before_node_id.as_deref(),
+            after_node_id: params.after_node_id.as_deref(),
+        },
+    )?;
+
+    save_report_value(server, &params.report_id, report).await
+}
+
+pub async fn remove_report_layout_node(
+    server: &SmoMcpServer,
+    params: RemoveReportLayoutNodeParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("report_id", &params.report_id)?;
+    validate_path_param("node_id", &params.node_id)?;
+
+    let mut report = get_report_value(server, &params.report_id).await?;
+    let definition = report_definition_mut(&mut report)?;
+    let layout = layout_array_mut(definition)?;
+    if remove_layout_node(layout, &params.node_id).is_none() {
+        return Err(layout_node_not_found(&params.node_id));
+    }
+
+    save_report_value(server, &params.report_id, report).await
+}
+
+#[derive(Clone, Copy)]
+struct LayoutPosition<'a> {
+    index: Option<usize>,
+    before_node_id: Option<&'a str>,
+    after_node_id: Option<&'a str>,
+}
+
+async fn get_report_value(
+    server: &SmoMcpServer,
+    report_id: &str,
+) -> Result<Value, rmcp::ErrorData> {
+    let result = api_get(server, &format!("/api/runtime/reports/{}", report_id)).await?;
+    result
+        .get("report")
+        .cloned()
+        .ok_or_else(|| rmcp::ErrorData::internal_error("Report API response missing report.", None))
+}
+
+async fn save_report_value(
+    server: &SmoMcpServer,
+    report_id: &str,
+    report: Value,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let definition = report
+        .get("definition")
+        .cloned()
+        .ok_or_else(|| rmcp::ErrorData::invalid_params("Report is missing definition.", None))?;
+    let issues = collect_report_definition_authoring_issues(&definition);
+    if authoring_errors(&issues).next().is_some() {
+        return Err(authoring_invalid_params(issues));
+    }
+
+    let body = json!({
+        "name": report.get("name").cloned().unwrap_or(Value::String("Report".to_string())),
+        "slug": report.get("slug").cloned().unwrap_or(Value::String("report".to_string())),
+        "description": report.get("description").cloned().unwrap_or(Value::Null),
+        "tags": report.get("tags").cloned().unwrap_or_else(|| json!([])),
+        "status": report.get("status").cloned().unwrap_or(Value::String("published".to_string())),
+        "definition": definition,
+    });
+
+    let result = api_put(
+        server,
+        &format!("/api/runtime/reports/{}", report_id),
+        Some(body),
+    )
+    .await?;
+    json_result(result)
+}
+
+fn report_definition_mut(report: &mut Value) -> Result<&mut Value, rmcp::ErrorData> {
+    report
+        .get_mut("definition")
+        .ok_or_else(|| rmcp::ErrorData::invalid_params("Report is missing definition.", None))
+}
+
+fn layout_array_mut(definition: &mut Value) -> Result<&mut Vec<Value>, rmcp::ErrorData> {
+    if definition.get("layout").is_none() {
+        definition["layout"] = json!([]);
+    }
+    definition
+        .get_mut("layout")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            rmcp::ErrorData::invalid_params("Report definition.layout must be an array.", None)
+        })
+}
+
+fn insert_layout_node(
+    nodes: &mut Vec<Value>,
+    parent_node_id: Option<&str>,
+    column_id: Option<&str>,
+    node: Value,
+    position: LayoutPosition<'_>,
+) -> Result<(), rmcp::ErrorData> {
+    match parent_node_id {
+        None => insert_layout_node_into(nodes, node, position),
+        Some(parent_node_id) => {
+            if insert_layout_node_in_container(nodes, parent_node_id, column_id, node, position)? {
+                Ok(())
+            } else {
+                Err(layout_node_not_found(parent_node_id))
+            }
+        }
+    }
+}
+
+fn insert_layout_node_in_container(
+    nodes: &mut [Value],
+    parent_node_id: &str,
+    column_id: Option<&str>,
+    node: Value,
+    position: LayoutPosition<'_>,
+) -> Result<bool, rmcp::ErrorData> {
+    for current in nodes {
+        if layout_node_id(current) == Some(parent_node_id) {
+            insert_layout_node_into_container(current, column_id, node, position)?;
+            return Ok(true);
+        }
+
+        if let Some(children) = current.get_mut("children").and_then(Value::as_array_mut)
+            && insert_layout_node_in_container(
+                children,
+                parent_node_id,
+                column_id,
+                node.clone(),
+                position,
+            )?
+        {
+            return Ok(true);
+        }
+
+        if let Some(columns) = current.get_mut("columns").and_then(Value::as_array_mut) {
+            for column in columns {
+                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
+                    && insert_layout_node_in_container(
+                        children,
+                        parent_node_id,
+                        column_id,
+                        node.clone(),
+                        position,
+                    )?
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn insert_layout_node_into_container(
+    container: &mut Value,
+    column_id: Option<&str>,
+    node: Value,
+    position: LayoutPosition<'_>,
+) -> Result<(), rmcp::ErrorData> {
+    match container.get("type").and_then(Value::as_str) {
+        Some("section") => {
+            if column_id.is_some() {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "column_id can only be used with columns layout nodes.",
+                    None,
+                ));
+            }
+            if container.get("children").is_none() {
+                container["children"] = json!([]);
+            }
+            let children = container
+                .get_mut("children")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params(
+                        "Section layout node children must be an array.",
+                        None,
+                    )
+                })?;
+            insert_layout_node_into(children, node, position)
+        }
+        Some("columns") => {
+            let column_id = column_id.ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    "column_id is required when inserting into a columns layout node.",
+                    None,
+                )
+            })?;
+            let columns = container
+                .get_mut("columns")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params(
+                        "Columns layout node columns must be an array.",
+                        None,
+                    )
+                })?;
+            for column in columns {
+                if column.get("id").and_then(Value::as_str) == Some(column_id) {
+                    if column.get("children").is_none() {
+                        column["children"] = json!([]);
+                    }
+                    let children = column
+                        .get_mut("children")
+                        .and_then(Value::as_array_mut)
+                        .ok_or_else(|| {
+                            rmcp::ErrorData::invalid_params(
+                                "Column children must be an array.",
+                                None,
+                            )
+                        })?;
+                    return insert_layout_node_into(children, node, position);
+                }
+            }
+            Err(rmcp::ErrorData::invalid_params(
+                format!("Unknown report layout column '{}'.", column_id),
+                None,
+            ))
+        }
+        Some(other) => Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "Layout node type '{}' cannot contain child layout nodes.",
+                other
+            ),
+            None,
+        )),
+        None => Err(rmcp::ErrorData::invalid_params(
+            "Layout container node must include type.",
+            None,
+        )),
+    }
+}
+
+fn insert_layout_node_into(
+    nodes: &mut Vec<Value>,
+    node: Value,
+    position: LayoutPosition<'_>,
+) -> Result<(), rmcp::ErrorData> {
+    let index = resolve_layout_position(nodes, position)?;
+    nodes.insert(index, node);
+    Ok(())
+}
+
+fn resolve_layout_position(
+    nodes: &[Value],
+    position: LayoutPosition<'_>,
+) -> Result<usize, rmcp::ErrorData> {
+    let selector_count = usize::from(position.index.is_some())
+        + usize::from(position.before_node_id.is_some())
+        + usize::from(position.after_node_id.is_some());
+    if selector_count > 1 {
+        return Err(rmcp::ErrorData::invalid_params(
+            "Layout position must use only one of index, before_node_id, or after_node_id.",
+            None,
+        ));
+    }
+    if let Some(index) = position.index {
+        return Ok(index.min(nodes.len()));
+    }
+    if let Some(before_node_id) = position.before_node_id {
+        return nodes
+            .iter()
+            .position(|node| layout_node_id(node) == Some(before_node_id))
+            .ok_or_else(|| layout_node_not_found(before_node_id));
+    }
+    if let Some(after_node_id) = position.after_node_id {
+        return nodes
+            .iter()
+            .position(|node| layout_node_id(node) == Some(after_node_id))
+            .map(|index| index + 1)
+            .ok_or_else(|| layout_node_not_found(after_node_id));
+    }
+    Ok(nodes.len())
+}
+
+fn patch_layout_node(nodes: &mut [Value], node_id: &str, patch: &Value) -> bool {
+    for node in nodes {
+        if layout_node_id(node) == Some(node_id) {
+            apply_json_merge_patch(node, patch);
+            return true;
+        }
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut)
+            && patch_layout_node(children, node_id, patch)
+        {
+            return true;
+        }
+        if let Some(columns) = node.get_mut("columns").and_then(Value::as_array_mut) {
+            for column in columns {
+                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
+                    && patch_layout_node(children, node_id, patch)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn replace_layout_node(nodes: &mut [Value], node_id: &str, replacement: Value) -> bool {
+    for node in nodes {
+        if layout_node_id(node) == Some(node_id) {
+            *node = replacement;
+            return true;
+        }
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut)
+            && replace_layout_node(children, node_id, replacement.clone())
+        {
+            return true;
+        }
+        if let Some(columns) = node.get_mut("columns").and_then(Value::as_array_mut) {
+            for column in columns {
+                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
+                    && replace_layout_node(children, node_id, replacement.clone())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn remove_layout_node(nodes: &mut Vec<Value>, node_id: &str) -> Option<Value> {
+    if let Some(index) = nodes
+        .iter()
+        .position(|node| layout_node_id(node) == Some(node_id))
+    {
+        return Some(nodes.remove(index));
+    }
+    for node in nodes {
+        if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut)
+            && let Some(removed) = remove_layout_node(children, node_id)
+        {
+            return Some(removed);
+        }
+        if let Some(columns) = node.get_mut("columns").and_then(Value::as_array_mut) {
+            for column in columns {
+                if let Some(children) = column.get_mut("children").and_then(Value::as_array_mut)
+                    && let Some(removed) = remove_layout_node(children, node_id)
+                {
+                    return Some(removed);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn layout_node_id(node: &Value) -> Option<&str> {
+    node.get("id").and_then(Value::as_str)
+}
+
+fn layout_node_not_found(node_id: &str) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(format!("Unknown report layout node '{}'.", node_id), None)
+}
+
+fn apply_json_merge_patch(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target), Value::Object(patch)) => {
+            for (key, patch_value) in patch {
+                if patch_value.is_null() {
+                    target.remove(key);
+                } else {
+                    apply_json_merge_patch(
+                        target.entry(key.clone()).or_insert(Value::Null),
+                        patch_value,
+                    );
+                }
+            }
+        }
+        (target, patch) => {
+            *target = patch.clone();
+        }
+    }
+}
+
 fn position_body(
     index: Option<usize>,
     before_block_id: Option<String>,
@@ -561,35 +1129,43 @@ fn position_body(
 fn report_authoring_schema() -> Value {
     json!({
         "definitionVersion": 1,
-        "purpose": "Canonical MCP contract for authoring Runtara reports. Call this before create_report, update_report, add_report_block, replace_report_block, or patch_report_block.",
+        "purpose": "Canonical MCP contract for authoring Runtara reports. Call this before create_report, update_report, add_report_block, replace_report_block, patch_report_block, or report layout mutations.",
         "relatedTools": [
             "list_object_schemas",
             "get_object_schema",
             "query_aggregate",
             "validate_report",
             "render_report",
-            "get_report_block_data"
+            "get_report_block_data",
+            "add_report_layout_node",
+            "replace_report_layout_node",
+            "patch_report_layout_node",
+            "move_report_layout_node",
+            "remove_report_layout_node"
         ],
         "definitionShape": {
             "definitionVersion": 1,
-            "markdown": "Markdown body. Render data blocks with standalone placeholders like {{ block.daily_qty }}. Do not put block placeholders inside Markdown tables for alignment/layout.",
+            "markdown": "Backward-compatible narrative Markdown. Render data blocks with standalone placeholders like {{ block.daily_qty }} only when definition.layout is absent. Do not put block placeholders inside Markdown tables for alignment/layout.",
+            "layout": "Optional structured layout tree. Prefer this over Markdown placeholders for dashboards and report layout. Every layout node must include a stable id and type.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
         },
         "layoutGuidance": {
             "currentContract": [
-                "Report block placeholders render as block-level UI components.",
-                "Put each {{ block.<id> }} placeholder on its own line or paragraph.",
-                "Do not wrap block placeholders in Markdown table rows such as | {{ block.a }} | {{ block.b }} |. The block renderer does not place components inside Markdown table cells, so leftover pipe characters may appear as visible vertical lines.",
-                "Use Markdown headings and paragraphs for narrative structure, and use report blocks for data presentation."
+                "Prefer definition.layout for all visual arrangement.",
+                "Supported layout node types are markdown, block, metric_row, section, columns, and grid.",
+                "Every layout node has a stable id so MCP can add, replace, patch, move, or remove one layout node at a time.",
+                "Use Markdown only for narrative text. If using legacy markdown placeholders, put each {{ block.<id> }} placeholder on its own line or paragraph.",
+                "Never wrap block placeholders in Markdown table rows such as | {{ block.a }} | {{ block.b }} |. Use metric_row, columns, or grid instead."
             ],
-            "plannedLayoutPrimitives": [
-                "metric_row: compact responsive row for several metric blocks.",
-                "columns: responsive multi-column layout for arbitrary block placeholders.",
-                "grid: explicit card/grid placement with spans for dashboards.",
-                "section: titled grouping with optional description and layout settings."
-            ],
-            "preferredMetricPatternToday": "Use headings plus standalone metric placeholders, one per line, until metric_row/columns/grid are implemented."
+            "layoutNodes": {
+                "markdown": {"id": "intro", "type": "markdown", "content": "# Report\n\nNarrative text."},
+                "block": {"id": "records_node", "type": "block", "blockId": "records"},
+                "metric_row": {"id": "summary_metrics", "type": "metric_row", "blocks": ["total_records", "open_records"]},
+                "section": {"id": "summary_section", "type": "section", "title": "Summary", "description": "Optional context.", "children": [{"id": "summary_metrics", "type": "metric_row", "blocks": ["total_records"]}]},
+                "columns": {"id": "comparison", "type": "columns", "columns": [{"id": "left", "width": 1, "children": [{"id": "left_chart_node", "type": "block", "blockId": "left_chart"}]}, {"id": "right", "width": 1, "children": [{"id": "right_table_node", "type": "block", "blockId": "right_table"}]}]},
+                "grid": {"id": "dashboard_grid", "type": "grid", "columns": 12, "items": [{"blockId": "trend", "colSpan": 8}, {"blockId": "records", "colSpan": 4}]}
+            }
         },
         "blockShape": {
             "common": {
@@ -671,10 +1247,16 @@ fn report_authoring_schema() -> Value {
             "Do not use metric.valueAlias or top-level valueAlias. Use block.metric.valueField.",
             "Do not copy query_aggregate specs directly: report aggregates use op/field while query_aggregate uses fn/column.",
             "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
-            "Do not use Markdown tables to align report block placeholders. Use standalone placeholders; layout primitives will provide metric rows/grids.",
+            "Do not use Markdown tables to align report block placeholders. Use definition.layout with metric_row, columns, or grid.",
+            "Do not omit layout node ids. MCP layout mutation tools address layout nodes by id.",
             "Always run validate_report before saving or mutating report blocks."
         ],
         "examples": {
+            "layout": [
+                {"id": "intro", "type": "markdown", "content": "# Demand summary\n\nLive Object Model data."},
+                {"id": "summary", "type": "metric_row", "blocks": ["total_snaps", "unique_skus"]},
+                {"id": "main_grid", "type": "grid", "columns": 12, "items": [{"blockId": "daily_qty", "colSpan": 8}, {"blockId": "top_vendors", "colSpan": 4}]}
+            ],
             "table": {
                 "id": "products",
                 "type": "table",
@@ -746,10 +1328,17 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
     collect_unknown_keys(
         "$",
         definition,
-        &["definitionVersion", "markdown", "filters", "blocks"],
+        &[
+            "definitionVersion",
+            "markdown",
+            "layout",
+            "filters",
+            "blocks",
+        ],
         &mut issues,
     );
     collect_markdown_layout_issues(definition, &mut issues);
+    collect_layout_authoring_issues(definition, &mut issues);
 
     if let Some(blocks) = definition.get("blocks") {
         match blocks.as_array() {
@@ -787,6 +1376,284 @@ fn collect_markdown_layout_issues(definition: &Value, issues: &mut Vec<Authoring
                 "Do not place report block placeholders inside Markdown table rows. Report blocks render as block-level components, so Markdown pipe characters can appear as visible vertical lines. Put each {{ block.<id> }} placeholder on its own line until layout primitives are available.",
             ));
         }
+    }
+}
+
+fn collect_layout_authoring_issues(definition: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(layout) = definition.get("layout") else {
+        return;
+    };
+    let Some(layout) = layout.as_array() else {
+        issues.push(error(
+            "$.layout",
+            "INVALID_REPORT_LAYOUT",
+            "Report definition.layout must be an array of layout nodes.",
+        ));
+        return;
+    };
+
+    let block_types = definition
+        .get("blocks")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    Some((
+                        block.get("id")?.as_str()?.to_string(),
+                        block.get("type")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let block_ids = block_types.keys().cloned().collect::<HashSet<_>>();
+    let mut layout_node_ids = HashSet::new();
+    for (index, node) in layout.iter().enumerate() {
+        collect_layout_node_authoring_issues(
+            &format!("$.layout[{index}]"),
+            node,
+            &block_ids,
+            &block_types,
+            &mut layout_node_ids,
+            issues,
+        );
+    }
+}
+
+fn collect_layout_node_authoring_issues(
+    path: &str,
+    node: &Value,
+    block_ids: &HashSet<String>,
+    block_types: &HashMap<String, String>,
+    layout_node_ids: &mut HashSet<String>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(object) = node.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_REPORT_LAYOUT_NODE",
+            "Report layout node must be an object.",
+        ));
+        return;
+    };
+    let Some(node_type) = object.get("type").and_then(Value::as_str) else {
+        issues.push(error(
+            format!("{path}.type"),
+            "MISSING_LAYOUT_NODE_TYPE",
+            "Report layout node must include type: markdown, block, metric_row, section, columns, or grid.",
+        ));
+        return;
+    };
+    let Some(node_id) = object.get("id").and_then(Value::as_str) else {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_LAYOUT_NODE_ID",
+            "Report layout node must include a stable id for MCP mutations.",
+        ));
+        return;
+    };
+    if node_id.trim().is_empty() {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_LAYOUT_NODE_ID",
+            "Report layout node id cannot be empty.",
+        ));
+    } else if !layout_node_ids.insert(node_id.to_string()) {
+        issues.push(error(
+            format!("{path}.id"),
+            "DUPLICATE_LAYOUT_NODE_ID",
+            format!("Duplicate report layout node id '{node_id}'."),
+        ));
+    }
+
+    match node_type {
+        "markdown" => {
+            collect_unknown_keys(path, node, &["id", "type", "content"], issues);
+            if object.get("content").and_then(Value::as_str).is_none() {
+                issues.push(error(
+                    format!("{path}.content"),
+                    "MISSING_LAYOUT_MARKDOWN_CONTENT",
+                    "Markdown layout nodes must include content.",
+                ));
+            }
+        }
+        "block" => {
+            collect_unknown_keys(path, node, &["id", "type", "blockId"], issues);
+            collect_layout_block_reference_issue(
+                &format!("{path}.blockId"),
+                object.get("blockId"),
+                block_ids,
+                issues,
+            );
+        }
+        "metric_row" => {
+            collect_unknown_keys(path, node, &["id", "type", "title", "blocks"], issues);
+            let Some(blocks) = object.get("blocks").and_then(Value::as_array) else {
+                issues.push(error(
+                    format!("{path}.blocks"),
+                    "MISSING_LAYOUT_METRIC_ROW_BLOCKS",
+                    "Metric row layout nodes must include blocks: [metricBlockId, ...].",
+                ));
+                return;
+            };
+            for (index, block) in blocks.iter().enumerate() {
+                let block_path = format!("{path}.blocks[{index}]");
+                let Some(block_id) = block.as_str() else {
+                    issues.push(error(
+                        block_path,
+                        "INVALID_LAYOUT_BLOCK_REFERENCE",
+                        "Metric row block references must be block id strings.",
+                    ));
+                    continue;
+                };
+                if !block_ids.contains(block_id) {
+                    issues.push(error(
+                        block_path,
+                        "UNKNOWN_LAYOUT_BLOCK_REFERENCE",
+                        format!("Layout references unknown report block '{block_id}'."),
+                    ));
+                } else if block_types.get(block_id).map(String::as_str) != Some("metric") {
+                    issues.push(error(
+                        block_path,
+                        "INVALID_METRIC_ROW_BLOCK",
+                        format!("Metric row references non-metric block '{block_id}'."),
+                    ));
+                }
+            }
+        }
+        "section" => {
+            collect_unknown_keys(
+                path,
+                node,
+                &["id", "type", "title", "description", "children"],
+                issues,
+            );
+            if let Some(children) = object.get("children") {
+                collect_layout_children_authoring_issues(
+                    &format!("{path}.children"),
+                    children,
+                    block_ids,
+                    block_types,
+                    layout_node_ids,
+                    issues,
+                );
+            }
+        }
+        "columns" => {
+            collect_unknown_keys(path, node, &["id", "type", "columns"], issues);
+            let Some(columns) = object.get("columns").and_then(Value::as_array) else {
+                issues.push(error(
+                    format!("{path}.columns"),
+                    "MISSING_LAYOUT_COLUMNS",
+                    "Columns layout nodes must include columns.",
+                ));
+                return;
+            };
+            for (column_index, column) in columns.iter().enumerate() {
+                let column_path = format!("{path}.columns[{column_index}]");
+                collect_unknown_keys(&column_path, column, &["id", "width", "children"], issues);
+                if column.get("id").and_then(Value::as_str).is_none() {
+                    issues.push(error(
+                        format!("{column_path}.id"),
+                        "MISSING_LAYOUT_COLUMN_ID",
+                        "Layout columns must include id so MCP can target them.",
+                    ));
+                }
+                if let Some(children) = column.get("children") {
+                    collect_layout_children_authoring_issues(
+                        &format!("{column_path}.children"),
+                        children,
+                        block_ids,
+                        block_types,
+                        layout_node_ids,
+                        issues,
+                    );
+                }
+            }
+        }
+        "grid" => {
+            collect_unknown_keys(path, node, &["id", "type", "columns", "items"], issues);
+            let Some(items) = object.get("items").and_then(Value::as_array) else {
+                issues.push(error(
+                    format!("{path}.items"),
+                    "MISSING_LAYOUT_GRID_ITEMS",
+                    "Grid layout nodes must include items.",
+                ));
+                return;
+            };
+            for (item_index, item) in items.iter().enumerate() {
+                let item_path = format!("{path}.items[{item_index}]");
+                collect_unknown_keys(
+                    &item_path,
+                    item,
+                    &["id", "blockId", "colSpan", "rowSpan"],
+                    issues,
+                );
+                collect_layout_block_reference_issue(
+                    &format!("{item_path}.blockId"),
+                    item.get("blockId"),
+                    block_ids,
+                    issues,
+                );
+            }
+        }
+        _ => issues.push(error(
+            format!("{path}.type"),
+            "UNKNOWN_LAYOUT_NODE_TYPE",
+            format!("Unknown report layout node type '{node_type}'."),
+        )),
+    }
+}
+
+fn collect_layout_children_authoring_issues(
+    path: &str,
+    children: &Value,
+    block_ids: &HashSet<String>,
+    block_types: &HashMap<String, String>,
+    layout_node_ids: &mut HashSet<String>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(children) = children.as_array() else {
+        issues.push(error(
+            path,
+            "INVALID_LAYOUT_CHILDREN",
+            "Report layout children must be an array.",
+        ));
+        return;
+    };
+    for (index, child) in children.iter().enumerate() {
+        collect_layout_node_authoring_issues(
+            &format!("{path}[{index}]"),
+            child,
+            block_ids,
+            block_types,
+            layout_node_ids,
+            issues,
+        );
+    }
+}
+
+fn collect_layout_block_reference_issue(
+    path: &str,
+    block_value: Option<&Value>,
+    block_ids: &HashSet<String>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(block_id) = block_value.and_then(Value::as_str) else {
+        issues.push(error(
+            path,
+            "MISSING_LAYOUT_BLOCK_REFERENCE",
+            "Layout block reference must be a block id string.",
+        ));
+        return;
+    };
+    if !block_ids.contains(block_id) {
+        issues.push(error(
+            path,
+            "UNKNOWN_LAYOUT_BLOCK_REFERENCE",
+            format!("Layout references unknown report block '{block_id}'."),
+        ));
     }
 }
 
@@ -1503,6 +2370,47 @@ mod tests {
             response["warnings"][0]["code"],
             json!("MARKDOWN_TABLE_BLOCK_LAYOUT")
         );
+    }
+
+    #[test]
+    fn report_authoring_accepts_structured_layout() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "layout": [
+                {"id": "intro", "type": "markdown", "content": "# Report"},
+                {"id": "summary", "type": "metric_row", "blocks": ["total"]}
+            ],
+            "blocks": [{
+                "id": "total",
+                "type": "metric",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "aggregate",
+                    "aggregates": [{"alias": "n", "op": "count"}]
+                },
+                "metric": {"valueField": "n"}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+
+        assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_layout_block_reference() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "layout": [{"id": "missing", "type": "block", "blockId": "missing_block"}],
+            "blocks": []
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"UNKNOWN_LAYOUT_BLOCK_REFERENCE"));
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {

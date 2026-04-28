@@ -484,6 +484,7 @@ impl ReportService {
         }
 
         let mut block_ids = HashSet::new();
+        let mut block_types = HashMap::new();
         for block in &definition.blocks {
             if block.id.trim().is_empty() {
                 return Err(ReportServiceError::Validation(
@@ -496,6 +497,7 @@ impl ReportService {
                     block.id
                 )));
             }
+            block_types.insert(block.id.clone(), block.block_type);
             if block.source.schema.trim().is_empty() {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' must specify an Object Model schema",
@@ -598,6 +600,17 @@ impl ReportService {
                     }
                 }
             }
+        }
+
+        let mut layout_node_ids = HashSet::new();
+        for (index, node) in definition.layout.iter().enumerate() {
+            validate_layout_node(
+                node,
+                &format!("$.layout[{index}]"),
+                &block_ids,
+                &block_types,
+                &mut layout_node_ids,
+            )?;
         }
 
         let placeholder_ids = extract_markdown_block_placeholders(&definition.markdown);
@@ -1116,6 +1129,237 @@ impl ReportService {
             "columns": columns,
             "rows": rows,
         }))
+    }
+}
+
+fn validate_layout_node(
+    node: &Value,
+    path: &str,
+    block_ids: &HashSet<String>,
+    block_types: &HashMap<String, ReportBlockType>,
+    layout_node_ids: &mut HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let Some(object) = node.as_object() else {
+        return Err(ReportServiceError::Validation(format!(
+            "Report layout node at {path} must be an object"
+        )));
+    };
+    let node_type = object.get("type").and_then(Value::as_str).ok_or_else(|| {
+        ReportServiceError::Validation(format!("Report layout node at {path} must include type"))
+    })?;
+    let node_id = object.get("id").and_then(Value::as_str).ok_or_else(|| {
+        ReportServiceError::Validation(format!("Report layout node at {path} must include id"))
+    })?;
+    if node_id.trim().is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Report layout node at {path} has an empty id"
+        )));
+    }
+    if !layout_node_ids.insert(node_id.to_string()) {
+        return Err(ReportServiceError::Validation(format!(
+            "Duplicate report layout node ID '{}'",
+            node_id
+        )));
+    }
+
+    match node_type {
+        "markdown" => {
+            if object.get("content").and_then(Value::as_str).is_none() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Markdown layout node '{}' must include content",
+                    node_id
+                )));
+            }
+        }
+        "block" => {
+            let block_id = object
+                .get("blockId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Block layout node '{}' must include blockId",
+                        node_id
+                    ))
+                })?;
+            validate_layout_block_ref(block_id, block_ids, "layout block")?;
+        }
+        "metric_row" => {
+            let blocks = object
+                .get("blocks")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Metric row layout node '{}' must include blocks",
+                        node_id
+                    ))
+                })?;
+            if blocks.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Metric row layout node '{}' must include at least one block",
+                    node_id
+                )));
+            }
+            for block in blocks {
+                let Some(block_id) = block.as_str() else {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Metric row layout node '{}' blocks entries must be block IDs",
+                        node_id
+                    )));
+                };
+                validate_layout_block_ref(block_id, block_ids, "metric row")?;
+                if block_types.get(block_id) != Some(&ReportBlockType::Metric) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Metric row layout node '{}' references non-metric block '{}'",
+                        node_id, block_id
+                    )));
+                }
+            }
+        }
+        "section" => {
+            if let Some(children) = object.get("children") {
+                validate_layout_children(
+                    children,
+                    &format!("{path}.children"),
+                    block_ids,
+                    block_types,
+                    layout_node_ids,
+                )?;
+            }
+        }
+        "columns" => {
+            let columns = object
+                .get("columns")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Columns layout node '{}' must include columns",
+                        node_id
+                    ))
+                })?;
+            if columns.is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Columns layout node '{}' must include at least one column",
+                    node_id
+                )));
+            }
+            for (column_index, column) in columns.iter().enumerate() {
+                let Some(column_object) = column.as_object() else {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Columns layout node '{}' column {} must be an object",
+                        node_id, column_index
+                    )));
+                };
+                if column_object.get("id").and_then(Value::as_str).is_none() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Columns layout node '{}' column {} must include id",
+                        node_id, column_index
+                    )));
+                }
+                if let Some(children) = column_object.get("children") {
+                    validate_layout_children(
+                        children,
+                        &format!("{path}.columns[{column_index}].children"),
+                        block_ids,
+                        block_types,
+                        layout_node_ids,
+                    )?;
+                }
+            }
+        }
+        "grid" => {
+            if let Some(columns) = object.get("columns").and_then(Value::as_i64)
+                && columns <= 0
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Grid layout node '{}' columns must be positive",
+                    node_id
+                )));
+            }
+            let items = object
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' must include items",
+                        node_id
+                    ))
+                })?;
+            for (item_index, item) in items.iter().enumerate() {
+                let Some(item_object) = item.as_object() else {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Grid layout node '{}' item {} must be an object",
+                        node_id, item_index
+                    )));
+                };
+                let block_id = item_object
+                    .get("blockId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' item {} must include blockId",
+                            node_id, item_index
+                        ))
+                    })?;
+                validate_layout_block_ref(block_id, block_ids, "grid")?;
+                for field in ["colSpan", "rowSpan"] {
+                    if let Some(value) = item_object.get(field).and_then(Value::as_i64)
+                        && value <= 0
+                    {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Grid layout node '{}' item {} {} must be positive",
+                            node_id, item_index, field
+                        )));
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(ReportServiceError::Validation(format!(
+                "Report layout node '{}' has unsupported type '{}'",
+                node_id, node_type
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_layout_children(
+    children: &Value,
+    path: &str,
+    block_ids: &HashSet<String>,
+    block_types: &HashMap<String, ReportBlockType>,
+    layout_node_ids: &mut HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let Some(children) = children.as_array() else {
+        return Err(ReportServiceError::Validation(format!(
+            "Report layout children at {path} must be an array"
+        )));
+    };
+    for (index, child) in children.iter().enumerate() {
+        validate_layout_node(
+            child,
+            &format!("{path}[{index}]"),
+            block_ids,
+            block_types,
+            layout_node_ids,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_layout_block_ref(
+    block_id: &str,
+    block_ids: &HashSet<String>,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    if block_ids.contains(block_id) {
+        Ok(())
+    } else {
+        Err(ReportServiceError::Validation(format!(
+            "Report {context} references unknown block '{}'",
+            block_id
+        )))
     }
 }
 
@@ -2220,6 +2464,27 @@ mod tests {
         }
     }
 
+    fn test_metric_block(id: &str) -> ReportBlockDefinition {
+        let mut block = test_block(id);
+        block.block_type = ReportBlockType::Metric;
+        block.source.mode = ReportSourceMode::Aggregate;
+        block.source.aggregates = vec![ReportAggregateSpec {
+            alias: "value".to_string(),
+            op: ReportAggregateFn::Count,
+            field: None,
+            distinct: false,
+            order_by: vec![],
+            expression: None,
+            percentile: None,
+        }];
+        block.metric = Some(ReportMetricConfig {
+            value_field: "value".to_string(),
+            label: None,
+            format: None,
+        });
+        block
+    }
+
     fn table_column(field: &str) -> ReportTableColumn {
         ReportTableColumn {
             field: field.to_string(),
@@ -2429,6 +2694,60 @@ mod tests {
         assert_eq!(expression["arguments"][0]["valueType"], json!("alias"));
         assert_eq!(expression["arguments"][1]["valueType"], json!("alias"));
         serde_json::from_value::<runtara_object_store::ExprNode>(expression).unwrap();
+    }
+
+    #[test]
+    fn layout_validation_accepts_nested_layout_nodes() {
+        let blocks = [test_metric_block("snapshots"), test_block("records")];
+        let block_ids = blocks
+            .iter()
+            .map(|block| block.id.clone())
+            .collect::<HashSet<_>>();
+        let block_types = blocks
+            .iter()
+            .map(|block| (block.id.clone(), block.block_type))
+            .collect::<HashMap<_, _>>();
+        let mut layout_node_ids = HashSet::new();
+
+        validate_layout_node(
+            &json!({
+                "id": "summary",
+                "type": "section",
+                "title": "Summary",
+                "children": [
+                    {"id": "summary_metrics", "type": "metric_row", "blocks": ["snapshots"]},
+                    {"id": "records_block", "type": "block", "blockId": "records"}
+                ]
+            }),
+            "$.layout[0]",
+            &block_ids,
+            &block_types,
+            &mut layout_node_ids,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn layout_validation_rejects_unknown_block_refs() {
+        let block = test_metric_block("snapshots");
+        let block_ids = HashSet::from([block.id.clone()]);
+        let block_types = HashMap::from([(block.id.clone(), block.block_type)]);
+        let mut layout_node_ids = HashSet::new();
+
+        let error = validate_layout_node(
+            &json!({
+                "id": "missing",
+                "type": "block",
+                "blockId": "not_here"
+            }),
+            "$.layout[0]",
+            &block_ids,
+            &block_types,
+            &mut layout_node_ids,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown block 'not_here'"));
     }
 
     #[test]
