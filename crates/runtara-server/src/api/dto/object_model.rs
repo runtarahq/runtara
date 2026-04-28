@@ -678,6 +678,8 @@ pub struct FilterInstancesResponse {
 pub enum AggregateFn {
     Count,
     Sum,
+    /// Arithmetic mean over a numeric column. Returns NULL on an empty set.
+    Avg,
     Min,
     Max,
     FirstValue,
@@ -768,6 +770,7 @@ impl From<AggregateFn> for runtara_object_store::AggregateFn {
         match f {
             AggregateFn::Count => runtara_object_store::AggregateFn::Count,
             AggregateFn::Sum => runtara_object_store::AggregateFn::Sum,
+            AggregateFn::Avg => runtara_object_store::AggregateFn::Avg,
             AggregateFn::Min => runtara_object_store::AggregateFn::Min,
             AggregateFn::Max => runtara_object_store::AggregateFn::Max,
             AggregateFn::FirstValue => runtara_object_store::AggregateFn::FirstValue,

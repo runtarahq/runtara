@@ -1661,6 +1661,14 @@ pub enum ConditionOperator {
     // Full-text search (server-side only; valid on tsvector columns inside
     // object-model query conditions). Maps to `field @@ plainto_tsquery(...)`.
     Match,
+
+    // pgvector distance thresholds (server-side only; valid on `vector(N)`
+    // columns inside object-model query conditions). Use these when you
+    // want all neighbors within a fixed distance, no Top-K limit. For
+    // ranked Top-K, use the `COSINE_DISTANCE` / `L2_DISTANCE` ExprFns in
+    // a `score_expression` and `order_by` instead.
+    CosineDistanceLte,
+    L2DistanceLte,
 }
 
 /// A condition expression for conditional branching.

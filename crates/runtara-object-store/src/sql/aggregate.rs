@@ -39,6 +39,10 @@ use crate::types::ColumnType;
 pub enum AggregateFn {
     Count,
     Sum,
+    /// Arithmetic mean over a numeric column. Renders as `AVG(col::numeric)`,
+    /// returning `numeric` (NULL on an empty filtered set, matching SQL
+    /// semantics). Same column/distinct/order_by rules as `SUM`.
+    Avg,
     Min,
     Max,
     FirstValue,
@@ -443,11 +447,15 @@ fn validate_spec(
             }
             Ok((AliasKind::Numeric, None))
         }
-        AggregateFn::Sum => {
-            let col = spec
-                .column
-                .as_ref()
-                .ok_or_else(|| format!("Aggregate '{}': SUM requires a column", spec.alias))?;
+        AggregateFn::Sum | AggregateFn::Avg => {
+            let fn_name = if matches!(spec.fn_, AggregateFn::Sum) {
+                "SUM"
+            } else {
+                "AVG"
+            };
+            let col = spec.column.as_ref().ok_or_else(|| {
+                format!("Aggregate '{}': {} requires a column", spec.alias, fn_name)
+            })?;
             if spec.distinct {
                 return Err(format!(
                     "Aggregate '{}': distinct is only valid for COUNT",
@@ -460,8 +468,8 @@ fn validate_spec(
                 Some(ColumnType::Integer) | Some(ColumnType::Decimal { .. }) => {}
                 Some(_) => {
                     return Err(format!(
-                        "Aggregate '{}': SUM requires a numeric column, '{}' is not numeric",
-                        spec.alias, col
+                        "Aggregate '{}': {} requires a numeric column, '{}' is not numeric",
+                        spec.alias, fn_name, col
                     ));
                 }
                 None => {
@@ -615,12 +623,19 @@ fn render_aggregate_expr(
                 }
             }
         }),
-        AggregateFn::Sum => {
+        AggregateFn::Sum | AggregateFn::Avg => {
             let col = spec.column.as_ref().unwrap();
             let sql = field_to_sql(col);
-            // Sum always renders as numeric — covers both Integer and Decimal
-            // source columns without loss.
-            Ok(format!("SUM({}::numeric)", quote_identifier(sql)))
+            // Both render as numeric — covers Integer and Decimal source
+            // columns without loss. AVG returns NULL on an empty filtered set
+            // (standard SQL); callers can wrap in COALESCE via `EXPR` if they
+            // want a default.
+            let fn_name = if matches!(spec.fn_, AggregateFn::Sum) {
+                "SUM"
+            } else {
+                "AVG"
+            };
+            Ok(format!("{}({}::numeric)", fn_name, quote_identifier(sql)))
         }
         AggregateFn::Min | AggregateFn::Max => {
             let col = spec.column.as_ref().unwrap();

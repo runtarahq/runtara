@@ -188,6 +188,20 @@ pub fn emit_operation(
                 }
             }
         }
+        // pgvector distance threshold operators are server-side-only —
+        // valid only inside object-model `query-instances` conditions.
+        ConditionOperator::CosineDistanceLte | ConditionOperator::L2DistanceLte => {
+            quote! {
+                {
+                    eprintln!(
+                        "warning: {{distance}}_DISTANCE_LTE is a server-side-only operator; \
+                         use it inside an object-model `query-instances` condition \
+                         on a vector column. Falling back to false."
+                    );
+                    false
+                }
+            }
+        }
     }
 }
 

@@ -469,6 +469,99 @@ pub fn build_condition_clause(
             *param_offset += 1;
             Ok((clause, params))
         }
+        op_name @ ("COSINE_DISTANCE_LTE" | "L2_DISTANCE_LTE") => {
+            let pg_op = if op_name == "COSINE_DISTANCE_LTE" {
+                "<=>"
+            } else {
+                "<->"
+            };
+            let args = args.ok_or_else(|| format!("{} requires arguments", op_name))?;
+            if args.len() != 3 {
+                return Err(format!(
+                    "{} requires exactly 3 arguments (vector_field, vector_literal, threshold)",
+                    op_name
+                ));
+            }
+            let raw_field = args[0]
+                .as_str()
+                .ok_or("First argument must be a vector field name")?;
+            if raw_field.is_empty() {
+                return Err("Field name cannot be empty".to_string());
+            }
+            if !raw_field
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err("Field name contains invalid characters".to_string());
+            }
+            let field = field_to_sql(raw_field);
+
+            // First arg must reference a vector column. Pull the dimension so
+            // we can validate the literal against it.
+            let dimension = match schema.columns.iter().find(|c| c.name == field) {
+                Some(col) => match &col.column_type {
+                    ColumnType::Vector { dimension, .. } => *dimension,
+                    other => {
+                        return Err(format!(
+                            "{} requires a vector column; '{}' has type {:?}",
+                            op_name, field, other
+                        ));
+                    }
+                },
+                None => {
+                    return Err(format!("{} unknown column '{}'", op_name, field));
+                }
+            };
+
+            let arr = args[1]
+                .as_array()
+                .ok_or("Second argument must be a JSON array of numbers")?;
+            if arr.len() as u32 != dimension {
+                return Err(format!(
+                    "{}: vector literal dimension {} does not match column '{}' dimension {}",
+                    op_name,
+                    arr.len(),
+                    field,
+                    dimension
+                ));
+            }
+            let mut parts: Vec<String> = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                let f = v.as_f64().ok_or_else(|| {
+                    format!("{}: vector element at index {} is not a number", op_name, i)
+                })?;
+                if !f.is_finite() {
+                    return Err(format!(
+                        "{}: vector element at index {} is not finite ({})",
+                        op_name, i, f
+                    ));
+                }
+                parts.push(
+                    serde_json::Number::from_f64(f)
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| f.to_string()),
+                );
+            }
+            let lit = format!("[{}]", parts.join(","));
+
+            let threshold = args[2].as_f64().ok_or_else(|| {
+                format!("{}: third argument must be a numeric threshold", op_name)
+            })?;
+            if !threshold.is_finite() || threshold < 0.0 {
+                return Err(format!(
+                    "{} threshold must be a finite non-negative number, got {}",
+                    op_name, threshold
+                ));
+            }
+
+            params.push(serde_json::Value::String(lit));
+            let clause = format!(
+                "(\"{}\" {} ${}::vector) <= {:.6}",
+                field, pg_op, param_offset, threshold
+            );
+            *param_offset += 1;
+            Ok((clause, params))
+        }
         "MATCH" => {
             let args = args.ok_or("MATCH operation requires arguments")?;
             if args.len() != 2 {

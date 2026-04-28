@@ -194,6 +194,7 @@ RESP=$(api_post /schemas '{
   "tableName": "tier3_e2e_doc",
   "columns": [
     {"name": "title", "type": "string"},
+    {"name": "qty", "type": "integer", "nullable": true},
     {"name": "embedding", "type": "vector", "dimension": 4, "indexMethod": {"type": "hnsw"}, "nullable": true}
   ]
 }')
@@ -248,8 +249,10 @@ declare -a VECS=(
   "[0.0, 0.0, 0.0, 1.0]"
   "[0.7071, 0.7071, 0.0, 0.0]"
 )
+# qty values mean = 30, used by the AVG aggregate scenario.
+declare -a QTYS=(10 20 30 40 50)
 for i in "${!TITLES[@]}"; do
-    api_post /instances "{\"schemaName\":\"Doc\",\"properties\":{\"title\":\"${TITLES[$i]}\",\"embedding\":${VECS[$i]}}}" >/dev/null
+    api_post /instances "{\"schemaName\":\"Doc\",\"properties\":{\"title\":\"${TITLES[$i]}\",\"qty\":${QTYS[$i]},\"embedding\":${VECS[$i]}}}" >/dev/null
 done
 TOTAL=$(api_get "/instances/schema/name/Doc?limit=100" | jq -r '.totalCount')
 if [ "${TOTAL}" != "5" ]; then
@@ -368,16 +371,88 @@ fi
 echo "  levenshtein('kitten','sitting')=${EDITS} ✓"
 
 #-------------------------------------------------------------------------
-# Scenario 9: Negative — INSERT with wrong dimension → 400.
-print_step "Scenario 9: dimension mismatch on INSERT rejected"
+# Scenario 9: AVG aggregate over qty (10,20,30,40,50) == 30.
+print_step "Scenario 9: AVG aggregate"
+RESP=$(api_post /instances/schema/Doc/aggregate '{
+  "aggregates": [
+    {"alias": "mean_qty", "fn": "AVG", "column": "qty"}
+  ]
+}')
+MEAN=$(echo "${RESP}" | jq -r '.rows[0][0]')
+if ! awk "BEGIN { exit !(${MEAN} == 30) }"; then
+    print_error "Expected AVG(qty)=30, got '${MEAN}'"
+    echo "${RESP}" | jq .
+    exit 1
+fi
+echo "  AVG(qty)=${MEAN} ✓"
+
+#-------------------------------------------------------------------------
+# Scenario 10: Negative — AVG on a non-numeric column → 400.
+print_step "Scenario 10: AVG on non-numeric column rejected"
+assert_http_status "avg-on-string" 400 POST /instances/schema/Doc/aggregate '{
+  "aggregates": [
+    {"alias": "bad_avg", "fn": "AVG", "column": "title"}
+  ]
+}'
+
+#-------------------------------------------------------------------------
+# Scenario 11: COSINE_DISTANCE_LTE filter — neighbors within threshold.
+# alpha = [1,0,0,0] is the query; threshold 0.5 (cosine ∈ [0, 2]).
+# Self-distance = 0; orthogonal vectors (beta/gamma/delta) = 1; epsilon =
+# [0.7071,0.7071,0,0] ≈ 0.293 (~45° from alpha). So expect alpha + epsilon.
+print_step "Scenario 11: COSINE_DISTANCE_LTE returns neighbors within threshold"
+RESP=$(api_post /instances/schema/Doc/filter '{
+  "limit": 100,
+  "condition": {
+    "op": "COSINE_DISTANCE_LTE",
+    "arguments": ["embedding", [1.0, 0.0, 0.0, 0.0], 0.5]
+  },
+  "sortBy": ["title"], "sortOrder": ["asc"]
+}')
+COUNT=$(echo "${RESP}" | jq -r '.instances | length')
+TITLES=$(echo "${RESP}" | jq -r '.instances[].properties.title' | tr '\n' ',' | sed 's/,$//')
+if [ "${COUNT}" != "2" ] || [ "${TITLES}" != "alpha,epsilon" ]; then
+    print_error "Expected 2 neighbors (alpha,epsilon), got count=${COUNT} titles=${TITLES}"
+    echo "${RESP}" | jq .
+    exit 1
+fi
+echo "  cosine_distance<=0.5 → ${TITLES} ✓"
+
+#-------------------------------------------------------------------------
+# Scenario 12: L2_DISTANCE_LTE filter. Query = epsilon's vector itself;
+# expect epsilon (self-distance 0) plus neighbors with L2 distance ≤ 1.0.
+# beta = [0,1,0,0] → L2 distance to [0.7071,0.7071,0,0] ≈ 0.7654 → in.
+# alpha = [1,0,0,0] → same ≈ 0.7654 → in.
+# gamma/delta orthogonal axes → L2 ≈ 1.225 → out.
+print_step "Scenario 12: L2_DISTANCE_LTE returns neighbors within threshold"
+RESP=$(api_post /instances/schema/Doc/filter '{
+  "limit": 100,
+  "condition": {
+    "op": "L2_DISTANCE_LTE",
+    "arguments": ["embedding", [0.7071, 0.7071, 0.0, 0.0], 1.0]
+  },
+  "sortBy": ["title"], "sortOrder": ["asc"]
+}')
+COUNT=$(echo "${RESP}" | jq -r '.instances | length')
+TITLES=$(echo "${RESP}" | jq -r '.instances[].properties.title' | tr '\n' ',' | sed 's/,$//')
+if [ "${COUNT}" != "3" ] || [ "${TITLES}" != "alpha,beta,epsilon" ]; then
+    print_error "Expected 3 neighbors (alpha,beta,epsilon), got count=${COUNT} titles=${TITLES}"
+    echo "${RESP}" | jq .
+    exit 1
+fi
+echo "  l2_distance<=1.0 → ${TITLES} ✓"
+
+#-------------------------------------------------------------------------
+# Scenario 13: Negative — INSERT with wrong dimension → 400.
+print_step "Scenario 13: dimension mismatch on INSERT rejected"
 assert_http_status "vector-dim-mismatch" 400 POST /instances '{
   "schemaName": "Doc",
   "properties": {"title": "bad", "embedding": [1.0, 0.0, 0.0]}
 }'
 
 #-------------------------------------------------------------------------
-# Scenario 10: Negative — vector dimension out of range (16001) → 400.
-print_step "Scenario 10: vector dimension > 16000 rejected"
+# Scenario 14: Negative — vector dimension out of range (16001) → 400.
+print_step "Scenario 14: vector dimension > 16000 rejected"
 assert_http_status "vector-dim-range" 400 POST /schemas '{
   "name": "BadDim",
   "tableName": "tier3_e2e_bad_dim",
@@ -387,8 +462,8 @@ assert_http_status "vector-dim-range" 400 POST /schemas '{
 }'
 
 #-------------------------------------------------------------------------
-# Scenario 11: Negative — IVFFlat with lists=0 → 400.
-print_step "Scenario 11: IVFFlat with lists=0 rejected"
+# Scenario 15: Negative — IVFFlat with lists=0 → 400.
+print_step "Scenario 15: IVFFlat with lists=0 rejected"
 assert_http_status "vector-ivf-lists" 400 POST /schemas '{
   "name": "BadIvf",
   "tableName": "tier3_e2e_bad_ivf",
@@ -398,8 +473,8 @@ assert_http_status "vector-ivf-lists" 400 POST /schemas '{
 }'
 
 #-------------------------------------------------------------------------
-# Scenario 12: Negative — COSINE_DISTANCE on non-vector column → 400.
-print_step "Scenario 12: COSINE_DISTANCE on non-vector column rejected"
+# Scenario 16: Negative — COSINE_DISTANCE on non-vector column → 400.
+print_step "Scenario 16: COSINE_DISTANCE on non-vector column rejected"
 assert_http_status "cosine-on-string" 400 POST /instances/schema/Doc/filter '{
   "limit": 1,
   "scoreExpression": {
@@ -412,8 +487,8 @@ assert_http_status "cosine-on-string" 400 POST /instances/schema/Doc/filter '{
 }'
 
 #-------------------------------------------------------------------------
-# Scenario 13: Negative — distance literal length doesn't match column dim.
-print_step "Scenario 13: distance literal length mismatch rejected"
+# Scenario 17: Negative — distance literal length doesn't match column dim.
+print_step "Scenario 17: distance literal length mismatch rejected"
 assert_http_status "cosine-literal-dim" 400 POST /instances/schema/Doc/filter '{
   "limit": 1,
   "scoreExpression": {
@@ -422,6 +497,28 @@ assert_http_status "cosine-literal-dim" 400 POST /instances/schema/Doc/filter '{
       {"valueType": "reference", "value": "embedding"},
       {"valueType": "immediate", "value": [1.0, 0.0]}
     ]}
+  }
+}'
+
+#-------------------------------------------------------------------------
+# Scenario 18: Negative — COSINE_DISTANCE_LTE on non-vector column → 400.
+print_step "Scenario 18: COSINE_DISTANCE_LTE on non-vector column rejected"
+assert_http_status "cosine-lte-on-string" 400 POST /instances/schema/Doc/filter '{
+  "limit": 1,
+  "condition": {
+    "op": "COSINE_DISTANCE_LTE",
+    "arguments": ["title", [1.0, 0.0, 0.0, 0.0], 0.5]
+  }
+}'
+
+#-------------------------------------------------------------------------
+# Scenario 19: Negative — distance threshold literal dim mismatch → 400.
+print_step "Scenario 19: COSINE_DISTANCE_LTE literal dim mismatch rejected"
+assert_http_status "cosine-lte-dim" 400 POST /instances/schema/Doc/filter '{
+  "limit": 1,
+  "condition": {
+    "op": "COSINE_DISTANCE_LTE",
+    "arguments": ["embedding", [1.0, 0.0], 0.5]
   }
 }'
 
@@ -435,6 +532,10 @@ echo "  - Vector inserts validated against declared dimension"
 echo "  - Vector column round-trips as JSON array of numbers"
 echo "  - COSINE_DISTANCE / L2_DISTANCE: monotonic ASC ordering"
 echo "  - LEVENSHTEIN returns expected edit distance"
-echo "  - Five negative cases (dim mismatch on INSERT, dim out of range,"
-echo "    IVFFlat lists=0, COSINE_DISTANCE on non-vector, literal dim"
-echo "    mismatch) → 400"
+echo "  - AVG aggregate returns arithmetic mean"
+echo "  - COSINE_DISTANCE_LTE / L2_DISTANCE_LTE filter neighbors within"
+echo "    a threshold (no Top-K limit)"
+echo "  - Seven negative cases (INSERT dim mismatch, dim out of range,"
+echo "    IVFFlat lists=0, AVG on non-numeric, COSINE_DISTANCE on"
+echo "    non-vector, literal dim mismatch, COSINE_DISTANCE_LTE on"
+echo "    non-vector, COSINE_DISTANCE_LTE literal dim) → 400"
