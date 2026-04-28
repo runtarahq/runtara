@@ -18,6 +18,7 @@ type ReportBlockHostProps = {
   block: ReportBlockDefinition;
   initialResult?: ReportBlockResult;
   filters: Record<string, unknown>;
+  className?: string;
 };
 
 export function ReportBlockHost({
@@ -25,6 +26,7 @@ export function ReportBlockHost({
   block,
   initialResult,
   filters,
+  className = 'my-5',
 }: ReportBlockHostProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [isVisible, setIsVisible] = useState(!block.lazy);
@@ -137,7 +139,7 @@ export function ReportBlockHost({
   const result = fetchedResult ?? initialResult;
 
   return (
-    <div ref={rootRef} className="my-5">
+    <div ref={rootRef} className={className}>
       {block.title && (
         <div className="mb-2 flex items-center justify-between gap-3">
           <h2 className="text-base font-semibold text-foreground">

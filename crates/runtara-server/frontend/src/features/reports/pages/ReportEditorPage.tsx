@@ -22,11 +22,16 @@ import {
 } from '../hooks/useReports';
 import { ReportDefinitionBuilder } from '../components/ReportDefinitionBuilder';
 import { ReportDefinition, ReportStatus } from '../types';
-import { extractBlockPlaceholders, slugify } from '../utils';
+import {
+  extractBlockPlaceholders,
+  extractLayoutBlockReferences,
+  slugify,
+} from '../utils';
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
   markdown: '# Report',
+  layout: [{ id: 'intro', type: 'markdown', content: '# Report' }],
   filters: [],
   blocks: [],
 };
@@ -104,6 +109,23 @@ export function ReportEditorPage() {
     const starter: ReportDefinition = {
       definitionVersion: 1,
       markdown: `# ${name || schema.name}\n\n{{ block.total_records }}\n\n{{ block.records }}`,
+      layout: [
+        {
+          id: 'intro',
+          type: 'markdown',
+          content: `# ${name || schema.name}`,
+        },
+        {
+          id: 'summary_metrics',
+          type: 'metric_row',
+          blocks: ['total_records'],
+        },
+        {
+          id: 'records_node',
+          type: 'block',
+          blockId: 'records',
+        },
+      ],
       filters: [],
       blocks: [
         {
@@ -321,6 +343,12 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
   for (const placeholder of extractBlockPlaceholders(definition.markdown)) {
     if (!blockIds.has(placeholder)) {
       errors.push(`Markdown references unknown block: ${placeholder}`);
+    }
+  }
+
+  for (const blockId of extractLayoutBlockReferences(definition.layout)) {
+    if (!blockIds.has(blockId)) {
+      errors.push(`Layout references unknown block: ${blockId}`);
     }
   }
 

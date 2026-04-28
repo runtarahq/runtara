@@ -138,9 +138,55 @@ export interface ReportBlockDefinition {
   filters?: ReportFilterDefinition[];
 }
 
+export type ReportLayoutNode =
+  | {
+      id: string;
+      type: 'markdown';
+      content: string;
+    }
+  | {
+      id: string;
+      type: 'block';
+      blockId: string;
+    }
+  | {
+      id: string;
+      type: 'metric_row';
+      title?: string;
+      blocks: string[];
+    }
+  | {
+      id: string;
+      type: 'section';
+      title?: string;
+      description?: string;
+      children?: ReportLayoutNode[];
+    }
+  | {
+      id: string;
+      type: 'columns';
+      columns: Array<{
+        id: string;
+        width?: number;
+        children?: ReportLayoutNode[];
+      }>;
+    }
+  | {
+      id: string;
+      type: 'grid';
+      columns?: number;
+      items: Array<{
+        id?: string;
+        blockId: string;
+        colSpan?: number;
+        rowSpan?: number;
+      }>;
+    };
+
 export interface ReportDefinition {
   definitionVersion: number;
   markdown: string;
+  layout?: ReportLayoutNode[];
   filters: ReportFilterDefinition[];
   blocks: ReportBlockDefinition[];
 }

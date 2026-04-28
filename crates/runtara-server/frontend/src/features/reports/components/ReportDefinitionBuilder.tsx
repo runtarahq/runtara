@@ -34,9 +34,14 @@ import {
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterType,
+  ReportLayoutNode,
   ReportTableColumn,
 } from '../types';
-import { humanizeFieldName, slugify } from '../utils';
+import {
+  extractLayoutBlockReferences,
+  humanizeFieldName,
+  slugify,
+} from '../utils';
 
 type ReportDefinitionBuilderProps = {
   value: ReportDefinition;
@@ -50,12 +55,26 @@ type EditorNode =
   | {
       kind: 'markdown';
       nodeId: string;
+      layoutId?: string;
       content: string;
     }
   | {
       kind: 'block';
       nodeId: string;
+      layoutId?: string;
       blockId: string;
+    }
+  | {
+      kind: 'metric_row';
+      nodeId: string;
+      layoutId?: string;
+      title?: string;
+      blocks: string[];
+    }
+  | {
+      kind: 'layout';
+      nodeId: string;
+      layout: ReportLayoutNode;
     };
 
 type BlockEditorProps = {
@@ -147,11 +166,7 @@ export function ReportDefinitionBuilder({
     const nextBlocks = value.blocks.map((current) =>
       current.id === blockId ? block : current
     );
-    const nextNodes = nodes.map((node) =>
-      node.kind === 'block' && node.blockId === blockId
-        ? { ...node, blockId: block.id }
-        : node
-    );
+    const nextNodes = replaceBlockIdInNodes(nodes, blockId, block.id);
     commitNodes(nextNodes, nextBlocks);
   };
 
@@ -159,6 +174,7 @@ export function ReportDefinitionBuilder({
     const nextNodes = insertAfter(nodes, nodeIndex, {
       kind: 'markdown',
       nodeId: `markdown-${Date.now()}`,
+      layoutId: uniqueLayoutNodeId(value.layout ?? [], 'markdown'),
       content: '## New section',
     });
     commitNodes(nextNodes);
@@ -172,9 +188,28 @@ export function ReportDefinitionBuilder({
     const nextNodes = insertAfter(nodes, nodeIndex, {
       kind: 'block',
       nodeId: `block-${block.id}`,
+      layoutId: uniqueLayoutNodeId(value.layout ?? [], `${block.id}_node`),
       blockId: block.id,
     });
     commitNodes(nextNodes, [...value.blocks, block]);
+  };
+
+  const addMetricRowAfter = (nodeIndex: number) => {
+    const existingMetricIds = value.blocks
+      .filter((block) => block.type === 'metric')
+      .map((block) => block.id);
+    const needsMetric = existingMetricIds.length === 0;
+    const block = needsMetric
+      ? createDefaultBlock('metric', defaultSchema, value.blocks)
+      : null;
+    const metricIds = block ? [block.id] : existingMetricIds.slice(0, 3);
+    const nextNodes = insertAfter(nodes, nodeIndex, {
+      kind: 'metric_row',
+      nodeId: `metric-row-${Date.now()}`,
+      layoutId: uniqueLayoutNodeId(value.layout ?? [], 'metric_row'),
+      blocks: metricIds,
+    });
+    commitNodes(nextNodes, block ? [...value.blocks, block] : value.blocks);
   };
 
   const appendBlock = (blockType: Exclude<ReportBlockType, 'markdown'>) => {
@@ -185,11 +220,16 @@ export function ReportDefinitionBuilder({
         {
           kind: 'block',
           nodeId: `block-${block.id}`,
+          layoutId: uniqueLayoutNodeId(value.layout ?? [], `${block.id}_node`),
           blockId: block.id,
         },
       ],
       [...value.blocks, block]
     );
+  };
+
+  const appendMetricRow = () => {
+    addMetricRowAfter(nodes.length - 1);
   };
 
   const duplicateBlock = (blockId: string) => {
@@ -202,6 +242,7 @@ export function ReportDefinitionBuilder({
     const nextNodes = insertAfter(nodes, sourceIndex, {
       kind: 'block',
       nodeId: `block-${copy.id}`,
+      layoutId: uniqueLayoutNodeId(value.layout ?? [], `${copy.id}_node`),
       blockId: copy.id,
     });
     commitNodes(nextNodes, [...value.blocks, copy]);
@@ -215,6 +256,18 @@ export function ReportDefinitionBuilder({
         ? value.blocks.filter((block) => block.id !== node.blockId)
         : value.blocks;
     commitNodes(nextNodes, nextBlocks);
+  };
+
+  const updateMetricRowNode = (
+    nodeIndex: number,
+    patch: Partial<Extract<EditorNode, { kind: 'metric_row' }>>
+  ) => {
+    const nextNodes = nodes.map((node, index) =>
+      index === nodeIndex && node.kind === 'metric_row'
+        ? { ...node, ...patch }
+        : node
+    );
+    commitNodes(nextNodes);
   };
 
   const createMissingBlock = (blockId: string) => {
@@ -298,6 +351,15 @@ export function ReportDefinitionBuilder({
             <LineChart className="mr-2 size-4" />
             Chart
           </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={appendMetricRow}
+          >
+            <Rows3 className="mr-2 size-4" />
+            Metric row
+          </Button>
         </div>
       </div>
 
@@ -330,6 +392,7 @@ export function ReportDefinitionBuilder({
                 <AddNodeMenu
                   onAddMarkdown={() => addMarkdownAfter(index)}
                   onAddBlock={(type) => addBlockAfter(index, type)}
+                  onAddMetricRow={() => addMetricRowAfter(index)}
                 />
               </div>
               {node.kind === 'markdown' ? (
@@ -338,7 +401,7 @@ export function ReportDefinitionBuilder({
                   onChange={(content) => updateMarkdownNode(index, content)}
                   onRemove={() => removeNode(index)}
                 />
-              ) : (
+              ) : node.kind === 'block' ? (
                 <ReportBlockEditor
                   block={value.blocks.find(
                     (block) => block.id === node.blockId
@@ -349,6 +412,18 @@ export function ReportDefinitionBuilder({
                   onDuplicate={() => duplicateBlock(node.blockId)}
                   onRemove={() => removeNode(index)}
                   onCreateMissing={() => createMissingBlock(node.blockId)}
+                />
+              ) : node.kind === 'metric_row' ? (
+                <MetricRowNodeEditor
+                  node={node}
+                  blocks={value.blocks}
+                  onChange={(patch) => updateMetricRowNode(index, patch)}
+                  onRemove={() => removeNode(index)}
+                />
+              ) : (
+                <LayoutNodeSummary
+                  node={node.layout}
+                  onRemove={() => removeNode(index)}
                 />
               )}
             </div>
@@ -370,9 +445,11 @@ export function ReportDefinitionBuilder({
 function AddNodeMenu({
   onAddMarkdown,
   onAddBlock,
+  onAddMetricRow,
 }: {
   onAddMarkdown: () => void;
   onAddBlock: (type: Exclude<ReportBlockType, 'markdown'>) => void;
+  onAddMetricRow: () => void;
 }) {
   return (
     <div className="flex flex-col gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -395,6 +472,16 @@ function AddNodeMenu({
         aria-label="Add table"
       >
         <Rows3 className="size-4" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-8"
+        onClick={onAddMetricRow}
+        aria-label="Add metric row"
+      >
+        <Sigma className="size-4" />
       </Button>
     </div>
   );
@@ -429,6 +516,102 @@ function MarkdownNodeEditor({
         className="min-h-32 resize-y border-0 bg-transparent p-0 text-sm shadow-none focus-visible:ring-0"
         onChange={(event) => onChange(event.target.value)}
       />
+    </div>
+  );
+}
+
+function MetricRowNodeEditor({
+  node,
+  blocks,
+  onChange,
+  onRemove,
+}: {
+  node: Extract<EditorNode, { kind: 'metric_row' }>;
+  blocks: ReportBlockDefinition[];
+  onChange: (
+    patch: Partial<Extract<EditorNode, { kind: 'metric_row' }>>
+  ) => void;
+  onRemove: () => void;
+}) {
+  const metricBlocks = blocks.filter((block) => block.type === 'metric');
+  const selected = new Set(node.blocks);
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-background p-4">
+      <div className="flex items-center justify-between gap-2">
+        <Badge variant="secondary">Metric row</Badge>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          onClick={onRemove}
+          aria-label="Remove metric row"
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+      <Field label="Title">
+        <Input
+          value={node.title ?? ''}
+          placeholder="Optional row title"
+          onChange={(event) => onChange({ title: event.target.value })}
+        />
+      </Field>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {metricBlocks.map((block) => (
+          <label
+            key={block.id}
+            className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm"
+          >
+            <Checkbox
+              checked={selected.has(block.id)}
+              onCheckedChange={(checked) => {
+                const nextBlocks = checked
+                  ? [...node.blocks, block.id]
+                  : node.blocks.filter((blockId) => blockId !== block.id);
+                onChange({ blocks: nextBlocks });
+              }}
+            />
+            <span className="truncate">
+              {block.title || humanizeFieldName(block.id)}
+            </span>
+          </label>
+        ))}
+      </div>
+      {metricBlocks.length === 0 && (
+        <div className="rounded-md border border-dashed bg-muted/20 p-4 text-sm text-muted-foreground" />
+      )}
+    </div>
+  );
+}
+
+function LayoutNodeSummary({
+  node,
+  onRemove,
+}: {
+  node: ReportLayoutNode;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/10 p-4">
+      <div className="min-w-0">
+        <Badge variant="secondary">Layout</Badge>
+        <p className="mt-2 truncate text-sm font-semibold text-foreground">
+          {node.id}
+        </p>
+        <p className="text-xs text-muted-foreground">{node.type}</p>
+      </div>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-8"
+        onClick={onRemove}
+        aria-label="Remove layout node"
+      >
+        <Trash2 className="size-4" />
+      </Button>
     </div>
   );
 }
@@ -1237,6 +1420,27 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function definitionToNodes(definition: ReportDefinition): EditorNode[] {
+  if ((definition.layout?.length ?? 0) > 0) {
+    const referencedBlockIds = new Set(
+      extractLayoutBlockReferences(definition.layout)
+    );
+    const nodes = (definition.layout ?? []).map(layoutNodeToEditorNode);
+    for (const block of definition.blocks) {
+      if (!referencedBlockIds.has(block.id)) {
+        nodes.push({
+          kind: 'block',
+          nodeId: `block-${block.id}-appended`,
+          layoutId: uniqueLayoutNodeId(
+            definition.layout ?? [],
+            `${block.id}_node`
+          ),
+          blockId: block.id,
+        });
+      }
+    }
+    return nodes;
+  }
+
   const nodes: EditorNode[] = [];
   const referencedBlockIds = new Set<string>();
   let lastIndex = 0;
@@ -1251,6 +1455,7 @@ function definitionToNodes(definition: ReportDefinition): EditorNode[] {
         nodes.push({
           kind: 'markdown',
           nodeId: `markdown-${index}`,
+          layoutId: `markdown_${index + 1}`,
           content: content.trim(),
         });
         index += 1;
@@ -1259,6 +1464,7 @@ function definitionToNodes(definition: ReportDefinition): EditorNode[] {
     nodes.push({
       kind: 'block',
       nodeId: `block-${match[1]}-${index}`,
+      layoutId: `${match[1]}_node`,
       blockId: match[1],
     });
     referencedBlockIds.add(match[1]);
@@ -1273,6 +1479,7 @@ function definitionToNodes(definition: ReportDefinition): EditorNode[] {
       nodes.push({
         kind: 'markdown',
         nodeId: `markdown-${index}`,
+        layoutId: `markdown_${index + 1}`,
         content: content.trim(),
       });
     }
@@ -1283,6 +1490,7 @@ function definitionToNodes(definition: ReportDefinition): EditorNode[] {
       nodes.push({
         kind: 'block',
         nodeId: `block-${block.id}-appended`,
+        layoutId: `${block.id}_node`,
         blockId: block.id,
       });
     }
@@ -1300,12 +1508,12 @@ function nodesToDefinition(
   const orderedBlocks: ReportBlockDefinition[] = [];
   const seenBlockIds = new Set<string>();
 
-  for (const node of nodes) {
-    if (node.kind !== 'block' || seenBlockIds.has(node.blockId)) continue;
-    const block = blockById.get(node.blockId);
+  for (const blockId of collectEditorNodeBlockIds(nodes)) {
+    if (seenBlockIds.has(blockId)) continue;
+    const block = blockById.get(blockId);
     if (!block) continue;
     orderedBlocks.push(block);
-    seenBlockIds.add(node.blockId);
+    seenBlockIds.add(blockId);
   }
 
   for (const block of blocks) {
@@ -1316,16 +1524,199 @@ function nodesToDefinition(
 
   return {
     ...definition,
+    layout: nodes.map(editorNodeToLayoutNode),
     markdown: nodes
-      .map((node) =>
-        node.kind === 'markdown'
-          ? node.content.trim()
-          : `{{ block.${node.blockId} }}`
-      )
+      .flatMap(editorNodeToMarkdownParts)
       .filter((content) => content.length > 0)
       .join('\n\n'),
     blocks: orderedBlocks,
   };
+}
+
+function layoutNodeToEditorNode(node: ReportLayoutNode): EditorNode {
+  if (node.type === 'markdown') {
+    return {
+      kind: 'markdown',
+      nodeId: `layout-${node.id}`,
+      layoutId: node.id,
+      content: node.content,
+    };
+  }
+  if (node.type === 'block') {
+    return {
+      kind: 'block',
+      nodeId: `layout-${node.id}`,
+      layoutId: node.id,
+      blockId: node.blockId,
+    };
+  }
+  if (node.type === 'metric_row') {
+    return {
+      kind: 'metric_row',
+      nodeId: `layout-${node.id}`,
+      layoutId: node.id,
+      title: node.title,
+      blocks: node.blocks,
+    };
+  }
+  return {
+    kind: 'layout',
+    nodeId: `layout-${node.id}`,
+    layout: node,
+  };
+}
+
+function editorNodeToLayoutNode(node: EditorNode): ReportLayoutNode {
+  if (node.kind === 'markdown') {
+    return {
+      id: node.layoutId ?? node.nodeId,
+      type: 'markdown',
+      content: node.content.trim(),
+    };
+  }
+  if (node.kind === 'block') {
+    return {
+      id: node.layoutId ?? `${node.blockId}_node`,
+      type: 'block',
+      blockId: node.blockId,
+    };
+  }
+  if (node.kind === 'metric_row') {
+    return {
+      id: node.layoutId ?? node.nodeId,
+      type: 'metric_row',
+      title: node.title || undefined,
+      blocks: node.blocks,
+    };
+  }
+  return node.layout;
+}
+
+function editorNodeToMarkdownParts(node: EditorNode): string[] {
+  if (node.kind === 'markdown') return [node.content.trim()];
+  if (node.kind === 'block') return [`{{ block.${node.blockId} }}`];
+  if (node.kind === 'metric_row') {
+    return [
+      node.title ? `## ${node.title}` : '',
+      ...node.blocks.map((blockId) => `{{ block.${blockId} }}`),
+    ];
+  }
+  return layoutNodeToMarkdownParts(node.layout);
+}
+
+function layoutNodeToMarkdownParts(node: ReportLayoutNode): string[] {
+  if (node.type === 'markdown') return [node.content.trim()];
+  if (node.type === 'block') return [`{{ block.${node.blockId} }}`];
+  if (node.type === 'metric_row') {
+    return [
+      node.title ? `## ${node.title}` : '',
+      ...node.blocks.map((blockId) => `{{ block.${blockId} }}`),
+    ];
+  }
+  if (node.type === 'section') {
+    return [
+      node.title ? `## ${node.title}` : '',
+      node.description ?? '',
+      ...(node.children ?? []).flatMap(layoutNodeToMarkdownParts),
+    ];
+  }
+  if (node.type === 'columns') {
+    return node.columns.flatMap((column) =>
+      (column.children ?? []).flatMap(layoutNodeToMarkdownParts)
+    );
+  }
+  return node.items.map((item) => `{{ block.${item.blockId} }}`);
+}
+
+function collectEditorNodeBlockIds(nodes: EditorNode[]): string[] {
+  return nodes.flatMap((node) => {
+    if (node.kind === 'block') return [node.blockId];
+    if (node.kind === 'metric_row') return node.blocks;
+    if (node.kind === 'layout')
+      return extractLayoutBlockReferences([node.layout]);
+    return [];
+  });
+}
+
+function replaceBlockIdInNodes(
+  nodes: EditorNode[],
+  previousBlockId: string,
+  nextBlockId: string
+): EditorNode[] {
+  return nodes.map((node) => {
+    if (node.kind === 'block' && node.blockId === previousBlockId) {
+      return { ...node, blockId: nextBlockId };
+    }
+    if (node.kind === 'metric_row') {
+      return {
+        ...node,
+        blocks: node.blocks.map((blockId) =>
+          blockId === previousBlockId ? nextBlockId : blockId
+        ),
+      };
+    }
+    if (node.kind === 'layout') {
+      return {
+        ...node,
+        layout: replaceBlockIdInLayoutNode(
+          node.layout,
+          previousBlockId,
+          nextBlockId
+        ),
+      };
+    }
+    return node;
+  });
+}
+
+function replaceBlockIdInLayoutNode(
+  node: ReportLayoutNode,
+  previousBlockId: string,
+  nextBlockId: string
+): ReportLayoutNode {
+  if (node.type === 'block') {
+    return {
+      ...node,
+      blockId: node.blockId === previousBlockId ? nextBlockId : node.blockId,
+    };
+  }
+  if (node.type === 'metric_row') {
+    return {
+      ...node,
+      blocks: node.blocks.map((blockId) =>
+        blockId === previousBlockId ? nextBlockId : blockId
+      ),
+    };
+  }
+  if (node.type === 'section') {
+    return {
+      ...node,
+      children: node.children?.map((child) =>
+        replaceBlockIdInLayoutNode(child, previousBlockId, nextBlockId)
+      ),
+    };
+  }
+  if (node.type === 'columns') {
+    return {
+      ...node,
+      columns: node.columns.map((column) => ({
+        ...column,
+        children: column.children?.map((child) =>
+          replaceBlockIdInLayoutNode(child, previousBlockId, nextBlockId)
+        ),
+      })),
+    };
+  }
+  if (node.type === 'grid') {
+    return {
+      ...node,
+      items: node.items.map((item) => ({
+        ...item,
+        blockId: item.blockId === previousBlockId ? nextBlockId : item.blockId,
+      })),
+    };
+  }
+  return node;
 }
 
 function insertAfter<T>(items: T[], index: number, item: T): T[] {
@@ -1546,6 +1937,36 @@ function uniqueBlockId(
     candidate = `${base}_${suffix}`;
   }
   return candidate;
+}
+
+function uniqueLayoutNodeId(layout: ReportLayoutNode[], seed: string): string {
+  const existingIds = new Set<string>();
+  for (const node of layout) {
+    collectLayoutNodeIds(node, existingIds);
+  }
+  const base =
+    slugify(seed || 'layout_node').replace(/-/g, '_') || 'layout_node';
+  let candidate = base;
+  let suffix = 1;
+  while (existingIds.has(candidate)) {
+    suffix += 1;
+    candidate = `${base}_${suffix}`;
+  }
+  return candidate;
+}
+
+function collectLayoutNodeIds(node: ReportLayoutNode, ids: Set<string>) {
+  ids.add(node.id);
+  if (node.type === 'section') {
+    for (const child of node.children ?? []) collectLayoutNodeIds(child, ids);
+    return;
+  }
+  if (node.type === 'columns') {
+    for (const column of node.columns) {
+      for (const child of column.children ?? [])
+        collectLayoutNodeIds(child, ids);
+    }
+  }
 }
 
 function uniqueFilterId(

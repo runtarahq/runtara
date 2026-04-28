@@ -2,6 +2,7 @@ import {
   ReportBlockDefinition,
   ReportDefinition,
   ReportFilterDefinition,
+  ReportLayoutNode,
 } from './types';
 
 export const TIME_RANGE_PRESETS = [
@@ -76,6 +77,42 @@ export function extractBlockPlaceholders(markdown: string): string[] {
   }
 
   return ids;
+}
+
+export function extractLayoutBlockReferences(layout: ReportLayoutNode[] = []) {
+  const ids: string[] = [];
+  for (const node of layout) {
+    collectLayoutBlockReferences(node, ids);
+  }
+  return ids;
+}
+
+function collectLayoutBlockReferences(node: ReportLayoutNode, ids: string[]) {
+  if (node.type === 'block') {
+    ids.push(node.blockId);
+    return;
+  }
+  if (node.type === 'metric_row') {
+    ids.push(...node.blocks);
+    return;
+  }
+  if (node.type === 'section') {
+    for (const child of node.children ?? []) {
+      collectLayoutBlockReferences(child, ids);
+    }
+    return;
+  }
+  if (node.type === 'columns') {
+    for (const column of node.columns) {
+      for (const child of column.children ?? []) {
+        collectLayoutBlockReferences(child, ids);
+      }
+    }
+    return;
+  }
+  if (node.type === 'grid') {
+    ids.push(...node.items.map((item) => item.blockId));
+  }
 }
 
 export function getEagerBlocks(definition: ReportDefinition) {
