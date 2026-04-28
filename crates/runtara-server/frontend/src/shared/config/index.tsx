@@ -4,6 +4,7 @@ import {
   FolderOpen,
   History,
   Link,
+  LineChart,
   Workflow,
   Zap,
 } from 'lucide-react';
@@ -28,6 +29,13 @@ export const menu = [
     title: 'Database',
     to: '/objects/types',
     icon: <Database size={16} />,
+    allowedGroups: [],
+  },
+  {
+    key: 'reports',
+    title: 'Reports',
+    to: '/reports',
+    icon: <LineChart size={16} />,
     allowedGroups: [],
   },
   {

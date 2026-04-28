@@ -171,6 +171,18 @@ export const queryKeys = {
     },
   },
 
+  // Reports domain
+  reports: {
+    all: ['reports'] as const,
+    lists: () => [...queryKeys.reports.all, 'list'] as const,
+    details: () => [...queryKeys.reports.all, 'detail'] as const,
+    byId: (id: string) => [...queryKeys.reports.details(), id] as const,
+    render: (id: string, request: unknown) =>
+      [...queryKeys.reports.byId(id), 'render', request] as const,
+    block: (id: string, blockId: string, request: unknown) =>
+      [...queryKeys.reports.byId(id), 'block', blockId, request] as const,
+  },
+
   // Files domain (S3-compatible storage)
   files: {
     all: ['files'] as const,

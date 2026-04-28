@@ -124,6 +124,21 @@ const InvocationHistory = lazy(() =>
     default: m.InvocationHistory,
   }))
 );
+const ReportsListPage = lazy(() =>
+  import('@/features/reports/pages/ReportsListPage').then((m) => ({
+    default: m.ReportsListPage,
+  }))
+);
+const ReportViewerPage = lazy(() =>
+  import('@/features/reports/pages/ReportViewerPage').then((m) => ({
+    default: m.ReportViewerPage,
+  }))
+);
+const ReportEditorPage = lazy(() =>
+  import('@/features/reports/pages/ReportEditorPage').then((m) => ({
+    default: m.ReportEditorPage,
+  }))
+);
 const Settings = lazy(() =>
   import('@/features/settings/pages/Settings').then((m) => ({
     default: m.Settings,
@@ -143,303 +158,343 @@ const basename = new URL(document.baseURI).pathname.replace(/\/$/, '');
 
 export const router = createBrowserRouter(
   [
-  {
-    path: '/',
-    element: <Layout />,
-    errorElement: (
-      <Layout>
-        <ErrorBoundary />
-      </Layout>
-    ),
-    children: [
-      {
-        path: '/',
-        index: true,
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Workflows />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Workflows />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows/create',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <CreateWorkflow />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows/:workflowId',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Workflow />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows/:workflowId/history/:instanceId',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <WorkflowHistory />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows/:workflowId/history/:instanceId/logs',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <WorkflowLogs />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows/:workflowId/chat',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <ChatPage />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/workflows/:workflowId/chat/:instanceId',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <ChatPage />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/invocation-triggers',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Triggers />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/invocation-triggers/create',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <CreateTrigger />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/invocation-triggers/:triggerId',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <EditTrigger />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/connections',
-        index: true,
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Connections />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/connections/:id',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Connection />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/connections/:id/create',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <CreateConnection />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/objects/types',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <ObjectSchemas />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/objects/types/create',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <CreateObjectSchema />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/objects/types/:id',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <EditObjectSchema />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/objects/:typeName',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <ManageInstances />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/objects/:typeName/create',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <CreateObjectInstance />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/objects/:typeName/:id',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <EditObjectInstance />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/files',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <FilesPage />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/analytics',
-        element: (
-          <PrivateRoute>
-            <Navigate to="/analytics/usage" replace />
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/analytics/usage',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <AnalyticsUsage />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/analytics/system',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <AnalyticsSystem />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/analytics/rate-limits',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <AnalyticsRateLimits />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/invocation-history',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <InvocationHistory />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/settings',
-        element: (
-          <PrivateRoute>
-            <Navigate to="/settings/api-keys" replace />
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/settings/api-keys',
-        element: (
-          <PrivateRoute>
-            <Suspense fallback={<PageLoader />}>
-              <Settings />
-            </Suspense>
-          </PrivateRoute>
-        ),
-      },
-      {
-        path: '/login',
-        element: <Login />,
-      },
-      {
-        path: '*',
-        element: <>404</>,
-      },
-    ],
-  },
+    {
+      path: '/',
+      element: <Layout />,
+      errorElement: (
+        <Layout>
+          <ErrorBoundary />
+        </Layout>
+      ),
+      children: [
+        {
+          path: '/',
+          index: true,
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Workflows />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Workflows />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows/create',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <CreateWorkflow />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows/:workflowId',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Workflow />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows/:workflowId/history/:instanceId',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <WorkflowHistory />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows/:workflowId/history/:instanceId/logs',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <WorkflowLogs />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows/:workflowId/chat',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ChatPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/workflows/:workflowId/chat/:instanceId',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ChatPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/invocation-triggers',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Triggers />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/invocation-triggers/create',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <CreateTrigger />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/invocation-triggers/:triggerId',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <EditTrigger />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/connections',
+          index: true,
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Connections />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/connections/:id',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Connection />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/connections/:id/create',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <CreateConnection />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/objects/types',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ObjectSchemas />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/objects/types/create',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <CreateObjectSchema />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/objects/types/:id',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <EditObjectSchema />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/objects/:typeName',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ManageInstances />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/objects/:typeName/create',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <CreateObjectInstance />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/objects/:typeName/:id',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <EditObjectInstance />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/files',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <FilesPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/analytics',
+          element: (
+            <PrivateRoute>
+              <Navigate to="/analytics/usage" replace />
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/analytics/usage',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <AnalyticsUsage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/analytics/system',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <AnalyticsSystem />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/analytics/rate-limits',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <AnalyticsRateLimits />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/invocation-history',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <InvocationHistory />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/reports',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ReportsListPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/reports/new',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ReportEditorPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/reports/:reportId',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ReportViewerPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/reports/:reportId/edit',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ReportEditorPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/settings',
+          element: (
+            <PrivateRoute>
+              <Navigate to="/settings/api-keys" replace />
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/settings/api-keys',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Settings />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/login',
+          element: <Login />,
+        },
+        {
+          path: '*',
+          element: <>404</>,
+        },
+      ],
+    },
   ],
   { basename }
 );
