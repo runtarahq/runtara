@@ -1,0 +1,1070 @@
+use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::api::dto::object_model::{
+    AggregateFn, AggregateOrderBy, AggregateRequest, AggregateSpec, Condition, FilterRequest,
+    SortDirection,
+};
+use crate::api::dto::reports::*;
+use crate::api::repositories::object_model::ObjectStoreManager;
+use crate::api::repositories::reports::ReportRepository;
+use crate::api::services::object_model::{
+    InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
+};
+
+const MAX_TABLE_PAGE_SIZE: i64 = 500;
+const MAX_AGGREGATE_ROWS: i64 = 1000;
+
+#[derive(Debug, Error)]
+pub enum ReportServiceError {
+    #[error("Report not found")]
+    NotFound,
+    #[error("{0}")]
+    Validation(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Database(String),
+}
+
+pub struct ReportService {
+    repo: ReportRepository,
+    schema_service: SchemaService,
+    instance_service: InstanceService,
+}
+
+impl ReportService {
+    pub fn new(
+        pool: PgPool,
+        manager: Arc<ObjectStoreManager>,
+        connections: Arc<runtara_connections::ConnectionsFacade>,
+    ) -> Self {
+        Self {
+            repo: ReportRepository::new(pool),
+            schema_service: SchemaService::new(manager.clone(), connections.clone()),
+            instance_service: InstanceService::new(manager, connections),
+        }
+    }
+
+    pub async fn list_reports(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<ReportSummary>, ReportServiceError> {
+        let reports = self.repo.list(tenant_id).await.map_err(map_sqlx_error)?;
+
+        Ok(reports.iter().map(ReportSummary::from).collect())
+    }
+
+    pub async fn get_report(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+    ) -> Result<ReportDto, ReportServiceError> {
+        self.repo
+            .get(tenant_id, id_or_slug)
+            .await
+            .map_err(map_sqlx_error)?
+            .ok_or(ReportServiceError::NotFound)
+    }
+
+    pub async fn create_report(
+        &self,
+        tenant_id: &str,
+        request: CreateReportRequest,
+    ) -> Result<ReportDto, ReportServiceError> {
+        self.validate_definition(tenant_id, &request.definition)
+            .await?;
+
+        let slug = request
+            .slug
+            .unwrap_or_else(|| slugify(&request.name))
+            .trim()
+            .to_string();
+        validate_slug(&slug)?;
+
+        let report = ReportDto {
+            id: format!("rep_{}", Uuid::new_v4()),
+            slug,
+            name: request.name,
+            description: request.description,
+            tags: request.tags,
+            status: request.status,
+            definition_version: request.definition.definition_version,
+            definition: request.definition,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        self.repo
+            .create(tenant_id, &report)
+            .await
+            .map_err(map_sqlx_error)
+    }
+
+    pub async fn update_report(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        request: UpdateReportRequest,
+    ) -> Result<ReportDto, ReportServiceError> {
+        self.validate_definition(tenant_id, &request.definition)
+            .await?;
+        validate_slug(&request.slug)?;
+
+        let existing = self.get_report(tenant_id, id_or_slug).await?;
+        let report = ReportDto {
+            id: existing.id,
+            slug: request.slug,
+            name: request.name,
+            description: request.description,
+            tags: request.tags,
+            status: request.status,
+            definition_version: request.definition.definition_version,
+            definition: request.definition,
+            created_at: existing.created_at,
+            updated_at: Utc::now(),
+        };
+
+        self.repo
+            .update(tenant_id, id_or_slug, &report)
+            .await
+            .map_err(map_sqlx_error)?
+            .ok_or(ReportServiceError::NotFound)
+    }
+
+    pub async fn delete_report(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+    ) -> Result<(), ReportServiceError> {
+        let affected = self
+            .repo
+            .delete(tenant_id, id_or_slug)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        if affected == 0 {
+            Err(ReportServiceError::NotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn validate_report(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+    ) -> ValidateReportResponse {
+        match self.validate_definition(tenant_id, definition).await {
+            Ok(()) => ValidateReportResponse {
+                valid: true,
+                errors: vec![],
+                warnings: vec![],
+            },
+            Err(ReportServiceError::Validation(message)) => ValidateReportResponse {
+                valid: false,
+                errors: vec![ReportValidationIssue {
+                    path: "$".to_string(),
+                    code: "VALIDATION_ERROR".to_string(),
+                    message,
+                }],
+                warnings: vec![],
+            },
+            Err(error) => ValidateReportResponse {
+                valid: false,
+                errors: vec![ReportValidationIssue {
+                    path: "$".to_string(),
+                    code: "VALIDATION_ERROR".to_string(),
+                    message: error.to_string(),
+                }],
+                warnings: vec![],
+            },
+        }
+    }
+
+    pub async fn render_report(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        request: ReportRenderRequest,
+    ) -> Result<ReportRenderResponse, ReportServiceError> {
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let requested_blocks = requested_blocks(&report.definition, request.blocks.as_deref());
+        let request_by_id: HashMap<_, _> = request
+            .blocks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|block| (block.id.clone(), block))
+            .collect();
+
+        let mut blocks = HashMap::new();
+        let mut errors = Vec::new();
+
+        for block in requested_blocks {
+            let block_request = request_by_id.get(&block.id);
+            let result = self
+                .render_block(
+                    tenant_id,
+                    &report.definition,
+                    block,
+                    &resolved_filters,
+                    block_request,
+                )
+                .await;
+
+            match result {
+                Ok(rendered) => {
+                    blocks.insert(block.id.clone(), rendered);
+                }
+                Err(error) => {
+                    let block_error = ReportBlockError {
+                        code: "BLOCK_RENDER_FAILED".to_string(),
+                        message: error.to_string(),
+                        block_id: Some(block.id.clone()),
+                    };
+                    errors.push(block_error.clone());
+                    blocks.insert(
+                        block.id.clone(),
+                        ReportBlockRenderResult {
+                            block_type: block.block_type,
+                            status: ReportBlockStatus::Error,
+                            title: block.title.clone(),
+                            data: None,
+                            error: Some(block_error),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(ReportRenderResponse {
+            success: true,
+            report: ReportRenderMetadata {
+                id: report.id,
+                definition_version: report.definition_version,
+            },
+            resolved_filters,
+            blocks,
+            errors,
+        })
+    }
+
+    pub async fn render_report_block(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        block_id: &str,
+        request: ReportBlockOnlyDataRequest,
+    ) -> Result<ReportBlockRenderResult, ReportServiceError> {
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let block = report
+            .definition
+            .blocks
+            .iter()
+            .find(|block| block.id == block_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown block '{}'", block_id))
+            })?;
+
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let block_request = ReportBlockDataRequest {
+            id: block_id.to_string(),
+            page: request.page,
+            sort: request.sort,
+            block_filters: request.block_filters,
+        };
+
+        self.render_block(
+            tenant_id,
+            &report.definition,
+            block,
+            &resolved_filters,
+            Some(&block_request),
+        )
+        .await
+    }
+
+    async fn validate_definition(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+    ) -> Result<(), ReportServiceError> {
+        if definition.markdown.len() > 250_000 {
+            return Err(ReportServiceError::Validation(
+                "Report markdown is too large".to_string(),
+            ));
+        }
+
+        let mut block_ids = HashSet::new();
+        for block in &definition.blocks {
+            if block.id.trim().is_empty() {
+                return Err(ReportServiceError::Validation(
+                    "Report block IDs cannot be empty".to_string(),
+                ));
+            }
+            if !block_ids.insert(block.id.clone()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Duplicate report block ID '{}'",
+                    block.id
+                )));
+            }
+            if block.source.schema.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' must specify an Object Model schema",
+                    block.id
+                )));
+            }
+
+            let schema = self
+                .schema_service
+                .get_schema_by_name(
+                    &block.source.schema,
+                    tenant_id,
+                    block.source.connection_id.as_deref(),
+                )
+                .await
+                .map_err(map_object_model_error)?;
+
+            let fields: HashSet<_> = schema
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect();
+            let is_known_field = |field: &str| -> bool {
+                fields.contains(field)
+                    || matches!(
+                        field,
+                        "id" | "created_at" | "updated_at" | "createdAt" | "updatedAt"
+                    )
+            };
+
+            if let Some(table) = &block.table {
+                for column in &table.columns {
+                    if !is_known_field(&column.field) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "Block '{}' references unknown table field '{}'",
+                            block.id, column.field
+                        )));
+                    }
+                }
+            }
+
+            for group_field in &block.source.group_by {
+                if !is_known_field(group_field) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' references unknown groupBy field '{}'",
+                        block.id, group_field
+                    )));
+                }
+            }
+
+            for aggregate in &block.source.aggregates {
+                if let Some(field) = &aggregate.field
+                    && !is_known_field(field)
+                {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' references unknown aggregate field '{}'",
+                        block.id, field
+                    )));
+                }
+            }
+        }
+
+        let placeholder_ids = extract_markdown_block_placeholders(&definition.markdown);
+        for placeholder in placeholder_ids {
+            if !block_ids.contains(&placeholder) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Markdown references unknown report block '{}'",
+                    placeholder
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn render_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<ReportBlockRenderResult, ReportServiceError> {
+        let data = match block.block_type {
+            ReportBlockType::Table => {
+                self.render_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await?
+            }
+            ReportBlockType::Chart => {
+                self.render_aggregate_block(tenant_id, definition, block, resolved_filters)
+                    .await?
+            }
+            ReportBlockType::Metric => {
+                self.render_metric_block(tenant_id, definition, block, resolved_filters)
+                    .await?
+            }
+            ReportBlockType::Markdown => json!({}),
+        };
+
+        let status = if is_empty_data(&data) {
+            ReportBlockStatus::Empty
+        } else {
+            ReportBlockStatus::Ready
+        };
+
+        Ok(ReportBlockRenderResult {
+            block_type: block.block_type,
+            status,
+            title: block.title.clone(),
+            data: Some(data),
+            error: None,
+        })
+    }
+
+    async fn render_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| table.map(|table| table.default_sort.clone()))
+            .unwrap_or_default();
+
+        let filter_request = FilterRequest {
+            offset,
+            limit: page_size,
+            condition: build_block_condition(definition, block, resolved_filters, block_request),
+            sort_by: if sort.is_empty() {
+                None
+            } else {
+                Some(sort.iter().map(|entry| entry.field.clone()).collect())
+            },
+            sort_order: if sort.is_empty() {
+                None
+            } else {
+                Some(
+                    sort.iter()
+                        .map(|entry| normalize_sort_direction(&entry.direction))
+                        .collect(),
+                )
+            },
+            score_expression: None,
+            order_by: None,
+        };
+
+        let (instances, total_count) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                filter_request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        let rows: Vec<_> = instances.into_iter().map(flatten_instance).collect();
+        let columns = table
+            .map(|table| {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        json!({
+                            "key": column.field,
+                            "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
+                            "format": column.format,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(json!({
+            "columns": columns,
+            "rows": rows,
+            "page": {
+                "offset": offset,
+                "size": page_size,
+                "totalCount": total_count,
+                "hasNextPage": offset + page_size < total_count
+            }
+        }))
+    }
+
+    async fn render_aggregate_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+    ) -> Result<Value, ReportServiceError> {
+        let request = build_aggregate_request(definition, block, resolved_filters)?;
+        let result = self
+            .instance_service
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        Ok(json!({
+            "columns": result.columns,
+            "rows": result.rows,
+            "groupCount": result.group_count,
+        }))
+    }
+
+    async fn render_metric_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+    ) -> Result<Value, ReportServiceError> {
+        let aggregate_data = self
+            .render_aggregate_block(tenant_id, definition, block, resolved_filters)
+            .await?;
+        let metric = block.metric.as_ref();
+        let value_field = metric.map(|m| m.value_field.as_str()).unwrap_or("value");
+        let columns = aggregate_data
+            .get("columns")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let rows = aggregate_data
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let value_index = columns
+            .iter()
+            .position(|column| column.as_str() == Some(value_field))
+            .unwrap_or(0);
+        let value = rows
+            .first()
+            .and_then(Value::as_array)
+            .and_then(|row| row.get(value_index))
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        Ok(json!({
+            "value": value,
+            "valueField": value_field,
+            "label": metric.and_then(|m| m.label.clone()),
+            "format": metric.and_then(|m| m.format.clone()),
+            "columns": columns,
+            "rows": rows,
+        }))
+    }
+}
+
+fn requested_blocks<'a>(
+    definition: &'a ReportDefinition,
+    requested: Option<&[ReportBlockDataRequest]>,
+) -> Vec<&'a ReportBlockDefinition> {
+    match requested {
+        Some(requested) if !requested.is_empty() => {
+            let ids: HashSet<_> = requested.iter().map(|block| block.id.as_str()).collect();
+            definition
+                .blocks
+                .iter()
+                .filter(|block| ids.contains(block.id.as_str()))
+                .collect()
+        }
+        _ => definition
+            .blocks
+            .iter()
+            .filter(|block| !block.lazy)
+            .collect(),
+    }
+}
+
+fn resolve_filters(
+    definition: &ReportDefinition,
+    runtime_filters: &HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    definition
+        .filters
+        .iter()
+        .map(|filter| {
+            let raw = runtime_filters
+                .get(&filter.id)
+                .cloned()
+                .or_else(|| filter.default.clone())
+                .unwrap_or(Value::Null);
+            (filter.id.clone(), resolve_filter_value(filter, raw))
+        })
+        .collect()
+}
+
+fn resolve_filter_value(filter: &ReportFilterDefinition, raw: Value) -> Value {
+    if filter.filter_type != ReportFilterType::TimeRange {
+        return raw;
+    }
+
+    let preset = match &raw {
+        Value::String(value) => Some(value.as_str()),
+        Value::Object(map) => map.get("preset").and_then(Value::as_str),
+        _ => None,
+    };
+
+    if let Some(preset) = preset {
+        let (from, to, label) = resolve_time_preset(preset);
+        return json!({
+            "from": from.to_rfc3339(),
+            "to": to.to_rfc3339(),
+            "label": label,
+            "preset": preset,
+        });
+    }
+
+    raw
+}
+
+fn resolve_time_preset(preset: &str) -> (DateTime<Utc>, DateTime<Utc>, String) {
+    let now = Utc::now();
+    let today =
+        DateTime::<Utc>::from_naive_utc_and_offset(now.date_naive().and_time(NaiveTime::MIN), Utc);
+
+    match preset {
+        "today" => (today, today + Duration::days(1), "Today".to_string()),
+        "yesterday" => (today - Duration::days(1), today, "Yesterday".to_string()),
+        "last_7_days" => (
+            today - Duration::days(6),
+            today + Duration::days(1),
+            "Last 7 days".to_string(),
+        ),
+        "this_month" => {
+            let start = DateTime::<Utc>::from_naive_utc_and_offset(
+                now.date_naive()
+                    .with_day(1)
+                    .unwrap_or(now.date_naive())
+                    .and_time(NaiveTime::MIN),
+                Utc,
+            );
+            (start, today + Duration::days(1), "This month".to_string())
+        }
+        _ => (
+            today - Duration::days(29),
+            today + Duration::days(1),
+            "Last 30 days".to_string(),
+        ),
+    }
+}
+
+fn build_block_condition(
+    definition: &ReportDefinition,
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+    block_request: Option<&ReportBlockDataRequest>,
+) -> Option<Condition> {
+    let mut conditions = Vec::new();
+
+    if let Some(condition) = &block.source.condition {
+        conditions.push(condition.clone());
+    }
+
+    append_filter_conditions(
+        &mut conditions,
+        &definition.filters,
+        &block.id,
+        resolved_filters,
+    );
+
+    append_source_mapping_conditions(
+        &mut conditions,
+        &block.source.filter_mappings,
+        resolved_filters,
+    );
+
+    if let Some(block_request) = block_request {
+        append_filter_conditions(
+            &mut conditions,
+            &block.filters,
+            &block.id,
+            &block_request.block_filters,
+        );
+    }
+
+    combine_conditions(conditions)
+}
+
+fn append_filter_conditions(
+    conditions: &mut Vec<Condition>,
+    filters: &[ReportFilterDefinition],
+    block_id: &str,
+    values: &HashMap<String, Value>,
+) {
+    for filter in filters {
+        let Some(value) = values.get(&filter.id) else {
+            continue;
+        };
+        for target in &filter.applies_to {
+            if target
+                .block_id
+                .as_deref()
+                .is_some_and(|target_block_id| target_block_id != block_id)
+            {
+                continue;
+            }
+            if let Some(condition) = condition_from_filter_target(target, value) {
+                conditions.push(condition);
+            }
+        }
+    }
+}
+
+fn append_source_mapping_conditions(
+    conditions: &mut Vec<Condition>,
+    mappings: &[ReportFilterTarget],
+    values: &HashMap<String, Value>,
+) {
+    for mapping in mappings {
+        let Some(filter_id) = mapping.filter_id.as_deref() else {
+            continue;
+        };
+        let Some(value) = values.get(filter_id) else {
+            continue;
+        };
+        if let Some(condition) = condition_from_filter_target(mapping, value) {
+            conditions.push(condition);
+        }
+    }
+}
+
+fn condition_from_filter_target(target: &ReportFilterTarget, value: &Value) -> Option<Condition> {
+    if value_is_empty(value) {
+        return None;
+    }
+
+    let field = Value::String(target.field.clone());
+    match target.op.to_ascii_lowercase().as_str() {
+        "between" => between_condition(&target.field, value),
+        "in" => Some(Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![field, ensure_array(value)]),
+        }),
+        "ne" => Some(binary_condition("NE", field, value.clone())),
+        "gt" => Some(binary_condition("GT", field, value.clone())),
+        "gte" => Some(binary_condition("GTE", field, value.clone())),
+        "lt" => Some(binary_condition("LT", field, value.clone())),
+        "lte" => Some(binary_condition("LTE", field, value.clone())),
+        "contains" | "search" => Some(binary_condition("CONTAINS", field, value.clone())),
+        _ => Some(binary_condition("EQ", field, value.clone())),
+    }
+}
+
+fn binary_condition(op: &str, field: Value, value: Value) -> Condition {
+    Condition {
+        op: op.to_string(),
+        arguments: Some(vec![field, value]),
+    }
+}
+
+fn between_condition(field: &str, value: &Value) -> Option<Condition> {
+    let (from, to) = if let Some(object) = value.as_object() {
+        (
+            object
+                .get("from")
+                .or_else(|| object.get("min"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            object
+                .get("to")
+                .or_else(|| object.get("max"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+    } else if let Some(array) = value.as_array() {
+        (
+            array.first().cloned().unwrap_or(Value::Null),
+            array.get(1).cloned().unwrap_or(Value::Null),
+        )
+    } else {
+        return None;
+    };
+
+    let mut conditions = Vec::new();
+    if !value_is_empty(&from) {
+        conditions.push(binary_condition(
+            "GTE",
+            Value::String(field.to_string()),
+            from,
+        ));
+    }
+    if !value_is_empty(&to) {
+        conditions.push(binary_condition("LT", Value::String(field.to_string()), to));
+    }
+
+    combine_conditions(conditions)
+}
+
+fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
+    match conditions.len() {
+        0 => None,
+        1 => conditions.into_iter().next(),
+        _ => Some(Condition {
+            op: "AND".to_string(),
+            arguments: Some(
+                conditions
+                    .into_iter()
+                    .filter_map(|condition| serde_json::to_value(condition).ok())
+                    .collect(),
+            ),
+        }),
+    }
+}
+
+fn build_aggregate_request(
+    definition: &ReportDefinition,
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+) -> Result<AggregateRequest, ReportServiceError> {
+    if block.source.aggregates.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' must define at least one aggregate",
+            block.id
+        )));
+    }
+
+    Ok(AggregateRequest {
+        condition: build_block_condition(definition, block, resolved_filters, None),
+        group_by: block.source.group_by.clone(),
+        aggregates: block
+            .source
+            .aggregates
+            .iter()
+            .map(|aggregate| AggregateSpec {
+                alias: aggregate.alias.clone(),
+                fn_: map_aggregate_fn(aggregate.op),
+                column: aggregate.field.clone(),
+                distinct: aggregate.distinct,
+                order_by: aggregate.order_by.iter().map(map_order_by).collect(),
+                expression: aggregate.expression.clone(),
+            })
+            .collect(),
+        order_by: block.source.order_by.iter().map(map_order_by).collect(),
+        limit: Some(
+            block
+                .source
+                .limit
+                .unwrap_or(MAX_AGGREGATE_ROWS)
+                .min(MAX_AGGREGATE_ROWS),
+        ),
+        offset: Some(0),
+    })
+}
+
+fn map_aggregate_fn(value: ReportAggregateFn) -> AggregateFn {
+    match value {
+        ReportAggregateFn::Count => AggregateFn::Count,
+        ReportAggregateFn::Sum => AggregateFn::Sum,
+        ReportAggregateFn::Avg => AggregateFn::Avg,
+        ReportAggregateFn::Min => AggregateFn::Min,
+        ReportAggregateFn::Max => AggregateFn::Max,
+        ReportAggregateFn::FirstValue => AggregateFn::FirstValue,
+        ReportAggregateFn::LastValue => AggregateFn::LastValue,
+        ReportAggregateFn::Expr => AggregateFn::Expr,
+    }
+}
+
+fn map_order_by(value: &ReportOrderBy) -> AggregateOrderBy {
+    AggregateOrderBy {
+        column: value.field.clone(),
+        direction: if value.direction.eq_ignore_ascii_case("desc") {
+            SortDirection::Desc
+        } else {
+            SortDirection::Asc
+        },
+    }
+}
+
+fn normalize_sort_direction(value: &str) -> String {
+    if value.eq_ignore_ascii_case("desc") {
+        "desc".to_string()
+    } else {
+        "asc".to_string()
+    }
+}
+
+fn value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(value) => value.trim().is_empty(),
+        Value::Array(values) => values.is_empty(),
+        Value::Object(values) => values.is_empty(),
+        _ => false,
+    }
+}
+
+fn ensure_array(value: &Value) -> Value {
+    match value {
+        Value::Array(_) => value.clone(),
+        _ => Value::Array(vec![value.clone()]),
+    }
+}
+
+fn flatten_instance(instance: crate::api::dto::object_model::Instance) -> Value {
+    let mut row = serde_json::Map::new();
+    row.insert("id".to_string(), Value::String(instance.id));
+    row.insert("tenantId".to_string(), Value::String(instance.tenant_id));
+    row.insert("createdAt".to_string(), Value::String(instance.created_at));
+    row.insert("updatedAt".to_string(), Value::String(instance.updated_at));
+
+    if let Some(schema_id) = instance.schema_id {
+        row.insert("schemaId".to_string(), Value::String(schema_id));
+    }
+    if let Some(schema_name) = instance.schema_name {
+        row.insert("schemaName".to_string(), Value::String(schema_name));
+    }
+    if let Value::Object(properties) = instance.properties {
+        row.extend(properties);
+    }
+    if let Some(computed) = instance.computed {
+        row.extend(computed);
+    }
+
+    Value::Object(row)
+}
+
+fn is_empty_data(data: &Value) -> bool {
+    data.get("rows")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| rows.is_empty())
+}
+
+fn clamp_page_size(size: i64) -> i64 {
+    size.clamp(1, MAX_TABLE_PAGE_SIZE)
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+fn validate_slug(slug: &str) -> Result<(), ReportServiceError> {
+    if slug.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report slug cannot be empty".to_string(),
+        ));
+    }
+    if !slug
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(ReportServiceError::Validation(
+            "Report slug can only contain lowercase letters, numbers, and dashes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn humanize_label(value: &str) -> String {
+    value
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_markdown_block_placeholders(markdown: &str) -> Vec<String> {
+    let mut placeholders = Vec::new();
+    let mut rest = markdown;
+
+    while let Some(start) = rest.find("{{") {
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find("}}") else {
+            break;
+        };
+        let candidate = rest[..end].trim();
+        if let Some(block_id) = candidate.strip_prefix("block.") {
+            let block_id = block_id.trim();
+            if !block_id.is_empty() {
+                placeholders.push(block_id.to_string());
+            }
+        }
+        rest = &rest[end + 2..];
+    }
+
+    placeholders
+}
+
+fn map_sqlx_error(error: sqlx::Error) -> ReportServiceError {
+    if let sqlx::Error::Database(db_error) = &error
+        && db_error
+            .constraint()
+            .is_some_and(|constraint| constraint == "idx_report_definitions_tenant_slug_active")
+    {
+        return ReportServiceError::Conflict("A report with this slug already exists".to_string());
+    }
+
+    ReportServiceError::Database(error.to_string())
+}
+
+fn map_object_model_error(error: ObjectModelServiceError) -> ReportServiceError {
+    match error {
+        ObjectModelServiceError::ValidationError(message) => {
+            ReportServiceError::Validation(message)
+        }
+        ObjectModelServiceError::NotFound(message) => ReportServiceError::Validation(message),
+        ObjectModelServiceError::Conflict(message) => ReportServiceError::Conflict(message),
+        ObjectModelServiceError::DatabaseError(message) => ReportServiceError::Database(message),
+    }
+}

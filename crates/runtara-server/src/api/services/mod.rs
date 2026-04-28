@@ -11,6 +11,7 @@ pub mod file_storage;
 pub mod input_validation;
 pub mod object_model;
 pub mod operators;
+pub mod reports;
 pub mod schema_validator;
 pub mod session_queue;
 pub mod session_token;

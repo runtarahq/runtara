@@ -1173,6 +1173,29 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/analytics/system",
             get(api::analytics::get_system_analytics_handler),
         )
+        // Reporting endpoints
+        .route(
+            "/api/runtime/reports",
+            get(api::handlers::reports::list_reports).post(api::handlers::reports::create_report),
+        )
+        .route(
+            "/api/runtime/reports/validate",
+            post(api::handlers::reports::validate_report),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}",
+            get(api::handlers::reports::get_report)
+                .put(api::handlers::reports::update_report)
+                .delete(api::handlers::reports::delete_report),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/render",
+            post(api::handlers::reports::render_report),
+        )
+        .route(
+            "/api/runtime/reports/{report_id}/blocks/{block_id}/data",
+            post(api::handlers::reports::get_report_block_data),
+        )
         // NOTE: Rate limit analytics routes are now served by runtara-connections crate.
         // Invocation Trigger endpoints
         .route(
