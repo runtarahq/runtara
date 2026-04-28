@@ -11,6 +11,7 @@ use super::internal_api::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthoringSeverity {
     Error,
+    Warning,
 }
 
 #[derive(Debug, Clone)]
@@ -571,9 +572,24 @@ fn report_authoring_schema() -> Value {
         ],
         "definitionShape": {
             "definitionVersion": 1,
-            "markdown": "Markdown body. Render data blocks with placeholders like {{ block.daily_qty }}.",
+            "markdown": "Markdown body. Render data blocks with standalone placeholders like {{ block.daily_qty }}. Do not put block placeholders inside Markdown tables for alignment/layout.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
+        },
+        "layoutGuidance": {
+            "currentContract": [
+                "Report block placeholders render as block-level UI components.",
+                "Put each {{ block.<id> }} placeholder on its own line or paragraph.",
+                "Do not wrap block placeholders in Markdown table rows such as | {{ block.a }} | {{ block.b }} |. The block renderer does not place components inside Markdown table cells, so leftover pipe characters may appear as visible vertical lines.",
+                "Use Markdown headings and paragraphs for narrative structure, and use report blocks for data presentation."
+            ],
+            "plannedLayoutPrimitives": [
+                "metric_row: compact responsive row for several metric blocks.",
+                "columns: responsive multi-column layout for arbitrary block placeholders.",
+                "grid: explicit card/grid placement with spans for dashboards.",
+                "section: titled grouping with optional description and layout settings."
+            ],
+            "preferredMetricPatternToday": "Use headings plus standalone metric placeholders, one per line, until metric_row/columns/grid are implemented."
         },
         "blockShape": {
             "common": {
@@ -655,6 +671,7 @@ fn report_authoring_schema() -> Value {
             "Do not use metric.valueAlias or top-level valueAlias. Use block.metric.valueField.",
             "Do not copy query_aggregate specs directly: report aggregates use op/field while query_aggregate uses fn/column.",
             "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
+            "Do not use Markdown tables to align report block placeholders. Use standalone placeholders; layout primitives will provide metric rows/grids.",
             "Always run validate_report before saving or mutating report blocks."
         ],
         "examples": {
@@ -732,6 +749,7 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
         &["definitionVersion", "markdown", "filters", "blocks"],
         &mut issues,
     );
+    collect_markdown_layout_issues(definition, &mut issues);
 
     if let Some(blocks) = definition.get("blocks") {
         match blocks.as_array() {
@@ -754,6 +772,22 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
     }
 
     issues
+}
+
+fn collect_markdown_layout_issues(definition: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(markdown) = definition.get("markdown").and_then(Value::as_str) else {
+        return;
+    };
+
+    for (index, line) in markdown.lines().enumerate() {
+        if line.contains("{{ block.") && line.contains('|') {
+            issues.push(warning(
+                format!("$.markdown:{}", index + 1),
+                "MARKDOWN_TABLE_BLOCK_LAYOUT",
+                "Do not place report block placeholders inside Markdown table rows. Report blocks render as block-level components, so Markdown pipe characters can appear as visible vertical lines. Put each {{ block.<id> }} placeholder on its own line until layout primitives are available.",
+            ));
+        }
+    }
 }
 
 fn collect_report_block_authoring_issues(
@@ -1310,7 +1344,7 @@ fn append_validation_issues(result: &mut Value, key: &str, issues: Vec<Value>) {
 
 fn split_authoring_issues(issues: Vec<AuthoringIssue>) -> (Vec<Value>, Vec<Value>) {
     let mut errors = Vec::new();
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
 
     for issue in issues {
         let value = json!({
@@ -1320,10 +1354,24 @@ fn split_authoring_issues(issues: Vec<AuthoringIssue>) -> (Vec<Value>, Vec<Value
         });
         match issue.severity {
             AuthoringSeverity::Error => errors.push(value),
+            AuthoringSeverity::Warning => warnings.push(value),
         }
     }
 
     (errors, warnings)
+}
+
+fn warning(
+    path: impl Into<String>,
+    code: &'static str,
+    message: impl Into<String>,
+) -> AuthoringIssue {
+    AuthoringIssue {
+        severity: AuthoringSeverity::Warning,
+        path: path.into(),
+        code,
+        message: message.into(),
+    }
 }
 
 fn error(
@@ -1416,6 +1464,45 @@ mod tests {
         let issues = collect_report_definition_authoring_issues(&definition);
 
         assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_warns_for_markdown_table_block_layout() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "| | |\n|---|---|\n| {{ block.a }} | {{ block.b }} |",
+            "blocks": [
+                {
+                    "id": "a",
+                    "type": "metric",
+                    "source": {
+                        "schema": "StockSnapshot",
+                        "mode": "aggregate",
+                        "aggregates": [{"alias": "n", "op": "count"}]
+                    },
+                    "metric": {"valueField": "n"}
+                },
+                {
+                    "id": "b",
+                    "type": "metric",
+                    "source": {
+                        "schema": "StockSnapshot",
+                        "mode": "aggregate",
+                        "aggregates": [{"alias": "n", "op": "count"}]
+                    },
+                    "metric": {"valueField": "n"}
+                }
+            ]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let response = authoring_validation_response(issues);
+
+        assert_eq!(response["valid"], json!(true));
+        assert_eq!(
+            response["warnings"][0]["code"],
+            json!("MARKDOWN_TABLE_BLOCK_LAYOUT")
+        );
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {
