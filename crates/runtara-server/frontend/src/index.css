@@ -173,6 +173,130 @@
   }
 }
 
+@media print {
+  @page {
+    margin: 12mm;
+  }
+
+  :root,
+  .dark {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --border: 214 32% 88%;
+    --primary: 217 91% 45%;
+  }
+
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+
+  [data-variant][data-side],
+  [data-sidebar='sidebar'],
+  [data-sidebar='rail'],
+  [data-sidebar='trigger'] {
+    display: none !important;
+  }
+
+  main,
+  .overflow-hidden,
+  .overflow-x-hidden,
+  .overflow-y-auto {
+    width: 100% !important;
+    max-width: none !important;
+    overflow: visible !important;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .report-print-root,
+  .report-print-root * {
+    visibility: visible !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .report-print-root {
+    position: absolute !important;
+    inset: 0 auto auto 0 !important;
+    width: 100% !important;
+    min-height: auto !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+
+  .report-print-root [data-tiles-page-header] {
+    position: static !important;
+    border: 0 !important;
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    box-shadow: none !important;
+  }
+
+  .report-print-root [data-tiles-page-header] > div,
+  .report-print-root [data-tiles-page-content] {
+    padding: 0 !important;
+  }
+
+  .report-print-root [data-tiles-page-action],
+  .report-print-root [data-tiles-page-toolbar],
+  .report-print-hidden {
+    display: none !important;
+  }
+
+  .report-print-content > div {
+    max-width: none !important;
+  }
+
+  .report-print-root .prose {
+    color: #0f172a !important;
+    max-width: none !important;
+  }
+
+  .report-print-root .prose h1,
+  .report-print-root .prose h2,
+  .report-print-root .prose h3,
+  .report-print-root h1,
+  .report-print-root h2,
+  .report-print-root h3 {
+    color: #0f172a !important;
+  }
+
+  .report-print-root .my-5,
+  .report-print-root .rounded-lg,
+  .report-print-root .rounded-xl {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-print-root table {
+    page-break-inside: auto;
+  }
+
+  .report-print-root thead {
+    display: table-header-group;
+  }
+
+  .report-print-root tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-print-root .h-80 {
+    height: 72mm !important;
+  }
+}
+
 /* React Flow custom node fixed dimensions */
 .react-flow__node-BASIC_NODE,
 .react-flow__node-CONDITIONAL_NODE,

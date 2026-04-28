@@ -88,7 +88,7 @@ export function TableBlock({
 
   return (
     <div className="rounded-lg border bg-background">
-      <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="report-print-hidden flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="relative w-full sm:max-w-sm">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -152,7 +152,7 @@ export function TableBlock({
           )}
         </TableBody>
       </Table>
-      <div className="flex flex-col gap-3 border-t px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+      <div className="report-print-hidden flex flex-col gap-3 border-t px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
         <span>{formatPageRange(page)}</span>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           {pageSizeOptions.length > 1 && (

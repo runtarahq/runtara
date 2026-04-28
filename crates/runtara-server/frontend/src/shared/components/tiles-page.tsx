@@ -30,7 +30,10 @@ export function TilesPage(props: TilesPageProps) {
       )}
     >
       {/* Header */}
-      <header className="sticky top-0 z-10 bg-slate-50/80 backdrop-blur-sm border-b border-slate-200/60 dark:bg-background/80 dark:border-slate-800/60">
+      <header
+        data-tiles-page-header
+        className="sticky top-0 z-10 bg-slate-50/80 backdrop-blur-sm border-b border-slate-200/60 dark:bg-background/80 dark:border-slate-800/60"
+      >
         <div className="px-4 md:px-8 py-5">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-1">
@@ -43,20 +46,30 @@ export function TilesPage(props: TilesPageProps) {
                 {title}
               </h1>
             </div>
-            {action}
+            {action && (
+              <div data-tiles-page-action className="contents">
+                {action}
+              </div>
+            )}
           </div>
         </div>
       </header>
 
       {/* Filters/Toolbar */}
       {toolbar && (
-        <div className="px-4 md:px-8 py-4 border-b border-slate-200/60 bg-white/50 dark:bg-slate-900/50 dark:border-slate-800/60">
+        <div
+          data-tiles-page-toolbar
+          className="px-4 md:px-8 py-4 border-b border-slate-200/60 bg-white/50 dark:bg-slate-900/50 dark:border-slate-800/60"
+        >
           {toolbar}
         </div>
       )}
 
       {/* Content */}
-      <div className={cn('px-4 md:px-8 py-6', contentClassName)}>
+      <div
+        data-tiles-page-content
+        className={cn('px-4 md:px-8 py-6', contentClassName)}
+      >
         {children}
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import { Edit, RefreshCw } from 'lucide-react';
+import { Edit, Printer, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -73,6 +73,10 @@ export function ReportViewerPage() {
     setSearchParams(nextParams, { replace: true });
   };
 
+  const handlePrint = () => {
+    window.requestAnimationFrame(() => window.print());
+  };
+
   if (isFetching) {
     return (
       <TilesPage kicker="Reports" title="Loading report">
@@ -111,6 +115,15 @@ export function ReportViewerPage() {
           <Button
             variant="outline"
             className="h-11 rounded-full sm:px-5"
+            onClick={handlePrint}
+            disabled={isRendering}
+          >
+            <Printer className="mr-2 h-4 w-4" />
+            Print / PDF
+          </Button>
+          <Button
+            variant="outline"
+            className="h-11 rounded-full sm:px-5"
             onClick={() => refetch()}
             disabled={isRendering}
           >
@@ -125,7 +138,8 @@ export function ReportViewerPage() {
           </Link>
         </div>
       }
-      contentClassName="pb-16"
+      className="report-print-root"
+      contentClassName="report-print-content pb-16"
     >
       <ReportRenderer
         reportId={report.id}
