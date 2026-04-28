@@ -407,6 +407,8 @@ pub struct ReportBlockOnlyDataRequest {
     pub page: Option<ReportPageRequest>,
     #[serde(default)]
     pub sort: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ReportTableSearchRequest>,
     #[serde(default, rename = "blockFilters")]
     pub block_filters: HashMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -420,8 +422,17 @@ pub struct ReportBlockDataRequest {
     pub page: Option<ReportPageRequest>,
     #[serde(default)]
     pub sort: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ReportTableSearchRequest>,
     #[serde(default, rename = "blockFilters")]
     pub block_filters: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportTableSearchRequest {
+    pub query: String,
+    #[serde(default)]
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

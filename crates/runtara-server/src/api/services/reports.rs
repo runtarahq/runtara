@@ -441,6 +441,7 @@ impl ReportService {
             id: block_id.to_string(),
             page: request.page,
             sort: request.sort,
+            search: request.search,
             block_filters: request.block_filters,
         };
 
@@ -903,9 +904,80 @@ fn build_block_condition(
             &block.id,
             &block_request.block_filters,
         );
+        append_table_search_condition(&mut conditions, block, block_request);
     }
 
     combine_conditions(conditions)
+}
+
+fn append_table_search_condition(
+    conditions: &mut Vec<Condition>,
+    block: &ReportBlockDefinition,
+    block_request: &ReportBlockDataRequest,
+) {
+    let Some(search) = &block_request.search else {
+        return;
+    };
+    let query = search.query.trim();
+    if query.is_empty() {
+        return;
+    }
+
+    let mut search_conditions = searchable_table_fields(block, search)
+        .into_iter()
+        .map(|field| {
+            binary_condition(
+                "CONTAINS",
+                Value::String(field),
+                Value::String(query.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    match search_conditions.len() {
+        0 => {}
+        1 => conditions.push(search_conditions.remove(0)),
+        _ => conditions.push(Condition {
+            op: "OR".to_string(),
+            arguments: Some(
+                search_conditions
+                    .into_iter()
+                    .filter_map(|condition| serde_json::to_value(condition).ok())
+                    .collect(),
+            ),
+        }),
+    }
+}
+
+fn searchable_table_fields(
+    block: &ReportBlockDefinition,
+    search: &ReportTableSearchRequest,
+) -> Vec<String> {
+    let Some(table) = block.table.as_ref() else {
+        return Vec::new();
+    };
+
+    let requested_fields = search
+        .fields
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+
+    table
+        .columns
+        .iter()
+        .filter(|column| {
+            requested_fields.is_empty() || requested_fields.contains(column.field.as_str())
+        })
+        .filter_map(|column| {
+            if seen.insert(column.field.clone()) {
+                Some(column.field.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn append_filter_conditions(
@@ -1551,6 +1623,82 @@ mod tests {
         assert_eq!(
             extract_markdown_block_placeholders(&markdown),
             vec!["c".to_string(), "a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn table_search_condition_uses_configured_columns() {
+        let mut block = test_block("orders");
+        block.table = Some(ReportTableConfig {
+            columns: vec![
+                ReportTableColumn {
+                    field: "customer_name".to_string(),
+                    label: None,
+                    format: None,
+                },
+                ReportTableColumn {
+                    field: "status".to_string(),
+                    label: None,
+                    format: None,
+                },
+            ],
+            default_sort: vec![],
+            pagination: None,
+        });
+        let request = ReportBlockDataRequest {
+            id: "orders".to_string(),
+            page: None,
+            sort: vec![],
+            search: Some(ReportTableSearchRequest {
+                query: " acme ".to_string(),
+                fields: vec![],
+            }),
+            block_filters: HashMap::new(),
+        };
+
+        let mut conditions = Vec::new();
+        append_table_search_condition(&mut conditions, &block, &request);
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].op, "OR");
+        let arguments = conditions[0].arguments.as_ref().unwrap();
+        assert_eq!(arguments.len(), 2);
+        assert_eq!(arguments[0]["arguments"][0], json!("customer_name"));
+        assert_eq!(arguments[0]["arguments"][1], json!("acme"));
+        assert_eq!(arguments[1]["arguments"][0], json!("status"));
+    }
+
+    #[test]
+    fn table_search_condition_rejects_unconfigured_requested_fields() {
+        let mut block = test_block("orders");
+        block.table = Some(ReportTableConfig {
+            columns: vec![ReportTableColumn {
+                field: "customer_name".to_string(),
+                label: None,
+                format: None,
+            }],
+            default_sort: vec![],
+            pagination: None,
+        });
+        let request = ReportBlockDataRequest {
+            id: "orders".to_string(),
+            page: None,
+            sort: vec![],
+            search: Some(ReportTableSearchRequest {
+                query: "acme".to_string(),
+                fields: vec!["customer_name".to_string(), "internal_note".to_string()],
+            }),
+            block_filters: HashMap::new(),
+        };
+
+        let mut conditions = Vec::new();
+        append_table_search_condition(&mut conditions, &block, &request);
+
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].op, "CONTAINS");
+        assert_eq!(
+            conditions[0].arguments.as_ref().unwrap(),
+            &vec![json!("customer_name"), json!("acme")]
         );
     }
 

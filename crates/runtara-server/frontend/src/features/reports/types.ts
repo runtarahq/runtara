@@ -50,6 +50,11 @@ export interface ReportOrderBy {
   direction?: 'asc' | 'desc' | string;
 }
 
+export interface ReportTableSearchRequest {
+  query: string;
+  fields?: string[];
+}
+
 export interface ReportSource {
   schema: string;
   connectionId?: string;
@@ -164,6 +169,7 @@ export interface ReportBlockDataRequest {
     size: number;
   };
   sort?: ReportOrderBy[];
+  search?: ReportTableSearchRequest;
   blockFilters?: Record<string, unknown>;
 }
 

@@ -84,7 +84,7 @@ pub struct RenderReportParams {
     #[schemars(description = "Global report filter values keyed by filter id.")]
     pub filters: Option<Value>,
     #[schemars(
-        description = "Optional array of block data requests: [{id, page?, sort?, blockFilters?}]. Omit to render non-lazy blocks."
+        description = "Optional array of block data requests: [{id, page?, sort?, search?, blockFilters?}]. Omit to render non-lazy blocks."
     )]
     pub blocks: Option<Value>,
     pub timezone: Option<String>,
@@ -103,6 +103,8 @@ pub struct GetReportBlockDataParams {
     pub page: Option<Value>,
     #[schemars(description = "Sort array: [{field, direction}].")]
     pub sort: Option<Value>,
+    #[schemars(description = "Table search request: {query, fields?}.")]
+    pub search: Option<Value>,
     #[schemars(description = "Per-block filter values keyed by filter id.")]
     pub block_filters: Option<Value>,
     pub timezone: Option<String>,
@@ -332,6 +334,9 @@ pub async fn get_report_block_data(
     }
     if let Some(sort) = params.sort {
         body["sort"] = sort;
+    }
+    if let Some(search) = params.search {
+        body["search"] = search;
     }
     if let Some(block_filters) = params.block_filters {
         body["blockFilters"] = block_filters;
