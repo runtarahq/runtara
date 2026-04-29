@@ -74,6 +74,60 @@ export interface ReportOrderBy {
   direction?: 'asc' | 'desc' | string;
 }
 
+export type ReportDatasetFieldType =
+  | 'string'
+  | 'number'
+  | 'decimal'
+  | 'boolean'
+  | 'date'
+  | 'datetime'
+  | 'json';
+
+export type ReportDatasetValueFormat =
+  | 'string'
+  | 'number'
+  | 'decimal'
+  | 'currency'
+  | 'percent'
+  | 'boolean'
+  | 'date'
+  | 'datetime';
+
+export interface ReportDatasetDefinition {
+  id: string;
+  label: string;
+  source: {
+    schema: string;
+    connectionId?: string | null;
+  };
+  timeDimension?: string;
+  dimensions: Array<{
+    field: string;
+    label: string;
+    type: ReportDatasetFieldType;
+    format?: ReportDatasetValueFormat;
+  }>;
+  measures: Array<{
+    id: string;
+    label: string;
+    op: ReportAggregateFn;
+    field?: string;
+    distinct?: boolean;
+    orderBy?: ReportOrderBy[];
+    expression?: unknown;
+    percentile?: number;
+    format: ReportDatasetValueFormat;
+  }>;
+}
+
+export interface ReportBlockDatasetQuery {
+  id: string;
+  dimensions?: string[];
+  measures?: string[];
+  orderBy?: ReportOrderBy[];
+  limit?: number;
+}
+
 export interface ReportTableSearchRequest {
   query: string;
   fields?: string[];
@@ -132,6 +186,7 @@ export interface ReportBlockDefinition {
   type: ReportBlockType;
   title?: string;
   lazy?: boolean;
+  dataset?: ReportBlockDatasetQuery;
   source: ReportSource;
   table?: {
     columns?: ReportTableColumn[];
@@ -223,6 +278,7 @@ export interface ReportDefinition {
   definitionVersion: number;
   markdown: string;
   layout?: ReportLayoutNode[];
+  datasets?: ReportDatasetDefinition[];
   filters: ReportFilterDefinition[];
   blocks: ReportBlockDefinition[];
 }

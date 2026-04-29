@@ -159,6 +159,7 @@ fn row_to_report(row: PgRow) -> Result<ReportDto, sqlx::Error> {
             markdown: String::new(),
             layout: vec![],
             filters: vec![],
+            datasets: vec![],
             blocks: vec![],
         });
 

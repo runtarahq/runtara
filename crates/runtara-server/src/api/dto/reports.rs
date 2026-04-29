@@ -28,6 +28,21 @@ fn default_block_status() -> ReportBlockStatus {
     ReportBlockStatus::Ready
 }
 
+pub(crate) fn default_report_source() -> ReportSource {
+    ReportSource {
+        schema: String::new(),
+        connection_id: None,
+        mode: default_source_mode(),
+        condition: None,
+        filter_mappings: vec![],
+        group_by: vec![],
+        aggregates: vec![],
+        order_by: vec![],
+        limit: None,
+        join: vec![],
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportStatus {
@@ -64,8 +79,92 @@ pub struct ReportDefinition {
     pub layout: Vec<Value>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<ReportDatasetDefinition>,
     #[serde(default)]
     pub blocks: Vec<ReportBlockDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetDefinition {
+    pub id: String,
+    pub label: String,
+    pub source: ReportDatasetSource,
+    #[serde(
+        default,
+        rename = "timeDimension",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub time_dimension: Option<String>,
+    #[serde(default)]
+    pub dimensions: Vec<ReportDatasetDimension>,
+    #[serde(default)]
+    pub measures: Vec<ReportDatasetMeasure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetSource {
+    pub schema: String,
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetDimension {
+    pub field: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub dimension_type: ReportDatasetFieldType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ReportDatasetValueFormat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetMeasure {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "op")]
+    pub op: ReportAggregateFn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub distinct: bool,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentile: Option<f64>,
+    pub format: ReportDatasetValueFormat,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportDatasetFieldType {
+    String,
+    Number,
+    Decimal,
+    Boolean,
+    Date,
+    Datetime,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportDatasetValueFormat {
+    String,
+    Number,
+    Decimal,
+    Currency,
+    Percent,
+    Boolean,
+    Date,
+    Datetime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -121,6 +220,12 @@ pub struct ReportBlockDefinition {
     pub title: Option<String>,
     #[serde(default)]
     pub lazy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<ReportBlockDatasetQuery>,
+    #[serde(
+        default = "default_report_source",
+        skip_serializing_if = "ReportSource::is_empty"
+    )]
     pub source: ReportSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<ReportTableConfig>,
@@ -132,6 +237,19 @@ pub struct ReportBlockDefinition {
     pub filters: Vec<ReportFilterDefinition>,
     #[serde(default)]
     pub interactions: Vec<ReportInteractionDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportBlockDatasetQuery {
+    pub id: String,
+    #[serde(default)]
+    pub dimensions: Vec<String>,
+    #[serde(default)]
+    pub measures: Vec<String>,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -173,6 +291,21 @@ pub struct ReportSource {
     /// keys, rows enriched after).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub join: Vec<ReportSourceJoin>,
+}
+
+impl ReportSource {
+    pub fn is_empty(&self) -> bool {
+        self.schema.trim().is_empty()
+            && self.connection_id.is_none()
+            && self.mode == default_source_mode()
+            && self.condition.is_none()
+            && self.filter_mappings.is_empty()
+            && self.group_by.is_empty()
+            && self.aggregates.is_empty()
+            && self.order_by.is_empty()
+            && self.limit.is_none()
+            && self.join.is_empty()
+    }
 }
 
 /// Cross-schema join declared on a block-level source. Mirrors the per-cell
@@ -568,6 +701,56 @@ pub struct ReportFilterOptionsResponse {
     pub filter: ReportFilterOptionsMetadata,
     pub options: Vec<ReportFilterOption>,
     pub page: ReportFilterOptionsPage,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetQueryRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default)]
+    pub dimensions: Vec<String>,
+    #[serde(default)]
+    pub measures: Vec<String>,
+    #[serde(default, rename = "orderBy")]
+    pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<ReportPageRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetQueryResponse {
+    pub success: bool,
+    pub dataset: ReportDatasetQueryMetadata,
+    pub columns: Vec<ReportDatasetQueryColumn>,
+    pub rows: Vec<Vec<Value>>,
+    pub page: ReportDatasetQueryPage,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetQueryMetadata {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetQueryColumn {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub column_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ReportDatasetValueFormat>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetQueryPage {
+    pub offset: i64,
+    pub size: i64,
+    #[serde(rename = "totalCount")]
+    pub total_count: i64,
+    #[serde(rename = "hasNextPage")]
+    pub has_next_page: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

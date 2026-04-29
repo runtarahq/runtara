@@ -1,0 +1,194 @@
+{
+  "name": "Stock snapshots BI demo",
+  "slug": "stock-snapshots-bi-demo",
+  "description": "Demo report that uses definition.datasets for semantic BI blocks.",
+  "tags": ["demo", "reports", "datasets"],
+  "status": "published",
+  "definition": {
+    "definitionVersion": 1,
+    "markdown": "# Stock snapshots BI demo\n\nA semantic dataset-backed report over StockSnapshot.",
+    "datasets": [
+      {
+        "id": "stock_snapshots",
+        "label": "Stock snapshots",
+        "source": {
+          "schema": "StockSnapshot",
+          "connectionId": null
+        },
+        "timeDimension": "snapshot_date",
+        "dimensions": [
+          {
+            "field": "snapshot_date",
+            "label": "Snapshot date",
+            "type": "date",
+            "format": "date"
+          },
+          {
+            "field": "sku",
+            "label": "SKU",
+            "type": "string"
+          },
+          {
+            "field": "vendor",
+            "label": "Vendor",
+            "type": "string"
+          },
+          {
+            "field": "category",
+            "label": "Category",
+            "type": "string"
+          }
+        ],
+        "measures": [
+          {
+            "id": "snapshot_count",
+            "label": "Snapshots",
+            "op": "count",
+            "format": "number"
+          },
+          {
+            "id": "qty_total",
+            "label": "Total quantity",
+            "op": "sum",
+            "field": "qty",
+            "format": "number"
+          },
+          {
+            "id": "qty_avg",
+            "label": "Average quantity",
+            "op": "avg",
+            "field": "qty",
+            "format": "decimal"
+          }
+        ]
+      }
+    ],
+    "filters": [
+      {
+        "id": "vendor",
+        "label": "Vendor",
+        "type": "multi_select",
+        "options": {
+          "source": "object_model",
+          "schema": "StockSnapshot",
+          "field": "vendor",
+          "search": true
+        },
+        "appliesTo": [
+          {
+            "field": "vendor",
+            "op": "in"
+          }
+        ]
+      }
+    ],
+    "layout": [
+      {
+        "id": "summary",
+        "type": "metric_row",
+        "blocks": ["snapshot_count"]
+      },
+      {
+        "id": "main_grid",
+        "type": "grid",
+        "columns": 12,
+        "items": [
+          {
+            "blockId": "qty_by_day",
+            "colSpan": 8
+          },
+          {
+            "blockId": "vendor_summary",
+            "colSpan": 4
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "snapshot_count",
+        "type": "metric",
+        "title": "Snapshots",
+        "dataset": {
+          "id": "stock_snapshots",
+          "measures": ["snapshot_count"]
+        },
+        "metric": {
+          "valueField": "snapshot_count",
+          "label": "Snapshots",
+          "format": "number"
+        }
+      },
+      {
+        "id": "qty_by_day",
+        "type": "chart",
+        "title": "Quantity by day",
+        "dataset": {
+          "id": "stock_snapshots",
+          "dimensions": ["snapshot_date"],
+          "measures": ["qty_total"],
+          "orderBy": [
+            {
+              "field": "snapshot_date",
+              "direction": "asc"
+            }
+          ],
+          "limit": 90
+        },
+        "chart": {
+          "kind": "line",
+          "x": "snapshot_date",
+          "series": [
+            {
+              "field": "qty_total",
+              "label": "Total quantity"
+            }
+          ]
+        }
+      },
+      {
+        "id": "vendor_summary",
+        "type": "table",
+        "title": "Vendor summary",
+        "dataset": {
+          "id": "stock_snapshots",
+          "dimensions": ["vendor"],
+          "measures": ["snapshot_count", "qty_total", "qty_avg"],
+          "orderBy": [
+            {
+              "field": "qty_total",
+              "direction": "desc"
+            }
+          ]
+        },
+        "table": {
+          "columns": [
+            {
+              "field": "vendor",
+              "label": "Vendor"
+            },
+            {
+              "field": "snapshot_count",
+              "label": "Snapshots",
+              "format": "number"
+            },
+            {
+              "field": "qty_total",
+              "label": "Total quantity",
+              "format": "number"
+            },
+            {
+              "field": "qty_avg",
+              "label": "Average quantity",
+              "format": "decimal"
+            }
+          ],
+          "pagination": {
+            "defaultPageSize": 25,
+            "allowedPageSizes": [25, 50, 100]
+          }
+        }
+      }
+    ]
+  }
+}

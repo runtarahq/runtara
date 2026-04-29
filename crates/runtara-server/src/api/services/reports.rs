@@ -625,6 +625,76 @@ impl ReportService {
         })
     }
 
+    pub async fn query_dataset(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        dataset_id: &str,
+        request: ReportDatasetQueryRequest,
+    ) -> Result<ReportDatasetQueryResponse, ReportServiceError> {
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let dataset = report
+            .definition
+            .datasets
+            .iter()
+            .find(|dataset| dataset.id == dataset_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown report dataset '{}'", dataset_id))
+            })?;
+
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let page_size = clamp_page_size(request.page.as_ref().map(|page| page.size).unwrap_or(50));
+        let offset = request
+            .page
+            .as_ref()
+            .map(|page| page.offset)
+            .unwrap_or(0)
+            .max(0);
+        let compiled = compile_dataset_query(
+            "dataset query",
+            dataset,
+            &request.dimensions,
+            &request.measures,
+            &request.order_by,
+            Some(page_size),
+        )?;
+        let aggregate_request = build_aggregate_request_from_parts(
+            "dataset query",
+            &compiled.source.group_by,
+            &compiled.source.aggregates,
+            &compiled.source.order_by,
+            Some(page_size),
+            Some(offset),
+            build_dataset_condition(&report.definition, &resolved_filters),
+        )?;
+
+        let result = self
+            .instance_service
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &compiled.source.schema,
+                aggregate_request,
+                compiled.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        Ok(ReportDatasetQueryResponse {
+            success: true,
+            dataset: ReportDatasetQueryMetadata {
+                id: dataset.id.clone(),
+            },
+            columns: compiled.columns,
+            rows: result.rows,
+            page: ReportDatasetQueryPage {
+                offset,
+                size: page_size,
+                total_count: result.group_count,
+                has_next_page: offset + page_size < result.group_count,
+            },
+        })
+    }
+
     async fn save_report_definition(
         &self,
         tenant_id: &str,
@@ -669,6 +739,22 @@ impl ReportService {
             self.validate_filter_options(tenant_id, filter).await?;
         }
 
+        let mut dataset_ids = HashSet::new();
+        for dataset in &definition.datasets {
+            if dataset.id.trim().is_empty() {
+                return Err(ReportServiceError::Validation(
+                    "Report dataset IDs cannot be empty".to_string(),
+                ));
+            }
+            if !dataset_ids.insert(dataset.id.clone()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Duplicate report dataset ID '{}'",
+                    dataset.id
+                )));
+            }
+            self.validate_dataset_definition(tenant_id, dataset).await?;
+        }
+
         let mut block_ids = HashSet::new();
         let mut block_types = HashMap::new();
         for block in &definition.blocks {
@@ -684,6 +770,35 @@ impl ReportService {
                 )));
             }
             block_types.insert(block.id.clone(), block.block_type);
+            if let Some(dataset_query) = &block.dataset {
+                if !block.source.is_empty() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' must use either dataset or source, not both",
+                        block.id
+                    )));
+                }
+                let dataset = definition
+                    .datasets
+                    .iter()
+                    .find(|dataset| dataset.id == dataset_query.id)
+                    .ok_or_else(|| {
+                        ReportServiceError::Validation(format!(
+                            "Block '{}' references unknown dataset '{}'",
+                            block.id, dataset_query.id
+                        ))
+                    })?;
+                let compiled = compile_dataset_query(
+                    &block.id,
+                    dataset,
+                    &dataset_query.dimensions,
+                    &dataset_query.measures,
+                    &dataset_query.order_by,
+                    dataset_query.limit,
+                )?;
+                validate_dataset_block_output(block, &compiled.source)?;
+                validate_block_interactions(block, &filter_ids)?;
+                continue;
+            }
             if block.source.schema.trim().is_empty() {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' must specify an Object Model schema",
@@ -850,6 +965,141 @@ impl ReportService {
                     "Markdown references unknown report block '{}'",
                     placeholder
                 )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn validate_dataset_definition(
+        &self,
+        tenant_id: &str,
+        dataset: &ReportDatasetDefinition,
+    ) -> Result<(), ReportServiceError> {
+        if dataset.label.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Dataset '{}' must include a label",
+                dataset.id
+            )));
+        }
+        if dataset.source.schema.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Dataset '{}' must specify an Object Model schema",
+                dataset.id
+            )));
+        }
+
+        let schema = self
+            .schema_service
+            .get_schema_by_name(
+                &dataset.source.schema,
+                tenant_id,
+                dataset.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+        let schema_fields: HashSet<_> = schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+
+        if let Some(time_dimension) = &dataset.time_dimension
+            && !is_schema_field(&schema_fields, time_dimension)
+        {
+            return Err(ReportServiceError::Validation(format!(
+                "Dataset '{}' timeDimension '{}' is not a column on '{}'",
+                dataset.id, time_dimension, dataset.source.schema
+            )));
+        }
+
+        let mut dimension_ids = HashSet::new();
+        for dimension in &dataset.dimensions {
+            if dimension.field.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' dimension fields cannot be empty",
+                    dataset.id
+                )));
+            }
+            if dimension.label.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' dimension '{}' must include a label",
+                    dataset.id, dimension.field
+                )));
+            }
+            if !dimension_ids.insert(dimension.field.clone()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' has duplicate dimension '{}'",
+                    dataset.id, dimension.field
+                )));
+            }
+            if !is_schema_field(&schema_fields, &dimension.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' dimension '{}' is not a column on '{}'",
+                    dataset.id, dimension.field, dataset.source.schema
+                )));
+            }
+        }
+
+        let mut measure_ids = HashSet::new();
+        for measure in &dataset.measures {
+            if measure.id.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' measure IDs cannot be empty",
+                    dataset.id
+                )));
+            }
+            if measure.label.trim().is_empty() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' measure '{}' must include a label",
+                    dataset.id, measure.id
+                )));
+            }
+            if dimension_ids.contains(&measure.id) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' measure '{}' conflicts with a dimension field",
+                    dataset.id, measure.id
+                )));
+            }
+            if !measure_ids.insert(measure.id.clone()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' has duplicate measure '{}'",
+                    dataset.id, measure.id
+                )));
+            }
+            if let Some(field) = &measure.field
+                && !is_schema_field(&schema_fields, field)
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' measure '{}' field '{}' is not a column on '{}'",
+                    dataset.id, measure.id, field, dataset.source.schema
+                )));
+            }
+            if measure.op != ReportAggregateFn::Count
+                && measure.op != ReportAggregateFn::Expr
+                && measure
+                    .field
+                    .as_ref()
+                    .is_none_or(|field| field.trim().is_empty())
+            {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' measure '{}' requires field for op {:?}",
+                    dataset.id, measure.id, measure.op
+                )));
+            }
+            if measure.op == ReportAggregateFn::Expr && measure.expression.is_none() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Dataset '{}' measure '{}' requires expression for op expr",
+                    dataset.id, measure.id
+                )));
+            }
+            for order_by in &measure.order_by {
+                if !is_schema_field(&schema_fields, &order_by.field) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Dataset '{}' measure '{}' references unknown orderBy field '{}'",
+                        dataset.id, measure.id, order_by.field
+                    )));
+                }
             }
         }
 
@@ -1041,6 +1291,14 @@ impl ReportService {
         resolved_filters: &HashMap<String, Value>,
         block_request: Option<&ReportBlockDataRequest>,
     ) -> Result<ReportBlockRenderResult, ReportServiceError> {
+        let compiled_block;
+        let block = if block.dataset.is_some() {
+            compiled_block = compiled_dataset_block(definition, block)?;
+            &compiled_block
+        } else {
+            block
+        };
+
         let data = match block.block_type {
             ReportBlockType::Table => {
                 self.render_table_block(
@@ -2370,6 +2628,265 @@ fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
     }
 }
 
+#[derive(Debug)]
+struct CompiledDatasetQuery {
+    source: ReportSource,
+    columns: Vec<ReportDatasetQueryColumn>,
+}
+
+fn compiled_dataset_block(
+    definition: &ReportDefinition,
+    block: &ReportBlockDefinition,
+) -> Result<ReportBlockDefinition, ReportServiceError> {
+    let dataset_query = block.dataset.as_ref().ok_or_else(|| {
+        ReportServiceError::Validation(format!("Block '{}' does not define dataset", block.id))
+    })?;
+    let dataset = definition
+        .datasets
+        .iter()
+        .find(|dataset| dataset.id == dataset_query.id)
+        .ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Block '{}' references unknown dataset '{}'",
+                block.id, dataset_query.id
+            ))
+        })?;
+    let compiled = compile_dataset_query(
+        &block.id,
+        dataset,
+        &dataset_query.dimensions,
+        &dataset_query.measures,
+        &dataset_query.order_by,
+        dataset_query.limit,
+    )?;
+    let mut compiled_block = block.clone();
+    compiled_block.dataset = None;
+    compiled_block.source = compiled.source;
+    Ok(compiled_block)
+}
+
+fn compile_dataset_query(
+    context: &str,
+    dataset: &ReportDatasetDefinition,
+    dimensions: &[String],
+    measures: &[String],
+    order_by: &[ReportOrderBy],
+    limit: Option<i64>,
+) -> Result<CompiledDatasetQuery, ReportServiceError> {
+    if measures.is_empty() {
+        return Err(ReportServiceError::Validation(format!(
+            "{} must select at least one dataset measure",
+            humanize_dataset_context(context)
+        )));
+    }
+
+    let dimensions_by_field = dataset
+        .dimensions
+        .iter()
+        .map(|dimension| (dimension.field.as_str(), dimension))
+        .collect::<HashMap<_, _>>();
+    let measures_by_id = dataset
+        .measures
+        .iter()
+        .map(|measure| (measure.id.as_str(), measure))
+        .collect::<HashMap<_, _>>();
+
+    let mut seen_dimensions = HashSet::new();
+    let mut group_by = Vec::with_capacity(dimensions.len());
+    let mut columns = Vec::with_capacity(dimensions.len() + measures.len());
+    for dimension_id in dimensions {
+        let dimension_id = dimension_id.trim();
+        let Some(dimension) = dimensions_by_field.get(dimension_id) else {
+            return Err(ReportServiceError::Validation(format!(
+                "{} references unknown dataset dimension '{}'",
+                humanize_dataset_context(context),
+                dimension_id
+            )));
+        };
+        if !seen_dimensions.insert(dimension_id.to_string()) {
+            return Err(ReportServiceError::Validation(format!(
+                "{} selects duplicate dataset dimension '{}'",
+                humanize_dataset_context(context),
+                dimension_id
+            )));
+        }
+        group_by.push(dimension.field.clone());
+        columns.push(ReportDatasetQueryColumn {
+            key: dimension.field.clone(),
+            label: dimension.label.clone(),
+            column_type: dataset_dimension_type_name(dimension.dimension_type).to_string(),
+            format: dimension.format,
+        });
+    }
+
+    let mut seen_measures = HashSet::new();
+    let mut aggregates = Vec::with_capacity(measures.len());
+    for measure_id in measures {
+        let measure_id = measure_id.trim();
+        let Some(measure) = measures_by_id.get(measure_id) else {
+            return Err(ReportServiceError::Validation(format!(
+                "{} references unknown dataset measure '{}'",
+                humanize_dataset_context(context),
+                measure_id
+            )));
+        };
+        if !seen_measures.insert(measure_id.to_string()) {
+            return Err(ReportServiceError::Validation(format!(
+                "{} selects duplicate dataset measure '{}'",
+                humanize_dataset_context(context),
+                measure_id
+            )));
+        }
+        aggregates.push(ReportAggregateSpec {
+            alias: measure.id.clone(),
+            op: measure.op,
+            field: measure.field.clone(),
+            distinct: measure.distinct,
+            order_by: measure.order_by.clone(),
+            expression: measure.expression.clone(),
+            percentile: measure.percentile,
+        });
+        columns.push(ReportDatasetQueryColumn {
+            key: measure.id.clone(),
+            label: measure.label.clone(),
+            column_type: "measure".to_string(),
+            format: Some(measure.format),
+        });
+    }
+
+    let output_fields = group_by
+        .iter()
+        .chain(aggregates.iter().map(|aggregate| &aggregate.alias))
+        .cloned()
+        .collect::<HashSet<_>>();
+    for order in order_by {
+        if !output_fields.contains(&order.field) {
+            return Err(ReportServiceError::Validation(format!(
+                "{} orderBy references unselected dataset field '{}'",
+                humanize_dataset_context(context),
+                order.field
+            )));
+        }
+    }
+
+    Ok(CompiledDatasetQuery {
+        source: ReportSource {
+            schema: dataset.source.schema.clone(),
+            connection_id: dataset.source.connection_id.clone(),
+            mode: ReportSourceMode::Aggregate,
+            condition: None,
+            filter_mappings: vec![],
+            group_by,
+            aggregates,
+            order_by: order_by.to_vec(),
+            limit: limit.map(|value| value.clamp(1, MAX_AGGREGATE_ROWS)),
+            join: vec![],
+        },
+        columns,
+    })
+}
+
+fn build_dataset_condition(
+    definition: &ReportDefinition,
+    resolved_filters: &HashMap<String, Value>,
+) -> Option<Condition> {
+    let mut conditions = Vec::new();
+    for filter in &definition.filters {
+        let Some(value) = resolved_filters.get(&filter.id) else {
+            continue;
+        };
+        for target in &filter.applies_to {
+            if target.block_id.is_some() {
+                continue;
+            }
+            if let Some(condition) = condition_from_filter_target(target, value) {
+                conditions.push(condition);
+            }
+        }
+    }
+    combine_conditions(conditions)
+}
+
+fn validate_dataset_block_output(
+    block: &ReportBlockDefinition,
+    source: &ReportSource,
+) -> Result<(), ReportServiceError> {
+    let output_fields = aggregate_source_output_fields(&source.group_by, &source.aggregates);
+
+    if let Some(table) = &block.table {
+        for column in &table.columns {
+            if column.is_chart() {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' dataset-backed table chart columns are not supported yet",
+                    block.id
+                )));
+            }
+            if !output_fields.contains(&column.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown dataset table field '{}'",
+                    block.id, column.field
+                )));
+            }
+        }
+        for sort in &table.default_sort {
+            if !output_fields.contains(&sort.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown dataset table sort field '{}'",
+                    block.id, sort.field
+                )));
+            }
+        }
+    }
+
+    if let Some(chart) = &block.chart {
+        if !output_fields.contains(&chart.x) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' references unknown dataset chart x field '{}'",
+                block.id, chart.x
+            )));
+        }
+        for series in &chart.series {
+            if !output_fields.contains(&series.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' references unknown dataset chart series field '{}'",
+                    block.id, series.field
+                )));
+            }
+        }
+    }
+
+    if let Some(metric) = &block.metric
+        && !output_fields.contains(&metric.value_field)
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' references unknown dataset metric valueField '{}'",
+            block.id, metric.value_field
+        )));
+    }
+
+    Ok(())
+}
+
+fn humanize_dataset_context(context: &str) -> String {
+    if context == "dataset query" {
+        "Dataset query".to_string()
+    } else {
+        format!("Block '{}'", context)
+    }
+}
+
+fn dataset_dimension_type_name(value: ReportDatasetFieldType) -> &'static str {
+    match value {
+        ReportDatasetFieldType::String => "string",
+        ReportDatasetFieldType::Number => "number",
+        ReportDatasetFieldType::Decimal => "decimal",
+        ReportDatasetFieldType::Boolean => "boolean",
+        ReportDatasetFieldType::Date => "date",
+        ReportDatasetFieldType::Datetime => "datetime",
+        ReportDatasetFieldType::Json => "json",
+    }
+}
+
 /// Resolved dimension data for a single block-level join. Held in memory
 /// during a single aggregate render; sized by `MAX_BROADCAST_JOIN_DIM_ROWS`.
 struct JoinResolution {
@@ -3460,6 +3977,7 @@ mod tests {
             block_type: ReportBlockType::Table,
             title: None,
             lazy: false,
+            dataset: None,
             source: ReportSource {
                 schema: "Order".to_string(),
                 connection_id: None,
@@ -3509,6 +4027,56 @@ mod tests {
             column_type: None,
             chart: None,
             source: None,
+        }
+    }
+
+    fn test_dataset() -> ReportDatasetDefinition {
+        ReportDatasetDefinition {
+            id: "stock_snapshots".to_string(),
+            label: "Stock snapshots".to_string(),
+            source: ReportDatasetSource {
+                schema: "StockSnapshot".to_string(),
+                connection_id: None,
+            },
+            time_dimension: Some("snapshot_date".to_string()),
+            dimensions: vec![
+                ReportDatasetDimension {
+                    field: "vendor".to_string(),
+                    label: "Vendor".to_string(),
+                    dimension_type: ReportDatasetFieldType::String,
+                    format: None,
+                },
+                ReportDatasetDimension {
+                    field: "category".to_string(),
+                    label: "Category".to_string(),
+                    dimension_type: ReportDatasetFieldType::String,
+                    format: None,
+                },
+            ],
+            measures: vec![
+                ReportDatasetMeasure {
+                    id: "snapshot_count".to_string(),
+                    label: "Snapshots".to_string(),
+                    op: ReportAggregateFn::Count,
+                    field: None,
+                    distinct: false,
+                    order_by: vec![],
+                    expression: None,
+                    percentile: None,
+                    format: ReportDatasetValueFormat::Number,
+                },
+                ReportDatasetMeasure {
+                    id: "qty_total".to_string(),
+                    label: "Total quantity".to_string(),
+                    op: ReportAggregateFn::Sum,
+                    field: Some("qty".to_string()),
+                    distinct: false,
+                    order_by: vec![],
+                    expression: None,
+                    percentile: None,
+                    format: ReportDatasetValueFormat::Number,
+                },
+            ],
         }
     }
 
@@ -3710,6 +4278,166 @@ mod tests {
         assert_eq!(expression["arguments"][0]["valueType"], json!("alias"));
         assert_eq!(expression["arguments"][1]["valueType"], json!("alias"));
         serde_json::from_value::<runtara_object_store::ExprNode>(expression).unwrap();
+    }
+
+    #[test]
+    fn dataset_block_deserializes_without_raw_source() {
+        let block: ReportBlockDefinition = serde_json::from_value(json!({
+            "id": "vendor_summary",
+            "type": "table",
+            "dataset": {
+                "id": "stock_snapshots",
+                "dimensions": ["vendor"],
+                "measures": ["snapshot_count", "qty_total"],
+                "orderBy": [{"field": "qty_total", "direction": "desc"}]
+            },
+            "table": {
+                "columns": [
+                    {"field": "vendor", "label": "Vendor"},
+                    {"field": "qty_total", "label": "Total quantity"}
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert!(block.source.is_empty());
+        assert_eq!(block.dataset.unwrap().id, "stock_snapshots");
+    }
+
+    #[test]
+    fn dataset_query_compiles_to_aggregate_source() {
+        let dataset = test_dataset();
+        let compiled = compile_dataset_query(
+            "vendor_summary",
+            &dataset,
+            &["vendor".to_string()],
+            &["snapshot_count".to_string(), "qty_total".to_string()],
+            &[ReportOrderBy {
+                field: "qty_total".to_string(),
+                direction: "desc".to_string(),
+            }],
+            Some(25),
+        )
+        .unwrap();
+
+        assert_eq!(compiled.source.schema, "StockSnapshot");
+        assert_eq!(compiled.source.mode, ReportSourceMode::Aggregate);
+        assert_eq!(compiled.source.group_by, vec!["vendor".to_string()]);
+        assert_eq!(compiled.source.aggregates.len(), 2);
+        assert_eq!(compiled.source.aggregates[0].alias, "snapshot_count");
+        assert_eq!(compiled.source.aggregates[0].op, ReportAggregateFn::Count);
+        assert_eq!(compiled.source.aggregates[1].field, Some("qty".to_string()));
+        assert_eq!(compiled.source.limit, Some(25));
+        assert_eq!(
+            compiled
+                .columns
+                .iter()
+                .map(|c| c.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vendor", "snapshot_count", "qty_total"]
+        );
+
+        let request = build_aggregate_request_from_parts(
+            "vendor_summary",
+            &compiled.source.group_by,
+            &compiled.source.aggregates,
+            &compiled.source.order_by,
+            Some(50),
+            Some(0),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(request.group_by, vec!["vendor".to_string()]);
+        assert_eq!(request.aggregates[0].fn_, AggregateFn::Count);
+        assert_eq!(request.aggregates[1].fn_, AggregateFn::Sum);
+        assert_eq!(request.order_by[0].column, "qty_total");
+        assert_eq!(request.order_by[0].direction, SortDirection::Desc);
+    }
+
+    #[test]
+    fn dataset_query_rejects_unknown_fields_and_unselected_sort() {
+        let dataset = test_dataset();
+
+        let err = compile_dataset_query(
+            "vendor_summary",
+            &dataset,
+            &["sku".to_string()],
+            &["qty_total".to_string()],
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown dataset dimension 'sku'"));
+
+        let err = compile_dataset_query(
+            "vendor_summary",
+            &dataset,
+            &["vendor".to_string()],
+            &["missing".to_string()],
+            &[],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown dataset measure 'missing'")
+        );
+
+        let err = compile_dataset_query(
+            "vendor_summary",
+            &dataset,
+            &["vendor".to_string()],
+            &["qty_total".to_string()],
+            &[ReportOrderBy {
+                field: "snapshot_count".to_string(),
+                direction: "desc".to_string(),
+            }],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unselected dataset field"));
+    }
+
+    #[test]
+    fn dataset_block_validation_checks_visual_output_fields() {
+        let dataset = test_dataset();
+        let mut block = test_block("vendor_summary");
+        block.dataset = Some(ReportBlockDatasetQuery {
+            id: dataset.id.clone(),
+            dimensions: vec!["vendor".to_string()],
+            measures: vec!["qty_total".to_string()],
+            order_by: vec![],
+            limit: None,
+        });
+        block.source = default_report_source();
+        block.table = Some(ReportTableConfig {
+            columns: vec![table_column("vendor"), table_column("qty_total")],
+            default_sort: vec![],
+            pagination: None,
+        });
+
+        let compiled = compile_dataset_query(
+            "vendor_summary",
+            &dataset,
+            &["vendor".to_string()],
+            &["qty_total".to_string()],
+            &[],
+            None,
+        )
+        .unwrap();
+        validate_dataset_block_output(&block, &compiled.source).unwrap();
+
+        block.table = Some(ReportTableConfig {
+            columns: vec![table_column("category")],
+            default_sort: vec![],
+            pagination: None,
+        });
+        let err = validate_dataset_block_output(&block, &compiled.source).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown dataset table field 'category'")
+        );
     }
 
     #[test]

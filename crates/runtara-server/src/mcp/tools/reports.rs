@@ -64,7 +64,7 @@ pub struct CreateReportParams {
     )]
     pub status: Option<String>,
     #[schemars(
-        description = "Full report definition: {definitionVersion, markdown, layout?, filters, blocks}. Every block must include a stable id; every layout node must include a stable id."
+        description = "Full report definition: {definitionVersion, markdown, layout?, filters, datasets?, blocks}. For BI reports, define datasets and let blocks reference them. Every block must include a stable id; every layout node must include a stable id."
     )]
     pub definition: Value,
 }
@@ -81,7 +81,7 @@ pub struct UpdateReportParams {
     #[schemars(description = "Report status: draft, published, or archived.")]
     pub status: Option<String>,
     #[schemars(
-        description = "Full replacement report definition: {definitionVersion, markdown, layout?, filters, blocks}. Use block/layout mutation tools for atomic edits."
+        description = "Full replacement report definition: {definitionVersion, markdown, layout?, filters, datasets?, blocks}. Use datasets for BI reports and block/layout mutation tools for atomic edits."
     )]
     pub definition: Value,
 }
@@ -1148,16 +1148,35 @@ fn report_authoring_schema() -> Value {
             "markdown": "Backward-compatible narrative Markdown. Render data blocks with standalone placeholders like {{ block.daily_qty }} only when definition.layout is absent. Do not put block placeholders inside Markdown tables for alignment/layout.",
             "layout": "Optional structured layout tree. Prefer this over Markdown placeholders for dashboards and report layout. Every layout node must include a stable id and type.",
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
+            "datasets": "Optional semantic BI datasets. Prefer defining datasets for aggregate BI reports so blocks reference named dimensions/measures instead of raw aggregate specs.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
         },
         "biGuidance": {
             "currentContract": [
+                "For BI-style reports, define definition.datasets first, then use block.dataset with selected dimensions/measures.",
+                "Use raw block.source only for lower-level Object Model queries, custom joins, or reports that have not moved to datasets yet.",
                 "For BI-style reports, define global filters with object_model-backed options so viewers can self-serve without raw SQL.",
                 "Use filter.options.source='object_model' with schema, field, optional labelField, search=true, and dependsOn for cascading filter option lists.",
                 "Use block.interactions for drill/cross-filter behavior. Supported UI events are point_click on charts and row_click/cell_click on tables.",
                 "Use set_filter actions to update global filters from clicked chart/table data, e.g. valueFrom='datum.category'.",
-                "Keep exploration governed: only expose dimensions and measures as report blocks/filters/interactions that the report author intentionally configured."
+                "Keep exploration governed: only expose dimensions and measures declared in datasets and report blocks/filters/interactions that the report author intentionally configured."
             ],
+            "datasetExample": {
+                "id": "stock_snapshots",
+                "label": "Stock snapshots",
+                "source": {"schema": "StockSnapshot", "connectionId": null},
+                "timeDimension": "snapshot_date",
+                "dimensions": [
+                    {"field": "sku", "label": "SKU", "type": "string"},
+                    {"field": "vendor", "label": "Vendor", "type": "string"},
+                    {"field": "category", "label": "Category", "type": "string"}
+                ],
+                "measures": [
+                    {"id": "snapshot_count", "label": "Snapshots", "op": "count", "format": "number"},
+                    {"id": "qty_total", "label": "Total quantity", "op": "sum", "field": "qty", "format": "number"},
+                    {"id": "qty_avg", "label": "Average quantity", "op": "avg", "field": "qty", "format": "decimal"}
+                ]
+            },
             "dynamicFilterExample": {
                 "id": "vendor",
                 "label": "Vendor",
@@ -1198,7 +1217,8 @@ fn report_authoring_schema() -> Value {
                 "type": "table | chart | metric | markdown",
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
-                "source": "Object Model data source and query plan.",
+                "dataset": "Preferred BI query shape: {id, dimensions, measures, orderBy?, limit?}. The id must match definition.datasets[].id.",
+                "source": "Object Model data source and query plan. Required only when block.dataset is absent.",
                 "filters": "Optional per-block filter presets.",
                 "interactions": "Optional drill/cross-filter actions. Use point_click, row_click, or cell_click triggers with set_filter actions."
             },
@@ -1239,6 +1259,15 @@ fn report_authoring_schema() -> Value {
             "orderBy": "Sort array using {field, direction}. Field must be a row field, groupBy field, or aggregate alias depending on source mode.",
             "limit": "Optional row/group cap."
         },
+        "datasetShape": {
+            "id": "Stable dataset id, unique within definition.datasets.",
+            "label": "Human-readable dataset name.",
+            "source": {"schema": "Object Model schema name", "connectionId": "Optional connection id or null"},
+            "timeDimension": "Optional date/datetime dimension field used as the default time axis.",
+            "dimensions": "Array of {field, label, type, format?}. The field is the stable dimension id and must exist on the source schema.",
+            "measures": "Array of {id, label, op, field?, distinct?, orderBy?, expression?, percentile?, format}. The id is the aggregate alias exposed to blocks.",
+            "blockDataset": {"id": "stock_snapshots", "dimensions": ["vendor"], "measures": ["snapshot_count", "qty_total"], "orderBy": [{"field": "qty_total", "direction": "desc"}]}
+        },
         "aggregateOps": {
             "core": ["count", "sum", "avg", "min", "max", "first_value", "last_value", "percentile_cont", "percentile_disc", "stddev_samp", "var_samp", "expr"],
             "expr": {
@@ -1269,9 +1298,12 @@ fn report_authoring_schema() -> Value {
             "For chart table columns, field is a synthetic cell key; configure column.chart and column.source.join.",
             "For chart.x, use an aggregate output field, usually a source.groupBy field.",
             "For chart.series[].field and metric.valueField, use aggregate aliases from source.aggregates.",
-            "For source.orderBy and table.defaultSort, use field, not column."
+            "For source.orderBy and table.defaultSort, use field, not column.",
+            "For dataset-backed blocks, table columns/chart fields/metric valueField use selected block.dataset dimensions and measures."
         ],
         "commonMistakes": [
+            "For BI reports, do not hand-author repeated raw aggregate block.source specs when the same semantic fields can live in definition.datasets.",
+            "Do not put dataset dimensions/measures directly on a block. Use block.dataset.dimensions and block.dataset.measures.",
             "Do not put columns at block.columns, block.fields, or source.columns. Use block.table.columns.",
             "Do not put chartType, x, or y at block top-level. Use block.chart.kind, block.chart.x, and block.chart.series[].field.",
             "Do not use metric.valueAlias or top-level valueAlias. Use block.metric.valueField.",
@@ -1283,6 +1315,28 @@ fn report_authoring_schema() -> Value {
             "Always run validate_report before saving or mutating report blocks."
         ],
         "examples": {
+            "datasetBackedTable": {
+                "definitionDatasets": [
+                    {
+                        "id": "stock_snapshots",
+                        "label": "Stock snapshots",
+                        "source": {"schema": "StockSnapshot", "connectionId": null},
+                        "timeDimension": "snapshot_date",
+                        "dimensions": [{"field": "vendor", "label": "Vendor", "type": "string"}],
+                        "measures": [
+                            {"id": "snapshot_count", "label": "Snapshots", "op": "count", "format": "number"},
+                            {"id": "qty_total", "label": "Total quantity", "op": "sum", "field": "qty", "format": "number"}
+                        ]
+                    }
+                ],
+                "block": {
+                    "id": "vendor_summary",
+                    "type": "table",
+                    "title": "Vendor summary",
+                    "dataset": {"id": "stock_snapshots", "dimensions": ["vendor"], "measures": ["snapshot_count", "qty_total"], "orderBy": [{"field": "qty_total", "direction": "desc"}]},
+                    "table": {"columns": [{"field": "vendor", "label": "Vendor"}, {"field": "snapshot_count", "label": "Snapshots", "format": "number"}, {"field": "qty_total", "label": "Total quantity", "format": "number"}]}
+                }
+            },
             "layout": [
                 {"id": "intro", "type": "markdown", "content": "# Demand summary\n\nLive Object Model data."},
                 {"id": "summary", "type": "metric_row", "blocks": ["total_snaps", "unique_skus"]},
@@ -1364,12 +1418,32 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
             "markdown",
             "layout",
             "filters",
+            "datasets",
             "blocks",
         ],
         &mut issues,
     );
     collect_markdown_layout_issues(definition, &mut issues);
     collect_layout_authoring_issues(definition, &mut issues);
+
+    if let Some(datasets) = definition.get("datasets") {
+        match datasets.as_array() {
+            Some(datasets) => {
+                for (index, dataset) in datasets.iter().enumerate() {
+                    collect_dataset_authoring_issues(
+                        &format!("$.datasets[{index}]"),
+                        dataset,
+                        &mut issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                "$.datasets",
+                "INVALID_DATASETS",
+                "Report definition datasets must be an array.",
+            )),
+        }
+    }
 
     if let Some(blocks) = definition.get("blocks") {
         match blocks.as_array() {
@@ -1392,6 +1466,164 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
     }
 
     issues
+}
+
+fn collect_dataset_authoring_issues(path: &str, dataset: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(
+        path,
+        dataset,
+        &[
+            "id",
+            "label",
+            "source",
+            "timeDimension",
+            "dimensions",
+            "measures",
+        ],
+        issues,
+    );
+    if dataset
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_DATASET_ID",
+            "Dataset must include a stable non-empty id.",
+        ));
+    }
+    if dataset
+        .get("label")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.label"),
+            "MISSING_DATASET_LABEL",
+            "Dataset must include a label.",
+        ));
+    }
+    match dataset.get("source") {
+        Some(source) => {
+            collect_unknown_keys(
+                &format!("{path}.source"),
+                source,
+                &["schema", "connectionId"],
+                issues,
+            );
+            if source
+                .get("schema")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                issues.push(error(
+                    format!("{path}.source.schema"),
+                    "MISSING_DATASET_SOURCE_SCHEMA",
+                    "Dataset source must include an Object Model schema name.",
+                ));
+            }
+        }
+        None => issues.push(error(
+            format!("{path}.source"),
+            "MISSING_DATASET_SOURCE",
+            "Dataset must include source with at least {schema}.",
+        )),
+    }
+
+    match dataset.get("dimensions").and_then(Value::as_array) {
+        Some(dimensions) => {
+            for (index, dimension) in dimensions.iter().enumerate() {
+                let dimension_path = format!("{path}.dimensions[{index}]");
+                collect_unknown_keys(
+                    &dimension_path,
+                    dimension,
+                    &["field", "label", "type", "format"],
+                    issues,
+                );
+                for key in ["field", "label", "type"] {
+                    if dimension
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    {
+                        issues.push(error(
+                            format!("{dimension_path}.{key}"),
+                            "MISSING_DATASET_DIMENSION_FIELD",
+                            "Dataset dimensions must include field, label, and type.",
+                        ));
+                    }
+                }
+            }
+        }
+        None => issues.push(error(
+            format!("{path}.dimensions"),
+            "MISSING_DATASET_DIMENSIONS",
+            "Dataset must include dimensions: [{field, label, type, format?}, ...].",
+        )),
+    }
+
+    match dataset.get("measures").and_then(Value::as_array) {
+        Some(measures) => {
+            for (index, measure) in measures.iter().enumerate() {
+                let measure_path = format!("{path}.measures[{index}]");
+                collect_unknown_keys_with_messages(
+                    &measure_path,
+                    measure,
+                    &[
+                        "id",
+                        "label",
+                        "op",
+                        "field",
+                        "distinct",
+                        "orderBy",
+                        "expression",
+                        "percentile",
+                        "format",
+                    ],
+                    |key| match key {
+                        "alias" => Some((
+                            "MISNAMED_DATASET_MEASURE_ID",
+                            "Dataset measures use id, not alias.",
+                        )),
+                        "column" => Some((
+                            "MISNAMED_DATASET_MEASURE_FIELD",
+                            "Dataset measures use field, not column.",
+                        )),
+                        _ => None,
+                    },
+                    issues,
+                );
+                for key in ["id", "label", "op", "format"] {
+                    if measure
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                    {
+                        issues.push(error(
+                            format!("{measure_path}.{key}"),
+                            "MISSING_DATASET_MEASURE_FIELD",
+                            "Dataset measures must include id, label, op, and format.",
+                        ));
+                    }
+                }
+                if let Some(order_by) = measure.get("orderBy").and_then(Value::as_array) {
+                    for (order_index, order) in order_by.iter().enumerate() {
+                        collect_order_by_issues(
+                            &format!("{measure_path}.orderBy[{order_index}]"),
+                            order,
+                            issues,
+                        );
+                    }
+                }
+            }
+        }
+        None => issues.push(error(
+            format!("{path}.measures"),
+            "MISSING_DATASET_MEASURES",
+            "Dataset must include measures: [{id, label, op, field?, format}, ...].",
+        )),
+    }
 }
 
 fn collect_markdown_layout_issues(definition: &Value, issues: &mut Vec<AuthoringIssue>) {
@@ -1709,6 +1941,7 @@ fn collect_report_block_authoring_issues(
             "type",
             "title",
             "lazy",
+            "dataset",
             "source",
             "table",
             "chart",
@@ -1765,12 +1998,14 @@ fn collect_report_block_authoring_issues(
                 "Report block must include type: table, chart, metric, or markdown.",
             ));
         }
+        let has_dataset = block.get("dataset").is_some();
         match block.get("source") {
             Some(source) if source.is_object() => {
                 if source
                     .get("schema")
                     .and_then(Value::as_str)
                     .is_none_or(str::is_empty)
+                    && !has_dataset
                 {
                     issues.push(error(
                         format!("{path}.source.schema"),
@@ -1779,14 +2014,18 @@ fn collect_report_block_authoring_issues(
                     ));
                 }
             }
-            _ => issues.push(error(
+            _ if !has_dataset => issues.push(error(
                 format!("{path}.source"),
                 "MISSING_BLOCK_SOURCE",
-                "Report block must include source with at least {schema}.",
+                "Report block must include either dataset or source with at least {schema}.",
             )),
+            _ => {}
         }
     }
 
+    if let Some(dataset) = block.get("dataset") {
+        collect_block_dataset_issues(&format!("{path}.dataset"), dataset, issues);
+    }
     if let Some(source) = block.get("source") {
         collect_source_issues(&format!("{path}.source"), source, issues);
     }
@@ -1847,11 +2086,12 @@ fn collect_report_block_authoring_issues(
                 .and_then(|source| source.get("aggregates"))
                 .and_then(Value::as_array)
                 .is_none_or(Vec::is_empty)
+                && block.get("dataset").is_none()
             {
                 issues.push(error(
                     format!("{path}.source.aggregates"),
-                    "MISSING_CHART_AGGREGATES",
-                    "Chart blocks need source.aggregates so the renderer has value series to plot.",
+                    "MISSING_CHART_QUERY",
+                    "Chart blocks need either dataset.measures or source.aggregates so the renderer has value series to plot.",
                 ));
             }
         }
@@ -1876,15 +2116,63 @@ fn collect_report_block_authoring_issues(
                 .and_then(|source| source.get("aggregates"))
                 .and_then(Value::as_array)
                 .is_none_or(Vec::is_empty)
+                && block.get("dataset").is_none()
             {
                 issues.push(error(
                     format!("{path}.source.aggregates"),
-                    "MISSING_METRIC_AGGREGATES",
-                    "Metric blocks need source.aggregates so metric.valueField has a value.",
+                    "MISSING_METRIC_QUERY",
+                    "Metric blocks need either dataset.measures or source.aggregates so metric.valueField has a value.",
                 ));
             }
         }
         _ => {}
+    }
+}
+
+fn collect_block_dataset_issues(path: &str, dataset: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(
+        path,
+        dataset,
+        &["id", "dimensions", "measures", "orderBy", "limit"],
+        issues,
+    );
+    if dataset
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_BLOCK_DATASET_ID",
+            "Block dataset reference must include id matching definition.datasets[].id.",
+        ));
+    }
+    match dataset.get("dimensions") {
+        Some(value) if value.as_array().is_some() => {}
+        Some(_) => issues.push(error(
+            format!("{path}.dimensions"),
+            "INVALID_BLOCK_DATASET_DIMENSIONS",
+            "Block dataset dimensions must be an array of dataset dimension ids.",
+        )),
+        None => {}
+    }
+    match dataset.get("measures") {
+        Some(value) if value.as_array().is_some() => {}
+        Some(_) => issues.push(error(
+            format!("{path}.measures"),
+            "INVALID_BLOCK_DATASET_MEASURES",
+            "Block dataset measures must be an array of dataset measure ids.",
+        )),
+        None => issues.push(error(
+            format!("{path}.measures"),
+            "MISSING_BLOCK_DATASET_MEASURES",
+            "Block dataset reference must select at least one measure.",
+        )),
+    }
+    if let Some(order_by) = dataset.get("orderBy").and_then(Value::as_array) {
+        for (index, order) in order_by.iter().enumerate() {
+            collect_order_by_issues(&format!("{path}.orderBy[{index}]"), order, issues);
+        }
     }
 }
 
@@ -2411,6 +2699,45 @@ mod tests {
                     "kind": "line",
                     "x": "snapshot_date",
                     "series": [{"field": "qty_total", "label": "Qty"}]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+
+        assert!(authoring_errors(&issues).next().is_none());
+    }
+
+    #[test]
+    fn report_authoring_accepts_dataset_backed_block_shape() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.vendor_summary }}",
+            "datasets": [{
+                "id": "stock_snapshots",
+                "label": "Stock snapshots",
+                "source": {"schema": "StockSnapshot", "connectionId": null},
+                "timeDimension": "snapshot_date",
+                "dimensions": [{"field": "vendor", "label": "Vendor", "type": "string"}],
+                "measures": [
+                    {"id": "snapshot_count", "label": "Snapshots", "op": "count", "format": "number"},
+                    {"id": "qty_total", "label": "Total quantity", "op": "sum", "field": "qty", "format": "number"}
+                ]
+            }],
+            "blocks": [{
+                "id": "vendor_summary",
+                "type": "table",
+                "dataset": {
+                    "id": "stock_snapshots",
+                    "dimensions": ["vendor"],
+                    "measures": ["snapshot_count", "qty_total"],
+                    "orderBy": [{"field": "qty_total", "direction": "desc"}]
+                },
+                "table": {
+                    "columns": [
+                        {"field": "vendor", "label": "Vendor"},
+                        {"field": "qty_total", "label": "Total quantity", "format": "number"}
+                    ]
                 }
             }]
         });
