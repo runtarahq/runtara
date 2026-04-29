@@ -64,6 +64,51 @@ fn validate_path(path: &str) -> Result<(), ServiceError> {
     Ok(())
 }
 
+/// Validate that `definition` is a JSON object with a non-empty, ≤255-char `name`.
+/// Returns specific errors so callers see what's actually wrong instead of the
+/// historical catch-all "non-empty 'name' field" message.
+fn validate_execution_graph_name(definition: &Value) -> Result<(), ServiceError> {
+    let object = definition.as_object().ok_or_else(|| {
+        ServiceError::ValidationError(format!(
+            "executionGraph must be a JSON object, got {}. Some MCP clients stringify large arguments — pass the graph as an object, not a JSON-encoded string.",
+            json_value_kind(definition)
+        ))
+    })?;
+    let Some(name_value) = object.get("name") else {
+        return Err(ServiceError::ValidationError(
+            "Execution graph must contain a non-empty 'name' field".to_string(),
+        ));
+    };
+    let name = name_value.as_str().ok_or_else(|| {
+        ServiceError::ValidationError(format!(
+            "Execution graph 'name' must be a string, got {}",
+            json_value_kind(name_value)
+        ))
+    })?;
+    if name.trim().is_empty() {
+        return Err(ServiceError::ValidationError(
+            "Execution graph must contain a non-empty 'name' field".to_string(),
+        ));
+    }
+    if name.len() > 255 {
+        return Err(ServiceError::ValidationError(
+            "Workflow name cannot exceed 255 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 impl WorkflowService {
     pub fn new(repository: Arc<WorkflowRepository>, connections: Arc<ConnectionsFacade>) -> Self {
         Self {
@@ -269,21 +314,7 @@ impl WorkflowService {
             ));
         }
 
-        // Validate name in execution graph
-        let name = definition
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if name.trim().is_empty() {
-            return Err(ServiceError::ValidationError(
-                "Execution graph must contain a non-empty 'name' field".to_string(),
-            ));
-        }
-        if name.len() > 255 {
-            return Err(ServiceError::ValidationError(
-                "Workflow name cannot exceed 255 characters".to_string(),
-            ));
-        }
+        validate_execution_graph_name(&definition)?;
 
         // Validate description length if present
         if let Some(description) = definition.get("description").and_then(|v| v.as_str())
@@ -474,21 +505,7 @@ impl WorkflowService {
             ));
         }
 
-        // Validate name in execution graph
-        let name = definition
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if name.trim().is_empty() {
-            return Err(ServiceError::ValidationError(
-                "Execution graph must contain a non-empty 'name' field".to_string(),
-            ));
-        }
-        if name.len() > 255 {
-            return Err(ServiceError::ValidationError(
-                "Workflow name cannot exceed 255 characters".to_string(),
-            ));
-        }
+        validate_execution_graph_name(&definition)?;
 
         // Validate description length if present
         if let Some(description) = definition.get("description").and_then(|v| v.as_str())
@@ -1102,6 +1119,82 @@ mod tests {
         } else {
             panic!("Expected WorkflowValidationError variant");
         }
+    }
+
+    // =========================================================================
+    // validate_execution_graph_name() tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_graph_name_accepts_valid_name() {
+        let v = serde_json::json!({"name": "MyWorkflow"});
+        assert!(validate_execution_graph_name(&v).is_ok());
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_string_definition_with_specific_message() {
+        let v = serde_json::Value::String(r#"{"name":"MyWorkflow"}"#.to_string());
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a JSON object") && msg.contains("got string"),
+            "expected type-aware message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_array_definition() {
+        let v = serde_json::json!([]);
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        assert!(err.to_string().contains("got array"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_missing_name() {
+        let v = serde_json::json!({"description": "no name"});
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("non-empty 'name' field"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_non_string_name() {
+        let v = serde_json::json!({"name": 42});
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'name' must be a string") && msg.contains("got number"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_empty_string() {
+        let v = serde_json::json!({"name": ""});
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("non-empty 'name' field"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_whitespace_only() {
+        let v = serde_json::json!({"name": "   "});
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("non-empty 'name' field"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_graph_name_rejects_too_long() {
+        let v = serde_json::json!({"name": "a".repeat(256)});
+        let err = validate_execution_graph_name(&v).unwrap_err();
+        assert!(err.to_string().contains("255"), "got: {err}");
     }
 
     // =========================================================================

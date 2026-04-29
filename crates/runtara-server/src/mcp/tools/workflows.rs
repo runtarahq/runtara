@@ -252,8 +252,9 @@ pub async fn update_workflow(
     params: UpdateWorkflowParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
+    let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
     let body = serde_json::json!({
-        "executionGraph": params.execution_graph,
+        "executionGraph": execution_graph,
     });
     let result = api_post(
         server,
@@ -262,6 +263,24 @@ pub async fn update_workflow(
     )
     .await?;
     json_result(result)
+}
+
+/// Some MCP clients/LLMs serialize large object arguments as JSON-encoded strings
+/// instead of nested objects. Accept both shapes so the rest of the pipeline always
+/// sees an object.
+fn normalize_json_arg(
+    value: serde_json::Value,
+    field: &str,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    match value {
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(|e| {
+            err(format!(
+                "{} was passed as a JSON-encoded string but is not valid JSON: {}",
+                field, e
+            ))
+        }),
+        other => Ok(other),
+    }
 }
 
 pub async fn compile_workflow(
@@ -1179,5 +1198,38 @@ mod tests {
             }
         });
         assert_eq!(resolve_child_version("current", &workflow_data), None);
+    }
+
+    #[test]
+    fn test_normalize_json_arg_passes_object_through() {
+        let v = serde_json::json!({"name": "foo", "steps": {}});
+        let normalized = normalize_json_arg(v.clone(), "execution_graph").unwrap();
+        assert_eq!(normalized, v);
+    }
+
+    #[test]
+    fn test_normalize_json_arg_parses_stringified_object() {
+        let original = serde_json::json!({"name": "foo", "n": 42});
+        let stringified = serde_json::Value::String(original.to_string());
+        let normalized = normalize_json_arg(stringified, "execution_graph").unwrap();
+        assert_eq!(normalized, original);
+    }
+
+    #[test]
+    fn test_normalize_json_arg_rejects_invalid_json_string() {
+        let bad = serde_json::Value::String("{not valid json".to_string());
+        let err = normalize_json_arg(bad, "execution_graph").unwrap_err();
+        let msg = err.message.to_string();
+        assert!(
+            msg.contains("execution_graph") && msg.contains("not valid JSON"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_normalize_json_arg_passes_array_through() {
+        let v = serde_json::json!([1, 2, 3]);
+        let normalized = normalize_json_arg(v.clone(), "execution_graph").unwrap();
+        assert_eq!(normalized, v);
     }
 }
