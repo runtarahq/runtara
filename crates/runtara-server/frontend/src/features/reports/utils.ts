@@ -33,7 +33,7 @@ export function getFilterDefaultValue(filter: ReportFilterDefinition): unknown {
 }
 
 export function encodeFilterValue(value: unknown): string {
-  if (Array.isArray(value)) return value.join(',');
+  if (Array.isArray(value)) return JSON.stringify(value);
   if (typeof value === 'string') return value;
   return JSON.stringify(value);
 }
@@ -45,6 +45,14 @@ export function decodeFilterValue(
   if (value === null) return getFilterDefaultValue(filter);
 
   if (filter.type === 'multi_select') {
+    if (value.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        // Fall through to legacy comma-separated URLs.
+      }
+    }
     return value
       .split(',')
       .map((part) => part.trim())

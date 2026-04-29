@@ -68,6 +68,7 @@ type ExploreState = {
   filters: ExploreFilter[];
   sort: ReportOrderBy[];
   vizType: ExploreVizType;
+  preferredVizType: ExploreVizType;
   limit: number;
   page: {
     offset: number;
@@ -306,11 +307,22 @@ export function ReportExplorePage() {
     }));
   };
 
-  const addPointFilter = (datum: Record<string, unknown>) => {
-    if (!state || !dataset || state.dimensions.length === 0) return;
-    const field = state.dimensions[0];
-    const value = datum[field];
-    if (value === undefined || value === null) return;
+  const addPointFilter = (
+    datum: Record<string, unknown>,
+    fieldOverride?: string
+  ): boolean => {
+    if (!state || !dataset || state.dimensions.length === 0) return false;
+    const field =
+      fieldOverride && state.dimensions.includes(fieldOverride)
+        ? fieldOverride
+        : state.dimensions[0];
+    const value =
+      typeof datum.field === 'string' &&
+      datum.field === field &&
+      'value' in datum
+        ? datum.value
+        : datum[field];
+    if (value === undefined || value === null) return false;
     updateState((current) => ({
       ...current,
       filters: [
@@ -324,6 +336,7 @@ export function ReportExplorePage() {
       ],
       page: { ...current.page, offset: 0 },
     }));
+    return true;
   };
 
   const handleSaveBlock = async (mode: 'append' | 'replace' = 'append') => {
@@ -618,6 +631,7 @@ export function ReportExplorePage() {
                 updateState((current) => ({
                   ...current,
                   vizType: value as ExploreVizType,
+                  preferredVizType: value as ExploreVizType,
                   page: { ...current.page, offset: 0 },
                 }))
               }
@@ -926,7 +940,10 @@ function ExplorePreview({
   onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
   onPageChange: (offset: number, size: number) => void;
-  onDrillFilter: (datum: Record<string, unknown>) => void;
+  onDrillFilter: (
+    datum: Record<string, unknown>,
+    field?: string
+  ) => boolean;
 }) {
   const result = datasetResultToBlockResult(block, data);
   const tableBlock = {
@@ -957,13 +974,23 @@ function ExplorePreview({
         onSortChange={onSortChange}
         onPageChange={onPageChange}
         onRowClick={onDrillFilter}
+        onCellClick={(cell) =>
+          onDrillFilter(
+            cell,
+            typeof cell.field === 'string' ? cell.field : undefined
+          )
+        }
       />
     );
   }
 
   return (
     <div className="space-y-4">
-      <ChartBlock block={block} result={result} onPointClick={onDrillFilter} />
+      <ChartBlock
+        block={block}
+        result={result}
+        onPointClick={(datum) => onDrillFilter(datum, block.chart?.x)}
+      />
       <div>
         <h3 className="mb-2 text-sm font-medium text-foreground">
           Result table
@@ -977,6 +1004,12 @@ function ExplorePreview({
           onSortChange={onSortChange}
           onPageChange={onPageChange}
           onRowClick={onDrillFilter}
+          onCellClick={(cell) =>
+            onDrillFilter(
+              cell,
+              typeof cell.field === 'string' ? cell.field : undefined
+            )
+          }
         />
       </div>
     </div>
@@ -1130,6 +1163,14 @@ function initialExploreState(
               : block.type === 'table'
                 ? 'table'
                 : recommendVizType(dataset, dimensions, measures),
+        preferredVizType:
+          block.type === 'chart'
+            ? block.chart?.kind ?? recommendVizType(dataset, dimensions, measures)
+            : block.type === 'metric'
+              ? 'metric'
+              : block.type === 'table'
+                ? 'table'
+                : recommendVizType(dataset, dimensions, measures),
         limit: block.dataset.limit ?? DEFAULT_LIMIT,
         page: { offset: 0, size: DEFAULT_PAGE_SIZE },
         search: '',
@@ -1155,6 +1196,7 @@ function defaultExploreState(
     filters: [],
     sort: defaultSort({ dimensions, measures }),
     vizType,
+    preferredVizType: vizType,
     limit: DEFAULT_LIMIT,
     page: { offset: 0, size: DEFAULT_PAGE_SIZE },
     search: '',
@@ -1211,15 +1253,16 @@ function preserveVizType(
   dimensions: string[],
   measures: string[]
 ): ExploreVizType {
+  const preferredVizType = current.preferredVizType ?? current.vizType;
   if (
     dataset &&
-    vizValidity(current.vizType, dataset, {
+    vizValidity(preferredVizType, dataset, {
       ...current,
       dimensions,
       measures,
     }).valid
   ) {
-    return current.vizType;
+    return preferredVizType;
   }
   return recommendVizType(dataset, dimensions, measures);
 }
