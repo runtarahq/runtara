@@ -104,6 +104,7 @@ export function ReportEditorPage() {
     setDescription(existingReport.description ?? '');
     setStatus(existingReport.status);
     setDefinition(existingReport.definition);
+    setSelectedSchema(inferReportPrimarySchema(existingReport.definition));
   }, [existingReport]);
 
   useEffect(() => {
@@ -316,7 +317,7 @@ export function ReportEditorPage() {
             </Select>
           </div>
           <div className="space-y-2 rounded-lg bg-muted/30 p-3">
-            <Label>Starter schema</Label>
+            <Label>Default schema for new blocks and datasets</Label>
             <Select value={selectedSchema} onValueChange={setSelectedSchema}>
               <SelectTrigger>
                 <SelectValue placeholder="Select schema" />
@@ -345,6 +346,7 @@ export function ReportEditorPage() {
           <ReportDatasetsEditor
             definition={definition}
             schemas={schemas}
+            selectedSchema={selectedSchema}
             onChange={(nextDefinition) => {
               setDefinition(nextDefinition);
               setLocalError(null);
@@ -374,10 +376,12 @@ export function ReportEditorPage() {
 function ReportDatasetsEditor({
   definition,
   schemas,
+  selectedSchema,
   onChange,
 }: {
   definition: ReportDefinition;
   schemas: Schema[];
+  selectedSchema: string;
   onChange: (definition: ReportDefinition) => void;
 }) {
   const datasets = definition.datasets ?? [];
@@ -415,7 +419,9 @@ function ReportDatasetsEditor({
   };
 
   const addDataset = () => {
-    const schema = schemas[0];
+    const schema =
+      schemas.find((candidate) => candidate.name === selectedSchema) ??
+      schemas[0];
     const dataset = createDefaultDataset(schema, datasets);
     updateDatasets([...datasets, dataset]);
   };
@@ -572,6 +578,20 @@ function DatasetEditorCard({
     });
   };
 
+  const updateSourceSchema = (schemaName: string) => {
+    const schema = schemas.find((candidate) => candidate.name === schemaName);
+    const nextDataset = createDefaultDataset(schema, []);
+    onChange({
+      ...nextDataset,
+      id: dataset.id,
+      label: dataset.label,
+      source: {
+        ...dataset.source,
+        schema: schemaName,
+      },
+    });
+  };
+
   return (
     <div className="rounded-lg border bg-muted/10 p-4">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -616,12 +636,7 @@ function DatasetEditorCard({
         <EditorField label="Source schema">
           <Select
             value={dataset.source.schema}
-            onValueChange={(schemaName) =>
-              onChange({
-                ...dataset,
-                source: { ...dataset.source, schema: schemaName },
-              })
-            }
+            onValueChange={updateSourceSchema}
           >
             <SelectTrigger>
               <SelectValue placeholder="Select schema" />
@@ -919,7 +934,9 @@ function createDefaultDataset(
   const schemaName = schema?.name ?? '';
   const fields = getSchemaFieldNames(schema);
   const preferredTimeField =
-    fields.find((field) => /date|time|created|updated/i.test(field)) ??
+    fields.find((field) =>
+      /date|day|month|year|time|created|updated/i.test(field)
+    ) ??
     undefined;
   const dimensions = fields.slice(0, 4).map((field) => ({
     field,
@@ -954,8 +971,17 @@ function getSchemaFieldNames(schema: Schema | undefined): string[] {
     .filter((field) => field && field !== 'id');
 }
 
+function inferReportPrimarySchema(definition: ReportDefinition): string {
+  return (
+    definition.datasets?.find((dataset) => dataset.source?.schema)?.source
+      .schema ??
+    definition.blocks.find((block) => block.source?.schema)?.source.schema ??
+    ''
+  );
+}
+
 function inferDatasetFieldType(field: string): ReportDatasetFieldType {
-  if (/date|_at$|time/i.test(field)) return 'date';
+  if (/date|day|month|year|_at$|time/i.test(field)) return 'date';
   if (/is_|has_|enabled|active/i.test(field)) return 'boolean';
   if (/amount|price|cost|total|qty|quantity|count|number|value/i.test(field)) {
     return 'number';
@@ -964,7 +990,7 @@ function inferDatasetFieldType(field: string): ReportDatasetFieldType {
 }
 
 function inferDatasetFormat(field: string): ReportDatasetValueFormat {
-  if (/date|_at$|time/i.test(field)) return 'date';
+  if (/date|day|month|year|_at$|time/i.test(field)) return 'date';
   if (/amount|price|cost/i.test(field)) return 'currency';
   if (/qty|quantity|count|number|total|value/i.test(field)) return 'number';
   return 'string';
