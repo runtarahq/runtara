@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   ArrowLeft,
   Calendar,
@@ -91,6 +91,7 @@ const VIZ_TYPES: Array<{ value: ExploreVizType; label: string }> = [
 
 export function ReportExplorePage() {
   const { reportId } = useParams();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { data: report, isFetching, isError, error } = useReport(reportId);
   const updateReport = useUpdateReport();
@@ -312,7 +313,7 @@ export function ReportExplorePage() {
   const handleSaveBlock = async () => {
     if (!report || !savedBlock || !state) return;
     const nextDefinition = appendBlockToDefinition(report.definition, savedBlock);
-    const updated = await updateReport.mutateAsync({
+    await updateReport.mutateAsync({
       id: report.id,
       data: {
         name: report.name,
@@ -323,7 +324,8 @@ export function ReportExplorePage() {
         definition: nextDefinition,
       },
     });
-    setSavedMessage(`Saved "${savedBlock.title ?? savedBlock.id}" to ${updated.name}.`);
+    setSavedMessage(`Saved "${savedBlock.title ?? savedBlock.id}".`);
+    navigate(buildReportPath(report.id, report.definition, searchParams));
   };
 
   const handleCopyDefinition = async () => {
@@ -1315,6 +1317,22 @@ function appendBlockToDefinition(
     blocks,
     markdown: `${definition.markdown ?? ''}\n\n{{ block.${block.id} }}`,
   };
+}
+
+function buildReportPath(
+  reportId: string,
+  definition: ReportDefinition,
+  searchParams: URLSearchParams
+): string {
+  const params = new URLSearchParams();
+  for (const filter of definition.filters) {
+    const value = searchParams.get(filter.id);
+    if (value !== null) {
+      params.set(filter.id, value);
+    }
+  }
+  const query = params.toString();
+  return `/reports/${reportId}${query ? `?${query}` : ''}`;
 }
 
 function datasetResultToBlockResult(
