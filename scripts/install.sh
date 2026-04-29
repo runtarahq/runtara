@@ -21,6 +21,15 @@
 
 set -eu
 
+# ─── Temp directory cleanup ──────────────────────────────────────────────────
+
+_TMP_DIRS=""
+_cleanup_tmp_dirs() {
+    # shellcheck disable=SC2086  # intentional word splitting: mktemp -d paths are space-free
+    [ -n "$_TMP_DIRS" ] && rm -rf $_TMP_DIRS
+}
+trap _cleanup_tmp_dirs EXIT
+
 # ─── Exit codes ──────────────────────────────────────────────────────────────
 
 EXIT_UNSUPPORTED_OS=10
@@ -221,6 +230,7 @@ resolve_bundle() {
         step "Extracting bundle tarball"
         local tmp_extract
         tmp_extract="$(mktemp -d)"
+        _TMP_DIRS="$_TMP_DIRS $tmp_extract"
         tar xzf "$BUNDLE_TARBALL" -C "$tmp_extract"
         # The tarball contains a single directory
         BUNDLE_DIR="$(find "$tmp_extract" -mindepth 1 -maxdepth 1 -type d | head -1)"
@@ -262,6 +272,7 @@ resolve_bundle() {
     step "Downloading ${tarball}"
     local tmp_dl
     tmp_dl="$(mktemp -d)"
+    _TMP_DIRS="$_TMP_DIRS $tmp_dl"
     curl -fSL -o "${tmp_dl}/${tarball}" "${base_url}/${tarball}" \
         || die $EXIT_DOWNLOAD "Failed to download ${tarball}. Check https://github.com/${GITHUB_REPO}/releases/tag/${tag}"
 
