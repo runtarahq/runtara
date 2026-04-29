@@ -145,8 +145,9 @@ export function useDeleteReport() {
 
   return useCustomMutation<void, string>({
     mutationFn: (token, reportId) => deleteReport(token, reportId),
-    onSuccess: () => {
+    onSuccess: (_data, reportId) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.reports.lists() });
+      queryClient.removeQueries({ queryKey: queryKeys.reports.byId(reportId) });
     },
   });
 }

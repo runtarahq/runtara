@@ -23,6 +23,7 @@ import {
   useUpdateReport,
 } from '../hooks/useReports';
 import { ReportDefinitionBuilder } from '../components/ReportDefinitionBuilder';
+import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import {
   ReportAggregateFn,
   ReportDatasetDefinition,
@@ -264,6 +265,13 @@ export function ReportEditorPage() {
               Cancel
             </Button>
           </Link>
+          {isEditing && reportId && existingReport ? (
+            <ReportDeleteButton
+              reportId={reportId}
+              reportName={existingReport.name}
+              className="h-11 rounded-full sm:px-5"
+            />
+          ) : null}
           <Button
             className="h-11 rounded-full sm:px-5"
             disabled={!canSave}

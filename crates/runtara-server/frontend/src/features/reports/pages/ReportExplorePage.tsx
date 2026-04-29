@@ -26,6 +26,7 @@ import {
 } from '@/shared/components/ui/select';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
+import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ChartBlock } from '../components/blocks/ChartBlock';
 import { MetricBlock } from '../components/blocks/MetricBlock';
@@ -402,12 +403,19 @@ export function ReportExplorePage() {
         kicker="Reports"
         title="Explore"
         action={
-          <Link to={`/reports/${report.id}`}>
-            <Button variant="outline">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Report
-            </Button>
-          </Link>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+            <Link to={`/reports/${report.id}`}>
+              <Button variant="outline" className="h-11 rounded-full sm:px-5">
+                <ArrowLeft className="mr-2 h-4 w-4" />
+                Report
+              </Button>
+            </Link>
+            <ReportDeleteButton
+              reportId={report.id}
+              reportName={report.name}
+              className="h-11 rounded-full sm:px-5"
+            />
+          </div>
         }
       >
         <div className="rounded-lg border bg-background p-6 text-sm text-muted-foreground">
@@ -452,6 +460,11 @@ export function ReportExplorePage() {
               Report
             </Button>
           </Link>
+          <ReportDeleteButton
+            reportId={report.id}
+            reportName={report.name}
+            className="h-11 rounded-full sm:px-5"
+          />
           <Button
             className="h-11 rounded-full sm:px-5"
             disabled={!canSaveBlock || updateReport.isPending}

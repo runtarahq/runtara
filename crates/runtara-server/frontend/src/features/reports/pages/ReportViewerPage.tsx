@@ -5,6 +5,7 @@ import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import RuntaraLogo from '@/assets/logo/runtara-logo-icon.svg';
+import { ReportDeleteButton } from '../components/ReportDeleteButton';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
 import { useReport, useReportRender } from '../hooks/useReports';
@@ -166,6 +167,11 @@ export function ReportViewerPage() {
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
+          <ReportDeleteButton
+            reportId={report.id}
+            reportName={report.name}
+            className="h-11 rounded-full sm:px-5"
+          />
           <Link to={`/reports/${report.id}/edit`} className="w-full sm:w-auto">
             <Button className="h-11 w-full rounded-full sm:w-auto sm:px-5">
               <Edit className="mr-2 h-4 w-4" />
