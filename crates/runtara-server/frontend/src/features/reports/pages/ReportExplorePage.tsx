@@ -293,6 +293,14 @@ export function ReportExplorePage() {
     setDraftFilterValue('');
   };
 
+  const removeExploreFilter = (filterId: string) => {
+    updateState((current) => ({
+      ...current,
+      filters: current.filters.filter((filter) => filter.id !== filterId),
+      page: { ...current.page, offset: 0 },
+    }));
+  };
+
   const addPointFilter = (datum: Record<string, unknown>) => {
     if (!state || !dataset || state.dimensions.length === 0) return;
     const field = state.dimensions[0];
@@ -432,17 +440,10 @@ export function ReportExplorePage() {
               variant="outline"
               size="sm"
               className="h-7 rounded-full px-3 text-xs"
-              onClick={() =>
-                updateState((current) => ({
-                  ...current,
-                  filters: current.filters.filter(
-                    (candidate) => candidate.id !== filter.id
-                  ),
-                }))
-              }
+              onClick={() => removeExploreFilter(filter.id)}
             >
               Explore: {fieldLabel(dataset, filter.field)} {filter.op}{' '}
-              {String(filter.value)}
+              {formatFilterValue(filter.value)}
               <X className="ml-2 h-3 w-3" />
             </Button>
           ))}
@@ -458,7 +459,7 @@ export function ReportExplorePage() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)_320px]">
-        <aside className="min-w-0 rounded-lg border bg-background">
+        <aside className="order-1 min-w-0 rounded-lg border bg-background xl:order-1">
           <div className="border-b p-4">
             <Label>Dataset</Label>
             <Select value={state.datasetId} onValueChange={handleDatasetChange}>
@@ -510,7 +511,7 @@ export function ReportExplorePage() {
           />
         </aside>
 
-        <main className="min-w-0 space-y-4">
+        <main className="order-3 min-w-0 space-y-4 xl:order-2">
           <section className="rounded-lg border bg-background p-4">
             <div className="mb-4 grid gap-3 lg:grid-cols-2">
               <Shelf
@@ -575,7 +576,7 @@ export function ReportExplorePage() {
           </section>
         </main>
 
-        <aside className="min-w-0 space-y-4 rounded-lg border bg-background p-4">
+        <aside className="order-2 min-w-0 space-y-4 rounded-lg border bg-background p-4 xl:order-3">
           <section className="space-y-3">
             <h2 className="text-sm font-semibold text-foreground">
               Visualization
@@ -762,6 +763,37 @@ export function ReportExplorePage() {
               >
                 <Plus className="h-4 w-4" />
               </Button>
+            </div>
+            <div className="space-y-2 rounded-md border bg-muted/20 p-3">
+              <div className="text-xs font-semibold uppercase text-muted-foreground">
+                Active explore filters
+              </div>
+              {state.filters.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No explore filters.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {state.filters.map((filter) => (
+                    <button
+                      key={filter.id}
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-md border bg-background px-3 py-2 text-left text-sm transition-colors hover:bg-muted/40"
+                      onClick={() => removeExploreFilter(filter.id)}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium text-foreground">
+                          {fieldLabel(dataset, filter.field)}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {filter.op} {formatFilterValue(filter.value)}
+                        </span>
+                      </span>
+                      <X className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <Button
               type="button"
@@ -1496,6 +1528,13 @@ function parseFilterValue(
     return value.toLowerCase() === 'true';
   }
   return value;
+}
+
+function formatFilterValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(formatFilterValue).join(', ');
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
 }
 
 function uniqueBlockId(blocks: ReportBlockDefinition[], baseId: string): string {
