@@ -1,4 +1,4 @@
-import { Fragment, useMemo } from 'react';
+import { CSSProperties, Fragment, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -39,7 +39,7 @@ export function ReportRenderer({
   );
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="w-full">
       {hasStructuredLayout ? (
         <LayoutNodes
           nodes={definition.layout ?? []}
@@ -160,13 +160,13 @@ function LayoutNode({
 
   if (node.type === 'metric_row') {
     return (
-      <section className="my-5">
+      <section className="my-5 w-full">
         {node.title && (
           <h2 className="mb-2 text-base font-semibold text-foreground">
             {node.title}
           </h2>
         )}
-        <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
+        <div className="grid w-full gap-3 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
           {node.blocks.map((blockId) => (
             <ReportBlockById
               key={blockId}
@@ -221,29 +221,22 @@ function LayoutNode({
       .join(' ');
     return (
       <section
-        className="my-5 grid gap-4"
-        style={{
-          gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, 280px), 1fr))`,
-        }}
+        className="my-5 grid w-full gap-4 lg:[grid-template-columns:var(--report-columns)]"
+        style={{ '--report-columns': template } as CSSProperties}
       >
-        <div
-          className="contents lg:grid lg:gap-4"
-          style={{ gridTemplateColumns: template }}
-        >
-          {node.columns.map((column) => (
-            <div key={column.id} className="min-w-0">
-              <LayoutNodes
-                nodes={column.children ?? []}
-                reportId={reportId}
-                definition={definition}
-                renderResponse={renderResponse}
-                filters={filters}
-                onFilterChange={onFilterChange}
-                onFiltersChange={onFiltersChange}
-              />
-            </div>
-          ))}
-        </div>
+        {node.columns.map((column) => (
+          <div key={column.id} className="min-w-0">
+            <LayoutNodes
+              nodes={column.children ?? []}
+              reportId={reportId}
+              definition={definition}
+              renderResponse={renderResponse}
+              filters={filters}
+              onFilterChange={onFilterChange}
+              onFiltersChange={onFiltersChange}
+            />
+          </div>
+        ))}
       </section>
     );
   }
@@ -252,33 +245,35 @@ function LayoutNode({
     const columns = Math.max(node.columns ?? 12, 1);
     return (
       <section
-        className="my-5 grid gap-4"
-        style={{
-          gridTemplateColumns:
-            'repeat(auto-fit, minmax(min(100%, 260px), 1fr))',
-        }}
+        className="my-5 grid w-full gap-4 xl:[grid-template-columns:var(--report-grid-columns)]"
+        style={
+          {
+            '--report-grid-columns': `repeat(${columns}, minmax(0, 1fr))`,
+          } as CSSProperties
+        }
       >
-        <div
-          className="contents xl:grid xl:gap-4"
-          style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
-        >
-          {node.items.map((item, index) => (
+        {node.items.map((item, index) => {
+          const colSpan =
+            item.colSpan && item.colSpan > 1
+              ? Math.min(item.colSpan, columns)
+              : undefined;
+          const rowSpan =
+            item.rowSpan && item.rowSpan > 1 ? item.rowSpan : undefined;
+
+          return (
             <div
               key={item.id ?? `${item.blockId}-${index}`}
-              className="min-w-0"
-              style={{
-                gridColumn:
-                  item.colSpan && item.colSpan > 1
-                    ? `span ${Math.min(item.colSpan, columns)} / span ${Math.min(
-                        item.colSpan,
-                        columns
-                      )}`
-                    : undefined,
-                gridRow:
-                  item.rowSpan && item.rowSpan > 1
-                    ? `span ${item.rowSpan} / span ${item.rowSpan}`
-                    : undefined,
-              }}
+              className="min-w-0 xl:[grid-column:var(--report-grid-column)] xl:[grid-row:var(--report-grid-row)]"
+              style={
+                {
+                  '--report-grid-column': colSpan
+                    ? `span ${colSpan} / span ${colSpan}`
+                    : 'auto',
+                  '--report-grid-row': rowSpan
+                    ? `span ${rowSpan} / span ${rowSpan}`
+                    : 'auto',
+                } as CSSProperties
+              }
             >
               <ReportBlockById
                 blockId={item.blockId}
@@ -291,8 +286,8 @@ function LayoutNode({
                 className="my-0"
               />
             </div>
-          ))}
-        </div>
+          );
+        })}
       </section>
     );
   }
