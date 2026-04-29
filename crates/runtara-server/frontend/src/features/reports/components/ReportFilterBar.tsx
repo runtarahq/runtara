@@ -37,6 +37,9 @@ export function ReportFilterBar({
   const activeFilters = definition.filters.filter(
     (filter) => !isFilterDefault(filter, values[filter.id])
   );
+  const chipFilters = activeFilters.filter(
+    (filter) => filter.type !== 'multi_select' && filter.type !== 'checkbox'
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -52,9 +55,9 @@ export function ReportFilterBar({
           />
         ))}
       </div>
-      {showChips && activeFilters.length > 0 && (
+      {showChips && chipFilters.length > 0 && (
         <div className="report-print-hidden flex flex-wrap items-center gap-2">
-          {activeFilters.map((filter) => (
+          {chipFilters.map((filter) => (
             <Button
               key={filter.id}
               type="button"

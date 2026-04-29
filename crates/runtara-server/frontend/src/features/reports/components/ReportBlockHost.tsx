@@ -108,7 +108,6 @@ export function ReportBlockHost({
     isVisible &&
     (block.lazy ||
       hasBlockFilters ||
-      !initialResult ||
       hasInteractiveTableState);
 
   const request = useMemo(
@@ -140,7 +139,9 @@ export function ReportBlockHost({
     refetch,
   } = useReportBlockData(reportId, block.id, request, needsBlockFetch);
 
-  const result = fetchedResult ?? initialResult;
+  const result = needsBlockFetch
+    ? (fetchedResult ?? initialResult)
+    : initialResult;
   const runInteraction = (
     event: string,
     datum: Record<string, unknown>
