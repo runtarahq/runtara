@@ -14,6 +14,8 @@ type ReportRendererProps = {
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
+  onFilterChange?: (filterId: string, value: unknown) => void;
+  onFiltersChange?: (updates: Record<string, unknown>) => void;
 };
 
 type MarkdownSegment =
@@ -27,6 +29,8 @@ export function ReportRenderer({
   definition,
   renderResponse,
   filters,
+  onFilterChange,
+  onFiltersChange,
 }: ReportRendererProps) {
   const hasStructuredLayout = (definition.layout?.length ?? 0) > 0;
   const segments = useMemo(
@@ -43,6 +47,8 @@ export function ReportRenderer({
           definition={definition}
           renderResponse={renderResponse}
           filters={filters}
+          onFilterChange={onFilterChange}
+          onFiltersChange={onFiltersChange}
         />
       ) : (
         segments.map((segment, index) => {
@@ -58,6 +64,8 @@ export function ReportRenderer({
               definition={definition}
               renderResponse={renderResponse}
               filters={filters}
+              onFilterChange={onFilterChange}
+              onFiltersChange={onFiltersChange}
             />
           );
         })
@@ -71,6 +79,8 @@ export function ReportRenderer({
               block={block}
               initialResult={renderResponse?.blocks[block.id]}
               filters={filters}
+              onFilterChange={onFilterChange}
+              onFiltersChange={onFiltersChange}
             />
           </Fragment>
         ))}
@@ -84,12 +94,16 @@ function LayoutNodes({
   definition,
   renderResponse,
   filters,
+  onFilterChange,
+  onFiltersChange,
 }: {
   nodes: ReportLayoutNode[];
   reportId: string;
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
+  onFilterChange?: (filterId: string, value: unknown) => void;
+  onFiltersChange?: (updates: Record<string, unknown>) => void;
 }) {
   return (
     <>
@@ -101,6 +115,8 @@ function LayoutNodes({
           definition={definition}
           renderResponse={renderResponse}
           filters={filters}
+          onFilterChange={onFilterChange}
+          onFiltersChange={onFiltersChange}
         />
       ))}
     </>
@@ -113,12 +129,16 @@ function LayoutNode({
   definition,
   renderResponse,
   filters,
+  onFilterChange,
+  onFiltersChange,
 }: {
   node: ReportLayoutNode;
   reportId: string;
   definition: ReportDefinition;
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
+  onFilterChange?: (filterId: string, value: unknown) => void;
+  onFiltersChange?: (updates: Record<string, unknown>) => void;
 }) {
   if (node.type === 'markdown') {
     return <MarkdownContent content={node.content} />;
@@ -132,6 +152,8 @@ function LayoutNode({
         definition={definition}
         renderResponse={renderResponse}
         filters={filters}
+        onFilterChange={onFilterChange}
+        onFiltersChange={onFiltersChange}
       />
     );
   }
@@ -153,6 +175,8 @@ function LayoutNode({
               definition={definition}
               renderResponse={renderResponse}
               filters={filters}
+              onFilterChange={onFilterChange}
+              onFiltersChange={onFiltersChange}
               className="my-0"
             />
           ))}
@@ -184,6 +208,8 @@ function LayoutNode({
           definition={definition}
           renderResponse={renderResponse}
           filters={filters}
+          onFilterChange={onFilterChange}
+          onFiltersChange={onFiltersChange}
         />
       </section>
     );
@@ -212,6 +238,8 @@ function LayoutNode({
                 definition={definition}
                 renderResponse={renderResponse}
                 filters={filters}
+                onFilterChange={onFilterChange}
+                onFiltersChange={onFiltersChange}
               />
             </div>
           ))}
@@ -258,6 +286,8 @@ function LayoutNode({
                 definition={definition}
                 renderResponse={renderResponse}
                 filters={filters}
+                onFilterChange={onFilterChange}
+                onFiltersChange={onFiltersChange}
                 className="my-0"
               />
             </div>
@@ -285,6 +315,8 @@ function ReportBlockById({
   renderResponse,
   filters,
   className,
+  onFilterChange,
+  onFiltersChange,
 }: {
   blockId: string;
   reportId: string;
@@ -292,6 +324,8 @@ function ReportBlockById({
   renderResponse?: ReportRenderResponse | null;
   filters: Record<string, unknown>;
   className?: string;
+  onFilterChange?: (filterId: string, value: unknown) => void;
+  onFiltersChange?: (updates: Record<string, unknown>) => void;
 }) {
   const block = getBlockById(definition, blockId);
   if (!block) {
@@ -309,6 +343,8 @@ function ReportBlockById({
       initialResult={renderResponse?.blocks[blockId]}
       filters={filters}
       className={className}
+      onFilterChange={onFilterChange}
+      onFiltersChange={onFiltersChange}
     />
   );
 }

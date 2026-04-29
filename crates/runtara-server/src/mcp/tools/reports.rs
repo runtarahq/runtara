@@ -1150,6 +1150,31 @@ fn report_authoring_schema() -> Value {
             "filters": "Optional global filter presets. Each filter can apply to one or more block/source fields.",
             "blocks": "Array of typed block definitions. Every block must have a stable id for MCP block mutations."
         },
+        "biGuidance": {
+            "currentContract": [
+                "For BI-style reports, define global filters with object_model-backed options so viewers can self-serve without raw SQL.",
+                "Use filter.options.source='object_model' with schema, field, optional labelField, search=true, and dependsOn for cascading filter option lists.",
+                "Use block.interactions for drill/cross-filter behavior. Supported UI events are point_click on charts and row_click/cell_click on tables.",
+                "Use set_filter actions to update global filters from clicked chart/table data, e.g. valueFrom='datum.category'.",
+                "Keep exploration governed: only expose dimensions and measures as report blocks/filters/interactions that the report author intentionally configured."
+            ],
+            "dynamicFilterExample": {
+                "id": "vendor",
+                "label": "Vendor",
+                "type": "multi_select",
+                "options": {"source": "object_model", "schema": "StockSnapshot", "field": "vendor", "search": true},
+                "appliesTo": [{"field": "vendor", "op": "in"}]
+            },
+            "drillInteractionExample": {
+                "interactions": [
+                    {
+                        "id": "drill_category",
+                        "trigger": {"event": "point_click"},
+                        "actions": [{"type": "set_filter", "filterId": "category", "valueFrom": "datum.category"}]
+                    }
+                ]
+            }
+        },
         "layoutGuidance": {
             "currentContract": [
                 "Prefer definition.layout for all visual arrangement.",
@@ -1174,7 +1199,8 @@ fn report_authoring_schema() -> Value {
                 "title": "Optional UI title.",
                 "lazy": "Optional boolean. Lazy blocks fetch only when requested.",
                 "source": "Object Model data source and query plan.",
-                "filters": "Optional per-block filter presets."
+                "filters": "Optional per-block filter presets.",
+                "interactions": "Optional drill/cross-filter actions. Use point_click, row_click, or cell_click triggers with set_filter actions."
             },
             "table": {
                 "type": "table",
@@ -1229,8 +1255,12 @@ fn report_authoring_schema() -> Value {
                 "id": "vendor",
                 "label": "Vendor",
                 "type": "select",
-                "options": [{"label": "TD Synnex", "value": "TD Synnex"}],
+                "options": {"source": "static", "values": [{"label": "TD Synnex", "value": "TD Synnex"}]},
                 "appliesTo": [{"blockId": "products", "field": "vendor", "op": "eq"}]
+            },
+            "dynamicOptions": {
+                "options": {"source": "object_model", "schema": "StockSnapshot", "field": "vendor", "labelField": "vendor", "search": true, "dependsOn": ["date_range"]},
+                "note": "Dynamic options are loaded from grouped Object Model values and can cascade through dependsOn plus filterMappings."
             }
         },
         "fieldRules": [
@@ -1249,6 +1279,7 @@ fn report_authoring_schema() -> Value {
             "Do not use source.mode='aggregate' with table.columns pointing at ungrouped raw schema fields; use groupBy fields or aggregate aliases.",
             "Do not use Markdown tables to align report block placeholders. Use definition.layout with metric_row, columns, or grid.",
             "Do not omit layout node ids. MCP layout mutation tools address layout nodes by id.",
+            "Do not hardcode large select option lists when the values live in Object Model data. Use filter.options.source='object_model'.",
             "Always run validate_report before saving or mutating report blocks."
         ],
         "examples": {
@@ -1674,7 +1705,16 @@ fn collect_report_block_authoring_issues(
 
     for key in block_object.keys() {
         if [
-            "id", "type", "title", "lazy", "source", "table", "chart", "metric", "filters",
+            "id",
+            "type",
+            "title",
+            "lazy",
+            "source",
+            "table",
+            "chart",
+            "metric",
+            "filters",
+            "interactions",
         ]
         .contains(&key.as_str())
         {

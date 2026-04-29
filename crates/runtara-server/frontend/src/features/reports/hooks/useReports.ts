@@ -6,6 +6,7 @@ import {
   deleteReport,
   getReport,
   getReportBlockData,
+  getReportFilterOptions,
   listReports,
   renderReport,
   updateReport,
@@ -15,6 +16,8 @@ import {
   ReportBlockDataRequest,
   ReportBlockResult,
   ReportDto,
+  ReportFilterOptionsRequest,
+  ReportFilterOptionsResponse,
   ReportRenderRequest,
   ReportRenderResponse,
   ReportSummary,
@@ -67,6 +70,23 @@ export function useReportBlockData(
     ),
     queryFn: (token, context) => getReportBlockData(token, context),
     enabled: Boolean(reportId && blockId && request && enabled),
+  });
+}
+
+export function useReportFilterOptions(
+  reportId: string | undefined,
+  filterId: string | undefined,
+  request: ReportFilterOptionsRequest | undefined,
+  enabled: boolean
+) {
+  return useCustomQuery<ReportFilterOptionsResponse | null>({
+    queryKey: queryKeys.reports.filterOptions(
+      reportId ?? '',
+      filterId ?? '',
+      request ?? {}
+    ),
+    queryFn: (token, context) => getReportFilterOptions(token, context),
+    enabled: Boolean(reportId && filterId && request && enabled),
   });
 }
 

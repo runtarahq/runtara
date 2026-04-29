@@ -55,8 +55,10 @@ const resolveAuthMode = (value: string | undefined): AuthMode => {
 };
 
 export const config = {
-  authMode: resolveAuthMode(runtime.authMode),
-  tenantId: clean(runtime.tenantId),
+  authMode: resolveAuthMode(
+    pick(runtime.authMode, import.meta.env.VITE_RUNTARA_AUTH_MODE)
+  ),
+  tenantId: pick(runtime.tenantId, import.meta.env.VITE_RUNTARA_TENANT_ID),
   oidc: {
     authority: pick(runtime.oidcAuthority, import.meta.env.VITE_OIDC_AUTHORITY),
     clientId: pick(runtime.oidcClientId, import.meta.env.VITE_OIDC_CLIENT_ID),

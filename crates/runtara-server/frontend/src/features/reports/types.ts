@@ -30,7 +30,26 @@ export type ReportAggregateFn =
 
 export interface ReportFilterOption {
   label: string;
-  value: string | number | boolean;
+  value: unknown;
+  count?: number;
+}
+
+export interface ReportFilterOptionsConfig {
+  source?: 'static' | 'object_model';
+  values?: ReportFilterOption[];
+  schema?: string;
+  field?: string;
+  valueField?: string;
+  labelField?: string;
+  connectionId?: string;
+  search?: boolean;
+  dependsOn?: string[];
+  filterMappings?: Array<{
+    filterId: string;
+    field: string;
+    op?: string;
+  }>;
+  condition?: unknown;
 }
 
 export interface ReportFilterDefinition {
@@ -42,7 +61,7 @@ export interface ReportFilterDefinition {
   options?: {
     source?: 'static' | 'object_model';
     values?: ReportFilterOption[];
-  };
+  } & ReportFilterOptionsConfig;
   appliesTo?: Array<{
     blockId?: string;
     field: string;
@@ -136,6 +155,23 @@ export interface ReportBlockDefinition {
     format?: string;
   };
   filters?: ReportFilterDefinition[];
+  interactions?: ReportInteractionDefinition[];
+}
+
+export interface ReportInteractionDefinition {
+  id: string;
+  trigger: {
+    event: 'point_click' | 'row_click' | 'cell_click' | string;
+    field?: string;
+  };
+  actions: ReportInteractionAction[];
+}
+
+export interface ReportInteractionAction {
+  type: 'set_filter' | string;
+  filterId?: string;
+  valueFrom?: string;
+  value?: unknown;
 }
 
 export type ReportLayoutNode =
@@ -243,6 +279,28 @@ export interface ReportBlockDataRequest {
   sort?: ReportOrderBy[];
   search?: ReportTableSearchRequest;
   blockFilters?: Record<string, unknown>;
+}
+
+export interface ReportFilterOptionsRequest {
+  filters: Record<string, unknown>;
+  query?: string;
+  offset?: number;
+  limit?: number;
+  timezone?: string;
+}
+
+export interface ReportFilterOptionsResponse {
+  success: boolean;
+  filter: {
+    id: string;
+  };
+  options: ReportFilterOption[];
+  page: {
+    offset: number;
+    size: number;
+    totalCount: number;
+    hasNextPage: boolean;
+  };
 }
 
 export interface ReportRenderRequest {

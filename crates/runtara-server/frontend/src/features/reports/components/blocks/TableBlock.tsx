@@ -68,6 +68,8 @@ type TableBlockProps = {
   onPageChange: (offset: number, size: number) => void;
   onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
+  onRowClick?: (row: Record<string, unknown>) => void;
+  onCellClick?: (cell: Record<string, unknown>) => boolean;
 };
 
 export function TableBlock({
@@ -78,6 +80,8 @@ export function TableBlock({
   onPageChange,
   onSearchChange,
   onSortChange,
+  onRowClick,
+  onCellClick,
 }: TableBlockProps) {
   const data = (result.data ?? {}) as TableData;
   const rows = data.rows ?? [];
@@ -154,18 +158,42 @@ export function TableBlock({
               </TableCell>
             </TableRow>
           ) : (
-            rows.map((row, rowIndex) => (
-              <TableRow key={getRowKey(row, rowIndex)}>
-                {columns.map((column, columnIndex) => (
-                  <TableCell key={column.key}>
-                    <TableCellValue
-                      column={column}
-                      value={getCellValue(row, column, columnIndex)}
-                    />
-                  </TableCell>
-                ))}
-              </TableRow>
-            ))
+            rows.map((row, rowIndex) => {
+              const rowObject = getRowObject(row, columns);
+              return (
+                <TableRow
+                  key={getRowKey(row, rowIndex)}
+                  className={
+                    onRowClick
+                      ? 'cursor-pointer transition-colors hover:bg-muted/40'
+                      : undefined
+                  }
+                  onClick={() => onRowClick?.(rowObject)}
+                >
+                  {columns.map((column, columnIndex) => {
+                    const value = getCellValue(row, column, columnIndex);
+                    return (
+                      <TableCell
+                        key={column.key}
+                        onClick={(event) => {
+                          if (!onCellClick) return;
+                          const handled = onCellClick({
+                            ...rowObject,
+                            field: column.key,
+                            value,
+                          });
+                          if (handled) {
+                            event.stopPropagation();
+                          }
+                        }}
+                      >
+                        <TableCellValue column={column} value={value} />
+                      </TableCell>
+                    );
+                  })}
+                </TableRow>
+              );
+            })
           )}
         </TableBody>
       </Table>
@@ -264,6 +292,17 @@ function getCellValue(
     return row[columnIndex];
   }
   return row[column.key];
+}
+
+function getRowObject(
+  row: Record<string, unknown> | unknown[],
+  columns: TableColumn[]
+): Record<string, unknown> {
+  if (!Array.isArray(row)) return row;
+  return columns.reduce<Record<string, unknown>>((acc, column, index) => {
+    acc[column.key] = row[index];
+    return acc;
+  }, {});
 }
 
 function getRowKey(row: Record<string, unknown> | unknown[], rowIndex: number) {

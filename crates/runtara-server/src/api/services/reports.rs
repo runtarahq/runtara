@@ -455,6 +455,172 @@ impl ReportService {
         .await
     }
 
+    pub async fn get_filter_options(
+        &self,
+        tenant_id: &str,
+        id_or_slug: &str,
+        filter_id: &str,
+        request: ReportFilterOptionsRequest,
+    ) -> Result<ReportFilterOptionsResponse, ReportServiceError> {
+        let report = self.get_report(tenant_id, id_or_slug).await?;
+        let filter = report
+            .definition
+            .filters
+            .iter()
+            .find(|filter| filter.id == filter_id)
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!("Unknown report filter '{}'", filter_id))
+            })?;
+        let offset = request.offset.max(0);
+        let limit = request.limit.clamp(1, MAX_TABLE_PAGE_SIZE);
+        let options = filter.options.as_ref().and_then(Value::as_object);
+
+        let Some(options_config) = options else {
+            return Ok(static_filter_options_response(
+                filter,
+                offset,
+                limit,
+                &request.query,
+            ));
+        };
+
+        let source = options_config
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("static");
+        if source != "object_model" {
+            return Ok(static_filter_options_response(
+                filter,
+                offset,
+                limit,
+                &request.query,
+            ));
+        }
+
+        let schema = option_string(options_config, "schema")
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Filter '{}' object_model options must include schema",
+                    filter.id
+                ))
+            })?
+            .to_string();
+        let field = option_string(options_config, "field")
+            .or_else(|| option_string(options_config, "valueField"))
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Filter '{}' object_model options must include field",
+                    filter.id
+                ))
+            })?
+            .to_string();
+        let label_field = option_string(options_config, "labelField")
+            .unwrap_or(&field)
+            .to_string();
+        let connection_id = option_string(options_config, "connectionId");
+        let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let mut conditions = Vec::new();
+
+        if let Some(condition) = options_config.get("condition") {
+            let parsed = serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+                ReportServiceError::Validation(format!(
+                    "Filter '{}' options.condition is invalid: {}",
+                    filter.id, err
+                ))
+            })?;
+            conditions.push(parsed);
+        }
+
+        append_option_context_conditions(
+            &mut conditions,
+            &report.definition,
+            filter,
+            options_config,
+            &resolved_filters,
+        );
+
+        let search_query = request.query.as_deref().map(str::trim).unwrap_or("");
+        if option_bool(options_config, "search").unwrap_or(false) && !search_query.is_empty() {
+            conditions.push(binary_condition(
+                "CONTAINS",
+                Value::String(label_field.clone()),
+                Value::String(search_query.to_string()),
+            ));
+        }
+
+        let mut group_by = vec![field.clone()];
+        if label_field != field {
+            group_by.push(label_field.clone());
+        }
+
+        let aggregate_request = AggregateRequest {
+            condition: combine_conditions(conditions),
+            group_by,
+            aggregates: vec![AggregateSpec {
+                alias: "__count".to_string(),
+                fn_: AggregateFn::Count,
+                column: None,
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+                percentile: None,
+            }],
+            order_by: vec![AggregateOrderBy {
+                column: label_field.clone(),
+                direction: SortDirection::Asc,
+            }],
+            limit: Some(limit),
+            offset: Some(offset),
+        };
+
+        let result = self
+            .instance_service
+            .aggregate_instances_by_schema(tenant_id, &schema, aggregate_request, connection_id)
+            .await
+            .map_err(map_object_model_error)?;
+        let value_index = result
+            .columns
+            .iter()
+            .position(|column| column == &field)
+            .unwrap_or(0);
+        let label_index = result
+            .columns
+            .iter()
+            .position(|column| column == &label_field)
+            .unwrap_or(value_index);
+        let count_index = result.columns.iter().position(|column| column == "__count");
+        let options = result
+            .rows
+            .into_iter()
+            .filter_map(|row| {
+                let value = row.get(value_index)?.clone();
+                let label_value = row.get(label_index).unwrap_or(&value);
+                let count = count_index
+                    .and_then(|index| row.get(index))
+                    .and_then(Value::as_i64);
+                Some(ReportFilterOption {
+                    label: filter_option_label(label_value),
+                    value,
+                    count,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(ReportFilterOptionsResponse {
+            success: true,
+            filter: ReportFilterOptionsMetadata {
+                id: filter.id.clone(),
+            },
+            options,
+            page: ReportFilterOptionsPage {
+                offset,
+                size: limit,
+                total_count: result.group_count,
+                has_next_page: offset + limit < result.group_count,
+            },
+        })
+    }
+
     async fn save_report_definition(
         &self,
         tenant_id: &str,
@@ -481,6 +647,22 @@ impl ReportService {
             return Err(ReportServiceError::Validation(
                 "Report markdown is too large".to_string(),
             ));
+        }
+
+        let mut filter_ids = HashSet::new();
+        for filter in &definition.filters {
+            if filter.id.trim().is_empty() {
+                return Err(ReportServiceError::Validation(
+                    "Report filter IDs cannot be empty".to_string(),
+                ));
+            }
+            if !filter_ids.insert(filter.id.clone()) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Duplicate report filter ID '{}'",
+                    filter.id
+                )));
+            }
+            self.validate_filter_options(tenant_id, filter).await?;
         }
 
         let mut block_ids = HashSet::new();
@@ -600,6 +782,8 @@ impl ReportService {
                     }
                 }
             }
+
+            validate_block_interactions(block, &filter_ids)?;
         }
 
         let mut layout_node_ids = HashSet::new();
@@ -619,6 +803,62 @@ impl ReportService {
                 return Err(ReportServiceError::Validation(format!(
                     "Markdown references unknown report block '{}'",
                     placeholder
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn validate_filter_options(
+        &self,
+        tenant_id: &str,
+        filter: &ReportFilterDefinition,
+    ) -> Result<(), ReportServiceError> {
+        let Some(options) = filter.options.as_ref().and_then(Value::as_object) else {
+            return Ok(());
+        };
+        if options
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("static")
+            != "object_model"
+        {
+            return Ok(());
+        }
+
+        let schema_name = option_string(options, "schema").ok_or_else(|| {
+            ReportServiceError::Validation(format!(
+                "Filter '{}' object_model options must include schema",
+                filter.id
+            ))
+        })?;
+        let value_field = option_string(options, "field")
+            .or_else(|| option_string(options, "valueField"))
+            .ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Filter '{}' object_model options must include field",
+                    filter.id
+                ))
+            })?;
+        let label_field = option_string(options, "labelField").unwrap_or(value_field);
+        let connection_id = option_string(options, "connectionId");
+        let schema = self
+            .schema_service
+            .get_schema_by_name(schema_name, tenant_id, connection_id)
+            .await
+            .map_err(map_object_model_error)?;
+        let schema_fields: HashSet<_> = schema
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+
+        for field in [value_field, label_field] {
+            if !is_schema_field(&schema_fields, field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Filter '{}' options reference unknown field '{}'",
+                    filter.id, field
                 )));
             }
         }
@@ -1324,6 +1564,57 @@ fn validate_layout_node(
     Ok(())
 }
 
+fn validate_block_interactions(
+    block: &ReportBlockDefinition,
+    filter_ids: &HashSet<String>,
+) -> Result<(), ReportServiceError> {
+    let mut interaction_ids = HashSet::new();
+    for interaction in &block.interactions {
+        if interaction.id.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' interaction IDs cannot be empty",
+                block.id
+            )));
+        }
+        if !interaction_ids.insert(interaction.id.clone()) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' has duplicate interaction ID '{}'",
+                block.id, interaction.id
+            )));
+        }
+        if interaction.trigger.event.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' interaction '{}' must include trigger.event",
+                block.id, interaction.id
+            )));
+        }
+        for action in &interaction.actions {
+            if action.action_type == "set_filter" {
+                let Some(filter_id) = action.filter_id.as_deref() else {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' interaction '{}' set_filter action must include filterId",
+                        block.id, interaction.id
+                    )));
+                };
+                if !filter_ids.contains(filter_id) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' interaction '{}' references unknown filter '{}'",
+                        block.id, interaction.id, filter_id
+                    )));
+                }
+                if action.value_from.is_none() && action.value.is_none() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' interaction '{}' set_filter action must include value or valueFrom",
+                        block.id, interaction.id
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_layout_children(
     children: &Value,
     path: &str,
@@ -1454,6 +1745,149 @@ fn resolve_time_preset(preset: &str) -> (DateTime<Utc>, DateTime<Utc>, String) {
             today + Duration::days(1),
             "Last 30 days".to_string(),
         ),
+    }
+}
+
+fn static_filter_options_response(
+    filter: &ReportFilterDefinition,
+    offset: i64,
+    limit: i64,
+    query: &Option<String>,
+) -> ReportFilterOptionsResponse {
+    let query = query.as_deref().map(str::trim).unwrap_or("").to_lowercase();
+    let values = filter
+        .options
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|options| options.get("values"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut options = values
+        .into_iter()
+        .filter_map(static_filter_option)
+        .filter(|option| {
+            query.is_empty()
+                || option.label.to_lowercase().contains(&query)
+                || option.value.to_string().to_lowercase().contains(&query)
+        })
+        .collect::<Vec<_>>();
+    let total_count = options.len() as i64;
+    let limit = limit.clamp(1, MAX_TABLE_PAGE_SIZE);
+    let offset = offset.max(0);
+    options = options
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
+
+    ReportFilterOptionsResponse {
+        success: true,
+        filter: ReportFilterOptionsMetadata {
+            id: filter.id.clone(),
+        },
+        options,
+        page: ReportFilterOptionsPage {
+            offset,
+            size: limit,
+            total_count,
+            has_next_page: offset + limit < total_count,
+        },
+    }
+}
+
+fn static_filter_option(value: Value) -> Option<ReportFilterOption> {
+    match value {
+        Value::Object(object) => {
+            let value = object.get("value").cloned()?;
+            let label = object
+                .get("label")
+                .map(filter_option_label)
+                .unwrap_or_else(|| filter_option_label(&value));
+            Some(ReportFilterOption {
+                label,
+                value,
+                count: None,
+            })
+        }
+        value => Some(ReportFilterOption {
+            label: filter_option_label(&value),
+            value,
+            count: None,
+        }),
+    }
+}
+
+fn filter_option_label(value: &Value) -> String {
+    match value {
+        Value::Null => "(blank)".to_string(),
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn option_string<'a>(options: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
+    options
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn option_bool(options: &serde_json::Map<String, Value>, key: &str) -> Option<bool> {
+    options.get(key).and_then(Value::as_bool)
+}
+
+fn option_string_set(
+    options: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<HashSet<String>> {
+    let values = options
+        .get(key)
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
+    Some(values)
+}
+
+fn append_option_context_conditions(
+    conditions: &mut Vec<Condition>,
+    definition: &ReportDefinition,
+    current_filter: &ReportFilterDefinition,
+    options: &serde_json::Map<String, Value>,
+    resolved_filters: &HashMap<String, Value>,
+) {
+    let depends_on = option_string_set(options, "dependsOn");
+    for filter in &definition.filters {
+        if filter.id == current_filter.id {
+            continue;
+        }
+        if let Some(depends_on) = &depends_on
+            && !depends_on.contains(&filter.id)
+        {
+            continue;
+        }
+        let Some(value) = resolved_filters.get(&filter.id) else {
+            continue;
+        };
+        for target in &filter.applies_to {
+            if target.block_id.is_some() {
+                continue;
+            }
+            if let Some(condition) = condition_from_filter_target(target, value) {
+                conditions.push(condition);
+            }
+        }
+    }
+
+    if let Some(mappings) = options.get("filterMappings")
+        && let Ok(mappings) = serde_json::from_value::<Vec<ReportFilterTarget>>(mappings.clone())
+    {
+        append_source_mapping_conditions(conditions, &mappings, resolved_filters);
     }
 }
 
@@ -2461,6 +2895,7 @@ mod tests {
             chart: None,
             metric: None,
             filters: vec![],
+            interactions: vec![],
         }
     }
 

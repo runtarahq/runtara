@@ -130,6 +130,8 @@ pub struct ReportBlockDefinition {
     pub metric: Option<ReportMetricConfig>,
     #[serde(default)]
     pub filters: Vec<ReportFilterDefinition>,
+    #[serde(default)]
+    pub interactions: Vec<ReportInteractionDefinition>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -342,6 +344,33 @@ pub struct ReportMetricConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportInteractionDefinition {
+    pub id: String,
+    pub trigger: ReportInteractionTrigger,
+    #[serde(default)]
+    pub actions: Vec<ReportInteractionAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportInteractionTrigger {
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportInteractionAction {
+    #[serde(rename = "type")]
+    pub action_type: String,
+    #[serde(default, rename = "filterId", skip_serializing_if = "Option::is_none")]
+    pub filter_id: Option<String>,
+    #[serde(default, rename = "valueFrom", skip_serializing_if = "Option::is_none")]
+    pub value_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReportSummary {
     pub id: String,
     pub slug: String,
@@ -462,6 +491,55 @@ pub struct ReportRenderRequest {
     pub blocks: Option<Vec<ReportBlockDataRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportFilterOptionsRequest {
+    #[serde(default)]
+    pub filters: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default = "default_filter_options_limit")]
+    pub limit: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportFilterOptionsResponse {
+    pub success: bool,
+    pub filter: ReportFilterOptionsMetadata,
+    pub options: Vec<ReportFilterOption>,
+    pub page: ReportFilterOptionsPage,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportFilterOptionsMetadata {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportFilterOption {
+    pub label: String,
+    pub value: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReportFilterOptionsPage {
+    pub offset: i64,
+    pub size: i64,
+    #[serde(rename = "totalCount")]
+    pub total_count: i64,
+    #[serde(rename = "hasNextPage")]
+    pub has_next_page: bool,
+}
+
+fn default_filter_options_limit() -> i64 {
+    100
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

@@ -181,6 +181,8 @@ export const queryKeys = {
       [...queryKeys.reports.byId(id), 'render', request] as const,
     block: (id: string, blockId: string, request: unknown) =>
       [...queryKeys.reports.byId(id), 'block', blockId, request] as const,
+    filterOptions: (id: string, filterId: string, request: unknown) =>
+      [...queryKeys.reports.byId(id), 'filterOptions', filterId, request] as const,
   },
 
   // Files domain (S3-compatible storage)

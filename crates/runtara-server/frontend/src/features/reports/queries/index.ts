@@ -5,6 +5,8 @@ import {
   ReportBlockDataRequest,
   ReportBlockResult,
   ReportDto,
+  ReportFilterOptionsRequest,
+  ReportFilterOptionsResponse,
   ReportRenderRequest,
   ReportRenderResponse,
   ReportSummary,
@@ -112,6 +114,31 @@ export async function getReportBlockData(
 
   const result = await RuntimeREST.instance.post(
     `/api/runtime/reports/${encodeURIComponent(reportId)}/blocks/${encodeURIComponent(blockId)}/data`,
+    request ?? { filters: {} },
+    createAuthHeaders(token)
+  );
+  return result.data;
+}
+
+export async function getReportFilterOptions(
+  token: string,
+  context: { queryKey: readonly unknown[] }
+): Promise<ReportFilterOptionsResponse | null> {
+  const reportId = context.queryKey[2];
+  const filterId = context.queryKey[4];
+  const request = context.queryKey[5] as ReportFilterOptionsRequest | undefined;
+
+  if (
+    typeof reportId !== 'string' ||
+    reportId.length === 0 ||
+    typeof filterId !== 'string' ||
+    filterId.length === 0
+  ) {
+    return null;
+  }
+
+  const result = await RuntimeREST.instance.post(
+    `/api/runtime/reports/${encodeURIComponent(reportId)}/filters/${encodeURIComponent(filterId)}/options`,
     request ?? { filters: {} },
     createAuthHeaders(token)
   );

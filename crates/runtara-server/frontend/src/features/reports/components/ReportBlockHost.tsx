@@ -19,6 +19,8 @@ type ReportBlockHostProps = {
   initialResult?: ReportBlockResult;
   filters: Record<string, unknown>;
   className?: string;
+  onFilterChange?: (filterId: string, value: unknown) => void;
+  onFiltersChange?: (updates: Record<string, unknown>) => void;
 };
 
 export function ReportBlockHost({
@@ -27,6 +29,8 @@ export function ReportBlockHost({
   initialResult,
   filters,
   className = 'my-5',
+  onFilterChange,
+  onFiltersChange,
 }: ReportBlockHostProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [isVisible, setIsVisible] = useState(!block.lazy);
@@ -137,6 +141,45 @@ export function ReportBlockHost({
   } = useReportBlockData(reportId, block.id, request, needsBlockFetch);
 
   const result = fetchedResult ?? initialResult;
+  const runInteraction = (
+    event: string,
+    datum: Record<string, unknown>
+  ): boolean => {
+    let handled = false;
+    const updates: Record<string, unknown> = {};
+    for (const interaction of block.interactions ?? []) {
+      if (interaction.trigger.event !== event) continue;
+      const triggerField = interaction.trigger.field;
+      if (triggerField) {
+        if (datum.field !== undefined) {
+          if (datum.field !== triggerField) continue;
+        } else if (!(triggerField in datum)) {
+          continue;
+        }
+      }
+      for (const action of interaction.actions) {
+        if (action.type !== 'set_filter' || !action.filterId) continue;
+        const value =
+          action.valueFrom !== undefined
+            ? resolveInteractionValue(action.valueFrom, datum)
+            : action.value;
+        if (value !== undefined) {
+          updates[action.filterId] = value;
+          handled = true;
+        }
+      }
+    }
+    if (handled) {
+      if (onFiltersChange) {
+        onFiltersChange(updates);
+      } else {
+        for (const [filterId, value] of Object.entries(updates)) {
+          onFilterChange?.(filterId, value);
+        }
+      }
+    }
+    return handled;
+  };
 
   return (
     <div ref={rootRef} className={className}>
@@ -156,6 +199,7 @@ export function ReportBlockHost({
       {(block.filters?.length ?? 0) > 0 && (
         <div className="mb-3 rounded-lg border bg-muted/20 p-3">
           <ReportFilterBar
+            reportId={reportId}
             definition={{
               definitionVersion: 1,
               markdown: '',
@@ -170,6 +214,7 @@ export function ReportBlockHost({
               }));
               setPage((current) => ({ ...current, offset: 0 }));
             }}
+            showChips={false}
           />
         </div>
       )}
@@ -194,6 +239,7 @@ export function ReportBlockHost({
             setSort(nextSort);
             setPage((current) => ({ ...current, offset: 0 }));
           }}
+          onBlockInteraction={runInteraction}
         />
       )}
     </div>
@@ -208,6 +254,7 @@ function RenderedBlock({
   onPageChange,
   onSearchChange,
   onSortChange,
+  onBlockInteraction,
 }: {
   block: ReportBlockDefinition;
   result: ReportBlockResult;
@@ -216,6 +263,10 @@ function RenderedBlock({
   onPageChange: (offset: number, size: number) => void;
   onSearchChange: (search: string) => void;
   onSortChange: (sort: ReportOrderBy[]) => void;
+  onBlockInteraction: (
+    event: string,
+    datum: Record<string, unknown>
+  ) => boolean;
 }) {
   if (block.type === 'table') {
     return (
@@ -227,12 +278,32 @@ function RenderedBlock({
         onPageChange={onPageChange}
         onSearchChange={onSearchChange}
         onSortChange={onSortChange}
+        onRowClick={
+          hasBlockInteraction(block, 'row_click')
+            ? (row) => onBlockInteraction('row_click', row)
+            : undefined
+        }
+        onCellClick={
+          hasBlockInteraction(block, 'cell_click')
+            ? (cell) => onBlockInteraction('cell_click', cell)
+            : undefined
+        }
       />
     );
   }
 
   if (block.type === 'chart') {
-    return <ChartBlock block={block} result={result} />;
+    return (
+      <ChartBlock
+        block={block}
+        result={result}
+        onPointClick={
+          hasBlockInteraction(block, 'point_click')
+            ? (datum) => onBlockInteraction('point_click', datum)
+            : undefined
+        }
+      />
+    );
   }
 
   if (block.type === 'metric') {
@@ -286,6 +357,25 @@ function areSortsEqual(left: ReportOrderBy[], right: ReportOrderBy[]) {
   );
 }
 
+function hasBlockInteraction(block: ReportBlockDefinition, event: string) {
+  return (block.interactions ?? []).some(
+    (interaction) => interaction.trigger.event === event
+  );
+}
+
 function normalizeSortDirection(direction: ReportOrderBy['direction']) {
   return direction?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+}
+
+function resolveInteractionValue(
+  source: string,
+  datum: Record<string, unknown>
+): unknown {
+  const path = source.startsWith('datum.') ? source.slice('datum.'.length) : source;
+  return path.split('.').reduce<unknown>((current, part) => {
+    if (current && typeof current === 'object' && part in current) {
+      return (current as Record<string, unknown>)[part];
+    }
+    return undefined;
+  }, datum);
 }

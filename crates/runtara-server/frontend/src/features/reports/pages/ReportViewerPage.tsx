@@ -8,7 +8,12 @@ import RuntaraLogo from '@/assets/logo/runtara-logo-icon.svg';
 import { ReportFilterBar } from '../components/ReportFilterBar';
 import { ReportRenderer } from '../components/ReportRenderer';
 import { useReport, useReportRender } from '../hooks/useReports';
-import { decodeFilterValue, encodeFilterValue, getEagerBlocks } from '../utils';
+import {
+  decodeFilterValue,
+  encodeFilterValue,
+  getEagerBlocks,
+  getFilterDefaultValue,
+} from '../utils';
 
 export function ReportViewerPage() {
   const { reportId } = useParams();
@@ -65,13 +70,35 @@ export function ReportViewerPage() {
     refetch,
   } = useReportRender(reportId, renderRequest, Boolean(report));
 
-  const handleFilterChange = (filterId: string, value: unknown) => {
-    const nextFilters = { ...filters, [filterId]: value };
-    setFilters(nextFilters);
+  const handleFilterChanges = (updates: Record<string, unknown>) => {
+    setFilters((current) => ({ ...current, ...updates }));
+    setSearchParams(
+      (currentParams) => {
+        const nextParams = new URLSearchParams(currentParams);
+        for (const [filterId, value] of Object.entries(updates)) {
+          const filter = report?.definition.filters.find(
+            (filter) => filter.id === filterId
+          );
+          const defaultValue = filter
+            ? getFilterDefaultValue(filter)
+            : undefined;
+          if (
+            isEmptyFilterValue(value) ||
+            isSameFilterValue(value, defaultValue)
+          ) {
+            nextParams.delete(filterId);
+          } else {
+            nextParams.set(filterId, encodeFilterValue(value));
+          }
+        }
+        return nextParams;
+      },
+      { replace: true }
+    );
+  };
 
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.set(filterId, encodeFilterValue(value));
-    setSearchParams(nextParams, { replace: true });
+  const handleFilterChange = (filterId: string, value: unknown) => {
+    handleFilterChanges({ [filterId]: value });
   };
 
   const handlePrint = () => {
@@ -106,6 +133,7 @@ export function ReportViewerPage() {
       title={report.name}
       toolbar={
         <ReportFilterBar
+          reportId={report.id}
           definition={report.definition}
           values={filters}
           onChange={handleFilterChange}
@@ -147,6 +175,8 @@ export function ReportViewerPage() {
         definition={report.definition}
         renderResponse={renderResponse}
         filters={filters}
+        onFilterChange={handleFilterChange}
+        onFiltersChange={handleFilterChanges}
       />
       <div className="report-print-brand">
         <img src={RuntaraLogo} alt="" />
@@ -154,4 +184,15 @@ export function ReportViewerPage() {
       </div>
     </TilesPage>
   );
+}
+
+function isEmptyFilterValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
+}
+
+function isSameFilterValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

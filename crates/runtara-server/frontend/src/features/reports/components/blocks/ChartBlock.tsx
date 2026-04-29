@@ -51,9 +51,11 @@ type TooltipPayload = {
 export function ChartBlock({
   block,
   result,
+  onPointClick,
 }: {
   block: ReportBlockDefinition;
   result: ReportBlockResult;
+  onPointClick?: (datum: Record<string, unknown>) => void;
 }) {
   const data = (result.data ?? {}) as ChartData;
   const rows = data.rows ?? [];
@@ -66,6 +68,10 @@ export function ChartBlock({
   );
   const chart = block.chart;
   const series = getChartSeries(block, columns);
+  const handleChartClick = (event: unknown) => {
+    const datum = chartClickDatum(event);
+    if (datum) onPointClick?.(datum);
+  };
 
   if (!chart || chartRows.length === 0 || series.length === 0) {
     return (
@@ -78,7 +84,11 @@ export function ChartBlock({
   if (chart.kind === 'pie' || chart.kind === 'donut') {
     const seriesField = series[0].field;
     return (
-      <div className="h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm">
+      <div
+        className={`h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm ${
+          onPointClick ? 'cursor-pointer' : ''
+        }`}
+      >
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Tooltip content={<ChartTooltip />} />
@@ -96,6 +106,7 @@ export function ChartBlock({
               cornerRadius={6}
               stroke={SURFACE_COLOR}
               strokeWidth={2}
+              onClick={handleChartClick}
             >
               {chartRows.map((_, index) => (
                 <Cell key={index} fill={COLORS[index % COLORS.length]} />
@@ -138,12 +149,17 @@ export function ChartBlock({
   );
 
   return (
-    <div className="h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm">
+    <div
+      className={`h-80 overflow-hidden rounded-lg border bg-card p-4 shadow-sm ${
+        onPointClick ? 'cursor-pointer' : ''
+      }`}
+    >
       <ResponsiveContainer width="100%" height="100%">
         {chart.kind === 'bar' ? (
           <BarChart
             data={chartRows}
             margin={{ top: 8, right: 12, left: 0, bottom: 4 }}
+            onClick={handleChartClick}
           >
             <defs>
               {series.map((series, index) => (
@@ -184,6 +200,7 @@ export function ChartBlock({
           <AreaChart
             data={chartRows}
             margin={{ top: 8, right: 12, left: 0, bottom: 4 }}
+            onClick={handleChartClick}
           >
             <defs>
               {series.map((series, index) => (
@@ -229,6 +246,7 @@ export function ChartBlock({
           <LineChart
             data={chartRows}
             margin={{ top: 8, right: 12, left: 0, bottom: 4 }}
+            onClick={handleChartClick}
           >
             {common}
             {series.map((series, index) => (
@@ -251,6 +269,19 @@ export function ChartBlock({
         )}
       </ResponsiveContainer>
     </div>
+  );
+}
+
+function chartClickDatum(event: unknown): Record<string, unknown> | null {
+  if (!event || typeof event !== 'object') return null;
+  const candidate = event as {
+    activePayload?: Array<{ payload?: Record<string, unknown> }>;
+    payload?: Record<string, unknown>;
+  };
+  return (
+    candidate.activePayload?.[0]?.payload ??
+    candidate.payload ??
+    (event as Record<string, unknown>)
   );
 }
 

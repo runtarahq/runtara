@@ -167,6 +167,25 @@ pub async fn get_report_block_data(
     }
 }
 
+pub async fn get_report_filter_options(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(pool): State<PgPool>,
+    State(manager): State<Arc<ObjectStoreManager>>,
+    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
+    Path((report_id, filter_id)): Path<(String, String)>,
+    Json(request): Json<ReportFilterOptionsRequest>,
+) -> Result<(StatusCode, Json<ReportFilterOptionsResponse>), (StatusCode, Json<Value>)> {
+    let service = ReportService::new(pool, manager, connections);
+
+    match service
+        .get_filter_options(&tenant_id, &report_id, &filter_id, request)
+        .await
+    {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(error_response(error)),
+    }
+}
+
 pub async fn add_report_block(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
