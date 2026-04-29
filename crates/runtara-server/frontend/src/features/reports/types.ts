@@ -125,7 +125,53 @@ export interface ReportBlockDatasetQuery {
   dimensions?: string[];
   measures?: string[];
   orderBy?: ReportOrderBy[];
+  datasetFilters?: ReportDatasetFilterRequest[];
   limit?: number;
+}
+
+export interface ReportDatasetFilterRequest {
+  field: string;
+  op?: string;
+  value: unknown;
+}
+
+export interface ReportDatasetQueryRequest {
+  filters?: Record<string, unknown>;
+  datasetFilters?: ReportDatasetFilterRequest[];
+  dimensions: string[];
+  measures: string[];
+  orderBy?: ReportOrderBy[];
+  sort?: ReportOrderBy[];
+  limit?: number;
+  search?: ReportTableSearchRequest;
+  page?: {
+    offset: number;
+    size: number;
+  };
+  timezone?: string;
+}
+
+export interface ReportDatasetQueryColumn {
+  key?: string;
+  field?: string;
+  label: string;
+  type: string;
+  format?: ReportDatasetValueFormat;
+}
+
+export interface ReportDatasetQueryResponse {
+  success: boolean;
+  dataset: {
+    id: string;
+  };
+  columns: ReportDatasetQueryColumn[];
+  rows: unknown[][];
+  page: {
+    offset: number;
+    size: number;
+    totalCount: number;
+    hasNextPage: boolean;
+  };
 }
 
 export interface ReportTableSearchRequest {

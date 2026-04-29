@@ -335,7 +335,7 @@ function validateReportDefinition(definition: ReportDefinition): string[] {
       errors.push(`Duplicate report block ID: ${block.id}`);
     }
     blockIds.add(block.id);
-    if (!block.source.schema.trim()) {
+    if (!block.dataset && !block.source.schema.trim()) {
       errors.push(`Block "${block.id}" needs a schema.`);
     }
   }

@@ -183,6 +183,8 @@ export const queryKeys = {
       [...queryKeys.reports.byId(id), 'block', blockId, request] as const,
     filterOptions: (id: string, filterId: string, request: unknown) =>
       [...queryKeys.reports.byId(id), 'filterOptions', filterId, request] as const,
+    dataset: (id: string, datasetId: string, request: unknown) =>
+      [...queryKeys.reports.byId(id), 'dataset', datasetId, request] as const,
   },
 
   // Files domain (S3-compatible storage)

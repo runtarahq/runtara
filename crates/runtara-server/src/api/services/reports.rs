@@ -643,21 +643,45 @@ impl ReportService {
             })?;
 
         let resolved_filters = resolve_filters(&report.definition, &request.filters);
-        let page_size = clamp_page_size(request.page.as_ref().map(|page| page.size).unwrap_or(50));
+        let requested_page_size =
+            clamp_page_size(request.page.as_ref().map(|page| page.size).unwrap_or(50));
         let offset = request
             .page
             .as_ref()
             .map(|page| page.offset)
             .unwrap_or(0)
             .max(0);
+        let requested_limit = request
+            .limit
+            .map(|limit| limit.clamp(1, MAX_AGGREGATE_ROWS));
+        let remaining_limit = requested_limit.map(|limit| limit.saturating_sub(offset));
+        let page_size = remaining_limit
+            .map(|remaining| requested_page_size.min(remaining))
+            .unwrap_or(requested_page_size);
         let compiled = compile_dataset_query(
             "dataset query",
             dataset,
             &request.dimensions,
             &request.measures,
             &request.order_by,
-            Some(page_size),
+            Some(page_size.max(1)),
         )?;
+        if page_size == 0 {
+            return Ok(ReportDatasetQueryResponse {
+                success: true,
+                dataset: ReportDatasetQueryMetadata {
+                    id: dataset.id.clone(),
+                },
+                columns: compiled.columns,
+                rows: vec![],
+                page: ReportDatasetQueryPage {
+                    offset,
+                    size: 0,
+                    total_count: requested_limit.unwrap_or(0),
+                    has_next_page: false,
+                },
+            });
+        }
         let aggregate_request = build_aggregate_request_from_parts(
             "dataset query",
             &compiled.source.group_by,
@@ -665,7 +689,13 @@ impl ReportService {
             &compiled.source.order_by,
             Some(page_size),
             Some(offset),
-            build_dataset_condition(&report.definition, &resolved_filters),
+            build_dataset_condition(
+                &report.definition,
+                dataset,
+                &resolved_filters,
+                &request.dataset_filters,
+                request.search.as_ref(),
+            )?,
         )?;
 
         let result = self
@@ -689,8 +719,13 @@ impl ReportService {
             page: ReportDatasetQueryPage {
                 offset,
                 size: page_size,
-                total_count: result.group_count,
-                has_next_page: offset + page_size < result.group_count,
+                total_count: requested_limit
+                    .map(|limit| result.group_count.min(limit))
+                    .unwrap_or(result.group_count),
+                has_next_page: offset + page_size
+                    < requested_limit
+                        .map(|limit| result.group_count.min(limit))
+                        .unwrap_or(result.group_count),
             },
         })
     }
@@ -794,6 +829,13 @@ impl ReportService {
                     &dataset_query.measures,
                     &dataset_query.order_by,
                     dataset_query.limit,
+                )?;
+                build_dataset_condition(
+                    definition,
+                    dataset,
+                    &HashMap::new(),
+                    &dataset_query.dataset_filters,
+                    None,
                 )?;
                 validate_dataset_block_output(block, &compiled.source)?;
                 validate_block_interactions(block, &filter_ids)?;
@@ -2662,6 +2704,13 @@ fn compiled_dataset_block(
     let mut compiled_block = block.clone();
     compiled_block.dataset = None;
     compiled_block.source = compiled.source;
+    compiled_block.source.condition = build_dataset_condition(
+        definition,
+        dataset,
+        &HashMap::new(),
+        &dataset_query.dataset_filters,
+        None,
+    )?;
     Ok(compiled_block)
 }
 
@@ -2788,8 +2837,11 @@ fn compile_dataset_query(
 
 fn build_dataset_condition(
     definition: &ReportDefinition,
+    dataset: &ReportDatasetDefinition,
     resolved_filters: &HashMap<String, Value>,
-) -> Option<Condition> {
+    dataset_filters: &[ReportDatasetFilter],
+    search: Option<&ReportTableSearchRequest>,
+) -> Result<Option<Condition>, ReportServiceError> {
     let mut conditions = Vec::new();
     for filter in &definition.filters {
         let Some(value) = resolved_filters.get(&filter.id) else {
@@ -2804,7 +2856,82 @@ fn build_dataset_condition(
             }
         }
     }
-    combine_conditions(conditions)
+
+    let dataset_filterable_fields = dataset_filterable_fields(dataset);
+    for filter in dataset_filters {
+        if !dataset_filterable_fields.contains(&filter.field) {
+            return Err(ReportServiceError::Validation(format!(
+                "Dataset query filter references unknown dataset field '{}'",
+                filter.field
+            )));
+        }
+        let target = ReportFilterTarget {
+            filter_id: None,
+            block_id: None,
+            field: filter.field.clone(),
+            op: filter.op.clone(),
+        };
+        if let Some(condition) = condition_from_filter_target(&target, &filter.value) {
+            conditions.push(condition);
+        }
+    }
+
+    if let Some(search) = search
+        && !search.query.trim().is_empty()
+    {
+        let requested_fields = search
+            .fields
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut search_conditions = dataset
+            .dimensions
+            .iter()
+            .map(|dimension| dimension.field.as_str())
+            .filter(|field| requested_fields.is_empty() || requested_fields.contains(field))
+            .filter(|field| dataset_filterable_fields.contains(*field))
+            .map(|field| {
+                binary_condition(
+                    "CONTAINS",
+                    Value::String(field.to_string()),
+                    Value::String(search.query.trim().to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        match search_conditions.len() {
+            0 => {}
+            1 => conditions.push(search_conditions.remove(0)),
+            _ => conditions.push(Condition {
+                op: "OR".to_string(),
+                arguments: Some(
+                    search_conditions
+                        .into_iter()
+                        .filter_map(|condition| serde_json::to_value(condition).ok())
+                        .collect(),
+                ),
+            }),
+        }
+    }
+
+    Ok(combine_conditions(conditions))
+}
+
+fn dataset_filterable_fields(dataset: &ReportDatasetDefinition) -> HashSet<String> {
+    let mut fields = dataset
+        .dimensions
+        .iter()
+        .map(|dimension| dimension.field.clone())
+        .collect::<HashSet<_>>();
+    if let Some(time_dimension) = &dataset.time_dimension {
+        fields.insert(time_dimension.clone());
+    }
+    for measure in &dataset.measures {
+        if let Some(field) = &measure.field {
+            fields.insert(field.clone());
+        }
+    }
+    fields
 }
 
 fn validate_dataset_block_output(
@@ -4356,6 +4483,125 @@ mod tests {
     }
 
     #[test]
+    fn dataset_query_condition_compiles_report_filters_explore_filters_and_search() {
+        let dataset = test_dataset();
+        let definition = ReportDefinition {
+            definition_version: 1,
+            markdown: String::new(),
+            layout: vec![],
+            filters: vec![ReportFilterDefinition {
+                id: "vendor".to_string(),
+                label: "Vendor".to_string(),
+                filter_type: ReportFilterType::Select,
+                default: None,
+                required: false,
+                options: None,
+                applies_to: vec![ReportFilterTarget {
+                    filter_id: None,
+                    block_id: None,
+                    field: "vendor".to_string(),
+                    op: "eq".to_string(),
+                }],
+            }],
+            datasets: vec![dataset.clone()],
+            blocks: vec![],
+        };
+        let mut resolved_filters = HashMap::new();
+        resolved_filters.insert("vendor".to_string(), json!("Fabrikam"));
+
+        let condition = build_dataset_condition(
+            &definition,
+            &dataset,
+            &resolved_filters,
+            &[ReportDatasetFilter {
+                field: "category".to_string(),
+                op: "contains".to_string(),
+                value: json!("Storage"),
+            }],
+            Some(&ReportTableSearchRequest {
+                query: "fab".to_string(),
+                fields: vec!["vendor".to_string()],
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let condition = serde_json::to_value(condition).unwrap();
+
+        assert_eq!(condition["op"], json!("AND"));
+        assert!(condition.to_string().contains("\"EQ\""));
+        assert!(condition.to_string().contains("\"CONTAINS\""));
+        assert!(condition.to_string().contains("Fabrikam"));
+        assert!(condition.to_string().contains("Storage"));
+    }
+
+    #[test]
+    fn dataset_query_condition_rejects_unknown_filter_fields() {
+        let dataset = test_dataset();
+        let err = build_dataset_condition(
+            &ReportDefinition {
+                definition_version: 1,
+                markdown: String::new(),
+                layout: vec![],
+                filters: vec![],
+                datasets: vec![dataset.clone()],
+                blocks: vec![],
+            },
+            &dataset,
+            &HashMap::new(),
+            &[ReportDatasetFilter {
+                field: "sku".to_string(),
+                op: "eq".to_string(),
+                value: json!("SKU-1"),
+            }],
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown dataset field 'sku'"));
+    }
+
+    #[test]
+    fn dataset_block_compilation_preserves_dataset_filters() {
+        let dataset = test_dataset();
+        let mut block = test_block("vendor_storage");
+        block.source = default_report_source();
+        block.dataset = Some(ReportBlockDatasetQuery {
+            id: dataset.id.clone(),
+            dimensions: vec!["vendor".to_string()],
+            measures: vec!["qty_total".to_string()],
+            order_by: vec![],
+            dataset_filters: vec![ReportDatasetFilter {
+                field: "category".to_string(),
+                op: "eq".to_string(),
+                value: json!("Storage"),
+            }],
+            limit: Some(25),
+        });
+        block.table = Some(ReportTableConfig {
+            columns: vec![table_column("vendor"), table_column("qty_total")],
+            default_sort: vec![],
+            pagination: None,
+        });
+        let definition = ReportDefinition {
+            definition_version: 1,
+            markdown: String::new(),
+            layout: vec![],
+            filters: vec![],
+            datasets: vec![dataset],
+            blocks: vec![block.clone()],
+        };
+
+        let compiled = compiled_dataset_block(&definition, &block).unwrap();
+        let condition = compiled.source.condition.unwrap();
+
+        assert_eq!(condition.op, "EQ");
+        assert_eq!(
+            condition.arguments,
+            Some(vec![json!("category"), json!("Storage")])
+        );
+    }
+
+    #[test]
     fn dataset_query_rejects_unknown_fields_and_unselected_sort() {
         let dataset = test_dataset();
 
@@ -4408,6 +4654,7 @@ mod tests {
             dimensions: vec!["vendor".to_string()],
             measures: vec!["qty_total".to_string()],
             order_by: vec![],
+            dataset_filters: vec![],
             limit: None,
         });
         block.source = default_report_source();

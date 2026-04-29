@@ -134,6 +134,11 @@ const ReportViewerPage = lazy(() =>
     default: m.ReportViewerPage,
   }))
 );
+const ReportExplorePage = lazy(() =>
+  import('@/features/reports/pages/ReportExplorePage').then((m) => ({
+    default: m.ReportExplorePage,
+  }))
+);
 const ReportEditorPage = lazy(() =>
   import('@/features/reports/pages/ReportEditorPage').then((m) => ({
     default: m.ReportEditorPage,
@@ -453,6 +458,16 @@ export const router = createBrowserRouter(
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
                 <ReportViewerPage />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/reports/:reportId/explore',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ReportExplorePage />
               </Suspense>
             </PrivateRoute>
           ),

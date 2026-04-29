@@ -4,6 +4,8 @@ import {
   CreateReportRequest,
   ReportBlockDataRequest,
   ReportBlockResult,
+  ReportDatasetQueryRequest,
+  ReportDatasetQueryResponse,
   ReportDto,
   ReportFilterOptionsRequest,
   ReportFilterOptionsResponse,
@@ -140,6 +142,31 @@ export async function getReportFilterOptions(
   const result = await RuntimeREST.instance.post(
     `/api/runtime/reports/${encodeURIComponent(reportId)}/filters/${encodeURIComponent(filterId)}/options`,
     request ?? { filters: {} },
+    createAuthHeaders(token)
+  );
+  return result.data;
+}
+
+export async function queryReportDataset(
+  token: string,
+  context: { queryKey: readonly unknown[] }
+): Promise<ReportDatasetQueryResponse | null> {
+  const reportId = context.queryKey[2];
+  const datasetId = context.queryKey[4];
+  const request = context.queryKey[5] as ReportDatasetQueryRequest | undefined;
+
+  if (
+    typeof reportId !== 'string' ||
+    reportId.length === 0 ||
+    typeof datasetId !== 'string' ||
+    datasetId.length === 0
+  ) {
+    return null;
+  }
+
+  const result = await RuntimeREST.instance.post(
+    `/api/runtime/reports/${encodeURIComponent(reportId)}/datasets/${encodeURIComponent(datasetId)}/query`,
+    request ?? { dimensions: [], measures: [] },
     createAuthHeaders(token)
   );
   return result.data;

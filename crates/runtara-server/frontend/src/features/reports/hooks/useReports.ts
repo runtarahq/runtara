@@ -8,6 +8,7 @@ import {
   getReportBlockData,
   getReportFilterOptions,
   listReports,
+  queryReportDataset,
   renderReport,
   updateReport,
 } from '../queries';
@@ -15,6 +16,8 @@ import {
   CreateReportRequest,
   ReportBlockDataRequest,
   ReportBlockResult,
+  ReportDatasetQueryRequest,
+  ReportDatasetQueryResponse,
   ReportDto,
   ReportFilterOptionsRequest,
   ReportFilterOptionsResponse,
@@ -87,6 +90,23 @@ export function useReportFilterOptions(
     ),
     queryFn: (token, context) => getReportFilterOptions(token, context),
     enabled: Boolean(reportId && filterId && request && enabled),
+  });
+}
+
+export function useReportDatasetQuery(
+  reportId: string | undefined,
+  datasetId: string | undefined,
+  request: ReportDatasetQueryRequest | undefined,
+  enabled: boolean
+) {
+  return useCustomQuery<ReportDatasetQueryResponse | null>({
+    queryKey: queryKeys.reports.dataset(
+      reportId ?? '',
+      datasetId ?? '',
+      request ?? {}
+    ),
+    queryFn: (token, context) => queryReportDataset(token, context),
+    enabled: Boolean(reportId && datasetId && request && enabled),
   });
 }
 

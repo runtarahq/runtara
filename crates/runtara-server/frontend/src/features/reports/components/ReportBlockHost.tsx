@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { Link } from 'react-router';
+import { Compass, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import {
   ReportBlockDefinition,
@@ -12,6 +13,7 @@ import { ChartBlock } from './blocks/ChartBlock';
 import { MetricBlock } from './blocks/MetricBlock';
 import { TableBlock } from './blocks/TableBlock';
 import { ReportFilterBar } from './ReportFilterBar';
+import { encodeFilterValue } from '../utils';
 
 type ReportBlockHostProps = {
   reportId: string;
@@ -138,6 +140,10 @@ export function ReportBlockHost({
     isFetching,
     refetch,
   } = useReportBlockData(reportId, block.id, request, needsBlockFetch);
+  const explorePath = useMemo(
+    () => buildExplorePath(reportId, block.id, filters),
+    [block.id, filters, reportId]
+  );
 
   const result = needsBlockFetch
     ? (fetchedResult ?? initialResult)
@@ -184,17 +190,31 @@ export function ReportBlockHost({
 
   return (
     <div ref={rootRef} className={className}>
-      {block.title && (
+      {(block.title || block.dataset) && (
         <div className="mb-2 flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold text-foreground">
-            {block.title}
-          </h2>
-          {result?.status === 'error' && (
-            <Button variant="outline" size="sm" onClick={() => refetch()}>
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Retry
-            </Button>
+          {block.title ? (
+            <h2 className="text-base font-semibold text-foreground">
+              {block.title}
+            </h2>
+          ) : (
+            <span />
           )}
+          <div className="flex items-center gap-2">
+            {block.dataset && (
+              <Link to={explorePath}>
+                <Button variant="outline" size="sm">
+                  <Compass className="mr-2 h-4 w-4" />
+                  Explore this
+                </Button>
+              </Link>
+            )}
+            {result?.status === 'error' && (
+              <Button variant="outline" size="sm" onClick={() => refetch()}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Retry
+              </Button>
+            )}
+          </div>
         </div>
       )}
       {(block.filters?.length ?? 0) > 0 && (
@@ -346,6 +366,28 @@ function BlockError({
 
 function getDefaultPageSize(block: ReportBlockDefinition) {
   return block.table?.pagination?.defaultPageSize ?? 50;
+}
+
+function buildExplorePath(
+  reportId: string,
+  blockId: string,
+  filters: Record<string, unknown>
+) {
+  const params = new URLSearchParams();
+  params.set('block', blockId);
+  for (const [filterId, value] of Object.entries(filters)) {
+    if (!isEmptyFilterValue(value)) {
+      params.set(filterId, encodeFilterValue(value));
+    }
+  }
+  return `/reports/${reportId}/explore?${params.toString()}`;
+}
+
+function isEmptyFilterValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return value.trim().length === 0;
+  if (Array.isArray(value)) return value.length === 0;
+  return false;
 }
 
 function areSortsEqual(left: ReportOrderBy[], right: ReportOrderBy[]) {

@@ -248,6 +248,12 @@ pub struct ReportBlockDatasetQuery {
     pub measures: Vec<String>,
     #[serde(default, rename = "orderBy")]
     pub order_by: Vec<ReportOrderBy>,
+    #[serde(
+        default,
+        rename = "datasetFilters",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub dataset_filters: Vec<ReportDatasetFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
 }
@@ -707,16 +713,30 @@ pub struct ReportFilterOptionsResponse {
 pub struct ReportDatasetQueryRequest {
     #[serde(default)]
     pub filters: HashMap<String, Value>,
+    #[serde(default, rename = "datasetFilters")]
+    pub dataset_filters: Vec<ReportDatasetFilter>,
     #[serde(default)]
     pub dimensions: Vec<String>,
     #[serde(default)]
     pub measures: Vec<String>,
-    #[serde(default, rename = "orderBy")]
+    #[serde(default, rename = "orderBy", alias = "sort")]
     pub order_by: Vec<ReportOrderBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ReportTableSearchRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<ReportPageRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportDatasetFilter {
+    pub field: String,
+    #[serde(default = "default_filter_op")]
+    pub op: String,
+    pub value: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

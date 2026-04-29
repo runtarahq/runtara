@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import { Edit, Printer, RefreshCw } from 'lucide-react';
+import { Compass, Edit, Printer, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { TileList, TilesPage } from '@/shared/components/tiles-page';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
@@ -120,6 +120,11 @@ export function ReportViewerPage() {
     );
   }
 
+  const exploreSearch = searchParams.toString();
+  const explorePath = `/reports/${report.id}/explore${
+    exploreSearch ? `?${exploreSearch}` : ''
+  }`;
+
   return (
     <TilesPage
       kicker="Reports"
@@ -134,6 +139,15 @@ export function ReportViewerPage() {
       }
       action={
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <Link to={explorePath} className="w-full sm:w-auto">
+            <Button
+              variant="outline"
+              className="h-11 w-full rounded-full sm:w-auto sm:px-5"
+            >
+              <Compass className="mr-2 h-4 w-4" />
+              Explore
+            </Button>
+          </Link>
           <Button
             variant="outline"
             className="h-11 rounded-full sm:px-5"
