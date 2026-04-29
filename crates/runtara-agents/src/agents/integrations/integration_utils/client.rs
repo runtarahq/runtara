@@ -305,6 +305,7 @@ impl<'c> ProxyRequest<'c> {
             body_type,
             response_type: ResponseType::Json,
             timeout_ms: self.timeout_ms,
+            _connection: Some(self.client.connection.clone()),
             ..Default::default()
         }
     }
@@ -421,6 +422,26 @@ mod tests {
         let client = ProxyHttpClient::new(&c, "HUBSPOT");
         let input = client.get("/crm/v3/objects/contacts").into_http_input();
         assert_eq!(input.url, "/crm/v3/objects/contacts");
+    }
+
+    #[test]
+    fn request_input_carries_connection_for_direct_host_execution() {
+        let c = RawConnection {
+            integration_id: "openai_api_key".into(),
+            parameters: serde_json::json!({
+                "api_key": "sk-test",
+                "base_url": "https://api.openai.com/v1"
+            }),
+            ..conn()
+        };
+        let client = ProxyHttpClient::new(&c, "OPENAI");
+        let input = client.post("/chat/completions").into_http_input();
+
+        let injected = input
+            ._connection
+            .expect("proxy request should preserve raw connection");
+        assert_eq!(injected.connection_id, "conn-1");
+        assert_eq!(injected.integration_id, "openai_api_key");
     }
 
     fn err_to_json(err: AgentError) -> serde_json::Value {

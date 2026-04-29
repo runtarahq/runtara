@@ -125,6 +125,29 @@ fn walk(value: &mut Value, source: &Value) {
                 return;
             }
 
+            // Object-model condition payloads use the same MappingValue
+            // envelope for two different concepts:
+            // - argument 0 of field-based operations names an Object Model
+            //   column and must stay as a MappingValue::Reference so the
+            //   agent can turn it into a field name;
+            // - later arguments are runtime values and should be resolved.
+            //
+            // Without this positional rule, `{valueType:"reference",
+            // value:"category_leaf_id"}` gets looked up as a workflow path and
+            // becomes null before the object-model agent can interpret it.
+            let condition_op = map.get("op").and_then(|v| v.as_str()).map(str::to_owned);
+            if let Some(op) = condition_op.as_deref()
+                && let Some(args) = map.get_mut("arguments").and_then(|v| v.as_array_mut())
+            {
+                for (index, arg) in args.iter_mut().enumerate() {
+                    if index == 0 && is_field_argument_operator(op) && is_reference_envelope(arg) {
+                        continue;
+                    }
+                    walk(arg, source);
+                }
+                return;
+            }
+
             for (_, child) in map.iter_mut() {
                 walk(child, source);
             }
@@ -156,6 +179,36 @@ fn path_to_json_pointer(path: &str) -> String {
         }
     }
     out
+}
+
+fn is_reference_envelope(value: &Value) -> bool {
+    matches!(
+        value.get("valueType"),
+        Some(Value::String(s)) if s == "reference"
+    ) && matches!(value.get("value"), Some(Value::String(_)))
+}
+
+fn is_field_argument_operator(op: &str) -> bool {
+    matches!(
+        op.to_ascii_uppercase().as_str(),
+        "EQ" | "NE"
+            | "GT"
+            | "GTE"
+            | "LT"
+            | "LTE"
+            | "STARTS_WITH"
+            | "ENDS_WITH"
+            | "CONTAINS"
+            | "IN"
+            | "NOT_IN"
+            | "IS_DEFINED"
+            | "IS_EMPTY"
+            | "IS_NOT_EMPTY"
+            | "SIMILARITY_GTE"
+            | "MATCH"
+            | "COSINE_DISTANCE_LTE"
+            | "L2_DISTANCE_LTE"
+    )
 }
 
 #[cfg(test)]
@@ -257,12 +310,14 @@ mod tests {
         // condition arrives as `{type, op, arguments}` (no `valueType` at the
         // top level). The user-reported failure (`INPUT_DESERIALIZATION_ERROR:
         // ConditionArgument`) was caused by the inner refs resolving to bare
-        // null. Now they are wrapped as MappingValue::Immediate.
+        // null. Field-position references now remain references so the
+        // object-model agent can interpret them as column names; value
+        // arguments are still resolved and wrapped as immediates.
         let value = json!({
             "type": "operation",
             "op": "COSINE_DISTANCE_LTE",
             "arguments": [
-                {"valueType": "reference", "value": "data.customer_category"},
+                {"valueType": "reference", "value": "embedding"},
                 {"valueType": "reference", "value": "steps.step1.outputs.first"},
                 {"valueType": "immediate", "value": 0.6}
             ]
@@ -274,7 +329,7 @@ mod tests {
                 "type": "operation",
                 "op": "COSINE_DISTANCE_LTE",
                 "arguments": [
-                    {"valueType": "immediate", "value": "leather wallet brown"},
+                    {"valueType": "reference", "value": "embedding"},
                     {"valueType": "immediate", "value": "alpha"},
                     {"valueType": "immediate", "value": 0.6}
                 ]
@@ -330,7 +385,7 @@ mod tests {
                 "type": "operation",
                 "op": "COSINE_DISTANCE_LTE",
                 "arguments": [
-                    {"valueType": "reference", "value": "data.embedding_field"},
+                    {"valueType": "reference", "value": "embedding"},
                     {"valueType": "reference", "value": "steps.step1.outputs.first"},
                     {"valueType": "immediate", "value": 0.6}
                 ]
@@ -347,9 +402,9 @@ mod tests {
                     "type": "operation",
                     "op": "COSINE_DISTANCE_LTE",
                     "arguments": [
-                        // data.embedding_field is missing in source → resolves to null,
-                        // wrapped as MappingValue::Immediate to satisfy ConditionArgument.
-                        {"valueType": "immediate", "value": null},
+                        // Field-position references are column names, not
+                        // workflow paths, so they intentionally remain refs.
+                        {"valueType": "reference", "value": "embedding"},
                         {"valueType": "immediate", "value": "alpha"},
                         {"valueType": "immediate", "value": 0.6}
                     ]

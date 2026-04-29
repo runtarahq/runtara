@@ -181,6 +181,21 @@ impl ValidationErrorDto {
                 Some(field_name.clone()),
                 None,
             ),
+            ValidationError::InvalidConditionShape {
+                step_id,
+                field_name,
+                path,
+                message,
+            } => (
+                "E025".to_string(),
+                format!(
+                    "Step '{}': condition input '{}' has invalid shape at {}: {}",
+                    step_id, field_name, path, message
+                ),
+                Some(step_id.clone()),
+                Some(field_name.clone()),
+                None,
+            ),
             ValidationError::InvalidChildVersion {
                 step_id,
                 child_workflow_id,

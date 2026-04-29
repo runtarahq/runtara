@@ -1445,6 +1445,25 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
         }
     }
 
+    if let Some(filters) = definition.get("filters") {
+        match filters.as_array() {
+            Some(filters) => {
+                for (index, filter) in filters.iter().enumerate() {
+                    collect_report_filter_authoring_issues(
+                        &format!("$.filters[{index}]"),
+                        filter,
+                        &mut issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                "$.filters",
+                "INVALID_FILTERS",
+                "Report definition filters must be an array.",
+            )),
+        }
+    }
+
     if let Some(blocks) = definition.get("blocks") {
         match blocks.as_array() {
             Some(blocks) => {
@@ -1935,22 +1954,21 @@ fn collect_report_block_authoring_issues(
         return;
     };
 
+    let allowed_block_keys = [
+        "id",
+        "type",
+        "title",
+        "lazy",
+        "dataset",
+        "source",
+        "table",
+        "chart",
+        "metric",
+        "filters",
+        "interactions",
+    ];
     for key in block_object.keys() {
-        if [
-            "id",
-            "type",
-            "title",
-            "lazy",
-            "dataset",
-            "source",
-            "table",
-            "chart",
-            "metric",
-            "filters",
-            "interactions",
-        ]
-        .contains(&key.as_str())
-        {
+        if allowed_block_keys.contains(&key.as_str()) {
             continue;
         }
 
@@ -1974,7 +1992,12 @@ fn collect_report_block_authoring_issues(
             _ => issues.push(error(
                 &key_path,
                 "UNKNOWN_REPORT_BLOCK_FIELD",
-                format!("Unknown report block field '{key}'. The report API ignores unknown block fields; use get_report_authoring_schema for the canonical shape."),
+                format!(
+                    "Unknown report block field '{key}'.{} The report API ignores unknown block fields; use get_report_authoring_schema for the canonical shape.",
+                    similar_key_hint(key, &allowed_block_keys)
+                        .map(|known| format!(" Did you mean '{known}'?"))
+                        .unwrap_or_default()
+                ),
             )),
         }
     }
@@ -2037,6 +2060,42 @@ fn collect_report_block_authoring_issues(
     }
     if let Some(metric) = block.get("metric") {
         collect_metric_issues(&format!("{path}.metric"), metric, issues);
+    }
+    if let Some(filters) = block.get("filters") {
+        match filters.as_array() {
+            Some(filters) => {
+                for (index, filter) in filters.iter().enumerate() {
+                    collect_report_filter_authoring_issues(
+                        &format!("{path}.filters[{index}]"),
+                        filter,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.filters"),
+                "INVALID_BLOCK_FILTERS",
+                "Report block filters must be an array.",
+            )),
+        }
+    }
+    if let Some(interactions) = block.get("interactions") {
+        match interactions.as_array() {
+            Some(interactions) => {
+                for (index, interaction) in interactions.iter().enumerate() {
+                    collect_interaction_issues(
+                        &format!("{path}.interactions[{index}]"),
+                        interaction,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.interactions"),
+                "INVALID_BLOCK_INTERACTIONS",
+                "Report block interactions must be an array.",
+            )),
+        }
     }
 
     if !full_block {
@@ -2133,7 +2192,14 @@ fn collect_block_dataset_issues(path: &str, dataset: &Value, issues: &mut Vec<Au
     collect_unknown_keys(
         path,
         dataset,
-        &["id", "dimensions", "measures", "orderBy", "limit"],
+        &[
+            "id",
+            "dimensions",
+            "measures",
+            "orderBy",
+            "datasetFilters",
+            "limit",
+        ],
         issues,
     );
     if dataset
@@ -2174,6 +2240,16 @@ fn collect_block_dataset_issues(path: &str, dataset: &Value, issues: &mut Vec<Au
             collect_order_by_issues(&format!("{path}.orderBy[{index}]"), order, issues);
         }
     }
+    if let Some(dataset_filters) = dataset.get("datasetFilters").and_then(Value::as_array) {
+        for (index, filter) in dataset_filters.iter().enumerate() {
+            collect_unknown_keys(
+                &format!("{path}.datasetFilters[{index}]"),
+                filter,
+                &["field", "op", "value"],
+                issues,
+            );
+        }
+    }
 }
 
 fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringIssue>) {
@@ -2203,6 +2279,20 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
         },
         issues,
     );
+
+    if let Some(condition) = source.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+
+    if let Some(filter_mappings) = source.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
 
     if let Some(aggregates) = source.get("aggregates").and_then(Value::as_array) {
         for (index, aggregate) in aggregates.iter().enumerate() {
@@ -2401,6 +2491,20 @@ fn collect_table_column_source_issues(
         issues,
     );
 
+    if let Some(condition) = source.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+
+    if let Some(filter_mappings) = source.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
+
     if source.get("mode").and_then(Value::as_str) != Some("aggregate") {
         issues.push(error(
             format!("{path}.mode"),
@@ -2484,6 +2588,237 @@ fn collect_metric_issues(path: &str, metric: &Value, issues: &mut Vec<AuthoringI
     );
 }
 
+fn collect_report_filter_authoring_issues(
+    path: &str,
+    filter: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    collect_unknown_keys(
+        path,
+        filter,
+        &[
+            "id",
+            "label",
+            "type",
+            "default",
+            "required",
+            "options",
+            "appliesTo",
+        ],
+        issues,
+    );
+    for key in ["id", "label", "type"] {
+        if filter
+            .get(key)
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            issues.push(error(
+                format!("{path}.{key}"),
+                "MISSING_REPORT_FILTER_FIELD",
+                "Report filters must include id, label, and type.",
+            ));
+        }
+    }
+    if let Some(options) = filter.get("options") {
+        collect_filter_options_issues(&format!("{path}.options"), options, issues);
+    }
+    if let Some(applies_to) = filter.get("appliesTo") {
+        match applies_to.as_array() {
+            Some(targets) => {
+                for (index, target) in targets.iter().enumerate() {
+                    collect_filter_target_issues(
+                        &format!("{path}.appliesTo[{index}]"),
+                        target,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.appliesTo"),
+                "INVALID_FILTER_TARGETS",
+                "Report filter appliesTo must be an array.",
+            )),
+        }
+    }
+}
+
+fn collect_filter_options_issues(path: &str, options: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(object) = options.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_FILTER_OPTIONS",
+            "Report filter options must be an object.",
+        ));
+        return;
+    };
+
+    let source = object.get("source").and_then(Value::as_str);
+    let allowed = match source {
+        Some("static") => &["source", "values"][..],
+        Some("object_model") => &[
+            "source",
+            "schema",
+            "connectionId",
+            "field",
+            "valueField",
+            "labelField",
+            "search",
+            "dependsOn",
+            "filterMappings",
+            "condition",
+        ][..],
+        _ => &[
+            "source",
+            "values",
+            "schema",
+            "connectionId",
+            "field",
+            "valueField",
+            "labelField",
+            "search",
+            "dependsOn",
+            "filterMappings",
+            "condition",
+        ][..],
+    };
+    collect_unknown_keys(path, options, allowed, issues);
+
+    if let Some(values) = options.get("values")
+        && !values.is_array()
+    {
+        issues.push(error(
+            format!("{path}.values"),
+            "INVALID_STATIC_FILTER_OPTIONS",
+            "Static filter options values must be an array.",
+        ));
+    }
+    if let Some(filter_mappings) = options.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
+    if let Some(condition) = options.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+}
+
+fn collect_filter_target_issues(path: &str, target: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(
+        path,
+        target,
+        &["filterId", "blockId", "field", "op"],
+        issues,
+    );
+    if target.get("field").and_then(Value::as_str).is_none() {
+        issues.push(error(
+            format!("{path}.field"),
+            "MISSING_FILTER_TARGET_FIELD",
+            "Report filter targets must include field.",
+        ));
+    }
+}
+
+fn collect_interaction_issues(path: &str, interaction: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(path, interaction, &["id", "trigger", "actions"], issues);
+    if interaction
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_INTERACTION_ID",
+            "Report interactions must include a stable id.",
+        ));
+    }
+    if let Some(trigger) = interaction.get("trigger") {
+        collect_unknown_keys(
+            &format!("{path}.trigger"),
+            trigger,
+            &["event", "field"],
+            issues,
+        );
+    }
+    if let Some(actions) = interaction.get("actions") {
+        match actions.as_array() {
+            Some(actions) => {
+                for (index, action) in actions.iter().enumerate() {
+                    collect_unknown_keys(
+                        &format!("{path}.actions[{index}]"),
+                        action,
+                        &["type", "filterId", "valueFrom", "value"],
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.actions"),
+                "INVALID_INTERACTION_ACTIONS",
+                "Report interaction actions must be an array.",
+            )),
+        }
+    }
+}
+
+fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(path, condition, &["op", "arguments"], issues);
+    if condition.get("op").and_then(Value::as_str).is_none() {
+        issues.push(error(
+            format!("{path}.op"),
+            "MISSING_CONDITION_OP",
+            "Report source conditions must include op.",
+        ));
+    }
+
+    let Some(arguments) = condition.get("arguments") else {
+        return;
+    };
+    let Some(arguments) = arguments.as_array() else {
+        issues.push(error(
+            format!("{path}.arguments"),
+            "INVALID_CONDITION_ARGUMENTS",
+            "Report source condition arguments must be an array.",
+        ));
+        return;
+    };
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument_path = format!("{path}.arguments[{index}]");
+        if is_mapping_value_object(argument) {
+            issues.push(error(
+                argument_path,
+                "UNSUPPORTED_CONDITION_MAPPING_VALUE",
+                "Report source conditions do not evaluate workflow MappingValue reference/template objects. Use filterMappings, appliesTo, or literal Object Model condition arguments.",
+            ));
+        } else if is_condition_object(argument) {
+            collect_condition_issues(&argument_path, argument, issues);
+        }
+    }
+}
+
+fn is_condition_object(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("op") || object.contains_key("arguments"))
+}
+
+fn is_mapping_value_object(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("valueType"))
+        .and_then(Value::as_str)
+        .is_some_and(|value_type| {
+            matches!(
+                value_type,
+                "reference" | "immediate" | "template" | "composite"
+            )
+        })
+}
+
 fn collect_order_by_issues(path: &str, order_by: &Value, issues: &mut Vec<AuthoringIssue>) {
     collect_unknown_keys_with_messages(
         path,
@@ -2531,13 +2866,49 @@ fn collect_unknown_keys_with_messages<F>(
         if let Some((code, message)) = message_for_key(key) {
             issues.push(error(&key_path, code, message));
         } else {
+            let suggestion = similar_key_hint(key, allowed)
+                .map(|known| format!(" Did you mean '{known}'?"))
+                .unwrap_or_default();
             issues.push(error(
                 &key_path,
                 "UNKNOWN_REPORT_FIELD",
-                format!("Unknown report field '{key}'. Use get_report_authoring_schema for the canonical shape."),
+                format!("Unknown report field '{key}'.{suggestion} Use get_report_authoring_schema for the canonical shape."),
             ));
         }
     }
+}
+
+fn similar_key_hint<'a>(key: &str, allowed: &'a [&str]) -> Option<&'a str> {
+    let key_lower = key.to_ascii_lowercase();
+    allowed
+        .iter()
+        .copied()
+        .filter_map(|allowed_key| {
+            let allowed_lower = allowed_key.to_ascii_lowercase();
+            let distance = levenshtein(&key_lower, &allowed_lower);
+            let threshold = if allowed_lower.len() <= 4 { 1 } else { 3 };
+            (distance <= threshold).then_some((distance, allowed_key))
+        })
+        .min_by_key(|(distance, allowed_key)| (*distance, allowed_key.len()))
+        .map(|(_, allowed_key)| allowed_key)
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let mut costs = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut previous = costs[0];
+        costs[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let current = costs[right_index + 1];
+            costs[right_index + 1] = if left_char == right_char {
+                previous
+            } else {
+                1 + previous.min(current).min(costs[right_index])
+            };
+            previous = current;
+        }
+    }
+    costs[right.chars().count()]
 }
 
 fn authoring_errors(issues: &[AuthoringIssue]) -> impl Iterator<Item = &AuthoringIssue> {
@@ -2825,6 +3196,98 @@ mod tests {
         let codes = issue_codes(&issues);
 
         assert!(codes.contains(&"UNKNOWN_LAYOUT_BLOCK_REFERENCE"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_keys_with_similar_key_hint() {
+        let definition = json!({
+            "definitionVerison": 1,
+            "markdown": "# Report",
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "titel": "Products",
+                "source": {"schema": "TDProduct", "mode": "filter"},
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let response =
+            authoring_validation_response(collect_report_definition_authoring_issues(&definition));
+        let errors = response["errors"].as_array().unwrap();
+
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.definitionVerison")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Did you mean 'definitionVersion'?"))
+        }));
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.blocks[0].titel")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Did you mean 'title'?"))
+        }));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_filter_option_keys() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "filters": [{
+                "id": "vendor",
+                "label": "Vendor",
+                "type": "select",
+                "options": {
+                    "source": "object_model",
+                    "schema": "StockSnapshot",
+                    "filed": "vendor"
+                },
+                "appliesTo": [{"field": "vendor"}]
+            }],
+            "blocks": []
+        });
+
+        let response =
+            authoring_validation_response(collect_report_definition_authoring_issues(&definition));
+        let errors = response["errors"].as_array().unwrap();
+
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.filters[0].options.filed")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Did you mean 'field'?"))
+        }));
+    }
+
+    #[test]
+    fn report_authoring_rejects_mapping_value_in_source_condition() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "TDProduct",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": [
+                            "sku",
+                            {"valueType": "template", "value": "{{ filters.sku }}"}
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"UNSUPPORTED_CONDITION_MAPPING_VALUE"));
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {

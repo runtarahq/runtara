@@ -19,6 +19,15 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct GetWorkflowAuthoringSchemaParams {
+    #[schemars(description = "Optional agent ID to echo in examples; no lookup is performed")]
+    pub agent_id: Option<String>,
+    #[schemars(description = "Optional capability ID to echo in examples; no lookup is performed")]
+    pub capability_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListWorkflowsParams {
     #[schemars(description = "Page number (1-based)")]
     pub page: Option<i64>,
@@ -144,6 +153,133 @@ pub struct DiffWorkflowVersionsParams {
 }
 
 // ===== Tool Implementations =====
+
+pub async fn get_workflow_authoring_schema(
+    _server: &SmoMcpServer,
+    params: GetWorkflowAuthoringSchemaParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let agent_id = params
+        .agent_id
+        .unwrap_or_else(|| "object_model".to_string());
+    let capability_id = params
+        .capability_id
+        .unwrap_or_else(|| "bulk-update-instances".to_string());
+
+    json_result(serde_json::json!({
+        "schema": "workflow-authoring",
+        "version": 1,
+        "purpose": "Canonical workflow JSON shapes for MCP clients and LLM authors.",
+        "graphShape": {
+            "required": ["name", "entryPoint", "steps", "executionPlan"],
+            "shape": {
+                "name": "Workflow name",
+                "description": "optional",
+                "entryPoint": "stepId",
+                "steps": {
+                    "stepId": {
+                        "id": "stepId",
+                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Connection | Error | Filter | GroupBy | Delay | WaitForSignal",
+                        "name": "Human label",
+                        "inputMapping": {}
+                    }
+                },
+                "executionPlan": [{"fromStep": "stepId", "toStep": "nextStepId"}]
+            },
+            "notes": ["steps is a map keyed by step ID, not an array", "use inputMapping, not inputMappings", "executionPlan edges use fromStep/toStep"]
+        },
+        "mappingValue": {
+            "reference": {"valueType": "reference", "value": "data.foo"},
+            "immediate": {"valueType": "immediate", "value": "literal or JSON value"},
+            "template": {"valueType": "template", "value": "Hello {{data.name}}"},
+            "compositeObject": {"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "data.foo"}}},
+            "compositeArray": {"valueType": "composite", "value": [{"valueType": "reference", "value": "data.foo"}]},
+            "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "__error.<field> on onError edges"]
+        },
+        "conditions": {
+            "conditionExpressionShape": {
+                "type": "operation",
+                "op": "EQ | NE | LT | LTE | GT | GTE | AND | OR | CONTAINS | IN",
+                "arguments": [
+                    {"valueType": "reference", "value": "data.status"},
+                    {"valueType": "immediate", "value": "active"}
+                ]
+            },
+            "rules": [
+                "Top-level ConditionExpression must include type: operation.",
+                "Operation arguments are bare MappingValue objects.",
+                "Do not wrap operation arguments in composite.",
+                "Do not encode a field reference as an immediate whose value is another MappingValue."
+            ],
+            "objectModelBulkUpdateCanonicalArgs": {
+                "field": {"valueType": "reference", "value": "category_leaf_id"},
+                "value": {"valueType": "reference", "value": "data.selected_category"},
+                "literal": {"valueType": "immediate", "value": true}
+            }
+        },
+        "avoid": [
+            {
+                "name": "bare string mapping",
+                "bad": {"category_leaf_id": "data.selected_category"},
+                "good": {"category_leaf_id": {"valueType": "reference", "value": "data.selected_category"}}
+            },
+            {
+                "name": "immediate wrapping nested reference for a field arg",
+                "bad": {"field": {"valueType": "immediate", "value": {"valueType": "reference", "value": "category_leaf_id"}}},
+                "good": {"field": {"valueType": "reference", "value": "category_leaf_id"}}
+            },
+            {
+                "name": "composite-wrapped condition args",
+                "bad": {"type": "operation", "op": "EQ", "arguments": [{"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "category_leaf_id"}}}]},
+                "good": {"type": "operation", "op": "EQ", "arguments": [{"valueType": "reference", "value": "category_leaf_id"}, {"valueType": "immediate", "value": "expected"}]}
+            }
+        ],
+        "completeExamples": {
+            "objectModelBulkUpdateAgentStepInWorkflow": {
+                "name": "Bulk assign selected category",
+                "entryPoint": "bulk_update_category",
+                "steps": {
+                    "bulk_update_category": {
+                        "id": "bulk_update_category",
+                        "stepType": "Agent",
+                        "name": "Bulk update category",
+                        "agentId": agent_id,
+                        "capabilityId": capability_id,
+                        "inputMapping": {
+                            "schema_name": {"valueType": "immediate", "value": "Product"},
+                            "condition": {
+                                "valueType": "immediate",
+                                "value": {
+                                    "type": "operation",
+                                    "op": "EQ",
+                                    "arguments": [
+                                        {"valueType": "reference", "value": "category_leaf_id"},
+                                        {"valueType": "reference", "value": "data.selected_category"}
+                                    ]
+                                }
+                            },
+                            "properties": {
+                                "valueType": "composite",
+                                "value": {
+                                    "category_leaf_id": {"valueType": "reference", "value": "data.selected_category"},
+                                    "reviewed": {"valueType": "immediate", "value": true}
+                                }
+                            }
+                        }
+                    }
+                },
+                "executionPlan": []
+            }
+        },
+        "workflowToolHints": [
+            "Call get_agent/get_capability when you need exact agentId/capabilityId and input names.",
+            "Prefer mutation tools such as add_agent_step and set_mapping for incremental edits.",
+            "Call validate_graph before deploying raw graph JSON.",
+            "Call preflight_compile to check graph, mappings, and child workflows without compiling.",
+            "Call deploy_latest after mutation tools to compile and set the current version.",
+            "Use inspect_step after an execution to inspect resolved inputs, outputs, and errors."
+        ]
+    }))
+}
 
 pub async fn list_workflows(
     server: &SmoMcpServer,
@@ -489,7 +625,7 @@ pub async fn deploy_workflow(
             let child_compile = api_post(
                 server,
                 &format!(
-                    "/api/runtime/workflows/{}/versions/{}/compile",
+                    "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
                     child_ref.child_workflow_id, resolved_version
                 ),
                 None,
@@ -531,7 +667,7 @@ pub async fn deploy_workflow(
     let compile_result = api_post(
         server,
         &format!(
-            "/api/runtime/workflows/{}/versions/{}/compile",
+            "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
             params.workflow_id, version
         ),
         None,
@@ -591,6 +727,10 @@ pub async fn deploy_latest(
     let version = workflow
         .pointer("/data/latestVersion")
         .or_else(|| workflow.pointer("/data/latest_version"))
+        .or_else(|| workflow.pointer("/data/lastVersionNumber"))
+        .or_else(|| workflow.pointer("/data/last_version_number"))
+        .or_else(|| workflow.pointer("/data/currentVersionNumber"))
+        .or_else(|| workflow.pointer("/data/current_version_number"))
         .and_then(|v| v.as_i64())
         .map(|v| v as i32)
         .or(params.version)
@@ -693,7 +833,7 @@ pub async fn deploy_latest(
             let child_compile = api_post(
                 server,
                 &format!(
-                    "/api/runtime/workflows/{}/versions/{}/compile",
+                    "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
                     child_ref.child_workflow_id, resolved_version
                 ),
                 None,
@@ -718,7 +858,7 @@ pub async fn deploy_latest(
     let compile_result = api_post(
         server,
         &format!(
-            "/api/runtime/workflows/{}/versions/{}/compile",
+            "/api/runtime/workflows/{}/versions/{}/compile?forceRecompile=true",
             params.workflow_id, version
         ),
         None,
@@ -741,9 +881,13 @@ pub async fn deploy_latest(
         "message": format!("Workflow deployed successfully (version {})", version),
         "workflowId": params.workflow_id,
         "version": version,
+        "recompiled": true,
+        "staleBinaryPrevented": true,
         "compilation": {
             "binarySize": compile_result.get("binarySize"),
             "binaryChecksum": compile_result.get("binaryChecksum"),
+            "imageId": compile_result.get("imageId"),
+            "message": compile_result.get("message"),
         },
     });
 

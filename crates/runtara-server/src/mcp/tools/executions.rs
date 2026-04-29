@@ -6,6 +6,11 @@ use serde_json::json;
 use super::super::server::SmoMcpServer;
 use super::internal_api::{api_get, api_post, validate_path_param};
 
+const DEBUG_STRING_TRUNCATE_THRESHOLD_BYTES: usize = 4000;
+const DEBUG_STRING_PREVIEW_BYTES: usize = 2000;
+const RUNTIME_NESTED_REFERENCE_NOTE: &str =
+    "Nested condition references are resolved by workflow runtime before agent dispatch.";
+
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&value).unwrap_or_default(),
@@ -480,6 +485,32 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> Option<serde_json
     Some(current.clone())
 }
 
+/// Helper: recursively replace large strings with an explicit truncation envelope.
+fn truncate_large_strings(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) if s.len() > DEBUG_STRING_TRUNCATE_THRESHOLD_BYTES => {
+            let mut cut = DEBUG_STRING_PREVIEW_BYTES.min(s.len());
+            while cut > 0 && !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            json!({
+                "_truncated": true,
+                "_originalSize": s.len(),
+                "_preview": &s[..cut],
+            })
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(truncate_large_strings).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, child)| (key.clone(), truncate_large_strings(child)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
 /// Helper: find a step by ID in the step summaries response.
 fn find_step_in_summaries<'a>(
     summaries: &'a serde_json::Value,
@@ -493,6 +524,222 @@ fn find_step_in_summaries<'a>(
                 .iter()
                 .find(|s| s.get("stepId").and_then(|v| v.as_str()) == Some(step_id))
         })
+}
+
+fn resolve_reference_value(
+    ref_path: &str,
+    summaries: &serde_json::Value,
+    execution: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = ref_path.splitn(4, '.').collect();
+    match parts.first().copied() {
+        Some("steps") if parts.len() >= 3 => {
+            let source_step_id = parts[1];
+            let field_path = if parts.len() >= 4 {
+                Some(parts[3])
+            } else {
+                None
+            };
+            let source = find_step_in_summaries(summaries, source_step_id)?;
+            let outputs = source.get("outputs")?;
+            if let Some(fp) = field_path {
+                resolve_json_path(outputs, fp)
+            } else {
+                Some(outputs.clone())
+            }
+        }
+        Some("data") if parts.len() >= 2 => {
+            let field = parts[1..].join(".");
+            let inputs = execution
+                .pointer("/data/inputs/data")
+                .or_else(|| execution.pointer("/data/inputs"))?;
+            resolve_json_path(inputs, &field)
+        }
+        Some("variables") if parts.len() >= 2 => {
+            let field = parts[1..].join(".");
+            execution
+                .pointer("/data/inputs/variables")
+                .or_else(|| execution.pointer("/data/variables"))
+                .and_then(|variables| resolve_json_path(variables, &field))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_nested_reference_envelopes(
+    value: &serde_json::Value,
+    summaries: &serde_json::Value,
+    execution: &serde_json::Value,
+    unresolved_refs: &mut Vec<String>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let condition_op = map.get("op").and_then(|v| v.as_str()).map(str::to_owned);
+            if let Some(op) = condition_op.as_deref()
+                && let Some(arguments) = map.get("arguments").and_then(|v| v.as_array())
+            {
+                let mut resolved = serde_json::Map::new();
+                for (key, child) in map {
+                    if key == "arguments" {
+                        let resolved_args: Vec<serde_json::Value> = arguments
+                            .iter()
+                            .enumerate()
+                            .map(|(index, arg)| {
+                                if index == 0
+                                    && is_field_argument_operator(op)
+                                    && is_reference_envelope(arg)
+                                {
+                                    arg.clone()
+                                } else {
+                                    resolve_nested_reference_envelopes(
+                                        arg,
+                                        summaries,
+                                        execution,
+                                        unresolved_refs,
+                                    )
+                                }
+                            })
+                            .collect();
+                        resolved.insert(key.clone(), serde_json::Value::Array(resolved_args));
+                    } else {
+                        resolved.insert(
+                            key.clone(),
+                            resolve_nested_reference_envelopes(
+                                child,
+                                summaries,
+                                execution,
+                                unresolved_refs,
+                            ),
+                        );
+                    }
+                }
+                return serde_json::Value::Object(resolved);
+            }
+
+            let is_reference_envelope =
+                matches!(
+                    map.get("valueType"),
+                    Some(serde_json::Value::String(s)) if s == "reference"
+                ) && matches!(map.get("value"), Some(serde_json::Value::String(_)));
+
+            if is_reference_envelope {
+                let ref_path = map
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let resolved = resolve_reference_value(ref_path, summaries, execution)
+                    .or_else(|| map.get("default").cloned());
+                if let Some(resolved) = resolved {
+                    return json!({
+                        "valueType": "immediate",
+                        "value": resolve_nested_reference_envelopes(
+                            &resolved,
+                            summaries,
+                            execution,
+                            unresolved_refs
+                        ),
+                    });
+                }
+
+                unresolved_refs.push(ref_path.to_string());
+                return value.clone();
+            }
+
+            serde_json::Value::Object(
+                map.iter()
+                    .map(|(key, child)| {
+                        (
+                            key.clone(),
+                            resolve_nested_reference_envelopes(
+                                child,
+                                summaries,
+                                execution,
+                                unresolved_refs,
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    resolve_nested_reference_envelopes(item, summaries, execution, unresolved_refs)
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn is_reference_envelope(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("valueType"),
+        Some(serde_json::Value::String(s)) if s == "reference"
+    ) && matches!(value.get("value"), Some(serde_json::Value::String(_)))
+}
+
+fn is_field_argument_operator(op: &str) -> bool {
+    matches!(
+        op.to_ascii_uppercase().as_str(),
+        "EQ" | "NE"
+            | "GT"
+            | "GTE"
+            | "LT"
+            | "LTE"
+            | "STARTS_WITH"
+            | "ENDS_WITH"
+            | "CONTAINS"
+            | "IN"
+            | "NOT_IN"
+            | "IS_DEFINED"
+            | "IS_EMPTY"
+            | "IS_NOT_EMPTY"
+            | "SIMILARITY_GTE"
+            | "MATCH"
+            | "COSINE_DISTANCE_LTE"
+            | "L2_DISTANCE_LTE"
+    )
+}
+
+fn is_condition_like(value: &serde_json::Value) -> bool {
+    value
+        .get("op")
+        .and_then(|op| op.as_str())
+        .is_some_and(|op| !op.is_empty())
+        && value
+            .get("arguments")
+            .and_then(|arguments| arguments.as_array())
+            .is_some()
+}
+
+fn output_error_from_step(step: &serde_json::Value) -> Option<serde_json::Value> {
+    let outputs = step.get("outputs")?;
+    if outputs.get("_error").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+
+    Some(
+        outputs
+            .get("error")
+            .cloned()
+            .unwrap_or_else(|| json!("Step output reported _error=true")),
+    )
+}
+
+fn effective_step_status(step: &serde_json::Value) -> Option<&str> {
+    match step.get("status").and_then(|v| v.as_str()) {
+        Some("completed") if output_error_from_step(step).is_some() => Some("failed"),
+        status => status,
+    }
+}
+
+fn step_error(step: &serde_json::Value) -> serde_json::Value {
+    step.get("error")
+        .cloned()
+        .or_else(|| output_error_from_step(step))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Helper: resolve inputMapping references against step summaries.
@@ -573,10 +820,38 @@ fn resolve_input_mappings(
                 }
             }
             "immediate" => {
-                entry["resolvedValue"] = value;
+                let mut unresolved_refs = Vec::new();
+                let resolved_value = resolve_nested_reference_envelopes(
+                    &value,
+                    summaries,
+                    execution,
+                    &mut unresolved_refs,
+                );
+                entry["resolvedValue"] = resolved_value;
+                if !unresolved_refs.is_empty() {
+                    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
+                    entry["unresolvedNestedReferences"] = json!(unresolved_refs);
+                }
             }
             "template" => {
                 entry["template"] = value;
+                entry["resolutionNote"] = json!(
+                    "Template rendering is runtime-only and is not evaluated by inspect_step."
+                );
+            }
+            _ if is_condition_like(mapping_value) => {
+                let mut unresolved_refs = Vec::new();
+                let resolved_value = resolve_nested_reference_envelopes(
+                    mapping_value,
+                    summaries,
+                    execution,
+                    &mut unresolved_refs,
+                );
+                entry["resolvedValue"] = resolved_value;
+                if !unresolved_refs.is_empty() {
+                    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
+                    entry["unresolvedNestedReferences"] = json!(unresolved_refs);
+                }
             }
             _ => {}
         }
@@ -642,8 +917,11 @@ pub async fn inspect_step(
             "durationMs": target.get("durationMs"),
             "error": target.get("error"),
         },
-        "resolvedInputs": resolved_inputs,
-        "outputs": target.get("outputs"),
+        "resolvedInputs": truncate_large_strings(&resolved_inputs),
+        "outputs": target
+            .get("outputs")
+            .map(truncate_large_strings)
+            .unwrap_or(serde_json::Value::Null),
     });
 
     json_result(response)
@@ -792,16 +1070,6 @@ pub async fn why_execution_failed(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    if status != "failed" {
-        return json_result(json!({
-            "execution": {
-                "instanceId": params.instance_id,
-                "status": status,
-            },
-            "message": format!("Execution is not failed (status: {})", status),
-        }));
-    }
-
     // Fetch all step summaries (full)
     let summaries =
         fetch_full_step_summaries(server, &params.workflow_id, &params.instance_id).await?;
@@ -816,7 +1084,7 @@ pub async fn why_execution_failed(
     let mut failed_steps = Vec::new();
     let mut running = 0;
     for step in &steps {
-        match step.get("status").and_then(|v| v.as_str()) {
+        match effective_step_status(step) {
             Some("completed") => completed += 1,
             Some("failed") => {
                 failed_steps.push(step.clone());
@@ -825,6 +1093,17 @@ pub async fn why_execution_failed(
             _ => {}
         }
     }
+
+    if status != "failed" && failed_steps.is_empty() {
+        return json_result(json!({
+            "execution": {
+                "instanceId": params.instance_id,
+                "status": status,
+            },
+            "message": format!("Execution is not failed (status: {})", status),
+        }));
+    }
+
     let not_reached = steps.len() - completed - failed_steps.len() - running;
 
     // Build failure diagnosis for the first (primary) failing step
@@ -861,7 +1140,8 @@ pub async fn why_execution_failed(
             "stepId": first_failed.get("stepId"),
             "stepName": first_failed.get("stepName"),
             "stepType": first_failed.get("stepType"),
-            "error": first_failed.get("error"),
+            "status": effective_step_status(first_failed).unwrap_or("unknown"),
+            "error": step_error(first_failed),
             "durationMs": first_failed.get("durationMs"),
             "resolvedInputs": resolved_inputs,
         })
@@ -872,7 +1152,7 @@ pub async fn why_execution_failed(
     json_result(json!({
         "execution": {
             "instanceId": params.instance_id,
-            "status": "failed",
+            "status": status,
             "error": execution.pointer("/data/error"),
         },
         "failingStep": failing_step,
@@ -884,4 +1164,178 @@ pub async fn why_execution_failed(
             "notReached": not_reached,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn summaries() -> serde_json::Value {
+        json!({
+            "data": {
+                "steps": [
+                    {
+                        "stepId": "build",
+                        "status": "completed",
+                        "outputs": {
+                            "status": "active",
+                            "nested": {"name": "from-step"}
+                        }
+                    }
+                ]
+            }
+        })
+    }
+
+    fn execution() -> serde_json::Value {
+        json!({
+            "data": {
+                "inputs": {
+                    "data": {
+                        "customer": {"name": "Ada"},
+                        "threshold": 7
+                    },
+                    "variables": {
+                        "limit": 10
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn truncate_large_strings_recurses_with_explicit_envelope() {
+        let large = format!(
+            "{}{}",
+            "a".repeat(DEBUG_STRING_TRUNCATE_THRESHOLD_BYTES),
+            "é"
+        );
+        let value = json!({
+            "small": "unchanged",
+            "items": [{"body": large}]
+        });
+
+        let truncated = truncate_large_strings(&value);
+
+        assert_eq!(truncated["small"], json!("unchanged"));
+        assert_eq!(truncated["items"][0]["body"]["_truncated"], json!(true));
+        assert_eq!(
+            truncated["items"][0]["body"]["_originalSize"],
+            json!(DEBUG_STRING_TRUNCATE_THRESHOLD_BYTES + 2)
+        );
+        assert_eq!(
+            truncated["items"][0]["body"]["_preview"]
+                .as_str()
+                .unwrap()
+                .len(),
+            DEBUG_STRING_PREVIEW_BYTES
+        );
+    }
+
+    #[test]
+    fn immediate_condition_resolves_nested_references_where_available() {
+        let input_mapping = json!({
+            "condition": {
+                "valueType": "immediate",
+                "value": {
+                    "type": "operation",
+                    "op": "EQ",
+                    "arguments": [
+                        {"valueType": "reference", "value": "customer_name"},
+                        {"valueType": "reference", "value": "steps.build.outputs.nested.name"}
+                    ]
+                }
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+
+        assert_eq!(
+            resolved["condition"]["resolvedValue"],
+            json!({
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    {"valueType": "reference", "value": "customer_name"},
+                    {"valueType": "immediate", "value": "from-step"}
+                ]
+            })
+        );
+        assert!(resolved["condition"].get("resolutionNote").is_none());
+    }
+
+    #[test]
+    fn condition_resolution_preserves_field_arg_and_resolves_value_arg() {
+        let input_mapping = json!({
+            "condition": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                    {"valueType": "reference", "value": "item.status"},
+                    {"valueType": "reference", "value": "steps.build.outputs.status"}
+                ]
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+
+        assert_eq!(
+            resolved["condition"]["resolvedValue"]["arguments"][0],
+            json!({"valueType": "reference", "value": "item.status"})
+        );
+        assert_eq!(
+            resolved["condition"]["resolvedValue"]["arguments"][1],
+            json!({"valueType": "immediate", "value": "active"})
+        );
+        assert!(resolved["condition"].get("resolutionNote").is_none());
+        assert!(
+            resolved["condition"]
+                .get("unresolvedNestedReferences")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn template_mapping_reports_runtime_only_rendering() {
+        let input_mapping = json!({
+            "message": {
+                "valueType": "template",
+                "value": "Hello {{ data.customer.name }}"
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution());
+
+        assert_eq!(
+            resolved["message"]["resolutionNote"],
+            json!("Template rendering is runtime-only and is not evaluated by inspect_step.")
+        );
+        assert!(resolved["message"].get("resolvedValue").is_none());
+    }
+
+    #[test]
+    fn completed_step_with_output_error_has_failed_effective_status() {
+        let step = json!({
+            "status": "completed",
+            "outputs": {
+                "_error": true,
+                "error": {"message": "Capability failed"}
+            }
+        });
+
+        assert_eq!(effective_step_status(&step), Some("failed"));
+        assert_eq!(step_error(&step), json!({"message": "Capability failed"}));
+    }
+
+    #[test]
+    fn completed_step_without_output_error_keeps_status() {
+        let step = json!({
+            "status": "completed",
+            "outputs": {"ok": true}
+        });
+
+        assert_eq!(effective_step_status(&step), Some("completed"));
+        assert_eq!(step_error(&step), serde_json::Value::Null);
+    }
 }

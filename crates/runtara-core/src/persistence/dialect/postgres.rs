@@ -212,6 +212,7 @@ impl Dialect for PostgresDialect {
                     convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
                     (convert_from(payload, 'UTF8')::jsonb->'outputs')::text as outputs, \
                     (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
+                    convert_from(payload, 'UTF8')::jsonb->'outputs'->>'_error' as output_error, \
                     created_at \
                 FROM instance_events \
                 WHERE instance_id = $1 AND subtype = 'step_debug_end' \
@@ -231,6 +232,7 @@ impl Dialect for PostgresDialect {
                     CASE \
                         WHEN e.step_id IS NULL THEN 'running' \
                         WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                        WHEN e.output_error = 'true' THEN 'failed' \
                         ELSE 'completed' \
                     END as status, \
                     CASE \
@@ -270,7 +272,8 @@ impl Dialect for PostgresDialect {
             SELECT \
                 convert_from(payload, 'UTF8')::jsonb->>'step_id' as step_id, \
                 convert_from(payload, 'UTF8')::jsonb->>'scope_id' as scope_id, \
-                (convert_from(payload, 'UTF8')::jsonb->'error')::text as error \
+                (convert_from(payload, 'UTF8')::jsonb->'error')::text as error, \
+                convert_from(payload, 'UTF8')::jsonb->'outputs'->>'_error' as output_error \
             FROM instance_events \
             WHERE instance_id = $1 AND subtype = 'step_debug_end' \
         ), \
@@ -283,6 +286,7 @@ impl Dialect for PostgresDialect {
                 CASE \
                     WHEN e.step_id IS NULL THEN 'running' \
                     WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                    WHEN e.output_error = 'true' THEN 'failed' \
                     ELSE 'completed' \
                 END as status \
             FROM start_events s \

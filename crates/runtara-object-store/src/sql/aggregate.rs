@@ -18,7 +18,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::instance::Condition;
 use crate::schema::Schema;
@@ -94,11 +96,104 @@ impl SortDirection {
 
 /// A single `(column, direction)` pair used inside aggregate `order_by` and
 /// the top-level `order_by`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AggregateOrderBy {
     pub column: String,
-    #[serde(default)]
     pub direction: SortDirection,
+}
+
+const ORDER_BY_EXPRESSION_PREFIX: &str = "__runtara_order_expression:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum DistanceOrderFn {
+    CosineDistance,
+    L2Distance,
+}
+
+impl DistanceOrderFn {
+    fn name(self) -> &'static str {
+        match self {
+            DistanceOrderFn::CosineDistance => "COSINE_DISTANCE",
+            DistanceOrderFn::L2Distance => "L2_DISTANCE",
+        }
+    }
+
+    fn pgvector_op(self) -> &'static str {
+        match self {
+            DistanceOrderFn::CosineDistance => "<=>",
+            DistanceOrderFn::L2Distance => "<->",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DistanceOrderExpression {
+    #[serde(rename = "fn")]
+    fn_: DistanceOrderFn,
+    field: String,
+    value: Vec<f64>,
+}
+
+enum TopLevelOrderByTarget {
+    Column(String),
+    Distance(DistanceOrderExpression),
+}
+
+impl Serialize for AggregateOrderBy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("AggregateOrderBy", 2)?;
+        if let Some(expr) = decode_order_expression(&self.column)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?
+        {
+            state.serialize_field("expression", &expr)?;
+        } else {
+            state.serialize_field("column", &self.column)?;
+        }
+        state.serialize_field("direction", &self.direction)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AggregateOrderBy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawOrderBy {
+            column: Option<String>,
+            expression: Option<DistanceOrderExpression>,
+            #[serde(default)]
+            direction: SortDirection,
+        }
+
+        let raw = RawOrderBy::deserialize(deserializer)?;
+        match (raw.column, raw.expression) {
+            (Some(column), None) => Ok(AggregateOrderBy {
+                column,
+                direction: raw.direction,
+            }),
+            (None, Some(expression)) => {
+                let encoded = encode_order_expression(&expression).map_err(de::Error::custom)?;
+                Ok(AggregateOrderBy {
+                    column: encoded,
+                    direction: raw.direction,
+                })
+            }
+            (Some(_), Some(_)) => Err(de::Error::custom(
+                "order_by entry must specify either `column` or `expression`, not both",
+            )),
+            (None, None) => Err(de::Error::custom(
+                "order_by entry must specify either `column` or `expression`",
+            )),
+        }
+    }
 }
 
 /// A single aggregate expression in an [`AggregateRequest`].
@@ -248,18 +343,31 @@ pub fn build_aggregate_query(
     }
 
     // Validate top-level order_by — each column must resolve to either a
-    // group_by column or an aggregate alias.
+    // group_by column or an aggregate alias. Distance expressions sort by a
+    // vector field's pgvector distance to a validated literal.
     let group_sql_set: HashSet<&str> = group_sql_cols.iter().map(|s| s.as_str()).collect();
     let alias_set: HashSet<&str> = req.aggregates.iter().map(|a| a.alias.as_str()).collect();
+    let mut top_level_order_by: Vec<TopLevelOrderByTarget> = Vec::with_capacity(req.order_by.len());
     for ob in &req.order_by {
-        validate_field_chars(&ob.column, "order_by")?;
-        let sql_field = field_to_sql(&ob.column);
-        let ok = group_sql_set.contains(sql_field) || alias_set.contains(ob.column.as_str());
-        if !ok {
-            return Err(format!(
-                "order_by column '{}' is not in group_by or aggregates",
-                ob.column
-            ));
+        if let Some(expr) = decode_order_expression(&ob.column).transpose()? {
+            validate_distance_order_expression(&expr, schema)?;
+            top_level_order_by.push(TopLevelOrderByTarget::Distance(expr));
+        } else {
+            validate_field_chars(&ob.column, "order_by")?;
+            let sql_field = field_to_sql(&ob.column);
+            let ok = group_sql_set.contains(sql_field) || alias_set.contains(ob.column.as_str());
+            if !ok {
+                return Err(format!(
+                    "order_by column '{}' is not in group_by or aggregates",
+                    ob.column
+                ));
+            }
+            let ident = if group_sql_set.contains(sql_field) {
+                quote_identifier(sql_field)
+            } else {
+                quote_identifier(&ob.column)
+            };
+            top_level_order_by.push(TopLevelOrderByTarget::Column(ident));
         }
     }
 
@@ -305,14 +413,13 @@ pub fn build_aggregate_query(
         let parts: Vec<String> = req
             .order_by
             .iter()
-            .map(|ob| {
-                let sql_field = field_to_sql(&ob.column);
-                let ident = if group_sql_set.contains(sql_field) {
-                    quote_identifier(sql_field)
-                } else {
-                    quote_identifier(&ob.column)
+            .zip(top_level_order_by.iter())
+            .map(|(ob, target)| {
+                let target_sql = match target {
+                    TopLevelOrderByTarget::Column(ident) => ident.clone(),
+                    TopLevelOrderByTarget::Distance(expr) => render_distance_order_expression(expr),
                 };
-                format!("{} {}", ident, ob.direction.as_sql())
+                format!("{} {}", target_sql, ob.direction.as_sql())
             })
             .collect();
         format!(" ORDER BY {}", parts.join(", "))
@@ -423,6 +530,84 @@ fn column_type<'a>(sql_field: &str, schema: &'a Schema) -> Option<&'a ColumnType
         .iter()
         .find(|c| c.name == sql_field)
         .map(|c| &c.column_type)
+}
+
+fn encode_order_expression(expr: &DistanceOrderExpression) -> Result<String, String> {
+    let json = serde_json::to_string(expr)
+        .map_err(|e| format!("failed to encode order_by expression: {}", e))?;
+    Ok(format!("{}{}", ORDER_BY_EXPRESSION_PREFIX, json))
+}
+
+fn decode_order_expression(column: &str) -> Option<Result<DistanceOrderExpression, String>> {
+    column.strip_prefix(ORDER_BY_EXPRESSION_PREFIX).map(|raw| {
+        serde_json::from_str(raw).map_err(|e| format!("invalid encoded order_by expression: {}", e))
+    })
+}
+
+fn validate_distance_order_expression(
+    expr: &DistanceOrderExpression,
+    schema: &Schema,
+) -> Result<(), String> {
+    validate_field_chars(&expr.field, "order_by expression")?;
+    let sql_field = field_to_sql(&expr.field);
+    let dim = match column_type(sql_field, schema) {
+        Some(ColumnType::Vector { dimension, .. }) => *dimension,
+        Some(other) => {
+            return Err(format!(
+                "order_by expression {} requires a vector field; '{}' has type {:?}",
+                expr.fn_.name(),
+                expr.field,
+                other
+            ));
+        }
+        None => {
+            return Err(format!(
+                "order_by expression {} field '{}' not found in schema",
+                expr.fn_.name(),
+                expr.field
+            ));
+        }
+    };
+    if expr.value.len() as u32 != dim {
+        return Err(format!(
+            "order_by expression {} vector dimension {} does not match field '{}' dimension {}",
+            expr.fn_.name(),
+            expr.value.len(),
+            expr.field,
+            dim
+        ));
+    }
+    for (i, f) in expr.value.iter().enumerate() {
+        if !f.is_finite() {
+            return Err(format!(
+                "order_by expression {} vector element at index {} is not finite ({})",
+                expr.fn_.name(),
+                i,
+                f
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn render_distance_order_expression(expr: &DistanceOrderExpression) -> String {
+    let sql_field = field_to_sql(&expr.field);
+    let parts: Vec<String> = expr.value.iter().map(|f| format_pg_float(*f)).collect();
+    let vector_literal = format!("[{}]", parts.join(","));
+    format!(
+        "((array_agg({}))[1] {} '{}'::vector)",
+        quote_identifier(sql_field),
+        expr.fn_.pgvector_op(),
+        vector_literal
+    )
+}
+
+/// Format an f64 in a way pgvector's text input accepts. Inputs are validated
+/// as finite before rendering.
+fn format_pg_float(f: f64) -> String {
+    serde_json::Number::from_f64(f)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| f.to_string())
 }
 
 /// Returns `(kind, parsed_expression_node)`. The parsed node is cached by the
@@ -903,6 +1088,17 @@ mod tests {
                     default_value: None,
                     text_index: crate::types::TextIndexKind::None,
                 },
+                ColumnDefinition {
+                    name: "embedding".into(),
+                    column_type: ColumnType::Vector {
+                        dimension: 3,
+                        index_method: None,
+                    },
+                    nullable: true,
+                    unique: false,
+                    default_value: None,
+                    text_index: crate::types::TextIndexKind::None,
+                },
             ],
             indexes: None,
         }
@@ -1104,6 +1300,121 @@ mod tests {
         };
         let err = build_aggregate_query(&schema, &req).unwrap_err();
         assert!(err.contains("not in group_by or aggregates"), "{}", err);
+    }
+
+    #[test]
+    fn top_level_order_by_cosine_distance_renders_pgvector_operator() {
+        let schema = stock_snapshot_schema();
+        let req: AggregateRequest = serde_json::from_value(serde_json::json!({
+            "groupBy": ["sku"],
+            "aggregates": [{"alias": "n", "fn": "COUNT"}],
+            "orderBy": [{
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "field": "embedding",
+                    "value": [0.1, 0.2, 0.3]
+                },
+                "direction": "ASC"
+            }]
+        }))
+        .unwrap();
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(
+            sql.data_sql.contains(
+                "ORDER BY ((array_agg(\"embedding\"))[1] <=> '[0.1,0.2,0.3]'::vector) ASC"
+            ),
+            "{}",
+            sql.data_sql
+        );
+        assert!(sql.params.is_empty());
+        assert!(sql.data_sql.contains("LIMIT $1 OFFSET $2"));
+    }
+
+    #[test]
+    fn top_level_order_by_l2_distance_renders_pgvector_operator() {
+        let schema = stock_snapshot_schema();
+        let req: AggregateRequest = serde_json::from_value(serde_json::json!({
+            "aggregates": [{"alias": "n", "fn": "COUNT"}],
+            "orderBy": [{
+                "expression": {
+                    "fn": "L2_DISTANCE",
+                    "field": "embedding",
+                    "value": [1, 2, 3]
+                },
+                "direction": "DESC"
+            }]
+        }))
+        .unwrap();
+        let sql = build_aggregate_query(&schema, &req).unwrap();
+        assert!(
+            sql.data_sql.contains(
+                "ORDER BY ((array_agg(\"embedding\"))[1] <-> '[1.0,2.0,3.0]'::vector) DESC"
+            ),
+            "{}",
+            sql.data_sql
+        );
+    }
+
+    #[test]
+    fn top_level_order_by_distance_validates_vector_field_and_dimension() {
+        let schema = stock_snapshot_schema();
+        let non_vector: AggregateRequest = serde_json::from_value(serde_json::json!({
+            "aggregates": [{"alias": "n", "fn": "COUNT"}],
+            "orderBy": [{
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "field": "sku",
+                    "value": [0.1, 0.2, 0.3]
+                }
+            }]
+        }))
+        .unwrap();
+        let err = build_aggregate_query(&schema, &non_vector).unwrap_err();
+        assert!(err.contains("requires a vector field"), "{}", err);
+
+        let wrong_dimension: AggregateRequest = serde_json::from_value(serde_json::json!({
+            "aggregates": [{"alias": "n", "fn": "COUNT"}],
+            "orderBy": [{
+                "expression": {
+                    "fn": "L2_DISTANCE",
+                    "field": "embedding",
+                    "value": [0.1, 0.2]
+                }
+            }]
+        }))
+        .unwrap();
+        let err = build_aggregate_query(&schema, &wrong_dimension).unwrap_err();
+        assert!(err.contains("dimension 2 does not match"), "{}", err);
+
+        let bad_field: AggregateRequest = serde_json::from_value(serde_json::json!({
+            "aggregates": [{"alias": "n", "fn": "COUNT"}],
+            "orderBy": [{
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "field": "embed ding",
+                    "value": [0.1, 0.2, 0.3]
+                }
+            }]
+        }))
+        .unwrap();
+        let err = build_aggregate_query(&schema, &bad_field).unwrap_err();
+        assert!(err.contains("contains invalid characters"), "{}", err);
+    }
+
+    #[test]
+    fn top_level_order_by_distance_requires_numeric_array() {
+        let err = serde_json::from_value::<AggregateRequest>(serde_json::json!({
+            "aggregates": [{"alias": "n", "fn": "COUNT"}],
+            "orderBy": [{
+                "expression": {
+                    "fn": "COSINE_DISTANCE",
+                    "field": "embedding",
+                    "value": [0.1, "nope", 0.3]
+                }
+            }]
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid type"), "{}", err);
     }
 
     #[test]

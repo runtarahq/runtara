@@ -1,6 +1,7 @@
 use rmcp::model::{CallToolResult, Content};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::super::server::SmoMcpServer;
 use super::internal_api::{
@@ -11,6 +12,235 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorDa
     Ok(CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(&value).unwrap_or_default(),
     )]))
+}
+
+const LARGE_RESULT_ROW_WARNING: usize = 1_000;
+const LARGE_RESULT_BYTES_WARNING: usize = 1_000_000;
+const MCP_REQUEST_PAYLOAD_GUIDANCE_BYTES: usize = 8 * 1024 * 1024;
+
+fn json_result_with_guidance(
+    mut value: serde_json::Value,
+    guidance: Vec<String>,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    if !guidance.is_empty() {
+        let guidance_value = serde_json::json!({
+            "warnings": guidance,
+            "nextActions": [
+                "Use limit and offset to page through results.",
+                "Use query_aggregate for grouped summaries instead of fetching rows and folding client-side.",
+            ],
+        });
+        match &mut value {
+            Value::Object(map) => {
+                map.insert("_mcpGuidance".to_string(), guidance_value);
+            }
+            _ => {
+                value = serde_json::json!({
+                    "result": value,
+                    "_mcpGuidance": guidance_value,
+                });
+            }
+        }
+    }
+    json_result(value)
+}
+
+fn extract_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_i64()))
+}
+
+fn extract_array_len(value: &Value, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(|v| v.as_array()).map(Vec::len))
+}
+
+fn result_size_guidance(
+    value: &Value,
+    tool_name: &str,
+    requested_limit: Option<i64>,
+    result_key: &[&str],
+    total_key: &[&str],
+) -> Vec<String> {
+    let returned = extract_array_len(value, result_key);
+    let total = extract_i64(value, total_key);
+    let mut warnings = Vec::new();
+
+    if let (Some(returned), Some(total)) = (returned, total) {
+        if total > returned as i64 {
+            warnings.push(format!(
+                "{} returned {} of {} matching rows. Use limit/offset to fetch subsequent pages.",
+                tool_name, returned, total
+            ));
+        }
+        if returned >= LARGE_RESULT_ROW_WARNING {
+            warnings.push(format!(
+                "{} returned {} rows in one MCP response. Prefer a smaller limit for interactive use.",
+                tool_name, returned
+            ));
+        }
+    }
+
+    let likely_large_without_limit = requested_limit.is_none()
+        && (returned.is_some_and(|n| n >= 100)
+            || total.is_some_and(|n| n >= 100)
+            || serde_json::to_vec(value)
+                .map(|bytes| bytes.len() >= LARGE_RESULT_BYTES_WARNING)
+                .unwrap_or(false));
+    if likely_large_without_limit {
+        warnings.push(format!(
+            "{} was called without an explicit limit. Set limit/offset deliberately for large schemas.",
+            tool_name
+        ));
+    }
+
+    if serde_json::to_vec(value)
+        .map(|bytes| bytes.len() >= LARGE_RESULT_BYTES_WARNING)
+        .unwrap_or(false)
+    {
+        warnings.push(format!(
+            "{} produced a large JSON response. Narrow the condition, lower limit, or aggregate before returning data to MCP.",
+            tool_name
+        ));
+    }
+
+    warnings
+}
+
+fn ensure_request_payload_reasonable(tool_name: &str, body: &Value) -> Result<(), rmcp::ErrorData> {
+    let Ok(bytes) = serde_json::to_vec(body) else {
+        return Ok(());
+    };
+    if bytes.len() <= MCP_REQUEST_PAYLOAD_GUIDANCE_BYTES {
+        return Ok(());
+    }
+
+    Err(rmcp::ErrorData::invalid_params(
+        format!(
+            "{} request payload is {} bytes, which is likely too large for MCP transport. Split the request into smaller batches; for bulk_create_instances prefer columns/rows plus constants to avoid repeating field names.",
+            tool_name,
+            bytes.len()
+        ),
+        None,
+    ))
+}
+
+fn with_payload_too_large_guidance<T>(
+    result: Result<T, rmcp::ErrorData>,
+    tool_name: &str,
+) -> Result<T, rmcp::ErrorData> {
+    result.map_err(|err| {
+        let msg = format!("{:?}", err);
+        let lower = msg.to_lowercase();
+        if lower.contains("413")
+            || lower.contains("payload too large")
+            || lower.contains("request body too large")
+            || lower.contains("body limit")
+            || lower.contains("exceeds limit")
+        {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "{} request was too large for the object-model API. Split it into smaller batches; for bulk_create_instances prefer columns/rows plus constants, and for reads use limit/offset or query_aggregate.",
+                    tool_name
+                ),
+                None,
+            )
+        } else {
+            err
+        }
+    })
+}
+
+fn condition_op_wire_name(op: &str) -> String {
+    let mut out = String::new();
+    let mut prev_was_lower_or_digit = false;
+    for ch in op.chars() {
+        if ch == '-' || ch == ' ' {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+            prev_was_lower_or_digit = false;
+            continue;
+        }
+        if ch == '_' {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+            prev_was_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_was_lower_or_digit {
+            out.push('_');
+        }
+        out.extend(ch.to_uppercase());
+        prev_was_lower_or_digit = ch.is_lowercase() || ch.is_ascii_digit();
+    }
+    out
+}
+
+fn mapping_value_to_condition_arg(value: Value) -> Value {
+    let Value::Object(mut map) = value else {
+        return value;
+    };
+
+    match map.get("valueType").and_then(Value::as_str) {
+        Some("reference") | Some("template") => map.remove("value").unwrap_or(Value::Null),
+        Some("immediate") => map.remove("value").unwrap_or(Value::Null),
+        Some("composite") => map.remove("value").unwrap_or(Value::Object(map)),
+        _ => Value::Object(map),
+    }
+}
+
+fn normalize_condition_argument(value: Value) -> Result<Value, rmcp::ErrorData> {
+    if value.get("op").is_some() || value.get("type").and_then(Value::as_str) == Some("operation") {
+        normalize_condition(value)
+    } else {
+        Ok(mapping_value_to_condition_arg(value))
+    }
+}
+
+fn normalize_condition(value: Value) -> Result<Value, rmcp::ErrorData> {
+    let Value::Object(map) = value else {
+        return Err(rmcp::ErrorData::invalid_params(
+            "condition must be an object".to_string(),
+            None,
+        ));
+    };
+
+    if map.get("valueType").is_some() || map.get("type").and_then(Value::as_str) == Some("value") {
+        return Ok(serde_json::json!({
+            "op": "IS_DEFINED",
+            "arguments": [mapping_value_to_condition_arg(Value::Object(map))],
+        }));
+    }
+
+    let op = map.get("op").and_then(Value::as_str).ok_or_else(|| {
+        rmcp::ErrorData::invalid_params(
+            "condition must include `op` or use the workflow condition shape {type:'operation', op, arguments}".to_string(),
+            None,
+        )
+    })?;
+
+    let normalized_op = condition_op_wire_name(op);
+    let mut normalized = serde_json::Map::new();
+    normalized.insert("op".to_string(), Value::String(normalized_op));
+
+    if let Some(arguments) = map.get("arguments") {
+        let args = arguments.as_array().ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                "condition.arguments must be an array".to_string(),
+                None,
+            )
+        })?;
+        let normalized_args = args
+            .iter()
+            .cloned()
+            .map(normalize_condition_argument)
+            .collect::<Result<Vec<_>, _>>()?;
+        normalized.insert("arguments".to_string(), Value::Array(normalized_args));
+    }
+
+    Ok(Value::Object(normalized))
 }
 
 // ===== Parameter Structs =====
@@ -73,6 +303,12 @@ pub struct DeleteObjectSchemaParams {
 pub struct ListObjectInstancesParams {
     #[schemars(description = "Schema name")]
     pub schema_name: String,
+    #[schemars(
+        description = "Max results. Defaults to the API page size; set explicitly for large schemas."
+    )]
+    pub limit: Option<i64>,
+    #[schemars(description = "Pagination offset")]
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -87,7 +323,9 @@ pub struct QueryObjectInstancesParams {
                               nest child Conditions inside arguments of AND/OR."
     )]
     pub condition: Option<serde_json::Value>,
-    #[schemars(description = "Max results")]
+    #[schemars(
+        description = "Max results. Set explicitly for large schemas; use offset for paging."
+    )]
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
     pub offset: Option<i64>,
@@ -136,14 +374,17 @@ pub struct QueryAggregateParams {
     )]
     pub aggregates: serde_json::Value,
     #[schemars(
-        description = "Optional top-level sort: [{column, direction}]. Each column \
-                       must match a group_by column or an aggregate alias."
+        description = "Optional top-level sort: [{column, direction}] where column \
+                       must match a group_by column or aggregate alias, or \
+                       [{expression:{fn:'COSINE_DISTANCE'|'L2_DISTANCE', field, \
+                       value:[number,...]}, direction:'ASC'|'DESC'}] for vector \
+                       nearest-neighbor ordering against a vector field."
     )]
     pub order_by: Option<serde_json::Value>,
     #[schemars(
         description = "Max result rows (server caps at 100000). Omit to let the \
                        server return all rows — if the natural result exceeds the \
-                       cap the request is rejected."
+                       cap the request is rejected. Set this explicitly for interactive MCP use."
     )]
     pub limit: Option<i64>,
     #[schemars(description = "Pagination offset")]
@@ -296,7 +537,11 @@ pub async fn create_object_schema(
     if let Some(indexes) = params.indexes {
         body["indexes"] = indexes;
     }
-    let result = api_post(server, "/api/runtime/object-model/schemas", Some(body)).await?;
+    ensure_request_payload_reasonable("create_object_schema", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(server, "/api/runtime/object-model/schemas", Some(body)).await,
+        "create_object_schema",
+    )?;
     json_result(result)
 }
 
@@ -357,12 +602,16 @@ pub async fn update_object_schema(
     if let Some(i) = params.indexes {
         body["indexes"] = i;
     }
-    let result = api_put(
-        server,
-        &format!("/api/runtime/object-model/schemas/{}", id),
-        Some(body),
-    )
-    .await?;
+    ensure_request_payload_reasonable("update_object_schema", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_put(
+            server,
+            &format!("/api/runtime/object-model/schemas/{}", id),
+            Some(body),
+        )
+        .await,
+        "update_object_schema",
+    )?;
     json_result(result)
 }
 
@@ -380,15 +629,32 @@ pub async fn list_object_instances(
     params: ListObjectInstancesParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("schema_name", &params.schema_name)?;
-    let result = api_get(
-        server,
-        &format!(
-            "/api/runtime/object-model/instances/schema/name/{}",
-            params.schema_name
-        ),
-    )
-    .await?;
-    json_result(result)
+    let mut path = format!(
+        "/api/runtime/object-model/instances/schema/name/{}",
+        params.schema_name
+    );
+    let mut query = Vec::new();
+    if let Some(offset) = params.offset {
+        query.push(format!("offset={}", offset));
+    }
+    if let Some(limit) = params.limit {
+        query.push(format!("limit={}", limit));
+    }
+    if !query.is_empty() {
+        path.push('?');
+        path.push_str(&query.join("&"));
+    }
+
+    let result =
+        with_payload_too_large_guidance(api_get(server, &path).await, "list_object_instances")?;
+    let guidance = result_size_guidance(
+        &result,
+        "list_object_instances",
+        params.limit,
+        &["instances"],
+        &["totalCount", "total_count"],
+    );
+    json_result_with_guidance(result, guidance)
 }
 
 pub async fn query_object_instances(
@@ -398,7 +664,7 @@ pub async fn query_object_instances(
     validate_path_param("schema_name", &params.schema_name)?;
     let mut body = serde_json::json!({});
     if let Some(condition) = params.condition {
-        body["condition"] = condition;
+        body["condition"] = normalize_condition(condition)?;
     }
     if let Some(limit) = params.limit {
         body["limit"] = serde_json::json!(limit);
@@ -406,16 +672,27 @@ pub async fn query_object_instances(
     if let Some(offset) = params.offset {
         body["offset"] = serde_json::json!(offset);
     }
-    let result = api_post(
-        server,
-        &format!(
-            "/api/runtime/object-model/instances/schema/{}/filter",
-            params.schema_name
-        ),
-        Some(body),
-    )
-    .await?;
-    json_result(result)
+    ensure_request_payload_reasonable("query_object_instances", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(
+            server,
+            &format!(
+                "/api/runtime/object-model/instances/schema/{}/filter",
+                params.schema_name
+            ),
+            Some(body),
+        )
+        .await,
+        "query_object_instances",
+    )?;
+    let guidance = result_size_guidance(
+        &result,
+        "query_object_instances",
+        params.limit,
+        &["instances"],
+        &["totalCount", "total_count"],
+    );
+    json_result_with_guidance(result, guidance)
 }
 
 pub async fn query_aggregate(
@@ -425,7 +702,7 @@ pub async fn query_aggregate(
     validate_path_param("schema_name", &params.schema_name)?;
     let mut body = serde_json::json!({ "aggregates": params.aggregates });
     if let Some(condition) = params.condition {
-        body["condition"] = condition;
+        body["condition"] = normalize_condition(condition)?;
     }
     if let Some(group_by) = params.group_by {
         body["groupBy"] = serde_json::json!(group_by);
@@ -439,16 +716,27 @@ pub async fn query_aggregate(
     if let Some(offset) = params.offset {
         body["offset"] = serde_json::json!(offset);
     }
-    let result = api_post(
-        server,
-        &format!(
-            "/api/runtime/object-model/instances/schema/{}/aggregate",
-            params.schema_name
-        ),
-        Some(body),
-    )
-    .await?;
-    json_result(result)
+    ensure_request_payload_reasonable("query_aggregate", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(
+            server,
+            &format!(
+                "/api/runtime/object-model/instances/schema/{}/aggregate",
+                params.schema_name
+            ),
+            Some(body),
+        )
+        .await,
+        "query_aggregate",
+    )?;
+    let guidance = result_size_guidance(
+        &result,
+        "query_aggregate",
+        params.limit,
+        &["rows"],
+        &["groupCount", "group_count"],
+    );
+    json_result_with_guidance(result, guidance)
 }
 
 pub async fn create_object_instance(
@@ -459,7 +747,11 @@ pub async fn create_object_instance(
         "schemaName": params.schema_name,
         "properties": params.properties,
     });
-    let result = api_post(server, "/api/runtime/object-model/instances", Some(body)).await?;
+    ensure_request_payload_reasonable("create_object_instance", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(server, "/api/runtime/object-model/instances", Some(body)).await,
+        "create_object_instance",
+    )?;
     json_result(result)
 }
 
@@ -472,15 +764,19 @@ pub async fn update_object_instance(
     let body = serde_json::json!({
         "properties": params.properties,
     });
-    let result = api_put(
-        server,
-        &format!(
-            "/api/runtime/object-model/instances/{}/{}",
-            params.schema_id, params.instance_id
-        ),
-        Some(body),
-    )
-    .await?;
+    ensure_request_payload_reasonable("update_object_instance", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_put(
+            server,
+            &format!(
+                "/api/runtime/object-model/instances/{}/{}",
+                params.schema_id, params.instance_id
+            ),
+            Some(body),
+        )
+        .await,
+        "update_object_instance",
+    )?;
     json_result(result)
 }
 
@@ -522,12 +818,17 @@ pub async fn bulk_create_instances(
         body.insert("conflictColumns".to_string(), serde_json::json!(cols));
     }
 
-    let result = api_post(
-        server,
-        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
-        Some(serde_json::Value::Object(body)),
-    )
-    .await?;
+    let body = serde_json::Value::Object(body);
+    ensure_request_payload_reasonable("bulk_create_instances", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_post(
+            server,
+            &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+            Some(body),
+        )
+        .await,
+        "bulk_create_instances",
+    )?;
     json_result(result)
 }
 
@@ -545,6 +846,7 @@ pub async fn bulk_update_instances(
                     None,
                 )
             })?;
+            let condition = normalize_condition(condition)?;
             let properties = params.properties.ok_or_else(|| {
                 rmcp::ErrorData::invalid_params(
                     "mode=byCondition requires `properties`".to_string(),
@@ -574,12 +876,16 @@ pub async fn bulk_update_instances(
         }
     };
 
-    let result = api_patch(
-        server,
-        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
-        Some(body),
-    )
-    .await?;
+    ensure_request_payload_reasonable("bulk_update_instances", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_patch(
+            server,
+            &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+            Some(body),
+        )
+        .await,
+        "bulk_update_instances",
+    )?;
     json_result(result)
 }
 
@@ -589,11 +895,118 @@ pub async fn bulk_delete_instances(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
     let body = serde_json::json!({ "instanceIds": params.instance_ids });
-    let result = api_delete_with_body(
-        server,
-        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
-        Some(body),
-    )
-    .await?;
+    ensure_request_payload_reasonable("bulk_delete_instances", &body)?;
+    let result = with_payload_too_large_guidance(
+        api_delete_with_body(
+            server,
+            &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+            Some(body),
+        )
+        .await,
+        "bulk_delete_instances",
+    )?;
     json_result(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_condition_preserves_canonical_condition() {
+        let condition = json!({
+            "op": "EQ",
+            "arguments": ["status", "active"]
+        });
+
+        assert_eq!(
+            normalize_condition(condition).unwrap(),
+            json!({
+                "op": "EQ",
+                "arguments": ["status", "active"]
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_condition_accepts_workflow_condition_expression_shape() {
+        let condition = json!({
+            "type": "operation",
+            "op": "Eq",
+            "arguments": [
+                {"valueType": "reference", "value": "status"},
+                {"valueType": "immediate", "value": "active"}
+            ]
+        });
+
+        assert_eq!(
+            normalize_condition(condition).unwrap(),
+            json!({
+                "op": "EQ",
+                "arguments": ["status", "active"]
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_condition_accepts_nested_workflow_condition_expression_shape() {
+        let condition = json!({
+            "type": "operation",
+            "op": "Or",
+            "arguments": [
+                {
+                    "type": "operation",
+                    "op": "IsDefined",
+                    "arguments": [{"valueType": "reference", "value": "email"}]
+                },
+                {
+                    "type": "operation",
+                    "op": "Eq",
+                    "arguments": [
+                        {"valueType": "reference", "value": "status"},
+                        {"valueType": "immediate", "value": "pending"}
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(
+            normalize_condition(condition).unwrap(),
+            json!({
+                "op": "OR",
+                "arguments": [
+                    {"op": "IS_DEFINED", "arguments": ["email"]},
+                    {"op": "EQ", "arguments": ["status", "pending"]}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn result_size_guidance_warns_for_partial_page() {
+        let result = json!({
+            "instances": [{ "id": "one" }],
+            "totalCount": 2,
+            "limit": 1,
+            "offset": 0
+        });
+
+        let warnings = result_size_guidance(
+            &result,
+            "query_object_instances",
+            Some(1),
+            &["instances"],
+            &["totalCount"],
+        );
+
+        assert!(warnings.iter().any(|warning| warning.contains("1 of 2")));
+    }
+
+    #[test]
+    fn request_payload_guidance_rejects_oversized_payload() {
+        let body = json!({ "blob": "x".repeat(MCP_REQUEST_PAYLOAD_GUIDANCE_BYTES + 1) });
+
+        assert!(ensure_request_payload_reasonable("bulk_create_instances", &body).is_err());
+    }
 }

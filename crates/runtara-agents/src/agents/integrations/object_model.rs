@@ -1299,22 +1299,14 @@ pub fn query_aggregate(input: QueryAggregateInput) -> Result<QueryAggregateOutpu
 
 /// Convert a `MappingValue` to a JSON value for use in conditions.
 ///
-/// `MappingValue::Reference` is expected to have been pre-resolved by the
-/// workflow codegen (see `runtara_workflow_stdlib::value_resolver`). If a
-/// `Reference` survives to this point we cannot produce a sane condition
-/// argument — the path string is *not* a value — so emit `null` and warn
-/// loudly so the failure is visible in logs.
+/// `MappingValue::Reference` inside object-model conditions names either a
+/// field (argument 0 of field-based operators) or, for older direct calls, a
+/// value path supplied by the caller. Workflow runtime references in value
+/// positions are resolved before dispatch; surviving references therefore map
+/// to their string payload so field arguments become SQL column names.
 fn mapping_value_to_json(mv: &MappingValue) -> serde_json::Value {
     match mv {
-        MappingValue::Reference(r) => {
-            eprintln!(
-                "warning: object_model condition received an unresolved reference \
-                 '{}'. The workflow runtime should have resolved this before \
-                 dispatching the capability; emitting null.",
-                r.value
-            );
-            serde_json::Value::Null
-        }
+        MappingValue::Reference(r) => json!(r.value),
         MappingValue::Immediate(i) => i.value.clone(),
         MappingValue::Composite(c) => serde_json::to_value(c).unwrap_or(json!(null)),
         MappingValue::Template(t) => json!(t.value),

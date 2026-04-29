@@ -1723,6 +1723,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_step_summaries_output_error_envelope_is_failed() {
+        let pool = test_pool().await;
+        let persistence = SqlitePersistence::new(pool);
+
+        let instance_id = Uuid::new_v4().to_string();
+        persistence
+            .register_instance(&instance_id, "test-tenant")
+            .await
+            .unwrap();
+
+        insert_step_start(
+            &persistence,
+            &instance_id,
+            "agent-step",
+            Some("Call Agent"),
+            "Agent",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        insert_step_end(
+            &persistence,
+            &instance_id,
+            "agent-step",
+            None,
+            Some(serde_json::json!({
+                "_error": true,
+                "error": {"message": "Capability failed"}
+            })),
+            None,
+        )
+        .await;
+
+        let filter = ListStepSummariesFilter {
+            sort_order: EventSortOrder::Desc,
+            status: None,
+            step_type: None,
+            scope_id: None,
+            parent_scope_id: None,
+            root_scopes_only: false,
+        };
+
+        let steps = persistence
+            .list_step_summaries(&instance_id, &filter, 100, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].status, StepStatus::Failed);
+        assert_eq!(
+            steps[0].error,
+            Some(serde_json::json!({"message": "Capability failed"}))
+        );
+
+        let failed_filter = ListStepSummariesFilter {
+            status: Some(StepStatus::Failed),
+            ..filter
+        };
+        assert_eq!(
+            persistence
+                .count_step_summaries(&instance_id, &failed_filter)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn test_list_step_summaries_filter_by_status() {
         let pool = test_pool().await;
         let persistence = SqlitePersistence::new(pool);

@@ -242,6 +242,14 @@ pub enum ValidationError {
         value: String,
         allowed_values: Vec<String>,
     },
+    /// A condition payload inside an agent input mapping has a shape that the
+    /// agent/runtime boundary will reject.
+    InvalidConditionShape {
+        step_id: String,
+        field_name: String,
+        path: String,
+        message: String,
+    },
 
     // === Naming Errors ===
     /// Multiple steps have the same name.
@@ -607,6 +615,18 @@ impl std::fmt::Display for ValidationError {
                     field_name,
                     value,
                     allowed_values.join(", ")
+                )
+            }
+            ValidationError::InvalidConditionShape {
+                step_id,
+                field_name,
+                path,
+                message,
+            } => {
+                write!(
+                    f,
+                    "[E025] Step '{}': condition input '{}' has invalid shape at {}: {}",
+                    step_id, field_name, path, message
                 )
             }
 
@@ -1686,6 +1706,13 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 &agent_step.capability_id,
             );
 
+            if agent_step.agent_id == "object_model"
+                && let Some(mapping) = &agent_step.input_mapping
+                && let Some(condition) = mapping.get("condition")
+            {
+                validate_condition_input_mapping(step_id, "condition", condition, result);
+            }
+
             if capability_inputs.is_none() {
                 // Get available capabilities for this agent
                 let available_capabilities: Vec<String> =
@@ -1768,6 +1795,18 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
                         inputs.iter().map(|f| (f.name.as_str(), f)).collect();
 
                     for (field_name, value) in mapping {
+                        if agent_step.agent_id != "object_model"
+                            && let Some(field_meta) = field_map.get(field_name.as_str())
+                            && is_condition_input(
+                                &agent_step.agent_id,
+                                &agent_step.capability_id,
+                                field_name,
+                                &field_meta.type_name,
+                            )
+                        {
+                            validate_condition_input_mapping(step_id, field_name, value, result);
+                        }
+
                         if let MappingValue::Immediate(imm) = value
                             && let Some(field_meta) = field_map.get(field_name.as_str())
                         {
@@ -1812,6 +1851,338 @@ fn validate_agents(graph: &ExecutionGraph, result: &mut ValidationResult) {
             _ => {}
         }
     }
+}
+
+fn is_condition_input(
+    agent_id: &str,
+    _capability_id: &str,
+    field_name: &str,
+    type_name: &str,
+) -> bool {
+    type_name.contains("ConditionExpression")
+        || (agent_id == "object_model" && field_name == "condition")
+}
+
+fn validate_condition_input_mapping(
+    step_id: &str,
+    field_name: &str,
+    value: &MappingValue,
+    result: &mut ValidationResult,
+) {
+    match value {
+        MappingValue::Immediate(imm) => {
+            let path = format!("inputMapping.{}.value", field_name);
+            match serde_json::from_value::<runtara_dsl::ConditionExpression>(imm.value.clone()) {
+                Ok(condition) => {
+                    validate_agent_condition_expression(
+                        step_id,
+                        field_name,
+                        &path,
+                        &condition,
+                        result,
+                    );
+                }
+                Err(err) => result.errors.push(ValidationError::InvalidConditionShape {
+                    step_id: step_id.to_string(),
+                    field_name: field_name.to_string(),
+                    path,
+                    message: format!(
+                        "expected ConditionExpression JSON with top-level `type` (`operation` or `value`); deserializer reported: {}",
+                        err
+                    ),
+                }),
+            }
+        }
+        MappingValue::Composite(_) => result.errors.push(ValidationError::InvalidConditionShape {
+            step_id: step_id.to_string(),
+            field_name: field_name.to_string(),
+            path: format!("inputMapping.{}", field_name),
+            message: "do not wrap a condition in `valueType: \"composite\"`; use `valueType: \"immediate\"` with a ConditionExpression object, and use bare MappingValue objects for each argument".to_string(),
+        }),
+        MappingValue::Reference(_) | MappingValue::Template(_) => {
+            // A whole condition may be supplied at runtime. Its shape cannot be
+            // validated statically because the referenced/template value is not
+            // available in the graph.
+        }
+    }
+}
+
+fn validate_agent_condition_expression(
+    step_id: &str,
+    field_name: &str,
+    path: &str,
+    expr: &runtara_dsl::ConditionExpression,
+    result: &mut ValidationResult,
+) {
+    match expr {
+        runtara_dsl::ConditionExpression::Operation(op) => {
+            use runtara_dsl::ConditionOperator;
+
+            match op.op {
+                ConditionOperator::And | ConditionOperator::Or => {
+                    if op.arguments.is_empty() {
+                        result.errors.push(ValidationError::InvalidConditionShape {
+                            step_id: step_id.to_string(),
+                            field_name: field_name.to_string(),
+                            path: format!("{path}.arguments"),
+                            message: format!("{:?} requires at least one nested condition", op.op),
+                        });
+                    }
+                    for (index, arg) in op.arguments.iter().enumerate() {
+                        let arg_path = format!("{path}.arguments[{index}]");
+                        match arg {
+                            runtara_dsl::ConditionArgument::Expression(nested) => {
+                                validate_agent_condition_expression(
+                                    step_id, field_name, &arg_path, nested, result,
+                                );
+                            }
+                            runtara_dsl::ConditionArgument::Value(_) => {
+                                result.errors.push(ValidationError::InvalidConditionShape {
+                                    step_id: step_id.to_string(),
+                                    field_name: field_name.to_string(),
+                                    path: arg_path,
+                                    message: "AND/OR arguments must be nested ConditionExpression objects, not MappingValue arguments".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                ConditionOperator::Not => {
+                    if op.arguments.len() != 1 {
+                        result.errors.push(ValidationError::InvalidConditionShape {
+                            step_id: step_id.to_string(),
+                            field_name: field_name.to_string(),
+                            path: format!("{path}.arguments"),
+                            message: "NOT requires exactly one nested condition".to_string(),
+                        });
+                    }
+                    if let Some(arg) = op.arguments.first() {
+                        let arg_path = format!("{path}.arguments[0]");
+                        match arg {
+                            runtara_dsl::ConditionArgument::Expression(nested) => {
+                                validate_agent_condition_expression(
+                                    step_id, field_name, &arg_path, nested, result,
+                                );
+                            }
+                            runtara_dsl::ConditionArgument::Value(_) => {
+                                result.errors.push(ValidationError::InvalidConditionShape {
+                                    step_id: step_id.to_string(),
+                                    field_name: field_name.to_string(),
+                                    path: arg_path,
+                                    message:
+                                        "NOT argument must be a nested ConditionExpression object"
+                                            .to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                ConditionOperator::Length => {
+                    result.errors.push(ValidationError::InvalidConditionShape {
+                        step_id: step_id.to_string(),
+                        field_name: field_name.to_string(),
+                        path: path.to_string(),
+                        message: "LENGTH is a workflow runtime operator and is not supported by object-model condition inputs".to_string(),
+                    });
+                }
+                _ => {
+                    validate_field_condition_operation(step_id, field_name, path, op, result);
+                }
+            }
+        }
+        runtara_dsl::ConditionExpression::Value(value) => {
+            validate_condition_field_mapping(
+                step_id,
+                field_name,
+                path,
+                value,
+                "top-level value condition must name a field with `valueType:\"reference\"` or an immediate string",
+                result,
+            );
+        }
+    }
+}
+
+fn validate_field_condition_operation(
+    step_id: &str,
+    field_name: &str,
+    path: &str,
+    op: &runtara_dsl::ConditionOperation,
+    result: &mut ValidationResult,
+) {
+    use runtara_dsl::ConditionOperator;
+
+    let expected = match op.op {
+        ConditionOperator::IsDefined
+        | ConditionOperator::IsEmpty
+        | ConditionOperator::IsNotEmpty => 1,
+        ConditionOperator::SimilarityGte
+        | ConditionOperator::CosineDistanceLte
+        | ConditionOperator::L2DistanceLte => 3,
+        ConditionOperator::Eq
+        | ConditionOperator::Ne
+        | ConditionOperator::Gt
+        | ConditionOperator::Gte
+        | ConditionOperator::Lt
+        | ConditionOperator::Lte
+        | ConditionOperator::StartsWith
+        | ConditionOperator::EndsWith
+        | ConditionOperator::Contains
+        | ConditionOperator::In
+        | ConditionOperator::NotIn
+        | ConditionOperator::Match => 2,
+        ConditionOperator::And
+        | ConditionOperator::Or
+        | ConditionOperator::Not
+        | ConditionOperator::Length => {
+            return;
+        }
+    };
+
+    if op.arguments.len() != expected {
+        result.errors.push(ValidationError::InvalidConditionShape {
+            step_id: step_id.to_string(),
+            field_name: field_name.to_string(),
+            path: format!("{path}.arguments"),
+            message: format!("{:?} requires exactly {expected} argument(s)", op.op),
+        });
+    }
+
+    if let Some(first_arg) = op.arguments.first() {
+        let arg_path = format!("{path}.arguments[0]");
+        match first_arg {
+            runtara_dsl::ConditionArgument::Value(value) => {
+                validate_condition_field_mapping(
+                    step_id,
+                    field_name,
+                    &arg_path,
+                    value,
+                    "first argument must be a field name: use bare `{ \"valueType\": \"reference\", \"value\": \"field_name\" }` or `{ \"valueType\": \"immediate\", \"value\": \"field_name\" }`",
+                    result,
+                );
+            }
+            runtara_dsl::ConditionArgument::Expression(_) => {
+                result.errors.push(ValidationError::InvalidConditionShape {
+                    step_id: step_id.to_string(),
+                    field_name: field_name.to_string(),
+                    path: arg_path,
+                    message: "first argument must be a field name, not a nested condition"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    for (index, arg) in op.arguments.iter().enumerate().skip(1) {
+        validate_non_field_condition_argument(
+            step_id,
+            field_name,
+            &format!("{path}.arguments[{index}]"),
+            arg,
+            result,
+        );
+    }
+}
+
+fn validate_condition_field_mapping(
+    step_id: &str,
+    field_name: &str,
+    path: &str,
+    value: &MappingValue,
+    base_message: &str,
+    result: &mut ValidationResult,
+) {
+    let invalid = match value {
+        MappingValue::Reference(r) => validate_condition_field_name(&r.value)
+            .err()
+            .map(|reason| format!("{base_message}; {reason}")),
+        MappingValue::Immediate(imm) => {
+            if let Some(field) = imm.value.as_str() {
+                validate_condition_field_name(field)
+                    .err()
+                    .map(|reason| format!("{base_message}; {reason}"))
+            } else if looks_like_mapping_value_envelope(&imm.value) {
+                Some("deprecated wrapping: do not use `{ valueType:\"immediate\", value:{ valueType:\"reference\", ... } }`; put the reference object directly in the argument slot".to_string())
+            } else {
+                Some(format!(
+                    "{base_message}; immediate field arguments must contain a string"
+                ))
+            }
+        }
+        MappingValue::Composite(_) => Some(format!(
+            "{base_message}; composite-wrapped condition arguments are not accepted"
+        )),
+        MappingValue::Template(_) => Some(format!(
+            "{base_message}; template field names are not accepted"
+        )),
+    };
+
+    if let Some(message) = invalid {
+        result.errors.push(ValidationError::InvalidConditionShape {
+            step_id: step_id.to_string(),
+            field_name: field_name.to_string(),
+            path: path.to_string(),
+            message,
+        });
+    }
+}
+
+fn validate_non_field_condition_argument(
+    step_id: &str,
+    field_name: &str,
+    path: &str,
+    arg: &runtara_dsl::ConditionArgument,
+    result: &mut ValidationResult,
+) {
+    match arg {
+        runtara_dsl::ConditionArgument::Expression(nested) => {
+            validate_agent_condition_expression(step_id, field_name, path, nested, result);
+        }
+        runtara_dsl::ConditionArgument::Value(MappingValue::Immediate(imm))
+            if looks_like_mapping_value_envelope(&imm.value) =>
+        {
+            result.errors.push(ValidationError::InvalidConditionShape {
+                step_id: step_id.to_string(),
+                field_name: field_name.to_string(),
+                path: path.to_string(),
+                message: "deprecated wrapping: do not nest a MappingValue inside `valueType:\"immediate\"`; use the bare reference/immediate/template object directly in the argument slot".to_string(),
+            });
+        }
+        runtara_dsl::ConditionArgument::Value(MappingValue::Composite(_)) => {
+            result.errors.push(ValidationError::InvalidConditionShape {
+                step_id: step_id.to_string(),
+                field_name: field_name.to_string(),
+                path: path.to_string(),
+                message: "composite-wrapped condition arguments are not accepted; use immediate arrays/objects for literals or bare references for runtime values".to_string(),
+            });
+        }
+        runtara_dsl::ConditionArgument::Value(_) => {}
+    }
+}
+
+fn validate_condition_field_name(field: &str) -> Result<(), String> {
+    if field.is_empty() {
+        return Err("field name cannot be empty".to_string());
+    }
+    if !field
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("field name may only contain letters, digits, `_`, and `-`".to_string());
+    }
+    Ok(())
+}
+
+fn looks_like_mapping_value_envelope(value: &serde_json::Value) -> bool {
+    value
+        .get("valueType")
+        .and_then(|v| v.as_str())
+        .is_some_and(|value_type| {
+            matches!(
+                value_type,
+                "reference" | "immediate" | "composite" | "template"
+            )
+        })
 }
 
 // ============================================================================
@@ -5024,6 +5395,97 @@ mod tests {
         assert!(display.contains("method"));
         assert!(display.contains("INVALID"));
         assert!(display.contains("GET, POST"));
+    }
+
+    fn create_object_model_bulk_update_step(id: &str, condition: serde_json::Value) -> Step {
+        let mut mapping = InputMapping::new();
+        mapping.insert(
+            "schema_name".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!("Product"),
+            }),
+        );
+        mapping.insert(
+            "properties".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue {
+                value: serde_json::json!({"reviewed": true}),
+            }),
+        );
+        mapping.insert(
+            "condition".to_string(),
+            MappingValue::Immediate(runtara_dsl::ImmediateValue { value: condition }),
+        );
+
+        Step::Agent(AgentStep {
+            id: id.to_string(),
+            name: None,
+            agent_id: "object_model".to_string(),
+            capability_id: "bulk-update-instances".to_string(),
+            connection_id: None,
+            input_mapping: Some(mapping),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            compensation: None,
+            breakpoint: None,
+            durable: None,
+        })
+    }
+
+    #[test]
+    fn object_model_condition_rejects_immediate_wrapped_field_reference() {
+        let condition = serde_json::json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                {"valueType": "immediate", "value": {"valueType": "reference", "value": "category_leaf_id"}},
+                {"valueType": "reference", "value": "data.selected_category"}
+            ]
+        });
+        let mut steps = HashMap::new();
+        steps.insert(
+            "bulk".to_string(),
+            create_object_model_bulk_update_step("bulk", condition),
+        );
+        let graph = create_basic_graph(steps, "bulk");
+
+        let result = validate_workflow(&graph);
+
+        assert!(result.errors.iter().any(|error| matches!(
+            error,
+            ValidationError::InvalidConditionShape { path, message, .. }
+                if path == "inputMapping.condition.value.arguments[0]"
+                    && message.contains("deprecated wrapping")
+        )));
+    }
+
+    #[test]
+    fn object_model_condition_accepts_canonical_field_and_runtime_refs() {
+        let condition = serde_json::json!({
+            "type": "operation",
+            "op": "EQ",
+            "arguments": [
+                {"valueType": "reference", "value": "category_leaf_id"},
+                {"valueType": "reference", "value": "data.selected_category"}
+            ]
+        });
+        let mut steps = HashMap::new();
+        steps.insert(
+            "bulk".to_string(),
+            create_object_model_bulk_update_step("bulk", condition),
+        );
+        let graph = create_basic_graph(steps, "bulk");
+
+        let result = validate_workflow(&graph);
+
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidConditionShape { .. })),
+            "{:?}",
+            result.errors
+        );
     }
 
     #[test]

@@ -234,6 +234,7 @@ impl Dialect for SqliteDialect {
                     json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
                     json_extract(CAST(payload AS TEXT), '$.outputs') as outputs, \
                     json_extract(CAST(payload AS TEXT), '$.error') as error, \
+                    json_extract(CAST(payload AS TEXT), '$.outputs._error') as output_error, \
                     created_at \
                 FROM instance_events \
                 WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
@@ -253,6 +254,7 @@ impl Dialect for SqliteDialect {
                     CASE \
                         WHEN e.step_id IS NULL THEN 'running' \
                         WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                        WHEN e.output_error = 1 OR e.output_error = 'true' THEN 'failed' \
                         ELSE 'completed' \
                     END as status, \
                     CASE \
@@ -292,7 +294,8 @@ impl Dialect for SqliteDialect {
             SELECT \
                 json_extract(CAST(payload AS TEXT), '$.step_id') as step_id, \
                 json_extract(CAST(payload AS TEXT), '$.scope_id') as scope_id, \
-                json_extract(CAST(payload AS TEXT), '$.error') as error \
+                json_extract(CAST(payload AS TEXT), '$.error') as error, \
+                json_extract(CAST(payload AS TEXT), '$.outputs._error') as output_error \
             FROM instance_events \
             WHERE instance_id = ?1 AND subtype = 'step_debug_end' \
         ), \
@@ -305,6 +308,7 @@ impl Dialect for SqliteDialect {
                 CASE \
                     WHEN e.step_id IS NULL THEN 'running' \
                     WHEN e.error IS NOT NULL AND e.error != 'null' THEN 'failed' \
+                    WHEN e.output_error = 1 OR e.output_error = 'true' THEN 'failed' \
                     ELSE 'completed' \
                 END as status \
             FROM start_events s \
