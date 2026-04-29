@@ -310,20 +310,25 @@ export function ReportDefinitionBuilder({
   return (
     <section className="flex flex-col gap-4 rounded-lg border bg-background p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-3">
           <Badge variant="secondary">{value.blocks.length} blocks</Badge>
-          <Select value={selectedSchema} onValueChange={onSelectedSchemaChange}>
-            <SelectTrigger className="h-9 w-56">
-              <SelectValue placeholder="Default schema" />
-            </SelectTrigger>
-            <SelectContent>
-              {schemas.map((schema) => (
-                <SelectItem key={schema.id} value={schema.name}>
-                  {schema.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex min-w-64 flex-col gap-1">
+            <Label className="text-xs text-muted-foreground">
+              Schema for new raw blocks
+            </Label>
+            <Select value={selectedSchema} onValueChange={onSelectedSchemaChange}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder="Choose Object Model schema" />
+              </SelectTrigger>
+              <SelectContent>
+                {schemas.map((schema) => (
+                  <SelectItem key={schema.id} value={schema.name}>
+                    {schema.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
@@ -333,7 +338,7 @@ export function ReportDefinitionBuilder({
             onClick={() => appendBlock('table')}
           >
             <Rows3 className="mr-2 size-4" />
-            Table
+            Raw table
           </Button>
           <Button
             type="button"
@@ -342,7 +347,7 @@ export function ReportDefinitionBuilder({
             onClick={() => appendBlock('metric')}
           >
             <Sigma className="mr-2 size-4" />
-            Metric
+            Raw metric
           </Button>
           <Button
             type="button"
@@ -351,7 +356,7 @@ export function ReportDefinitionBuilder({
             onClick={() => appendBlock('chart')}
           >
             <LineChart className="mr-2 size-4" />
-            Chart
+            Raw chart
           </Button>
           <Button
             type="button"
