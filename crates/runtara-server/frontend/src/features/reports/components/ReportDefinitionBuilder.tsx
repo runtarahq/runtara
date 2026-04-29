@@ -31,6 +31,7 @@ import {
   ReportBlockDefinition,
   ReportBlockType,
   ReportChartKind,
+  ReportDatasetDefinition,
   ReportDefinition,
   ReportFilterDefinition,
   ReportFilterType,
@@ -81,6 +82,7 @@ type BlockEditorProps = {
   block: ReportBlockDefinition | undefined;
   blockId: string;
   schemas: Schema[];
+  datasets: ReportDatasetDefinition[];
   onChange: (block: ReportBlockDefinition) => void;
   onDuplicate: () => void;
   onRemove: () => void;
@@ -408,6 +410,7 @@ export function ReportDefinitionBuilder({
                   )}
                   blockId={node.blockId}
                   schemas={schemas}
+                  datasets={value.datasets ?? []}
                   onChange={(block) => updateBlock(node.blockId, block)}
                   onDuplicate={() => duplicateBlock(node.blockId)}
                   onRemove={() => removeNode(index)}
@@ -620,6 +623,7 @@ function ReportBlockEditor({
   block,
   blockId,
   schemas,
+  datasets,
   onChange,
   onDuplicate,
   onRemove,
@@ -651,10 +655,16 @@ function ReportBlockEditor({
       : (block.type as Exclude<ReportBlockType, 'markdown'>);
   const blockMeta = BLOCK_TYPE_META[blockType];
   const TypeIcon = blockMeta.icon;
+  const source = block.source ?? emptyReportSource();
+  const dataset = block.dataset
+    ? datasets.find((candidate) => candidate.id === block.dataset?.id)
+    : undefined;
+  const schemaName = source.schema || dataset?.source.schema || '';
   const schema = schemas.find(
-    (candidate) => candidate.name === block.source.schema
+    (candidate) => candidate.name === schemaName
   );
   const fields = getSchemaFields(schema);
+  const isDatasetBlock = Boolean(block.dataset);
 
   const update = (patch: Partial<ReportBlockDefinition>) => {
     onChange({ ...block, ...patch });
@@ -681,30 +691,41 @@ function ReportBlockEditor({
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">{blockMeta.label}</Badge>
               <Badge variant="outline">
-                {block.source.schema || 'No schema'}
+                {isDatasetBlock
+                  ? dataset?.label ?? block.dataset?.id ?? 'Dataset'
+                  : source.schema || 'No schema'}
               </Badge>
+              {isDatasetBlock && schemaName && (
+                <Badge variant="outline">Source: {schemaName}</Badge>
+              )}
               {block.lazy && <Badge variant="muted">Lazy</Badge>}
             </div>
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
-          <Select
-            value={blockType}
-            onValueChange={(value) =>
-              updateType(value as Exclude<ReportBlockType, 'markdown'>)
-            }
-          >
-            <SelectTrigger className="h-9 w-32">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {Object.entries(BLOCK_TYPE_META).map(([type, meta]) => (
-                <SelectItem key={type} value={type}>
-                  {meta.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {isDatasetBlock ? (
+            <Badge variant="outline" className="h-9 px-3">
+              Dataset block
+            </Badge>
+          ) : (
+            <Select
+              value={blockType}
+              onValueChange={(value) =>
+                updateType(value as Exclude<ReportBlockType, 'markdown'>)
+              }
+            >
+              <SelectTrigger className="h-9 w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {Object.entries(BLOCK_TYPE_META).map(([type, meta]) => (
+                  <SelectItem key={type} value={type}>
+                    {meta.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Button
             type="button"
             variant="ghost"
@@ -737,25 +758,35 @@ function ReportBlockEditor({
             }
           />
         </Field>
-        <Field label="Schema">
-          <Select
-            value={block.source.schema}
-            onValueChange={(schemaName) =>
-              onChange(changeBlockSchema(block, schemaName, schemas))
-            }
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select schema" />
-            </SelectTrigger>
-            <SelectContent>
-              {schemas.map((schemaOption) => (
-                <SelectItem key={schemaOption.id} value={schemaOption.name}>
-                  {schemaOption.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
+        {isDatasetBlock ? (
+          <Field label="Dataset">
+            <Input
+              value={dataset?.label ?? block.dataset?.id ?? ''}
+              readOnly
+              className="bg-muted/40"
+            />
+          </Field>
+        ) : (
+          <Field label="Schema">
+            <Select
+              value={source.schema}
+              onValueChange={(schemaName) =>
+                onChange(changeBlockSchema(block, schemaName, schemas))
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select schema" />
+              </SelectTrigger>
+              <SelectContent>
+                {schemas.map((schemaOption) => (
+                  <SelectItem key={schemaOption.id} value={schemaOption.name}>
+                    {schemaOption.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
         <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
           <div>
             <Label className="text-sm">Lazy load</Label>
@@ -769,21 +800,35 @@ function ReportBlockEditor({
 
       <Separator />
 
-      {blockType === 'table' && (
-        <TableBlockSettings block={block} fields={fields} onChange={onChange} />
-      )}
-      {blockType === 'metric' && (
-        <MetricBlockSettings
-          block={block}
-          fields={fields}
-          onChange={onChange}
-        />
-      )}
-      {blockType === 'chart' && (
-        <ChartBlockSettings block={block} fields={fields} onChange={onChange} />
+      {isDatasetBlock ? (
+        <DatasetBlockSettings block={block} dataset={dataset} />
+      ) : (
+        <>
+          {blockType === 'table' && (
+            <TableBlockSettings
+              block={block}
+              fields={fields}
+              onChange={onChange}
+            />
+          )}
+          {blockType === 'metric' && (
+            <MetricBlockSettings
+              block={block}
+              fields={fields}
+              onChange={onChange}
+            />
+          )}
+          {blockType === 'chart' && (
+            <ChartBlockSettings
+              block={block}
+              fields={fields}
+              onChange={onChange}
+            />
+          )}
+        </>
       )}
 
-      {(blockType === 'table' || blockType === 'chart') && (
+      {!isDatasetBlock && (blockType === 'table' || blockType === 'chart') && (
         <>
           <Separator />
           <BlockFiltersEditor
@@ -792,6 +837,83 @@ function ReportBlockEditor({
             onChange={onChange}
           />
         </>
+      )}
+    </div>
+  );
+}
+
+function DatasetBlockSettings({
+  block,
+  dataset,
+}: {
+  block: ReportBlockDefinition;
+  dataset: ReportDatasetDefinition | undefined;
+}) {
+  const query = block.dataset;
+  if (!query) return null;
+
+  const dimensions = (query.dimensions ?? []).map((field) =>
+    dataset?.dimensions.find((dimension) => dimension.field === field)?.label ??
+    field
+  );
+  const measures = (query.measures ?? []).map(
+    (id) => dataset?.measures.find((measure) => measure.id === id)?.label ?? id
+  );
+  const sort = query.orderBy?.[0];
+
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      <Field label="Dataset ID">
+        <Input value={query.id} readOnly className="bg-muted/40" />
+      </Field>
+      <Field label="Source schema">
+        <Input
+          value={dataset?.source.schema ?? 'Unknown dataset'}
+          readOnly
+          className="bg-muted/40"
+        />
+      </Field>
+      <Field label="Dimensions">
+        <ReadOnlyPills values={dimensions} empty="No dimensions" />
+      </Field>
+      <Field label="Measures">
+        <ReadOnlyPills values={measures} empty="No measures" />
+      </Field>
+      <Field label="Sort">
+        <Input
+          value={sort ? `${sort.field} ${sort.direction}` : 'No explicit sort'}
+          readOnly
+          className="bg-muted/40"
+        />
+      </Field>
+      <Field label="Limit">
+        <Input
+          value={String(query.limit ?? 100)}
+          readOnly
+          className="bg-muted/40"
+        />
+      </Field>
+    </div>
+  );
+}
+
+function ReadOnlyPills({
+  values,
+  empty,
+}: {
+  values: string[];
+  empty: string;
+}) {
+  return (
+    <div className="flex min-h-10 flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2">
+      {values.length > 0 ? (
+        values.map((value) => (
+          <Badge key={value} variant="secondary">
+            {value}
+          </Badge>
+        ))
+      ) : (
+        <span className="text-sm text-muted-foreground">{empty}</span>
       )}
     </div>
   );
@@ -1734,6 +1856,17 @@ function moveItem<T>(items: T[], fromIndex: number, toIndex: number): T[] {
 function getSchemaFields(schema: Schema | undefined): string[] {
   const schemaFields = schema?.columns?.map((column) => column.name) ?? [];
   return ['id', ...schemaFields, 'createdAt', 'updatedAt'];
+}
+
+function emptyReportSource(): ReportBlockDefinition['source'] {
+  return {
+    schema: '',
+    mode: 'filter',
+    groupBy: [],
+    aggregates: [],
+    orderBy: [],
+    filterMappings: [],
+  };
 }
 
 function createDefaultBlock(
