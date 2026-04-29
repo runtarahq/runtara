@@ -20,6 +20,10 @@ use crate::api::services::object_model::{
 
 const MAX_TABLE_PAGE_SIZE: i64 = 500;
 const MAX_AGGREGATE_ROWS: i64 = 1000;
+/// Cap on rows fetched per join from a dimension schema. Broadcast-hash
+/// join breaks down (round trip + memory) past this; report a validation
+/// error so the caller adds a more selective `<alias>.<field>` condition.
+const MAX_BROADCAST_JOIN_DIM_ROWS: i64 = 50_000;
 
 #[derive(Debug, Error)]
 pub enum ReportServiceError {
@@ -702,7 +706,49 @@ impl ReportService {
                 .iter()
                 .map(|column| column.name.clone())
                 .collect();
-            let is_known_field = |field: &str| -> bool { is_schema_field(&schema_fields, field) };
+
+            // Resolve dimension schemas for any block-level joins. Each join
+            // contributes a `<alias>.<field>` namespace recognized by the
+            // field-existence checks below.
+            let mut join_field_sets: HashMap<String, HashSet<String>> = HashMap::new();
+            for join in &block.source.join {
+                let alias = join.effective_alias().to_string();
+                if !is_schema_field(&schema_fields, &join.parent_field) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' join parentField '{}' is not a column on '{}'",
+                        block.id, join.parent_field, block.source.schema
+                    )));
+                }
+                let dim_schema = self
+                    .schema_service
+                    .get_schema_by_name(&join.schema, tenant_id, join.connection_id.as_deref())
+                    .await
+                    .map_err(map_object_model_error)?;
+                let dim_fields: HashSet<String> =
+                    dim_schema.columns.iter().map(|c| c.name.clone()).collect();
+                if !is_schema_field(&dim_fields, &join.field) {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' join field '{}' is not a column on '{}'",
+                        block.id, join.field, join.schema
+                    )));
+                }
+                if join_field_sets.insert(alias.clone(), dim_fields).is_some() {
+                    return Err(ReportServiceError::Validation(format!(
+                        "Block '{}' has duplicate join alias '{}'",
+                        block.id, alias
+                    )));
+                }
+            }
+
+            let is_known_field = |field: &str| -> bool {
+                if let Some((alias, dim_field)) = field.split_once('.') {
+                    return join_field_sets
+                        .get(alias)
+                        .map(|fields| is_schema_field(fields, dim_field))
+                        .unwrap_or(false);
+                }
+                is_schema_field(&schema_fields, field)
+            };
             let aggregate_output_fields = aggregate_output_fields(block);
             let is_table_value_field = |field: &str| -> bool {
                 match block.source.mode {
@@ -1186,15 +1232,8 @@ impl ReportService {
             offset,
         )?;
         let result = self
-            .instance_service
-            .aggregate_instances_by_schema(
-                tenant_id,
-                &block.source.schema,
-                request,
-                block.source.connection_id.as_deref(),
-            )
-            .await
-            .map_err(map_object_model_error)?;
+            .aggregate_with_optional_joins(tenant_id, block, request)
+            .await?;
 
         let source_columns = result.columns.clone();
         let mut row_maps = aggregate_rows_to_maps(&source_columns, &result.rows);
@@ -1311,21 +1350,208 @@ impl ReportService {
     ) -> Result<Value, ReportServiceError> {
         let request = build_aggregate_request(definition, block, resolved_filters)?;
         let result = self
-            .instance_service
-            .aggregate_instances_by_schema(
-                tenant_id,
-                &block.source.schema,
-                request,
-                block.source.connection_id.as_deref(),
-            )
-            .await
-            .map_err(map_object_model_error)?;
+            .aggregate_with_optional_joins(tenant_id, block, request)
+            .await?;
 
         Ok(json!({
             "columns": result.columns,
             "rows": result.rows,
             "groupCount": result.group_count,
         }))
+    }
+
+    /// Run an aggregate that may reference joined dimension schemas via
+    /// `<alias>.<field>` qualified field names. Implements broadcast-hash
+    /// join: each declared dimension is resolved client-side first (with any
+    /// `<alias>.<field>` condition terms applied), the primary aggregate is
+    /// filtered by the resolved parent-field keys, and result rows are
+    /// enriched with the joined dimension columns.
+    ///
+    /// When `block.source.join` is empty this is a passthrough to the regular
+    /// aggregate.
+    async fn aggregate_with_optional_joins(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        request: AggregateRequest,
+    ) -> Result<runtara_object_store::AggregateResult, ReportServiceError> {
+        let joins = &block.source.join;
+        if joins.is_empty() {
+            return self
+                .instance_service
+                .aggregate_instances_by_schema(
+                    tenant_id,
+                    &block.source.schema,
+                    request,
+                    block.source.connection_id.as_deref(),
+                )
+                .await
+                .map_err(map_object_model_error);
+        }
+
+        let alias_to_join = build_alias_index(joins, &block.id)?;
+        validate_join_request(&request, &alias_to_join, &block.id)?;
+
+        let alias_set: HashSet<&str> = alias_to_join.keys().map(|s| s.as_str()).collect();
+        let (primary_condition, by_alias) =
+            split_qualified_condition(request.condition.clone(), &alias_set, &block.id)?;
+
+        let mut join_data: HashMap<String, JoinResolution> = HashMap::new();
+        for (alias, join) in &alias_to_join {
+            let alias_terms = by_alias.get(alias).cloned().unwrap_or_default();
+            let resolution = self
+                .resolve_join(tenant_id, join, &alias_terms, &request.group_by)
+                .await?;
+            join_data.insert(alias.clone(), resolution);
+        }
+
+        let mut primary_conditions: Vec<Condition> = Vec::new();
+        if let Some(c) = primary_condition {
+            primary_conditions.push(c);
+        }
+        let mut empty_inner_join = false;
+        for (alias, join) in &alias_to_join {
+            let data = &join_data[alias];
+            if data.parent_keys.is_empty() {
+                if matches!(join.kind, ReportJoinKind::Inner) {
+                    empty_inner_join = true;
+                    break;
+                }
+                continue;
+            }
+            primary_conditions.push(Condition {
+                op: "IN".to_string(),
+                arguments: Some(vec![
+                    Value::String(join.parent_field.clone()),
+                    Value::Array(data.parent_keys.clone()),
+                ]),
+            });
+        }
+
+        if empty_inner_join {
+            return Ok(empty_join_result(&request.group_by, &request.aggregates));
+        }
+
+        let primary_group_by: Vec<String> = request
+            .group_by
+            .iter()
+            .filter(|field| field_alias_prefix(field).is_none())
+            .cloned()
+            .collect();
+
+        let primary_order_by: Vec<AggregateOrderBy> = request
+            .order_by
+            .iter()
+            .filter(|order| field_alias_prefix(&order.column).is_none())
+            .cloned()
+            .collect();
+
+        let primary_request = AggregateRequest {
+            condition: combine_conditions(primary_conditions),
+            group_by: primary_group_by,
+            aggregates: request.aggregates.clone(),
+            order_by: primary_order_by,
+            limit: request.limit,
+            offset: request.offset,
+        };
+
+        let primary_result = self
+            .instance_service
+            .aggregate_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                primary_request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        Ok(enrich_aggregate_result(
+            primary_result,
+            &request.group_by,
+            joins,
+            &alias_to_join,
+            &join_data,
+        ))
+    }
+
+    /// Query the dimension schema and build a lookup keyed by the join's `field`.
+    async fn resolve_join(
+        &self,
+        tenant_id: &str,
+        join: &ReportSourceJoin,
+        alias_terms: &[Condition],
+        _group_by: &[String],
+    ) -> Result<JoinResolution, ReportServiceError> {
+        let alias = join.effective_alias();
+
+        let stripped_conditions: Vec<Condition> = alias_terms
+            .iter()
+            .map(|c| strip_alias_from_condition(c.clone(), alias))
+            .collect();
+
+        let dim_condition = combine_conditions(stripped_conditions);
+
+        let filter = FilterRequest {
+            offset: 0,
+            limit: MAX_BROADCAST_JOIN_DIM_ROWS,
+            condition: dim_condition,
+            sort_by: None,
+            sort_order: None,
+            score_expression: None,
+            order_by: None,
+        };
+
+        let (dim_instances, total) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &join.schema,
+                filter,
+                join.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        if total > MAX_BROADCAST_JOIN_DIM_ROWS {
+            return Err(ReportServiceError::Validation(format!(
+                "Join '{}' would broadcast {} rows from '{}'; cap is {}. Add a more \
+                 selective condition on '{}' fields.",
+                alias, total, join.schema, MAX_BROADCAST_JOIN_DIM_ROWS, alias
+            )));
+        }
+
+        let dim_rows: Vec<serde_json::Map<String, Value>> = dim_instances
+            .into_iter()
+            .filter_map(|i| match flatten_instance(i) {
+                Value::Object(map) => Some(map),
+                _ => None,
+            })
+            .collect();
+
+        let mut parent_keys: Vec<Value> = Vec::with_capacity(dim_rows.len());
+        let mut seen_keys: HashSet<String> = HashSet::with_capacity(dim_rows.len());
+        let mut by_key: HashMap<String, serde_json::Map<String, Value>> =
+            HashMap::with_capacity(dim_rows.len());
+
+        for row in dim_rows {
+            let Some(key_value) = row.get(&join.field) else {
+                continue;
+            };
+            if value_is_empty(key_value) {
+                continue;
+            }
+            let key_str = value_to_lookup_key(key_value);
+            if seen_keys.insert(key_str.clone()) {
+                parent_keys.push(key_value.clone());
+            }
+            by_key.entry(key_str).or_insert(row);
+        }
+
+        Ok(JoinResolution {
+            parent_keys,
+            by_key,
+        })
     }
 
     async fn render_metric_block(
@@ -2144,6 +2370,360 @@ fn combine_conditions(conditions: Vec<Condition>) -> Option<Condition> {
     }
 }
 
+/// Resolved dimension data for a single block-level join. Held in memory
+/// during a single aggregate render; sized by `MAX_BROADCAST_JOIN_DIM_ROWS`.
+struct JoinResolution {
+    /// Distinct values of the dim's `field` column. Used to build an
+    /// `IN [...]` filter against the primary's `parent_field`.
+    parent_keys: Vec<Value>,
+    /// Lookup of dim row by stringified `field` value. Each row is a
+    /// flattened instance map (system fields + properties merged).
+    by_key: HashMap<String, serde_json::Map<String, Value>>,
+}
+
+/// `(primary_condition, terms_grouped_by_alias)` returned by
+/// [`split_qualified_condition`].
+type SplitCondition = (Option<Condition>, HashMap<String, Vec<Condition>>);
+
+fn build_alias_index<'a>(
+    joins: &'a [ReportSourceJoin],
+    block_id: &str,
+) -> Result<HashMap<String, &'a ReportSourceJoin>, ReportServiceError> {
+    let mut alias_to_join: HashMap<String, &ReportSourceJoin> = HashMap::new();
+    for join in joins {
+        let alias = join.effective_alias().to_string();
+        if alias.contains('.') || alias.is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' join alias '{}' must be a non-empty identifier without '.'",
+                block_id, alias
+            )));
+        }
+        if alias_to_join.insert(alias.clone(), join).is_some() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' has duplicate join alias '{}'",
+                block_id, alias
+            )));
+        }
+    }
+    Ok(alias_to_join)
+}
+
+/// Reject features that v1 broadcast-hash join does not yet support:
+/// qualified `aggregates[].field`, qualified `orderBy.column`, qualified
+/// `groupBy` entries whose join's `parent_field` isn't also in the
+/// (unqualified) groupBy.
+fn validate_join_request(
+    request: &AggregateRequest,
+    alias_to_join: &HashMap<String, &ReportSourceJoin>,
+    block_id: &str,
+) -> Result<(), ReportServiceError> {
+    for aggregate in &request.aggregates {
+        if let Some(column) = aggregate.column.as_deref()
+            && let Some(alias) = field_alias_prefix(column)
+            && alias_to_join.contains_key(alias)
+        {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' aggregate '{}' references qualified field '{}'; \
+                 qualified refs in aggregate.field are not supported in v1.",
+                block_id, aggregate.alias, column
+            )));
+        }
+    }
+
+    for order in &request.order_by {
+        if let Some(alias) = field_alias_prefix(&order.column)
+            && alias_to_join.contains_key(alias)
+        {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' orderBy '{}' references qualified field; \
+                 qualified refs in orderBy are not supported in v1. Use \
+                 an aggregate alias or an unqualified primary-schema field.",
+                block_id, order.column
+            )));
+        }
+    }
+
+    let unqualified_group_by: HashSet<&str> = request
+        .group_by
+        .iter()
+        .filter_map(|field| {
+            if field_alias_prefix(field).is_none() {
+                Some(field.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut joins_used_in_group_by: HashSet<&str> = HashSet::new();
+    for field in &request.group_by {
+        let Some(alias) = field_alias_prefix(field) else {
+            continue;
+        };
+        let Some(join) = alias_to_join.get(alias) else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' groupBy field '{}' references unknown alias '{}'",
+                block_id, field, alias
+            )));
+        };
+        if !unqualified_group_by.contains(join.parent_field.as_str()) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' groupBy uses qualified field '{}' but is missing the \
+                 join's parent field '{}' from groupBy. Add '{}' to groupBy so \
+                 the dimension can be enriched per row.",
+                block_id, field, join.parent_field, join.parent_field
+            )));
+        }
+        joins_used_in_group_by.insert(alias);
+    }
+
+    Ok(())
+}
+
+/// Returns the alias portion of a qualified `<alias>.<field>` reference,
+/// or `None` for unqualified names.
+fn field_alias_prefix(field: &str) -> Option<&str> {
+    field.split_once('.').map(|(alias, _)| alias)
+}
+
+fn split_qualified_condition(
+    condition: Option<Condition>,
+    alias_set: &HashSet<&str>,
+    block_id: &str,
+) -> Result<SplitCondition, ReportServiceError> {
+    let Some(c) = condition else {
+        return Ok((None, HashMap::new()));
+    };
+
+    if c.op.eq_ignore_ascii_case("AND") {
+        let raw_args = c.arguments.clone().unwrap_or_default();
+        let children: Vec<Condition> = raw_args
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+        let mut primary: Vec<Condition> = Vec::new();
+        let mut by_alias: HashMap<String, Vec<Condition>> = HashMap::new();
+        for child in children {
+            match alias_for_condition(&child, alias_set, block_id)? {
+                Some(alias) => by_alias.entry(alias).or_default().push(child),
+                None => primary.push(child),
+            }
+        }
+        return Ok((combine_conditions(primary), by_alias));
+    }
+
+    match alias_for_condition(&c, alias_set, block_id)? {
+        Some(alias) => {
+            let mut by_alias = HashMap::new();
+            by_alias.insert(alias, vec![c]);
+            Ok((None, by_alias))
+        }
+        None => Ok((Some(c), HashMap::new())),
+    }
+}
+
+/// Identify the join alias used by a single condition term, if any. Rejects
+/// terms that would mix references across a join boundary or against an
+/// unknown alias — both indicate caller error.
+fn alias_for_condition(
+    c: &Condition,
+    alias_set: &HashSet<&str>,
+    block_id: &str,
+) -> Result<Option<String>, ReportServiceError> {
+    let mut found_alias: Option<String> = None;
+    let mut found_unknown: Option<String> = None;
+    walk_condition_field_refs(c, &mut |field| {
+        let Some(alias) = field_alias_prefix(field) else {
+            return;
+        };
+        if alias_set.contains(alias) {
+            if found_alias.as_deref() != Some(alias) {
+                if found_alias.is_some() {
+                    found_alias = Some(format!("__multiple__:{}", alias));
+                } else {
+                    found_alias = Some(alias.to_string());
+                }
+            }
+        } else if found_unknown.is_none() {
+            found_unknown = Some(alias.to_string());
+        }
+    });
+
+    if let Some(alias) = found_unknown {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' condition references unknown join alias '{}'",
+            block_id, alias
+        )));
+    }
+    if let Some(alias) = &found_alias
+        && alias.starts_with("__multiple__:")
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' condition mixes references across joins ({}); v1 \
+             requires each AND'd term to reference at most one schema.",
+            block_id, alias
+        )));
+    }
+    Ok(found_alias)
+}
+
+/// Visit every string-valued field reference in a condition tree.
+/// Field refs in this DSL are always the first argument of a binary op or
+/// the field arg of IN/NOT_IN — checking arg[0] of every node covers them
+/// without rebuilding the operator catalog.
+fn walk_condition_field_refs(c: &Condition, visit: &mut impl FnMut(&str)) {
+    let Some(args) = &c.arguments else {
+        return;
+    };
+    for (index, arg) in args.iter().enumerate() {
+        if index == 0
+            && let Some(s) = arg.as_str()
+        {
+            visit(s);
+        }
+        if let Ok(child) = serde_json::from_value::<Condition>(arg.clone()) {
+            walk_condition_field_refs(&child, visit);
+        }
+    }
+}
+
+fn strip_alias_from_condition(mut c: Condition, alias: &str) -> Condition {
+    let prefix = format!("{}.", alias);
+    if let Some(args) = &mut c.arguments {
+        for (index, arg) in args.iter_mut().enumerate() {
+            if index == 0
+                && let Some(s) = arg.as_str()
+                && let Some(unqualified) = s.strip_prefix(&prefix)
+            {
+                *arg = Value::String(unqualified.to_string());
+            }
+            if let Ok(child) = serde_json::from_value::<Condition>(arg.clone()) {
+                let stripped = strip_alias_from_condition(child, alias);
+                if let Ok(stripped_value) = serde_json::to_value(stripped) {
+                    *arg = stripped_value;
+                }
+            }
+        }
+    }
+    c
+}
+
+/// Stringify a JSON value for use as a HashMap lookup key. Two JSON values
+/// that compare equal under SQL semantics produce the same key.
+fn value_to_lookup_key(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Build the empty result when an inner join has no matching dimension rows
+/// — preserving the column shape the caller requested so downstream code
+/// (table projection, chart rendering) stays uniform.
+fn empty_join_result(
+    group_by: &[String],
+    aggregates: &[AggregateSpec],
+) -> runtara_object_store::AggregateResult {
+    let mut columns = group_by.to_vec();
+    columns.extend(aggregates.iter().map(|a| a.alias.clone()));
+    runtara_object_store::AggregateResult {
+        columns,
+        rows: Vec::new(),
+        group_count: 0,
+    }
+}
+
+/// Take the primary aggregate result and add columns sourced from the
+/// joined dimensions. Output column order matches the original groupBy
+/// order, with aggregate columns appended at the end.
+fn enrich_aggregate_result(
+    primary: runtara_object_store::AggregateResult,
+    requested_group_by: &[String],
+    joins: &[ReportSourceJoin],
+    alias_to_join: &HashMap<String, &ReportSourceJoin>,
+    join_data: &HashMap<String, JoinResolution>,
+) -> runtara_object_store::AggregateResult {
+    let primary_index: HashMap<&str, usize> = primary
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect();
+
+    let aggregate_aliases: Vec<&str> = primary
+        .columns
+        .iter()
+        .map(String::as_str)
+        .filter(|c| !requested_group_by.iter().any(|g| g == c))
+        .collect();
+
+    let mut output_columns: Vec<String> = requested_group_by.to_vec();
+    for alias in &aggregate_aliases {
+        output_columns.push(alias.to_string());
+    }
+
+    let mut output_rows: Vec<Vec<Value>> = Vec::with_capacity(primary.rows.len());
+    for row in &primary.rows {
+        let mut new_row: Vec<Value> = Vec::with_capacity(output_columns.len());
+
+        for field in requested_group_by {
+            if let Some(alias) = field_alias_prefix(field) {
+                let Some(join) = alias_to_join.get(alias) else {
+                    new_row.push(Value::Null);
+                    continue;
+                };
+                let Some(parent_index) = primary_index.get(join.parent_field.as_str()) else {
+                    new_row.push(Value::Null);
+                    continue;
+                };
+                let Some(parent_value) = row.get(*parent_index) else {
+                    new_row.push(Value::Null);
+                    continue;
+                };
+                let key = value_to_lookup_key(parent_value);
+                let dim_field = field
+                    .strip_prefix(&format!("{}.", alias))
+                    .unwrap_or(field.as_str());
+                let dim_row = join_data.get(alias).and_then(|data| data.by_key.get(&key));
+                let cell = dim_row
+                    .and_then(|row_map| row_map.get(dim_field))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                new_row.push(cell);
+            } else {
+                let value = primary_index
+                    .get(field.as_str())
+                    .and_then(|i| row.get(*i))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                new_row.push(value);
+            }
+        }
+
+        for alias in &aggregate_aliases {
+            let value = primary_index
+                .get(alias)
+                .and_then(|i| row.get(*i))
+                .cloned()
+                .unwrap_or(Value::Null);
+            new_row.push(value);
+        }
+
+        output_rows.push(new_row);
+    }
+
+    let _ = joins;
+    let group_count = primary.group_count;
+    runtara_object_store::AggregateResult {
+        columns: output_columns,
+        rows: output_rows,
+        group_count,
+    }
+}
+
 fn build_aggregate_request(
     definition: &ReportDefinition,
     block: &ReportBlockDefinition,
@@ -2890,6 +3470,7 @@ mod tests {
                 aggregates: vec![],
                 order_by: vec![],
                 limit: None,
+                join: vec![],
             },
             table: None,
             chart: None,
@@ -3204,5 +3785,208 @@ mod tests {
         assert_eq!(value["title"], "Recent orders");
         assert!(value["table"].get("columns").is_some());
         assert!(value["table"].get("defaultSort").is_none());
+    }
+
+    fn cond(op: &str, args: Vec<Value>) -> Condition {
+        Condition {
+            op: op.to_string(),
+            arguments: Some(args),
+        }
+    }
+
+    #[test]
+    fn split_qualified_condition_separates_aliased_from_primary_terms() {
+        let aliases: HashSet<&str> = ["p"].into_iter().collect();
+        let condition = cond(
+            "AND",
+            vec![
+                serde_json::to_value(cond("EQ", vec![json!("status"), json!("active")])).unwrap(),
+                serde_json::to_value(cond(
+                    "IN",
+                    vec![json!("p.category_leaf_id"), json!([1, 2, 3])],
+                ))
+                .unwrap(),
+            ],
+        );
+
+        let (primary, by_alias) =
+            split_qualified_condition(Some(condition), &aliases, "block").unwrap();
+
+        let primary = primary.expect("primary should retain the unqualified term");
+        assert_eq!(primary.op, "EQ");
+        assert_eq!(primary.arguments.unwrap()[0].as_str().unwrap(), "status");
+
+        let alias_terms = by_alias.get("p").expect("alias bucket present");
+        assert_eq!(alias_terms.len(), 1);
+        assert_eq!(alias_terms[0].op, "IN");
+    }
+
+    #[test]
+    fn split_qualified_condition_rejects_unknown_alias() {
+        let aliases: HashSet<&str> = ["p"].into_iter().collect();
+        let condition = cond("EQ", vec![json!("q.foo"), json!("bar")]);
+        let err = split_qualified_condition(Some(condition), &aliases, "block").unwrap_err();
+        assert!(err.to_string().contains("unknown join alias 'q'"));
+    }
+
+    #[test]
+    fn strip_alias_from_condition_removes_qualifier() {
+        let stripped = strip_alias_from_condition(
+            cond("IN", vec![json!("p.category_leaf_id"), json!([1, 2, 3])]),
+            "p",
+        );
+        assert_eq!(
+            stripped.arguments.unwrap()[0].as_str().unwrap(),
+            "category_leaf_id"
+        );
+    }
+
+    #[test]
+    fn enrich_aggregate_result_appends_dim_columns_in_groupby_order() {
+        let primary = runtara_object_store::AggregateResult {
+            columns: vec!["sku".to_string(), "delta".to_string()],
+            rows: vec![
+                vec![json!("ABC-1"), json!(5)],
+                vec![json!("ABC-2"), json!(-3)],
+            ],
+            group_count: 2,
+        };
+
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Inner,
+        };
+        let joins = [join];
+        let alias_to_join: HashMap<String, &ReportSourceJoin> =
+            joins.iter().map(|j| ("p".to_string(), j)).collect();
+
+        let mut by_key: HashMap<String, serde_json::Map<String, Value>> = HashMap::new();
+        let mut row1 = serde_json::Map::new();
+        row1.insert("sku".to_string(), json!("ABC-1"));
+        row1.insert("vendor".to_string(), json!("HPE"));
+        row1.insert("part_number".to_string(), json!("X-1"));
+        by_key.insert("ABC-1".to_string(), row1);
+        let mut row2 = serde_json::Map::new();
+        row2.insert("sku".to_string(), json!("ABC-2"));
+        row2.insert("vendor".to_string(), json!("Cisco"));
+        row2.insert("part_number".to_string(), json!("Y-2"));
+        by_key.insert("ABC-2".to_string(), row2);
+
+        let mut join_data: HashMap<String, JoinResolution> = HashMap::new();
+        join_data.insert(
+            "p".to_string(),
+            JoinResolution {
+                parent_keys: vec![json!("ABC-1"), json!("ABC-2")],
+                by_key,
+            },
+        );
+
+        let requested_group_by = vec![
+            "sku".to_string(),
+            "p.part_number".to_string(),
+            "p.vendor".to_string(),
+        ];
+
+        let enriched = enrich_aggregate_result(
+            primary,
+            &requested_group_by,
+            &joins,
+            &alias_to_join,
+            &join_data,
+        );
+
+        assert_eq!(
+            enriched.columns,
+            vec![
+                "sku".to_string(),
+                "p.part_number".to_string(),
+                "p.vendor".to_string(),
+                "delta".to_string(),
+            ]
+        );
+        assert_eq!(enriched.rows.len(), 2);
+        assert_eq!(enriched.rows[0][0], json!("ABC-1"));
+        assert_eq!(enriched.rows[0][1], json!("X-1"));
+        assert_eq!(enriched.rows[0][2], json!("HPE"));
+        assert_eq!(enriched.rows[0][3], json!(5));
+        assert_eq!(enriched.rows[1][2], json!("Cisco"));
+    }
+
+    #[test]
+    fn validate_join_request_rejects_qualified_aggregate_field() {
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Inner,
+        };
+        let joins = [join];
+        let alias_to_join: HashMap<String, &ReportSourceJoin> =
+            joins.iter().map(|j| ("p".to_string(), j)).collect();
+
+        let request = AggregateRequest {
+            condition: None,
+            group_by: vec!["sku".to_string()],
+            aggregates: vec![AggregateSpec {
+                alias: "vendor_sample".to_string(),
+                fn_: AggregateFn::Max,
+                column: Some("p.vendor".to_string()),
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+                percentile: None,
+            }],
+            order_by: vec![],
+            limit: Some(10),
+            offset: Some(0),
+        };
+        let err = validate_join_request(&request, &alias_to_join, "block").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("qualified refs in aggregate.field are not supported")
+        );
+    }
+
+    #[test]
+    fn validate_join_request_requires_parent_field_in_groupby_when_qualified_used() {
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Inner,
+        };
+        let joins = [join];
+        let alias_to_join: HashMap<String, &ReportSourceJoin> =
+            joins.iter().map(|j| ("p".to_string(), j)).collect();
+
+        let request = AggregateRequest {
+            condition: None,
+            group_by: vec!["p.vendor".to_string()],
+            aggregates: vec![AggregateSpec {
+                alias: "n".to_string(),
+                fn_: AggregateFn::Count,
+                column: None,
+                distinct: false,
+                order_by: vec![],
+                expression: None,
+                percentile: None,
+            }],
+            order_by: vec![],
+            limit: Some(10),
+            offset: Some(0),
+        };
+        let err = validate_join_request(&request, &alias_to_join, "block").unwrap_err();
+        assert!(err.to_string().contains("parent field 'sku'"));
     }
 }

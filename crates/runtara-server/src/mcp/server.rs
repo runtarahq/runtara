@@ -419,6 +419,50 @@ impl SmoMcpServer {
         tools::object_model::update_object_instance(self, params.0).await
     }
 
+    #[tool(
+        description = "Create many instances in one request. Object form: pass `instances` \
+                       (array of property objects). Columnar form: pass `columns` + `rows` \
+                       (and optionally `constants`/`nullifyEmptyStrings`) for large uniform \
+                       payloads. `onConflict`: error|skip|upsert (default error); for skip/\
+                       upsert provide `conflictColumns`. `onError`: stop|skip (default stop). \
+                       Returns {success, createdCount, skippedCount, errors[], message}."
+    )]
+    async fn bulk_create_instances(
+        &self,
+        params: Parameters<tools::object_model::BulkCreateInstancesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::bulk_create_instances(self, params.0).await
+    }
+
+    #[tool(
+        description = "Update many instances in one request. mode=byCondition: pass \
+                       `condition` (same DSL as query_object_instances) and `properties` \
+                       (flat column→value map applied to every match). Idempotent. \
+                       mode=byIds: pass `updates` (array of {id, properties}) for per-row \
+                       changes. Use this for column backfills (e.g. populate a new \
+                       category_leaf_id on millions of rows after schema evolution) — \
+                       single-row update_object_instance does not scale. Returns \
+                       {success, updatedCount, message}."
+    )]
+    async fn bulk_update_instances(
+        &self,
+        params: Parameters<tools::object_model::BulkUpdateInstancesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::bulk_update_instances(self, params.0).await
+    }
+
+    #[tool(
+        description = "Delete many instances in one request by id list. Soft- vs \
+                       hard-delete is governed by server configuration. Returns \
+                       {success, deletedCount, message}."
+    )]
+    async fn bulk_delete_instances(
+        &self,
+        params: Parameters<tools::object_model::BulkDeleteInstancesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::object_model::bulk_delete_instances(self, params.0).await
+    }
+
     // ===== Report Tools =====
 
     #[tool(

@@ -1902,6 +1902,7 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
             "aggregates",
             "orderBy",
             "limit",
+            "join",
         ],
         |key| match key {
             "columns" => Some((
@@ -1924,6 +1925,52 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
     if let Some(order_by) = source.get("orderBy").and_then(Value::as_array) {
         for (index, order) in order_by.iter().enumerate() {
             collect_order_by_issues(&format!("{path}.orderBy[{index}]"), order, issues);
+        }
+    }
+
+    if let Some(join) = source.get("join").and_then(Value::as_array) {
+        for (index, join_entry) in join.iter().enumerate() {
+            collect_unknown_keys(
+                &format!("{path}.join[{index}]"),
+                join_entry,
+                &[
+                    "schema",
+                    "alias",
+                    "connectionId",
+                    "parentField",
+                    "field",
+                    "op",
+                    "kind",
+                ],
+                issues,
+            );
+            if join_entry.get("schema").and_then(Value::as_str).is_none() {
+                issues.push(error(
+                    format!("{path}.join[{index}].schema"),
+                    "MISSING_JOIN_SCHEMA",
+                    "Block-level join entries must include schema (the dimension to join in).",
+                ));
+            }
+            if join_entry
+                .get("parentField")
+                .and_then(Value::as_str)
+                .is_none()
+            {
+                issues.push(error(
+                    format!("{path}.join[{index}].parentField"),
+                    "MISSING_JOIN_PARENT_FIELD",
+                    "Block-level join entries must include parentField (the column on the \
+                     primary schema).",
+                ));
+            }
+            if join_entry.get("field").and_then(Value::as_str).is_none() {
+                issues.push(error(
+                    format!("{path}.join[{index}].field"),
+                    "MISSING_JOIN_FIELD",
+                    "Block-level join entries must include field (the column on the joined \
+                     dimension).",
+                ));
+            }
         }
     }
 }

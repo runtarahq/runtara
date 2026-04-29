@@ -3,7 +3,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::super::server::SmoMcpServer;
-use super::internal_api::{api_delete, api_get, api_post, api_put, validate_path_param};
+use super::internal_api::{
+    api_delete, api_delete_with_body, api_get, api_patch, api_post, api_put, validate_path_param,
+};
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(
@@ -166,6 +168,93 @@ pub struct UpdateObjectInstanceParams {
     pub instance_id: String,
     #[schemars(description = "Updated properties as JSON object")]
     pub properties: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkCreateInstancesParams {
+    #[schemars(description = "Schema name")]
+    pub schema_name: String,
+    #[schemars(
+        description = "Object form — array of instance objects, one per record. Mutually \
+                       exclusive with `columns`/`rows`."
+    )]
+    pub instances: Option<Vec<serde_json::Value>>,
+    #[schemars(
+        description = "Columnar form — column names (length N). Pair with `rows`. Use for \
+                       large uniform payloads."
+    )]
+    pub columns: Option<Vec<String>>,
+    #[schemars(
+        description = "Columnar form — each row is an array of values aligned to `columns`."
+    )]
+    pub rows: Option<Vec<Vec<serde_json::Value>>>,
+    #[schemars(
+        description = "Columnar form — fields merged into every row. Row cell values take \
+                       precedence over constants."
+    )]
+    pub constants: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(
+        description = "Columnar form — when true, empty strings in non-string columns are \
+                       converted to null before validation."
+    )]
+    #[serde(rename = "nullifyEmptyStrings")]
+    pub nullify_empty_strings: Option<bool>,
+    #[schemars(
+        description = "Behavior on unique-key conflict: error (default), skip (ON CONFLICT \
+                       DO NOTHING), or upsert (ON CONFLICT DO UPDATE)."
+    )]
+    #[serde(rename = "onConflict")]
+    pub on_conflict: Option<String>,
+    #[schemars(
+        description = "Behavior on per-row validation failure: stop (default — abort whole \
+                       bulk on first failure) or skip (collect into errors[], keep going)."
+    )]
+    #[serde(rename = "onError")]
+    pub on_error: Option<String>,
+    #[schemars(
+        description = "Columns used to detect conflicts. Required when onConflict is skip \
+                       or upsert."
+    )]
+    #[serde(rename = "conflictColumns")]
+    pub conflict_columns: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkUpdateInstancesParams {
+    #[schemars(description = "Schema name")]
+    pub schema_name: String,
+    #[schemars(
+        description = "Update mode: byCondition (apply same `properties` to every row \
+                       matching `condition`) or byIds (per-row `properties` for each \
+                       listed id via `updates`)."
+    )]
+    pub mode: String,
+    #[schemars(
+        description = "byCondition: filter condition (same DSL as query_object_instances). \
+                       Required when mode=byCondition."
+    )]
+    pub condition: Option<serde_json::Value>,
+    #[schemars(
+        description = "byCondition: flat object of column → new_value applied to every \
+                       matched row. Required when mode=byCondition."
+    )]
+    pub properties: Option<serde_json::Value>,
+    #[schemars(
+        description = "byIds: array of {id, properties} entries. Required when mode=byIds."
+    )]
+    pub updates: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkDeleteInstancesParams {
+    #[schemars(description = "Schema name")]
+    pub schema_name: String,
+    #[schemars(description = "Instance IDs to delete")]
+    #[serde(rename = "instanceIds")]
+    pub instance_ids: Vec<String>,
 }
 
 // ===== Tool Implementations =====
@@ -389,6 +478,120 @@ pub async fn update_object_instance(
             "/api/runtime/object-model/instances/{}/{}",
             params.schema_id, params.instance_id
         ),
+        Some(body),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn bulk_create_instances(
+    server: &SmoMcpServer,
+    params: BulkCreateInstancesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
+
+    let mut body = serde_json::Map::new();
+    if let Some(instances) = params.instances {
+        body.insert("instances".to_string(), serde_json::Value::Array(instances));
+    }
+    if let Some(columns) = params.columns {
+        body.insert("columns".to_string(), serde_json::json!(columns));
+    }
+    if let Some(rows) = params.rows {
+        body.insert("rows".to_string(), serde_json::json!(rows));
+    }
+    if let Some(constants) = params.constants {
+        body.insert(
+            "constants".to_string(),
+            serde_json::Value::Object(constants),
+        );
+    }
+    if let Some(b) = params.nullify_empty_strings {
+        body.insert(
+            "nullifyEmptyStrings".to_string(),
+            serde_json::Value::Bool(b),
+        );
+    }
+    if let Some(s) = params.on_conflict {
+        body.insert("onConflict".to_string(), serde_json::Value::String(s));
+    }
+    if let Some(s) = params.on_error {
+        body.insert("onError".to_string(), serde_json::Value::String(s));
+    }
+    if let Some(cols) = params.conflict_columns {
+        body.insert("conflictColumns".to_string(), serde_json::json!(cols));
+    }
+
+    let result = api_post(
+        server,
+        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+        Some(serde_json::Value::Object(body)),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn bulk_update_instances(
+    server: &SmoMcpServer,
+    params: BulkUpdateInstancesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
+
+    let body = match params.mode.as_str() {
+        "byCondition" => {
+            let condition = params.condition.ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    "mode=byCondition requires `condition`".to_string(),
+                    None,
+                )
+            })?;
+            let properties = params.properties.ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    "mode=byCondition requires `properties`".to_string(),
+                    None,
+                )
+            })?;
+            serde_json::json!({
+                "mode": "byCondition",
+                "condition": condition,
+                "properties": properties,
+            })
+        }
+        "byIds" => {
+            let updates = params.updates.ok_or_else(|| {
+                rmcp::ErrorData::invalid_params("mode=byIds requires `updates`".to_string(), None)
+            })?;
+            serde_json::json!({
+                "mode": "byIds",
+                "updates": updates,
+            })
+        }
+        other => {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("unknown mode '{}': expected byCondition or byIds", other),
+                None,
+            ));
+        }
+    };
+
+    let result = api_patch(
+        server,
+        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
+        Some(body),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn bulk_delete_instances(
+    server: &SmoMcpServer,
+    params: BulkDeleteInstancesParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let schema_id = resolve_schema_id_by_name(server, &params.schema_name).await?;
+    let body = serde_json::json!({ "instanceIds": params.instance_ids });
+    let result = api_delete_with_body(
+        server,
+        &format!("/api/runtime/object-model/instances/{}/bulk", schema_id),
         Some(body),
     )
     .await?;

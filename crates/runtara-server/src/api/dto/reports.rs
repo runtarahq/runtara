@@ -166,6 +166,61 @@ pub struct ReportSource {
     pub order_by: Vec<ReportOrderBy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
+    /// Cross-schema joins. When non-empty, fields prefixed with `<alias>.`
+    /// resolve against the joined dimension schema. Currently supported on
+    /// aggregate-mode blocks; v1 implementation uses broadcast-hash join
+    /// (dim resolved client-side, primary query pushed down with the resolved
+    /// keys, rows enriched after).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub join: Vec<ReportSourceJoin>,
+}
+
+/// Cross-schema join declared on a block-level source. Mirrors the per-cell
+/// `ReportTableColumnJoin` but adds `schema`, `alias`, and `kind` since the
+/// primary schema is the block's source rather than the column's.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReportSourceJoin {
+    /// Joined (dimension) schema name.
+    pub schema: String,
+    /// Optional alias for qualified field references in `groupBy`,
+    /// `condition`, `aggregates[].field`, and `orderBy`. Defaults to `schema`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Optional connection ID for the dimension schema.
+    #[serde(
+        default,
+        rename = "connectionId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connection_id: Option<String>,
+    /// Field on the joined (dimension) schema.
+    pub field: String,
+    /// Field on the parent (block-source) schema.
+    #[serde(rename = "parentField")]
+    pub parent_field: String,
+    /// Comparison op — eq | ne | gt | gte | lt | lte | in | contains | search.
+    /// Default: eq. Mirrors `ReportTableColumnJoin.op`.
+    #[serde(default = "default_filter_op")]
+    pub op: String,
+    /// Inner or left join. Default: inner. Inner drops fact rows with no
+    /// matching dim row; left keeps them with null dim columns.
+    #[serde(default)]
+    pub kind: ReportJoinKind,
+}
+
+impl ReportSourceJoin {
+    /// Resolve the alias used for qualified field refs.
+    pub fn effective_alias(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.schema)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportJoinKind {
+    #[default]
+    Inner,
+    Left,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
