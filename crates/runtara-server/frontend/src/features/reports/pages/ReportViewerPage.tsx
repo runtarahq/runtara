@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { Edit, Printer, RefreshCw } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
@@ -22,7 +22,7 @@ export function ReportViewerPage() {
 
   usePageTitle(report?.name ?? 'Report');
 
-  const initialFilters = useMemo(() => {
+  const filters = useMemo(() => {
     if (!report) return {};
     return Object.fromEntries(
       report.definition.filters.map((filter) => [
@@ -31,12 +31,6 @@ export function ReportViewerPage() {
       ])
     );
   }, [report, searchParams]);
-
-  const [filters, setFilters] = useState<Record<string, unknown>>({});
-
-  useEffect(() => {
-    setFilters(initialFilters);
-  }, [initialFilters]);
 
   const eagerBlocks = useMemo(
     () => (report ? getEagerBlocks(report.definition) : []),
@@ -71,7 +65,6 @@ export function ReportViewerPage() {
   } = useReportRender(reportId, renderRequest, Boolean(report));
 
   const handleFilterChanges = (updates: Record<string, unknown>) => {
-    setFilters((current) => ({ ...current, ...updates }));
     setSearchParams(
       (currentParams) => {
         const nextParams = new URLSearchParams(currentParams);
