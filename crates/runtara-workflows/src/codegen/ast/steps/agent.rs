@@ -648,6 +648,45 @@ mod tests {
     }
 
     #[test]
+    fn test_emit_agent_invokes_unwrap_top_level_immediate_envelopes() {
+        // Pin the runtime call sequence the agent step body emits:
+        //   1. resolve_nested_references(base_inputs, &source)
+        //   2. unwrap_top_level_immediate_envelopes(...)
+        // Workflows whose binaries lack the unwrap call hit
+        // INPUT_DESERIALIZATION_ERROR for typed input fields like
+        // `condition: Option<ConditionExpression>` when the user wraps the
+        // condition in `valueType: "immediate"` per the inputMapping
+        // contract.
+        let mut ctx = EmitContext::new(false);
+        let step = AgentStep {
+            id: "retr_fts".to_string(),
+            name: Some("Retrieve FTS".to_string()),
+            agent_id: "object_model".to_string(),
+            capability_id: "query-instances".to_string(),
+            connection_id: None,
+            input_mapping: Some(HashMap::new()),
+            max_retries: None,
+            retry_delay: None,
+            timeout: None,
+            compensation: None,
+            breakpoint: None,
+            durable: None,
+        };
+        let tokens = emit(&step, &mut ctx).unwrap();
+        let code = tokens.to_string();
+        assert!(
+            code.contains("unwrap_top_level_immediate_envelopes"),
+            "agent step body must invoke unwrap_top_level_immediate_envelopes; got: {}",
+            code
+        );
+        assert!(
+            code.contains("resolve_nested_references"),
+            "agent step body must invoke resolve_nested_references; got: {}",
+            code
+        );
+    }
+
+    #[test]
     fn test_emit_agent_with_input_mapping() {
         let mut ctx = EmitContext::new(false);
         let mut input_mapping = HashMap::new();

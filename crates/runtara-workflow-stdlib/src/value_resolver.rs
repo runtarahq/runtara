@@ -4,32 +4,29 @@
 //! `{valueType: "reference", value: "<path>"}` envelopes against the
 //! workflow execution context.
 //!
-//! Top-level input mappings are resolved by the codegen (see
-//! `mapping::emit_input_mapping`), but `MappingValue::Immediate` nodes pass
-//! their inner JSON through verbatim. When that inner JSON is a typed
-//! structure like `ConditionExpression` it can carry nested
-//! `{valueType: "reference"}` envelopes that the codegen does not visit.
+//! By the time this pass runs, codegen has already stripped the outer
+//! `MappingValue` envelope from each top-level inputMapping field
+//! (`emit_immediate_value` emits the inner JSON verbatim). What remains
+//! are references buried inside those inlined immediate payloads — for
+//! example `ConditionExpression` arguments. Those positions are typed at
+//! the agent boundary as `ConditionArgument` (untagged: `Expression |
+//! MappingValue`) which only matches *wrapped* values, so resolving a
+//! reference there to a bare scalar would crash deserialization with
+//! `INPUT_DESERIALIZATION_ERROR: data did not match any variant of
+//! untagged enum ConditionArgument`.
 //!
-//! This pass runs once per capability invocation, after the input envelope
-//! is built and before it is serialized to the agent.
-//!
-//! Two contexts, two behaviors:
-//! - **Outside an immediate envelope** (top-level fields, composites): a
-//!   resolved `{valueType: "reference", ...}` is replaced with the bare
-//!   looked-up value. Agents whose input fields take primitive Rust types
-//!   (e.g. `String`, `i32`) deserialize cleanly from the bare form.
-//! - **Inside an immediate envelope** (e.g. nested in a `ConditionExpression`
-//!   argument): a resolved reference is rewritten to
-//!   `{valueType: "immediate", value: <resolved>}`. Agents that expect typed
-//!   wire shapes there (e.g. `ConditionArgument` = `Expression | MappingValue`)
-//!   then deserialize the resolved arg as `MappingValue::Immediate`. The
-//!   `condition_expr_to_json` path on the agent side already extracts
-//!   `Immediate.value`, so the bare value reaches the SQL layer unchanged.
+//! The fix is to always rewrite a resolved reference as
+//! `{valueType: "immediate", value: <resolved>}`. The wrapper preserves
+//! the `MappingValue` shape that nested typed deserialisers expect, and
+//! the per-field `unwrap_top_level_immediate_envelopes` pass strips
+//! exactly one wrapper at the agent input boundary so primitive-typed
+//! fields (`String`, `i32`, etc.) still see their bare value.
 
 use serde_json::Value;
 
 /// Recursively replace any `{valueType: "reference", value: "<path>"}` JSON
-/// objects inside `value` with the looked-up value from `source`.
+/// objects inside `value` with `{valueType: "immediate", value: <resolved>}`,
+/// where `<resolved>` is the looked-up value from `source`.
 ///
 /// `source` is the full execution context envelope, the same shape the
 /// codegen builds for top-level reference resolution: it has `data`,
@@ -37,7 +34,7 @@ use serde_json::Value;
 /// dotted notation (e.g. `"data.customer_category"`); the helper converts
 /// them to JSON pointers internally.
 pub fn resolve_nested_references(mut value: Value, source: &Value) -> Value {
-    walk(&mut value, source, false);
+    walk(&mut value, source);
     value
 }
 
@@ -45,15 +42,12 @@ pub fn resolve_nested_references(mut value: Value, source: &Value) -> Value {
 /// field of an input object so they can be deserialized into the agent's
 /// typed input struct (which expects the inner shape, not the wrapper).
 ///
-/// Workflow `inputMapping` requires every value to be a `MappingValue`
-/// (`{valueType, value}`), but agent input fields are typed against the
-/// inner Rust type — e.g. `condition: Option<ConditionExpression>` rather
-/// than `MappingValue<ConditionExpression>`. To bridge the two, the codegen
-/// runs this helper after `resolve_nested_references`.
-///
-/// Only the immediate envelope at the *outermost* level of each field is
-/// stripped. Nested wrappers inside the value are preserved so things like
-/// `ConditionArgument::Value(MappingValue::Immediate)` continue to match.
+/// Pairs with [`resolve_nested_references`]: the resolver wraps every
+/// resolved reference as a `MappingValue::Immediate`; this pass strips
+/// exactly one wrapper per field so primitive-typed agent inputs (`String`,
+/// `i32`, etc.) still see their bare value while nested wrappers inside
+/// typed structures (e.g. `ConditionArgument::Value(MappingValue::Immediate)`)
+/// survive intact.
 pub fn unwrap_top_level_immediate_envelopes(mut value: Value) -> Value {
     if let Value::Object(map) = &mut value {
         for child in map.values_mut() {
@@ -65,8 +59,7 @@ pub fn unwrap_top_level_immediate_envelopes(mut value: Value) -> Value {
     value
 }
 
-/// If `value` is exactly `{valueType: "immediate", value: X}` (and no other
-/// recognised envelope keys we'd want to keep, like `default`), return `X`.
+/// If `value` is exactly `{valueType: "immediate", value: X}`, return `X`.
 fn take_immediate_inner(value: &mut Value) -> Option<Value> {
     let Value::Object(map) = value else {
         return None;
@@ -81,7 +74,7 @@ fn take_immediate_inner(value: &mut Value) -> Option<Value> {
     map.remove("value")
 }
 
-fn walk(value: &mut Value, source: &Value, inside_immediate: bool) {
+fn walk(value: &mut Value, source: &Value) {
     match value {
         Value::Object(map) => {
             // Detect the wire shape `{valueType: "reference", value: "<path>"}`.
@@ -99,26 +92,20 @@ fn walk(value: &mut Value, source: &Value, inside_immediate: bool) {
                 let default = map.get("default").cloned();
                 let resolved =
                     resolve_path(&path, source).unwrap_or_else(|| default.unwrap_or(Value::Null));
-
-                if inside_immediate {
-                    // Preserve `MappingValue` shape so structures like
-                    // `ConditionArgument` can still deserialize. The agent
-                    // side then sees `MappingValue::Immediate(resolved)`.
-                    let mut wrapped = serde_json::Map::with_capacity(2);
-                    wrapped.insert("valueType".to_string(), Value::String("immediate".into()));
-                    wrapped.insert("value".to_string(), resolved);
-                    *value = Value::Object(wrapped);
-                    // Recurse with the same flag so nested refs inside
-                    // a complex resolved value (object/array) keep wrapping.
-                    if let Value::Object(m) = value
-                        && let Some(inner) = m.get_mut("value")
-                    {
-                        walk(inner, source, inside_immediate);
-                    }
-                } else {
-                    // Top-level / outside-immediate: bare-replace as before.
-                    *value = resolved;
-                    walk(value, source, inside_immediate);
+                // Always wrap as MappingValue::Immediate so untagged
+                // deserialisers like ConditionArgument keep matching.
+                // unwrap_top_level_immediate_envelopes peels the wrapper
+                // back off for top-level primitive-typed agent inputs.
+                let mut wrapped = serde_json::Map::with_capacity(2);
+                wrapped.insert("valueType".to_string(), Value::String("immediate".into()));
+                wrapped.insert("value".to_string(), resolved);
+                *value = Value::Object(wrapped);
+                // Recurse into the freshly resolved payload so any refs
+                // inside complex values (object/array) get rewritten too.
+                if let Value::Object(m) = value
+                    && let Some(inner) = m.get_mut("value")
+                {
+                    walk(inner, source);
                 }
                 return;
             }
@@ -128,24 +115,23 @@ fn walk(value: &mut Value, source: &Value, inside_immediate: bool) {
                 Some(Value::String(s)) if s == "immediate"
             );
 
-            // Descend into the immediate's `value` so nested refs get resolved.
-            // The flag flips on so any refs inside are wrapped, preserving the
-            // `MappingValue::Immediate` shape that downstream typed deserialisers
-            // (e.g. `ConditionArgument`) expect.
+            // Skip the immediate envelope itself (its inner payload is
+            // intended to pass through verbatim) but still walk the inner
+            // value to resolve any references the user nested inside.
             if is_immediate_envelope {
                 if let Some(inner) = map.get_mut("value") {
-                    walk(inner, source, true);
+                    walk(inner, source);
                 }
                 return;
             }
 
             for (_, child) in map.iter_mut() {
-                walk(child, source, inside_immediate);
+                walk(child, source);
             }
         }
         Value::Array(items) => {
             for item in items.iter_mut() {
-                walk(item, source, inside_immediate);
+                walk(item, source);
             }
         }
         _ => {}
@@ -186,7 +172,11 @@ mod tests {
     }
 
     #[test]
-    fn resolves_top_level_ref_inside_immediate_payload() {
+    fn resolves_ref_inline_inside_payload() {
+        // After codegen unwraps the outer MappingValue::Immediate, the
+        // resolver sees the inner JSON directly. Resolved refs are wrapped
+        // as MappingValue::Immediate so untagged ConditionArgument keeps
+        // matching at the agent boundary.
         let value = json!({
             "op": "EQ",
             "arguments": [
@@ -199,7 +189,10 @@ mod tests {
             resolved,
             json!({
                 "op": "EQ",
-                "arguments": ["name", "leather wallet brown"]
+                "arguments": [
+                    "name",
+                    {"valueType": "immediate", "value": "leather wallet brown"}
+                ]
             })
         );
     }
@@ -223,10 +216,13 @@ mod tests {
             json!({
                 "op": "AND",
                 "arguments": [
-                    {"op": "EQ", "arguments": ["status", 7]},
+                    {"op": "EQ", "arguments": [
+                        "status",
+                        {"valueType": "immediate", "value": 7}
+                    ]},
                     {"op": "SIMILARITY_GTE", "arguments": [
                         "keywords",
-                        "leather wallet brown",
+                        {"valueType": "immediate", "value": "leather wallet brown"},
                         0.3
                     ]}
                 ]
@@ -236,9 +232,10 @@ mod tests {
 
     #[test]
     fn ref_inside_immediate_is_wrapped() {
-        // Inside an immediate envelope, a resolved reference is rewritten as
-        // `{valueType: "immediate", value: <resolved>}` so structures like
-        // `ConditionArgument::Value(MappingValue::Immediate)` keep matching.
+        // An immediate envelope's inner value is descended into; nested refs
+        // are rewritten as `{valueType: "immediate", value: <resolved>}` so
+        // structures like ConditionArgument::Value(MappingValue::Immediate)
+        // keep matching.
         let value = json!({
             "valueType": "immediate",
             "value": {"valueType": "reference", "value": "data.id"}
@@ -254,37 +251,33 @@ mod tests {
     }
 
     #[test]
-    fn condition_with_nested_refs_inside_immediate_envelope() {
-        // The user-reported failing shape: a condition expression wrapped in
-        // an immediate envelope, whose argument list contains nested refs.
-        // After resolution, every ref-inside-the-immediate is wrapped as
-        // a MappingValue::Immediate so ConditionArgument deserialises cleanly.
+    fn condition_post_codegen_shape() {
+        // Reproduce the exact shape the resolver sees in production: codegen
+        // has already unwrapped the outer MappingValue::Immediate, so the
+        // condition arrives as `{type, op, arguments}` (no `valueType` at the
+        // top level). The user-reported failure (`INPUT_DESERIALIZATION_ERROR:
+        // ConditionArgument`) was caused by the inner refs resolving to bare
+        // null. Now they are wrapped as MappingValue::Immediate.
         let value = json!({
-            "valueType": "immediate",
-            "value": {
-                "type": "operation",
-                "op": "COSINE_DISTANCE_LTE",
-                "arguments": [
-                    {"valueType": "reference", "value": "data.customer_category"},
-                    {"valueType": "reference", "value": "steps.step1.outputs.first"},
-                    {"valueType": "immediate", "value": 0.6}
-                ]
-            }
+            "type": "operation",
+            "op": "COSINE_DISTANCE_LTE",
+            "arguments": [
+                {"valueType": "reference", "value": "data.customer_category"},
+                {"valueType": "reference", "value": "steps.step1.outputs.first"},
+                {"valueType": "immediate", "value": 0.6}
+            ]
         });
         let resolved = resolve_nested_references(value, &source());
         assert_eq!(
             resolved,
             json!({
-                "valueType": "immediate",
-                "value": {
-                    "type": "operation",
-                    "op": "COSINE_DISTANCE_LTE",
-                    "arguments": [
-                        {"valueType": "immediate", "value": "leather wallet brown"},
-                        {"valueType": "immediate", "value": "alpha"},
-                        {"valueType": "immediate", "value": 0.6}
-                    ]
-                }
+                "type": "operation",
+                "op": "COSINE_DISTANCE_LTE",
+                "arguments": [
+                    {"valueType": "immediate", "value": "leather wallet brown"},
+                    {"valueType": "immediate", "value": "alpha"},
+                    {"valueType": "immediate", "value": 0.6}
+                ]
             })
         );
     }
@@ -321,24 +314,26 @@ mod tests {
 
     #[test]
     fn agent_pipeline_end_to_end() {
-        // Mirrors the exact two-step pipeline emitted by agent.rs codegen:
-        //   1. resolve_nested_references
-        //   2. unwrap_top_level_immediate_envelopes
-        // This test pins the wire shape the agent's typed deserialiser sees.
+        // Mirrors the runtime pipeline emitted by agent.rs codegen, AFTER
+        // codegen has already unwrapped the outer MappingValue envelope from
+        // each top-level field. The remaining job is:
+        //   1. resolve_nested_references — wraps every nested ref as
+        //      MappingValue::Immediate.
+        //   2. unwrap_top_level_immediate_envelopes — strips a single envelope
+        //      from each top-level field so primitive-typed agent inputs see
+        //      the bare value.
+        // This pins the exact wire shape the agent's typed deserialiser sees.
         let inputs = json!({
-            "schema_name": {"valueType": "immediate", "value": "Embedding"},
-            "limit": {"valueType": "immediate", "value": 50},
+            "schema_name": "Embedding",
+            "limit": 50,
             "condition": {
-                "valueType": "immediate",
-                "value": {
-                    "type": "operation",
-                    "op": "COSINE_DISTANCE_LTE",
-                    "arguments": [
-                        {"valueType": "reference", "value": "data.embedding_field"},
-                        {"valueType": "reference", "value": "steps.step1.outputs.first"},
-                        {"valueType": "immediate", "value": 0.6}
-                    ]
-                }
+                "type": "operation",
+                "op": "COSINE_DISTANCE_LTE",
+                "arguments": [
+                    {"valueType": "reference", "value": "data.embedding_field"},
+                    {"valueType": "reference", "value": "steps.step1.outputs.first"},
+                    {"valueType": "immediate", "value": 0.6}
+                ]
             }
         });
         let resolved = resolve_nested_references(inputs, &source());
@@ -394,7 +389,9 @@ mod tests {
     fn missing_path_falls_back_to_null() {
         let value = json!({"valueType": "reference", "value": "data.missing"});
         let resolved = resolve_nested_references(value, &source());
-        assert_eq!(resolved, Value::Null);
+        // Refs always wrap as MappingValue::Immediate; null payload reflects
+        // the missing path.
+        assert_eq!(resolved, json!({"valueType": "immediate", "value": null}));
     }
 
     #[test]
@@ -405,7 +402,7 @@ mod tests {
             "default": 42
         });
         let resolved = resolve_nested_references(value, &source());
-        assert_eq!(resolved, json!(42));
+        assert_eq!(resolved, json!({"valueType": "immediate", "value": 42}));
     }
 
     #[test]
