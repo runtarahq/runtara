@@ -1,0 +1,941 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timeline Branches Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f5f0;
+      --surface: #ffffff;
+      --panel: #fcfaf4;
+      --ink: #1e2530;
+      --muted: #667085;
+      --line: #d9dcd2;
+      --line-strong: #bfc6ba;
+      --accent: #234b68;
+      --accent-soft: #e1edf4;
+      --teal: #0f766e;
+      --teal-soft: #dcf2ed;
+      --amber: #93670a;
+      --amber-soft: #fff2c7;
+      --red: #ac2f24;
+      --red-soft: #ffe6e2;
+      --violet: #5e4aa1;
+      --violet-soft: #ede8ff;
+      --radius: 8px;
+      --shadow: 0 20px 50px rgba(45, 55, 42, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    button { border: 0; cursor: pointer; font: inherit; }
+
+    .icon {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(252, 250, 244, 0.9);
+      padding: 14px 22px;
+      backdrop-filter: blur(14px);
+    }
+
+    .title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 820;
+    }
+
+    h1, h2, h3, h4, p { margin-top: 0; }
+    .title h1 { margin-bottom: 2px; font-size: 20px; line-height: 1.18; }
+    .title p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.35; }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .icon-button, .text-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 36px;
+      min-width: 36px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .text-button { gap: 8px; padding: 0 12px; }
+    .primary-button { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(650px, 1fr) 370px;
+      min-height: 0;
+    }
+
+    .timeline-area {
+      overflow: auto;
+      min-width: 0;
+      padding: 26px;
+    }
+
+    .timeline-shell {
+      max-width: 1080px;
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .timeline-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+      padding: 20px 24px;
+    }
+
+    .timeline-header h2 { margin-bottom: 6px; font-size: 25px; line-height: 1.15; }
+    .timeline-header p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .segmented {
+      display: flex;
+      align-items: center;
+      align-self: start;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: #eef1e9;
+      padding: 3px;
+    }
+
+    .segmented button {
+      height: 31px;
+      border-radius: 6px;
+      background: transparent;
+      color: #64706b;
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 780;
+    }
+
+    .segmented button.is-active {
+      background: var(--surface);
+      color: var(--ink);
+      box-shadow: 0 4px 12px rgba(32, 43, 39, 0.08);
+    }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      gap: 0;
+      padding: 22px 24px 28px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      top: 34px;
+      bottom: 44px;
+      left: 50px;
+      width: 2px;
+      background: #c6d0c8;
+    }
+
+    .step {
+      position: relative;
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr);
+      gap: 16px;
+      padding: 9px 0;
+    }
+
+    .step[hidden], .branch-group[hidden] { display: none; }
+
+    .marker {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      margin-left: 9px;
+      border: 2px solid var(--panel);
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 820;
+      box-shadow: 0 0 0 1px #b6c2bb;
+    }
+
+    .marker.loop { background: var(--teal); }
+    .marker.split { background: var(--violet); }
+    .marker.branch { background: var(--amber); }
+    .marker.error { background: var(--red); }
+    .marker.call { background: #315ac8; }
+
+    .step-body {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      overflow: hidden;
+    }
+
+    .step-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding: 14px;
+    }
+
+    .step-title {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .step-title h3 { margin-bottom: 0; font-size: 16px; line-height: 1.25; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 23px;
+      border-radius: 999px;
+      background: #eef1f5;
+      color: #596575;
+      padding: 0 8px;
+      font-size: 11px;
+      font-weight: 780;
+    }
+
+    .badge.loop { background: var(--teal-soft); color: var(--teal); }
+    .badge.split { background: var(--violet-soft); color: var(--violet); }
+    .badge.branch { background: var(--amber-soft); color: var(--amber); }
+    .badge.error { background: var(--red-soft); color: var(--red); }
+    .badge.call { background: var(--accent-soft); color: var(--accent); }
+
+    .step-copy { margin-bottom: 0; color: #3b4652; font-size: 14px; line-height: 1.45; }
+    .slot { display: inline-flex; border-radius: 6px; background: var(--accent-soft); color: var(--accent); padding: 1px 5px 2px; font-weight: 760; }
+
+    .expand {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: #59645f;
+    }
+
+    .step-detail {
+      display: none;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      border-top: 1px solid var(--line);
+      background: #fbfcfa;
+      padding: 12px 14px;
+    }
+
+    .step.is-open .step-detail { display: grid; }
+
+    .detail-item { border-left: 3px solid var(--line-strong); padding-left: 9px; }
+    .detail-item b { display: block; color: #69746f; font-size: 11px; text-transform: uppercase; }
+    .detail-item span { display: block; margin-top: 3px; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
+
+    .branch-group {
+      position: relative;
+      margin: 8px 0 8px 54px;
+      border-left: 3px solid #c8d3cc;
+      padding-left: 16px;
+    }
+
+    .branch-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 27px;
+      margin: 6px 0 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--surface);
+      color: #53605b;
+      padding: 0 9px;
+      font-size: 12px;
+      font-weight: 780;
+    }
+
+    .branch-label.good { border-color: #a3d4c8; background: var(--teal-soft); color: var(--teal); }
+    .branch-label.warn { border-color: #e4ca8e; background: var(--amber-soft); color: var(--amber); }
+    .branch-label.bad { border-color: #efb5ad; background: var(--red-soft); color: var(--red); }
+    .branch-label.call { border-color: #b8c9ee; background: var(--accent-soft); color: var(--accent); }
+
+    .branch-step { grid-template-columns: 42px minmax(0, 1fr); padding: 6px 0; }
+    .branch-step .marker { width: 28px; height: 28px; margin-left: 0; font-size: 10px; }
+    .branch-step .step-main { padding: 12px; }
+
+    .side {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 16px;
+      border-left: 1px solid var(--line);
+      background: #e8ece5;
+      padding: 18px;
+      overflow: auto;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 10px 30px rgba(45, 55, 42, 0.08);
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+      padding: 14px;
+    }
+
+    .panel-header h3 { margin: 0; font-size: 14px; }
+    .panel-body { padding: 14px; }
+
+    .run-card { display: grid; gap: 12px; }
+    .run-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .run-top b { font-size: 18px; }
+    .run-state { color: var(--teal); font-size: 12px; font-weight: 800; }
+    .progress { height: 9px; border-radius: 999px; background: #dde4db; overflow: hidden; }
+    .progress span { display: block; width: 72%; height: 100%; background: linear-gradient(90deg, var(--accent), var(--teal)); transition: width 0.25s ease; }
+
+    .run-meta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .run-meta div {
+      border: 1px solid #edf0eb;
+      border-radius: var(--radius);
+      background: #fbfcfa;
+      padding: 10px;
+    }
+
+    .run-meta b { display: block; font-size: 17px; }
+    .run-meta span { color: var(--muted); font-size: 11px; line-height: 1.2; }
+
+    .trace-list { display: grid; gap: 9px; }
+
+    .trace-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 9px;
+      font-size: 13px;
+    }
+
+    .trace-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--teal); }
+    .trace-dot.warn { background: var(--amber); }
+    .trace-dot.red { background: var(--red); }
+    .trace-row small { color: var(--muted); font-size: 12px; }
+
+    .selected-detail { display: grid; gap: 9px; }
+    .selected-detail h4 { margin-bottom: 0; font-size: 18px; }
+    .selected-detail p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+
+    .kv { display: grid; gap: 8px; margin-top: 6px; }
+    .kv-row {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 10px;
+      border-top: 1px solid #edf0eb;
+      padding-top: 8px;
+      font-size: 13px;
+    }
+    .kv-row span { color: var(--muted); font-size: 12px; font-weight: 760; }
+    .kv-row code {
+      color: #3d4a48;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .edit-form {
+      display: grid;
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .edit-form label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 780;
+      text-transform: uppercase;
+    }
+
+    .edit-form input,
+    .edit-form textarea {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fffdf8;
+      color: var(--ink);
+      padding: 9px 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .edit-form textarea {
+      min-height: 72px;
+      resize: vertical;
+      line-height: 1.4;
+    }
+
+    .edit-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .edit-actions .wide { grid-column: 1 / -1; }
+
+    .edit-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fffdf8;
+      color: var(--ink);
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .edit-button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .change-feed {
+      display: grid;
+      gap: 8px;
+    }
+
+    .change-item {
+      border-left: 3px solid var(--accent);
+      border-radius: 0 7px 7px 0;
+      background: #f8fbf8;
+      padding: 9px 10px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .change-item b {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 12px;
+    }
+
+    @media (max-width: 1080px) {
+      .layout { display: block; }
+      .side {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: auto;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 780px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px; }
+      .actions { width: 100%; overflow-x: auto; padding-bottom: 2px; }
+      .timeline-area { padding: 12px; }
+      .timeline-header { grid-template-columns: 1fr; padding: 18px 14px; }
+      .segmented { width: 100%; overflow-x: auto; }
+      .timeline { padding: 16px 12px 18px; }
+      .timeline::before { left: 28px; }
+      .step { grid-template-columns: 38px minmax(0, 1fr); gap: 9px; }
+      .marker { width: 28px; height: 28px; margin-left: 1px; }
+      .step-main { grid-template-columns: 1fr; }
+      .branch-group { margin-left: 38px; padding-left: 10px; }
+      .step-detail, .step.is-open .step-detail { grid-template-columns: 1fr; }
+      .side { display: block; padding: 12px; }
+      .panel { margin-bottom: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="title">
+        <div class="mark">R</div>
+        <div>
+          <h1>Timeline With Branches</h1>
+          <p>A deterministic timeline projection of the execution graph. Humans edit phases and paths; patches update nodes and edges.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="icon-button" type="button" title="Collapse all" id="collapseAll"><svg class="icon" viewBox="0 0 24 24"><path d="m7 15 5-5 5 5"/></svg></button>
+        <button class="text-button" type="button" id="expandAll"><svg class="icon" viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg>Expand</button>
+        <button class="text-button primary-button" type="button" id="playRun"><svg class="icon" viewBox="0 0 24 24"><path d="M5 3v18l15-9Z"/></svg>Preview run</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <main class="timeline-area" aria-label="Timeline">
+        <section class="timeline-shell">
+          <header class="timeline-header">
+            <div>
+              <h2>Reconcile Inventory: EasyBill to Shopify</h2>
+              <p>Attached v28 scenario rendered without nodes: source loops, variant split, all branch outcomes, error path, report join, and proposed child calls.</p>
+            </div>
+            <div class="segmented" role="group" aria-label="Path filter">
+              <button class="is-active" data-mode="all" type="button">All</button>
+              <button data-mode="main" type="button">Main</button>
+              <button data-mode="split" type="button">Split</button>
+              <button data-mode="call" type="button">Calls</button>
+              <button data-mode="error" type="button">Errors</button>
+            </div>
+          </header>
+
+          <div class="timeline">
+            <section class="step is-open" data-type="main" data-title="Prepare run context" data-kind="Setup" data-node="getLocations, getTimestamp" data-input="live_mode, Shopify connection" data-output="locations, run id" data-guard="live_mode defaults to live">
+              <div class="marker">1</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Prepare run context</h3><span class="badge">setup</span></div><p class="step-copy">Read live_mode, get Shopify locations, and create a timestamped run id for all result records.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Nodes</b><span>getLocations, getTimestamp</span></div><div class="detail-item"><b>Input</b><span>variables.live_mode</span></div><div class="detail-item"><b>Output</b><span>locations, run id</span></div><div class="detail-item"><b>Review</b><span>absence of false means live writes</span></div></div>
+              </div>
+            </section>
+
+            <section class="step is-open" data-type="main" data-title="Collect EasyBill positions" data-kind="While loop" data-node="collectEb" data-input="EasyBill PRODUCT positions" data-output="all EasyBill pages" data-guard="page < pages, max 20">
+              <div class="marker loop">2</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Collect EasyBill positions</h3><span class="badge loop">while loop</span></div><p class="step-copy">Fetch <span class="slot">https://api.easybill.de/rest/v1/positions</span> one page at a time, append each page, calculate the next page, and stop when the final page is reached.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Container</b><span>Collect EasyBill Positions</span></div><div class="detail-item"><b>Inner path</b><span>fetchEbPage -> initEbArray -> accEbPages -> calcNextEbPage -> checkMoreEb</span></div><div class="detail-item"><b>True branch</b><span>EB Next</span></div><div class="detail-item"><b>False branch</b><span>EB Complete</span></div></div>
+              </div>
+            </section>
+
+            <section class="step" data-type="main" data-title="Collect Shopify products" data-kind="While loop" data-node="collectShopify" data-input="Shopify products cursor" data-output="all Shopify product pages" data-guard="next_cursor is not empty, max 100">
+              <div class="marker loop">3</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Collect Shopify products</h3><span class="badge loop">while loop</span></div><p class="step-copy">Fetch Shopify products with cursor pagination, append every page, and exit when there is no next cursor.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Container</b><span>Collect Shopify Products</span></div><div class="detail-item"><b>Inner path</b><span>fetchShopifyPage -> initShopifyArray -> accShopifyPages -> checkNextShopify</span></div><div class="detail-item"><b>True branch</b><span>Shopify Next</span></div><div class="detail-item"><b>False branch</b><span>Shopify Complete</span></div></div>
+              </div>
+            </section>
+
+            <section class="step" data-type="main call" data-title="Flatten and normalize source data" data-kind="Transform + call" data-node="flattenEb, flattenProducts, flattenVariants, call.normalize_catalog_items" data-input="EasyBill pages, Shopify products" data-output="normalized variant list" data-guard="before splitVariants">
+              <div class="marker call">4</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Flatten and normalize source data</h3><span class="badge call">child call example</span></div><p class="step-copy">Flatten EasyBill pages, Shopify products, and variants. A reusable child scenario can normalize SKUs and stock fields before reconciliation.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Graph nodes</b><span>flattenEb, flattenProducts, flattenVariants</span></div><div class="detail-item"><b>Proposed call</b><span>Normalize Catalog Items</span></div><div class="detail-item"><b>Input</b><span>positions[], products[]</span></div><div class="detail-item"><b>Output</b><span>variants[]</span></div></div>
+              </div>
+            </section>
+
+            <section class="step is-open" data-type="split" data-title="Split every Shopify variant" data-kind="Split" data-node="splitVariants" data-input="flattened Shopify variants" data-output="one result per variant" data-guard="all split branches join at queryAllItems">
+              <div class="marker split">5</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Split every Shopify variant</h3><span class="badge split">split</span></div><p class="step-copy">Run the reconciliation decision tree once per variant, then join all outcomes before generating the report.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Container</b><span>Reconcile Variants</span></div><div class="detail-item"><b>Entry</b><span>checkHasSku</span></div><div class="detail-item"><b>Join</b><span>queryAllItems</span></div><div class="detail-item"><b>Outcomes</b><span>Updated, Would Update, In Sync, No SKU, Not in EB, Not Managed, Failed</span></div></div>
+              </div>
+            </section>
+
+            <div class="branch-group" data-type="split">
+              <div class="branch-label warn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg> No SKU path</div>
+              <section class="step branch-step" data-type="split" data-title="No SKU" data-kind="Branch outcome" data-node="checkHasSku false -> tagNoSku -> skipNoSku" data-input="data.sku" data-output="No SKU result" data-guard="data.sku is empty">
+                <div class="marker branch">5A</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>No SKU</h3><span class="badge branch">branch</span></div><p class="step-copy">Record the variant as No SKU and stop processing that split item.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Condition</b><span>checkHasSku false</span></div><div class="detail-item"><b>Record</b><span>tagNoSku</span></div><div class="detail-item"><b>Finish</b><span>skipNoSku</span></div><div class="detail-item"><b>Side effect</b><span>object_model.create-instance</span></div></div></div>
+              </section>
+            </div>
+
+            <div class="branch-group" data-type="split">
+              <div class="branch-label warn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg> Missing EasyBill match</div>
+              <section class="step branch-step" data-type="split" data-title="Not in EasyBill" data-kind="Branch outcome" data-node="findEbMatch -> checkFound false -> tagNotInEb" data-input="Shopify SKU" data-output="Not in EB result" data-guard="EasyBill match list is empty">
+                <div class="marker branch">5B</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>Not in EasyBill</h3><span class="badge branch">branch</span></div><p class="step-copy">If the SKU cannot be found in EasyBill, record Not in EB and skip the update.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Lookup</b><span>findEbMatch</span></div><div class="detail-item"><b>Condition</b><span>checkFound false</span></div><div class="detail-item"><b>Record</b><span>tagNotInEb</span></div><div class="detail-item"><b>Finish</b><span>skipNotInEb</span></div></div></div>
+              </section>
+            </div>
+
+            <div class="branch-group" data-type="split">
+              <div class="branch-label warn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg> Stock not managed</div>
+              <section class="step branch-step" data-type="split" data-title="Not Managed" data-kind="Branch outcome" data-node="checkManaged false -> tagNotManaged" data-input="EasyBill stock flag" data-output="Not Managed result" data-guard="stock != YES">
+                <div class="marker branch">5C</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>Not Managed</h3><span class="badge branch">branch</span></div><p class="step-copy">If EasyBill does not manage stock for the item, record Not Managed and do not write to Shopify.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Condition</b><span>checkManaged false</span></div><div class="detail-item"><b>Record</b><span>tagNotManaged</span></div><div class="detail-item"><b>Finish</b><span>skipNotManaged</span></div><div class="detail-item"><b>Guard</b><span>stock != YES</span></div></div></div>
+              </section>
+            </div>
+
+            <div class="branch-group" data-type="split">
+              <div class="branch-label good"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg> Quantity already matches</div>
+              <section class="step branch-step" data-type="split" data-title="In Sync" data-kind="Branch outcome" data-node="checkDiffers false -> tagInSync" data-input="EasyBill stock_count, Shopify inventoryQuantity" data-output="In Sync result" data-guard="quantities equal">
+                <div class="marker branch">5D</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>In Sync</h3><span class="badge branch">branch</span></div><p class="step-copy">If EasyBill and Shopify quantities match, record In Sync and stop this split item.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Condition</b><span>checkDiffers false</span></div><div class="detail-item"><b>Record</b><span>tagInSync</span></div><div class="detail-item"><b>Finish</b><span>skipInSync</span></div><div class="detail-item"><b>Guard</b><span>EB quantity == Shopify quantity</span></div></div></div>
+              </section>
+            </div>
+
+            <div class="branch-group" data-type="split">
+              <div class="branch-label warn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg> Quantity differs, dry run</div>
+              <section class="step branch-step" data-type="split" data-title="Would Update" data-kind="Dry-run branch" data-node="checkLiveMode false -> saveDryItem -> reportWouldUpdate" data-input="quantity mismatch" data-output="Would Update result" data-guard="variables.live_mode == false">
+                <div class="marker branch">5E</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>Would Update</h3><span class="badge branch">dry run</span></div><p class="step-copy">If live_mode is false, record the intended Shopify inventory change without writing it.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Condition</b><span>checkLiveMode false</span></div><div class="detail-item"><b>Record</b><span>saveDryItem</span></div><div class="detail-item"><b>Finish</b><span>reportWouldUpdate</span></div><div class="detail-item"><b>Side effect</b><span>no Shopify write</span></div></div></div>
+              </section>
+            </div>
+
+            <div class="branch-group" data-type="split call">
+              <div class="branch-label call"><svg class="icon" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg> Quantity differs, live mode</div>
+              <section class="step branch-step" data-type="split call" data-title="Call Shopify Inventory Writer" data-kind="Child call + action" data-node="call.shopify_inventory_writer / updateInventory" data-input="location id, inventory item id, EasyBill stock_count" data-output="Synced or Failed" data-guard="variables.live_mode != false">
+                <div class="marker call">5F</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>Call Shopify Inventory Writer</h3><span class="badge call">child call example</span></div><p class="step-copy">The graph uses updateInventory directly; this prototype shows how that write policy could be promoted into a named child scenario.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Graph node</b><span>updateInventory</span></div><div class="detail-item"><b>Success</b><span>saveLiveItem -> reportUpdated</span></div><div class="detail-item"><b>Call boundary</b><span>shopify_inventory_writer</span></div><div class="detail-item"><b>Side effect</b><span>Shopify inventory write</span></div></div></div>
+              </section>
+            </div>
+
+            <div class="branch-group" data-type="error split">
+              <div class="branch-label bad"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg> Update error</div>
+              <section class="step branch-step" data-type="error split" data-title="Failed" data-kind="Error branch" data-node="updateInventory onError -> saveFailedItem -> skipFailed" data-input="Shopify update error" data-output="Failed result" data-guard="onError">
+                <div class="marker error">5G</div>
+                <div class="step-body"><div class="step-main"><div><div class="step-title"><h3>Failed</h3><span class="badge error">onError</span></div><p class="step-copy">If Shopify update fails, record the variant as Failed and let the final report expose the failure.</p></div><button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div><div class="step-detail"><div class="detail-item"><b>Error edge</b><span>updateInventory onError</span></div><div class="detail-item"><b>Record</b><span>saveFailedItem</span></div><div class="detail-item"><b>Finish</b><span>skipFailed</span></div><div class="detail-item"><b>Open question</b><span>retry or escalation policy</span></div></div></div>
+              </section>
+            </div>
+
+            <section class="step" data-type="main" data-title="Join split results" data-kind="Join" data-node="queryAllItems" data-input="all variant result records" data-output="run result collection" data-guard="after splitVariants completes">
+              <div class="marker">6</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Join split results</h3><span class="badge">join</span></div><p class="step-copy">After every split item has finished, query all result records for the run.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Node</b><span>queryAllItems</span></div><div class="detail-item"><b>Input</b><span>run id</span></div><div class="detail-item"><b>Output</b><span>all run result objects</span></div><div class="detail-item"><b>Dependency</b><span>splitVariants complete</span></div></div>
+              </div>
+            </section>
+
+            <section class="step" data-type="main" data-title="Build report sections" data-kind="Fan-in filters" data-node="filterChanges, filterInSync, filterNotInEb, filterNoSku, filterNotManaged, filterFailed" data-input="run result collection" data-output="sectioned report data" data-guard="one filter per outcome category">
+              <div class="marker">7</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Build report sections</h3><span class="badge">fan-in</span></div><p class="step-copy">Filter the joined results into Changes, In Sync, Not in EB, No SKU, Not Managed, and Failed sections.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Filters</b><span>6 report filters</span></div><div class="detail-item"><b>Serialize</b><span>serializeJson</span></div><div class="detail-item"><b>Purpose</b><span>human-readable breakdown</span></div><div class="detail-item"><b>Trace</b><span>each branch has a report home</span></div></div>
+              </div>
+            </section>
+
+            <section class="step" data-type="main call" data-title="Generate and publish report" data-kind="Report + call" data-node="generateHtml, saveReport, call.publish_ops_report, finishComplete" data-input="sectioned report data" data-output="saved HTML report and optional notification" data-guard="after serializeJson succeeds">
+              <div class="marker call">8</div>
+              <div class="step-body">
+                <div class="step-main">
+                  <div><div class="step-title"><h3>Generate and publish report</h3><span class="badge call">child call example</span></div><p class="step-copy">Generate HTML, save the report, finish the run, and optionally call a publish scenario for notifications or dashboards.</p></div>
+                  <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+                </div>
+                <div class="step-detail"><div class="detail-item"><b>Graph nodes</b><span>generateHtml, saveReport, finishComplete</span></div><div class="detail-item"><b>Proposed call</b><span>Publish Ops Report</span></div><div class="detail-item"><b>Output</b><span>HTML report object</span></div><div class="detail-item"><b>Finish</b><span>Reconciliation Complete</span></div></div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <aside class="side" aria-label="Execution preview">
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Run preview</h3>
+            <button class="icon-button" type="button" title="Refresh preview"><svg class="icon" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7"/><path d="M21 12A9 9 0 0 1 6 18.7"/><path d="M3 3v6h6"/><path d="M21 21v-6h-6"/></svg></button>
+          </div>
+          <div class="panel-body run-card">
+            <div class="run-top"><b>Catalog run v28</b><span class="run-state" id="runState">waiting</span></div>
+            <div class="progress"><span id="progressBar"></span></div>
+            <div class="run-meta">
+              <div><b>53</b><span>graph nodes hidden</span></div>
+              <div><b>7</b><span>branch outcomes shown</span></div>
+              <div><b>2</b><span>pagination loops</span></div>
+              <div><b>3</b><span>scenario call examples</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Trace</h3>
+            <button class="icon-button" type="button" title="Copy trace"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          </div>
+          <div class="panel-body trace-list">
+            <div class="trace-row"><span class="trace-dot"></span><span>EasyBill loop completed</span><small>20 max</small></div>
+            <div class="trace-row"><span class="trace-dot"></span><span>Shopify loop completed</span><small>100 max</small></div>
+            <div class="trace-row"><span class="trace-dot warn"></span><span>Variant split generated mixed outcomes</span><small>review</small></div>
+            <div class="trace-row"><span class="trace-dot red"></span><span>updateInventory onError has no retry contract</span><small>risk</small></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Selected step</h3>
+            <button class="icon-button" type="button" title="Open source node"><svg class="icon" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg></button>
+          </div>
+          <div class="panel-body selected-detail">
+            <h4 id="selectedTitle">Prepare run context</h4>
+            <p id="selectedSummary">Read live_mode, get Shopify locations, and create a timestamped run id for all result records.</p>
+            <div class="kv">
+              <div class="kv-row"><span>Kind</span><code id="selectedKind">Setup</code></div>
+              <div class="kv-row"><span>Node</span><code id="selectedNode">getLocations, getTimestamp</code></div>
+              <div class="kv-row"><span>Input</span><code id="selectedInput">live_mode, Shopify connection</code></div>
+              <div class="kv-row"><span>Output</span><code id="selectedOutput">locations, run id</code></div>
+              <div class="kv-row"><span>Guard</span><code id="selectedGuard">live_mode defaults to live</code></div>
+              <div class="kv-row"><span>View block</span><code id="selectedBlock">timeline.step.prepare-run-context</code></div>
+              <div class="kv-row"><span>Patch</span><code id="selectedPatch">update_step</code></div>
+            </div>
+            <div class="edit-form">
+              <div>
+                <label for="stepTitleInput">Step title</label>
+                <input id="stepTitleInput" value="Prepare run context" />
+              </div>
+              <div>
+                <label for="stepSummaryInput">Step text</label>
+                <textarea id="stepSummaryInput">Read live_mode, get Shopify locations, and create a timestamped run id for all result records.</textarea>
+              </div>
+              <div>
+                <label for="stepGuardInput">Guard</label>
+                <input id="stepGuardInput" value="live_mode defaults to live" />
+              </div>
+              <div class="edit-actions">
+                <button class="edit-button primary wide" id="applyStepEdit" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>Apply step edit</button>
+                <button class="edit-button" id="addRetryStep" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add retry path</button>
+                <button class="edit-button" id="disableLivePath" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>Disable live path</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Change queue</h3>
+            <button class="icon-button" type="button" title="Copy changes"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          </div>
+          <div class="panel-body change-feed" id="timelineChangeFeed">
+            <div class="change-item"><b>No pending graph patches</b>Select a step, amend it, or add a path. Edits compile into graph patch commands.</div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    let steps = [...document.querySelectorAll(".step")];
+    let branchGroups = [...document.querySelectorAll(".branch-group")];
+    const modeButtons = [...document.querySelectorAll(".segmented button")];
+    const selectedTitle = document.getElementById("selectedTitle");
+    const selectedSummary = document.getElementById("selectedSummary");
+    const selectedKind = document.getElementById("selectedKind");
+    const selectedNode = document.getElementById("selectedNode");
+    const selectedInput = document.getElementById("selectedInput");
+    const selectedOutput = document.getElementById("selectedOutput");
+    const selectedGuard = document.getElementById("selectedGuard");
+    const selectedBlock = document.getElementById("selectedBlock");
+    const selectedPatch = document.getElementById("selectedPatch");
+    const stepTitleInput = document.getElementById("stepTitleInput");
+    const stepSummaryInput = document.getElementById("stepSummaryInput");
+    const stepGuardInput = document.getElementById("stepGuardInput");
+    const timelineChangeFeed = document.getElementById("timelineChangeFeed");
+    let activeStep = document.querySelector(".step");
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      })[char]);
+    }
+
+    function pushTimelineChange(title, detail) {
+      if (timelineChangeFeed.textContent.includes("No pending graph patches")) timelineChangeFeed.innerHTML = "";
+      const item = document.createElement("div");
+      item.className = "change-item";
+      item.innerHTML = `<b>${escapeHtml(title)}</b>${escapeHtml(detail)}`;
+      timelineChangeFeed.prepend(item);
+    }
+
+    function selectStep(step) {
+      selectedTitle.textContent = step.dataset.title;
+      selectedSummary.textContent = step.querySelector(".step-copy").textContent.trim();
+      selectedKind.textContent = step.dataset.kind;
+      selectedNode.textContent = step.dataset.node;
+      selectedInput.textContent = step.dataset.input;
+      selectedOutput.textContent = step.dataset.output;
+      selectedGuard.textContent = step.dataset.guard;
+      selectedBlock.textContent = `timeline.step.${step.dataset.title.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+      selectedPatch.textContent = step.dataset.type.includes("error") ? "update_error_path" : step.dataset.type.includes("call") ? "upsert_scenario_call" : step.dataset.type.includes("split") ? "update_split_path" : "update_step";
+      stepTitleInput.value = step.dataset.title;
+      stepSummaryInput.value = step.querySelector(".step-copy").textContent.trim();
+      stepGuardInput.value = step.dataset.guard;
+      activeStep = step;
+    }
+
+    function bindStep(step) {
+      if (step.dataset.bound) return;
+      step.dataset.bound = "true";
+      step.addEventListener("click", () => selectStep(step));
+      step.querySelector(".expand").addEventListener("click", (event) => {
+        event.stopPropagation();
+        step.classList.toggle("is-open");
+        selectStep(step);
+      });
+    }
+
+    steps.forEach(bindStep);
+
+    function matchesType(element, mode) {
+      if (mode === "all") return true;
+      return element.dataset.type.split(" ").includes(mode);
+    }
+
+    modeButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        modeButtons.forEach((item) => item.classList.remove("is-active"));
+        button.classList.add("is-active");
+        const mode = button.dataset.mode;
+        steps.forEach((step) => { step.hidden = !matchesType(step, mode); });
+        branchGroups.forEach((group) => { group.hidden = !matchesType(group, mode); });
+      });
+    });
+
+    document.getElementById("expandAll").addEventListener("click", () => {
+      steps.forEach((step) => step.classList.add("is-open"));
+    });
+
+    document.getElementById("collapseAll").addEventListener("click", () => {
+      steps.forEach((step) => step.classList.remove("is-open"));
+    });
+
+    document.getElementById("playRun").addEventListener("click", () => {
+      const bar = document.getElementById("progressBar");
+      const state = document.getElementById("runState");
+      state.textContent = "running";
+      bar.style.width = "18%";
+      setTimeout(() => { bar.style.width = "44%"; }, 260);
+      setTimeout(() => { bar.style.width = "78%"; }, 520);
+      setTimeout(() => { bar.style.width = "100%"; state.textContent = "complete"; }, 840);
+      setTimeout(() => { bar.style.width = "72%"; state.textContent = "waiting"; }, 1800);
+    });
+
+    document.getElementById("applyStepEdit").addEventListener("click", () => {
+      if (!activeStep) return;
+      activeStep.dataset.title = stepTitleInput.value;
+      activeStep.dataset.guard = stepGuardInput.value;
+      activeStep.querySelector("h3").textContent = stepTitleInput.value;
+      activeStep.querySelector(".step-copy").textContent = stepSummaryInput.value;
+      selectedTitle.textContent = stepTitleInput.value;
+      selectedSummary.textContent = stepSummaryInput.value;
+      selectedGuard.textContent = stepGuardInput.value;
+      pushTimelineChange("PATCH " + selectedPatch.textContent, `${selectedBlock.textContent}; graphRefs.nodes=[${activeStep.dataset.node}]; title="${stepTitleInput.value}"; guard="${stepGuardInput.value}".`);
+    });
+
+    document.getElementById("addRetryStep").addEventListener("click", () => {
+      if (document.getElementById("retryPathGroup")) return;
+      const failedGroup = document.querySelector('[data-title="Failed"]').closest(".branch-group");
+      const retryGroup = document.createElement("div");
+      retryGroup.className = "branch-group";
+      retryGroup.id = "retryPathGroup";
+      retryGroup.dataset.type = "error split";
+      retryGroup.innerHTML = `
+        <div class="branch-label bad"><svg class="icon" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7"/><path d="M21 12A9 9 0 0 1 6 18.7"/></svg> Retry before failed</div>
+        <section class="step branch-step is-open" data-type="error split" data-title="Retry Shopify update" data-kind="Retry branch" data-node="retry(updateInventory) -> saveFailedItem" data-input="Shopify 429 or 5xx" data-output="Synced or Failed" data-guard="3 attempts with backoff">
+          <div class="marker error">5R</div>
+          <div class="step-body">
+            <div class="step-main">
+              <div><div class="step-title"><h3>Retry Shopify update</h3><span class="badge error">retry</span></div><p class="step-copy">Transient Shopify update failures retry three times before the variant is recorded as Failed.</p></div>
+              <button class="expand" type="button" title="Toggle technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+            </div>
+            <div class="step-detail"><div class="detail-item"><b>Wraps</b><span>updateInventory</span></div><div class="detail-item"><b>Retry</b><span>3 attempts</span></div><div class="detail-item"><b>Then</b><span>saveFailedItem</span></div><div class="detail-item"><b>Guard</b><span>429 or 5xx</span></div></div>
+          </div>
+        </section>`;
+      failedGroup.before(retryGroup);
+      const retryStep = retryGroup.querySelector(".step");
+      bindStep(retryStep);
+      steps = [...document.querySelectorAll(".step")];
+      branchGroups = [...document.querySelectorAll(".branch-group")];
+      selectStep(retryStep);
+      pushTimelineChange("PATCH add_error_branch", "source=updateInventory; condition=429_or_5xx; insert retry(updateInventory) before saveFailedItem.");
+    });
+
+    document.getElementById("disableLivePath").addEventListener("click", () => {
+      const liveStep = document.querySelector('[data-title="Call Shopify Inventory Writer"]');
+      if (!liveStep) return;
+      liveStep.dataset.guard = "disabled until explicit approval";
+      liveStep.querySelector(".step-copy").textContent = "Live Shopify writes are disabled until an operator approves the planned inventory changes.";
+      liveStep.querySelector(".badge").textContent = "approval required";
+      selectStep(liveStep);
+      pushTimelineChange("PATCH disable_path", "edge=checkLiveMode:true -> updateInventory; replacement=approval_required before Shopify write.");
+    });
+  </script>
+</body>
+</html>

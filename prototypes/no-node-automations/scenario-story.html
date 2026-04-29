@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scenario Story Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --shell: #fffaf1;
+      --surface: #ffffff;
+      --ink: #1f2933;
+      --muted: #667085;
+      --line: #ddd5c7;
+      --line-strong: #bfb4a0;
+      --accent: #0f766e;
+      --accent-soft: #dff3ed;
+      --blue: #315ac8;
+      --blue-soft: #e6ecff;
+      --amber: #93670a;
+      --amber-soft: #fff2c7;
+      --red: #ad2f24;
+      --red-soft: #ffe6e2;
+      --violet: #5e4aa1;
+      --violet-soft: #eee9ff;
+      --shadow: 0 20px 58px rgba(60, 47, 25, 0.12);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    button, input { font: inherit; }
+    button { border: 0; cursor: pointer; }
+
+    .icon {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 286px minmax(560px, 1fr) 360px;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      background: #e7e1d5;
+      padding: 20px 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 24px;
+      font-weight: 780;
+      font-size: 17px;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 7px;
+      background: var(--ink);
+      color: #fff;
+      font-weight: 820;
+    }
+
+    .nav-label {
+      margin: 22px 8px 8px;
+      color: #756b5b;
+      font-size: 11px;
+      font-weight: 780;
+      text-transform: uppercase;
+    }
+
+    .scenario-button {
+      display: grid;
+      gap: 3px;
+      width: 100%;
+      margin-bottom: 7px;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--ink);
+      padding: 11px 10px;
+      text-align: left;
+    }
+
+    .scenario-button strong { font-size: 13px; line-height: 1.2; }
+    .scenario-button span { color: var(--muted); font-size: 12px; }
+    .scenario-button.is-active {
+      border-color: var(--line-strong);
+      background: var(--shell);
+      box-shadow: 0 9px 24px rgba(61, 50, 31, 0.08);
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 250, 241, 0.68);
+      padding: 10px;
+    }
+
+    .metric b { display: block; font-size: 21px; line-height: 1; }
+    .metric span { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.25; }
+
+    .main {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-width: 0;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 250, 241, 0.78);
+      padding: 14px 22px;
+      backdrop-filter: blur(14px);
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    .title-block h1 { margin-bottom: 3px; font-size: 20px; line-height: 1.2; }
+    .title-block p { margin-bottom: 0; color: var(--muted); font-size: 13px; }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .icon-button, .text-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 36px;
+      min-width: 36px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 680;
+    }
+
+    .text-button { gap: 8px; padding: 0 12px; }
+    .primary-button { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    .workspace {
+      overflow: auto;
+      min-width: 0;
+      padding: 28px;
+    }
+
+    .story-document {
+      max-width: 940px;
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--shell);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .doc-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+      padding: 22px 26px;
+    }
+
+    .doc-header h2 { margin-bottom: 6px; font-size: 25px; line-height: 1.15; }
+    .doc-header p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      align-self: start;
+      gap: 7px;
+      min-height: 30px;
+      border: 1px solid #a8d9cf;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #07554d;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 780;
+      white-space: nowrap;
+    }
+
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+
+    .chapter {
+      border-bottom: 1px solid var(--line);
+      background: #f6efe1;
+      padding: 11px 26px;
+      color: #6d6250;
+      font-size: 12px;
+      font-weight: 820;
+      text-transform: uppercase;
+    }
+
+    .paragraphs {
+      display: grid;
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .story-paragraph {
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr) 116px;
+      gap: 18px;
+      background: var(--shell);
+      padding: 22px 26px;
+    }
+
+    .story-paragraph.is-selected { background: #fffdf7; }
+
+    .para-number {
+      display: flex;
+      justify-content: center;
+      padding-top: 5px;
+      color: #948a77;
+      font-size: 12px;
+      font-weight: 780;
+    }
+
+    .para-copy {
+      margin: 0;
+      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+      font-size: 23px;
+      line-height: 1.52;
+      letter-spacing: 0;
+    }
+
+    .slot {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 4px;
+      min-height: 31px;
+      margin: 0 1px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      padding: 1px 7px 3px;
+      background: var(--blue-soft);
+      color: #163b91;
+      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      font-size: 16px;
+      font-weight: 760;
+      vertical-align: baseline;
+    }
+
+    .slot[data-kind="loop"] { background: var(--accent-soft); color: #07554d; }
+    .slot[data-kind="split"] { background: var(--violet-soft); color: var(--violet); }
+    .slot[data-kind="branch"] { background: var(--amber-soft); color: var(--amber); }
+    .slot[data-kind="error"] { background: var(--red-soft); color: var(--red); }
+    .slot.is-active { border-color: currentColor; box-shadow: 0 0 0 3px rgba(49, 90, 200, 0.13); }
+    .slot svg { width: 12px; height: 12px; stroke-width: 2.5; }
+
+    .para-tools {
+      display: flex;
+      justify-content: flex-end;
+      align-items: flex-start;
+      gap: 6px;
+    }
+
+    .tiny-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fffaf1;
+      color: #635a49;
+    }
+
+    .tech-detail {
+      grid-column: 2 / 4;
+      display: none;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: -8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 12px;
+    }
+
+    .story-paragraph.is-open .tech-detail { display: grid; }
+
+    .tech-item { border-left: 3px solid var(--line-strong); padding-left: 9px; }
+    .tech-item b { display: block; color: #7b7162; font-size: 11px; text-transform: uppercase; }
+    .tech-item span { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: 12px; }
+
+    .inspector {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 16px;
+      border-left: 1px solid var(--line);
+      background: #ede8dc;
+      padding: 20px 18px;
+      overflow: auto;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 12px 32px rgba(54, 45, 29, 0.08);
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+      padding: 14px;
+    }
+
+    .panel-header h3 { margin: 0; font-size: 14px; }
+    .panel-body { padding: 14px; }
+
+    .selected-name {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 12px;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    .selected-name span {
+      display: grid;
+      place-items: center;
+      width: 31px;
+      height: 31px;
+      border-radius: 7px;
+      background: var(--blue-soft);
+      color: #163b91;
+      font-size: 13px;
+    }
+
+    .field-grid { display: grid; gap: 10px; }
+    .field { display: grid; gap: 5px; }
+    .field label { color: #706758; font-size: 11px; font-weight: 780; text-transform: uppercase; }
+    .field input {
+      width: 100%;
+      height: 38px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fffdf8;
+      color: var(--ink);
+      padding: 0 10px;
+      font-size: 13px;
+    }
+
+    .edit-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .edit-actions .wide { grid-column: 1 / -1; }
+
+    .edit-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fffdf8;
+      color: var(--ink);
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .edit-button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .change-feed {
+      display: grid;
+      gap: 8px;
+    }
+
+    .change-item {
+      border-left: 3px solid var(--accent);
+      border-radius: 0 7px 7px 0;
+      background: #f8fbf8;
+      padding: 9px 10px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .change-item b {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 12px;
+    }
+
+    .coverage-list { display: grid; gap: 10px; }
+    .coverage-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 9px;
+      font-size: 13px;
+    }
+
+    .check {
+      display: grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .warn { background: var(--amber-soft); color: var(--amber); }
+    .err { background: var(--red-soft); color: var(--red); }
+    .coverage-row small { color: var(--muted); font-size: 12px; }
+
+    .map-list { display: grid; gap: 8px; }
+    .map-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      border-bottom: 1px solid #eee8dd;
+      padding-bottom: 8px;
+      font-size: 13px;
+    }
+    .map-row:last-child { border-bottom: 0; padding-bottom: 0; }
+    .map-row code {
+      color: #43516b;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 1180px) {
+      .app { grid-template-columns: 250px minmax(0, 1fr); }
+      .inspector {
+        grid-column: 1 / -1;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: auto;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 780px) {
+      .app { display: block; }
+      .sidebar { display: none; }
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px; }
+      .toolbar { width: 100%; overflow-x: auto; padding-bottom: 2px; }
+      .workspace { padding: 12px; }
+      .doc-header { grid-template-columns: 1fr; padding: 18px 14px; }
+      .story-paragraph { grid-template-columns: 34px minmax(0, 1fr); gap: 8px; padding: 18px 14px; }
+      .para-copy { font-size: 20px; }
+      .slot { min-height: 28px; font-size: 15px; }
+      .para-tools { grid-column: 2; justify-content: flex-start; }
+      .tech-detail, .story-paragraph.is-open .tech-detail { grid-column: 2; grid-template-columns: 1fr; }
+      .inspector { display: block; padding: 12px; }
+      .panel { margin-bottom: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Scenarios">
+      <div class="brand"><div class="brand-mark">R</div><div>Rantara</div></div>
+      <div class="nav-label">Scenario stories</div>
+      <button class="scenario-button is-active" type="button">
+        <strong>EasyBill to Shopify inventory</strong>
+        <span>Attached v28 reconciliation graph</span>
+      </button>
+      <button class="scenario-button" type="button">
+        <strong>Child: normalize catalog items</strong>
+        <span>Called by the story where data needs cleanup</span>
+      </button>
+      <button class="scenario-button" type="button">
+        <strong>Child: publish ops report</strong>
+        <span>Called after reconciliation results are saved</span>
+      </button>
+
+      <div class="nav-label">Graph complexity</div>
+      <div class="metric-grid">
+        <div class="metric"><b>53</b><span>nodes represented as prose</span></div>
+        <div class="metric"><b>49</b><span>edges hidden from the reader</span></div>
+        <div class="metric"><b>7</b><span>conditional branches</span></div>
+        <div class="metric"><b>3</b><span>container phases</span></div>
+        <div class="metric"><b>2</b><span>pagination loops</span></div>
+        <div class="metric"><b>1</b><span>variant split</span></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title-block">
+          <h1>Scenario Story</h1>
+          <p>A structured projection of the execution graph: humans edit slots and controls, not node canvases or chat instructions.</p>
+        </div>
+        <div class="toolbar" aria-label="Scenario actions">
+          <button class="icon-button" type="button" title="Undo"><svg class="icon" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-1"/></svg></button>
+          <button class="icon-button" type="button" title="Redo"><svg class="icon" viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h1"/></svg></button>
+          <button id="toggleDetails" class="text-button" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>Details</button>
+          <button class="text-button primary-button" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>Approve</button>
+        </div>
+      </header>
+
+      <section class="workspace" aria-label="Story editor">
+        <article class="story-document">
+          <header class="doc-header">
+            <div>
+              <h2>Reconcile Inventory: EasyBill to Shopify</h2>
+              <p>Bulk-fetches all EasyBill positions and Shopify products, compares them in memory, updates only mismatches, and saves a full breakdown report.</p>
+            </div>
+            <div class="status-pill"><span class="status-dot"></span> v28 graph translated</div>
+          </header>
+
+          <div class="chapter">Setup and source collection</div>
+          <div class="paragraphs">
+            <section class="story-paragraph is-selected is-open">
+              <div class="para-number">01</div>
+              <p class="para-copy">
+                Start by reading the operator's
+                <button class="slot is-active" type="button" data-slot="live_mode flag" data-kind="branch" data-node="inputSchema.live_mode" data-source="inputSchema" data-guard="defaults to live updates" data-output="true or false">
+                  live_mode flag <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                and the Shopify locations, then stamp the run with a report id.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Nodes</b><span>getLocations, getTimestamp</span></div>
+                <div class="tech-item"><b>Input</b><span>variables.live_mode</span></div>
+                <div class="tech-item"><b>Output</b><span>locations, run id</span></div>
+                <div class="tech-item"><b>Risk</b><span>unchecked means live Shopify writes</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">02</div>
+              <p class="para-copy">
+                Collect EasyBill positions by repeating
+                <button class="slot" type="button" data-slot="Fetch EB Page loop" data-kind="loop" data-node="collectEb" data-source="While container" data-guard="page < pages, max 20 iterations" data-output="all EasyBill PRODUCT positions">
+                  Fetch EB Page loop <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                until the EasyBill response says there are no more pages.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Container</b><span>Collect EasyBill Positions</span></div>
+                <div class="tech-item"><b>Loop nodes</b><span>fetchEbPage -> initEbArray -> accEbPages -> calcNextEbPage -> checkMoreEb</span></div>
+                <div class="tech-item"><b>Branch</b><span>true: EB Next, false: EB Complete</span></div>
+                <div class="tech-item"><b>Limit</b><span>maxIterations = 20</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">03</div>
+              <p class="para-copy">
+                Collect Shopify products with a cursor loop, accumulating every page until
+                <button class="slot" type="button" data-slot="next_cursor is empty" data-kind="loop" data-node="collectShopify" data-source="While container" data-guard="next_cursor is not empty, max 100 iterations" data-output="all Shopify product pages">
+                  next_cursor is empty <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                so the comparison uses one complete Shopify snapshot.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Container</b><span>Collect Shopify Products</span></div>
+                <div class="tech-item"><b>Loop nodes</b><span>fetchShopifyPage -> initShopifyArray -> accShopifyPages -> checkNextShopify</span></div>
+                <div class="tech-item"><b>Branch</b><span>true: Shopify Next, false: Shopify Complete</span></div>
+                <div class="tech-item"><b>Limit</b><span>maxIterations = 100</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">04</div>
+              <p class="para-copy">
+                Flatten EasyBill pages, Shopify products, and Shopify variants, then optionally
+                <button class="slot" type="button" data-slot="call Normalize Catalog Items" data-kind="call" data-node="call.normalize_catalog_items" data-source="child scenario call" data-guard="before variant reconciliation" data-output="normalized SKU and stock fields">
+                  call Normalize Catalog Items <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                if the AI detects source fields that need cleanup before comparison.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Nodes</b><span>flattenEb, flattenProducts, flattenVariants</span></div>
+                <div class="tech-item"><b>Call example</b><span>normalize_catalog_items</span></div>
+                <div class="tech-item"><b>Why</b><span>child scenario replaces hidden helper graph</span></div>
+                <div class="tech-item"><b>Output</b><span>variants[] ready for split</span></div>
+              </div>
+            </section>
+          </div>
+
+          <div class="chapter">Split every variant and classify the outcome</div>
+          <div class="paragraphs">
+            <section class="story-paragraph">
+              <div class="para-number">05</div>
+              <p class="para-copy">
+                For each flattened Shopify variant, run the
+                <button class="slot" type="button" data-slot="Reconcile Variants split" data-kind="split" data-node="splitVariants" data-source="Split container" data-guard="one run per variant" data-output="one status record per variant">
+                  Reconcile Variants split <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                independently so one bad variant does not block the rest of the catalog.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Container</b><span>splitVariants</span></div>
+                <div class="tech-item"><b>Entry</b><span>checkHasSku</span></div>
+                <div class="tech-item"><b>Parallel unit</b><span>data = one Shopify variant</span></div>
+                <div class="tech-item"><b>Join</b><span>queryAllItems after split completes</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">06</div>
+              <p class="para-copy">
+                If a variant has no SKU, tag it as No SKU and stop that split branch. If it has a SKU, find the matching EasyBill position.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Condition</b><span>checkHasSku: data.sku is not empty</span></div>
+                <div class="tech-item"><b>False branch</b><span>tagNoSku -> skipNoSku</span></div>
+                <div class="tech-item"><b>True branch</b><span>findEbMatch -> checkFound</span></div>
+                <div class="tech-item"><b>Record type</b><span>object_model.create-instance</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">07</div>
+              <p class="para-copy">
+                If the SKU is not found in EasyBill, tag it as Not in EB. If it is found but stock is not managed, tag it as Not Managed.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Condition</b><span>checkFound: EasyBill match list is not empty</span></div>
+                <div class="tech-item"><b>Condition</b><span>checkManaged: EasyBill stock = YES</span></div>
+                <div class="tech-item"><b>False outcomes</b><span>skipNotInEb, skipNotManaged</span></div>
+                <div class="tech-item"><b>Purpose</b><span>explicit inventory exceptions</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">08</div>
+              <p class="para-copy">
+                If EasyBill stock and Shopify inventory already match, tag the variant as In Sync. If they differ, branch on
+                <button class="slot" type="button" data-slot="live_mode" data-kind="branch" data-node="checkLiveMode" data-source="Conditional" data-guard="variables.live_mode != false" data-output="live update or dry-run record">
+                  live_mode <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                to decide whether this is a preview or an actual Shopify update.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Condition</b><span>checkDiffers: EB stock_count != Shopify inventoryQuantity</span></div>
+                <div class="tech-item"><b>No difference</b><span>tagInSync -> skipInSync</span></div>
+                <div class="tech-item"><b>Dry run</b><span>saveDryItem -> reportWouldUpdate</span></div>
+                <div class="tech-item"><b>Live run</b><span>updateInventory</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">09</div>
+              <p class="para-copy">
+                In live mode, update Shopify inventory. If the update fails, record a Failed result; otherwise record Synced. The update may be modeled as
+                <button class="slot" type="button" data-slot="call Shopify Inventory Writer" data-kind="call" data-node="call.shopify_inventory_writer" data-source="child scenario call" data-guard="only when quantity differs and live_mode is true" data-output="updated or failed status">
+                  call Shopify Inventory Writer <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                so retries and platform-specific details stay outside the main story.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Node</b><span>updateInventory</span></div>
+                <div class="tech-item"><b>Success</b><span>saveLiveItem -> reportUpdated</span></div>
+                <div class="tech-item"><b>Error edge</b><span>updateInventory onError -> saveFailedItem -> skipFailed</span></div>
+                <div class="tech-item"><b>Call example</b><span>shopify_inventory_writer</span></div>
+              </div>
+            </section>
+          </div>
+
+          <div class="chapter">Join, summarize, and publish</div>
+          <div class="paragraphs">
+            <section class="story-paragraph">
+              <div class="para-number">10</div>
+              <p class="para-copy">
+                When all split branches have finished, query every variant result for this run, filter it into Changes, In Sync, Not in EB, No SKU, Not Managed, and Failed sections, then serialize the result.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Join node</b><span>queryAllItems</span></div>
+                <div class="tech-item"><b>Filters</b><span>filterChanges, filterInSync, filterNotInEb, filterNoSku, filterNotManaged, filterFailed</span></div>
+                <div class="tech-item"><b>Serialize</b><span>serializeJson</span></div>
+                <div class="tech-item"><b>Shape</b><span>full breakdown report data</span></div>
+              </div>
+            </section>
+
+            <section class="story-paragraph">
+              <div class="para-number">11</div>
+              <p class="para-copy">
+                Generate the HTML reconciliation report, save it as an object model record, and optionally
+                <button class="slot" type="button" data-slot="call Publish Ops Report" data-kind="call" data-node="call.publish_ops_report" data-source="child scenario call" data-guard="after saveReport succeeds" data-output="notification or dashboard update">
+                  call Publish Ops Report <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                </button>
+                for notifications, dashboards, or approvals.
+              </p>
+              <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+              <div class="tech-detail">
+                <div class="tech-item"><b>Nodes</b><span>generateHtml, saveReport, finishComplete</span></div>
+                <div class="tech-item"><b>Call example</b><span>publish_ops_report</span></div>
+                <div class="tech-item"><b>Human review</b><span>report sections expose every branch outcome</span></div>
+                <div class="tech-item"><b>Finish</b><span>Reconciliation Complete</span></div>
+              </div>
+            </section>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <aside class="inspector" aria-label="Inspector">
+      <section class="panel">
+        <div class="panel-header">
+          <h3>Selected slot</h3>
+          <button class="tiny-button" type="button" title="Open source"><svg class="icon" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg></button>
+        </div>
+        <div class="panel-body">
+          <div class="selected-name"><span id="slotIcon">B</span><div id="selectedSlotName">live_mode flag</div></div>
+          <div class="field-grid">
+            <div class="field"><label for="slotLabel">Readable slot label</label><input id="slotLabel" value="live_mode flag" /></div>
+            <div class="field"><label for="slotSource">Source</label><input id="slotSource" value="inputSchema" /></div>
+            <div class="field"><label for="slotNode">Node or call</label><input id="slotNode" value="inputSchema.live_mode" /></div>
+            <div class="field"><label for="slotGuard">Guard</label><input id="slotGuard" value="defaults to live updates" /></div>
+            <div class="field"><label for="slotOutput">Output</label><input id="slotOutput" value="true or false" /></div>
+            <div class="field"><label for="slotBlock">View block</label><input id="slotBlock" value="story.slot.live-mode" /></div>
+            <div class="field"><label for="slotPatch">Patch command</label><input id="slotPatch" value="update_condition" /></div>
+          </div>
+          <div class="edit-actions">
+            <button class="edit-button primary wide" id="applySlotEdit" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>Apply slot edit</button>
+            <button class="edit-button" id="addReviewGate" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add gate</button>
+            <button class="edit-button" id="makeDryRunDefault" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>Dry-run default</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h3>Review checklist</h3>
+          <button class="tiny-button" type="button" title="Run checks"><svg class="icon" viewBox="0 0 24 24"><path d="m21 2-2 2"/><path d="M3 12a9 9 0 0 1 15-6.7"/><path d="M21 12A9 9 0 0 1 6 18.7"/></svg></button>
+        </div>
+        <div class="panel-body coverage-list">
+          <div class="coverage-row"><span class="check"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><span>Readable blocks have stable graph refs</span><small>projection</small></div>
+          <div class="coverage-row"><span class="check"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><span>Loops have clear stop conditions</span><small>covered</small></div>
+          <div class="coverage-row"><span class="check"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><span>Every split branch has an outcome</span><small>covered</small></div>
+          <div class="coverage-row"><span class="check warn"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span><span>live_mode default is easy to miss</span><small>review</small></div>
+          <div class="coverage-row"><span class="check err"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span><span>Child calls are proposed examples</span><small>not in JSON</small></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h3>Change queue</h3>
+          <button class="tiny-button" type="button" title="Copy mappings"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+        </div>
+        <div class="panel-body change-feed" id="changeFeed">
+          <div class="change-item"><b>No pending graph patches</b>Select a slot, change its fields, or add a gate. Edits compile into patch commands against the execution graph.</div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <script>
+    let slots = [...document.querySelectorAll(".slot")];
+    let paragraphs = [...document.querySelectorAll(".story-paragraph")];
+    let activeSlot = document.querySelector(".slot.is-active");
+    const selectedSlotName = document.getElementById("selectedSlotName");
+    const slotSource = document.getElementById("slotSource");
+    const slotNode = document.getElementById("slotNode");
+    const slotGuard = document.getElementById("slotGuard");
+    const slotOutput = document.getElementById("slotOutput");
+    const slotBlock = document.getElementById("slotBlock");
+    const slotPatch = document.getElementById("slotPatch");
+    const slotLabel = document.getElementById("slotLabel");
+    const slotIcon = document.getElementById("slotIcon");
+    const changeFeed = document.getElementById("changeFeed");
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      })[char]);
+    }
+
+    function pushChange(title, detail) {
+      if (changeFeed.textContent.includes("No pending graph patches")) changeFeed.innerHTML = "";
+      const item = document.createElement("div");
+      item.className = "change-item";
+      item.innerHTML = `<b>${escapeHtml(title)}</b>${escapeHtml(detail)}`;
+      changeFeed.prepend(item);
+    }
+
+    function bindParagraphControls(scope = document) {
+      scope.querySelectorAll(".toggle-paragraph").forEach((button) => {
+        if (button.dataset.bound) return;
+        button.dataset.bound = "true";
+        button.addEventListener("click", () => button.closest(".story-paragraph").classList.toggle("is-open"));
+      });
+    }
+
+    function bindSlotControls(scope = document) {
+      scope.querySelectorAll(".slot").forEach((slot) => {
+        if (slot.dataset.bound) return;
+        slot.dataset.bound = "true";
+        slot.addEventListener("click", () => selectSlot(slot));
+      });
+      slots = [...document.querySelectorAll(".slot")];
+      paragraphs = [...document.querySelectorAll(".story-paragraph")];
+    }
+
+    function selectSlot(slot) {
+      slots.forEach((item) => item.classList.remove("is-active"));
+      paragraphs.forEach((item) => item.classList.remove("is-selected"));
+      slot.classList.add("is-active");
+      slot.closest(".story-paragraph").classList.add("is-selected");
+      activeSlot = slot;
+      selectedSlotName.textContent = slot.dataset.slot;
+      slotLabel.value = slot.dataset.slot;
+      slotSource.value = slot.dataset.source;
+      slotNode.value = slot.dataset.node;
+      slotGuard.value = slot.dataset.guard;
+      slotOutput.value = slot.dataset.output;
+      slotBlock.value = `story.slot.${slot.dataset.node.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+      slotPatch.value = slot.dataset.kind === "call" ? "upsert_scenario_call" : slot.dataset.kind === "loop" ? "update_loop" : "update_condition";
+      slotIcon.textContent = (slot.dataset.kind || "S").slice(0, 1).toUpperCase();
+      slotIcon.style.background = getComputedStyle(slot).backgroundColor;
+      slotIcon.style.color = getComputedStyle(slot).color;
+    }
+
+    bindSlotControls();
+    bindParagraphControls();
+
+    document.getElementById("applySlotEdit").addEventListener("click", () => {
+      if (!activeSlot) return;
+      const label = slotLabel.value.trim() || activeSlot.dataset.slot;
+      activeSlot.dataset.slot = label;
+      selectedSlotName.textContent = label;
+      activeSlot.dataset.source = slotSource.value;
+      activeSlot.dataset.node = slotNode.value;
+      activeSlot.dataset.guard = slotGuard.value;
+      activeSlot.dataset.output = slotOutput.value;
+      activeSlot.innerHTML = `${escapeHtml(label)} <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>`;
+      pushChange("PATCH " + slotPatch.value, `${slotBlock.value} -> graphRefs.nodes=[${slotNode.value}], guard="${slotGuard.value}", output="${slotOutput.value}".`);
+    });
+
+    document.getElementById("addReviewGate").addEventListener("click", () => {
+      const target = document.querySelector('[data-node="call.shopify_inventory_writer"]')?.closest(".story-paragraph") || document.querySelector(".story-paragraph.is-selected");
+      if (!target || document.getElementById("manualApprovalGate")) return;
+      const gate = document.createElement("section");
+      gate.className = "story-paragraph is-open";
+      gate.id = "manualApprovalGate";
+      gate.innerHTML = `
+        <div class="para-number">NEW</div>
+        <p class="para-copy">Before any live inventory write, require an operations approval gate that summarizes the number of variants that will change and the largest stock delta.</p>
+        <div class="para-tools"><button class="tiny-button toggle-paragraph" type="button" title="Technical detail"><svg class="icon" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button></div>
+        <div class="tech-detail">
+          <div class="tech-item"><b>New node</b><span>approve_live_inventory_write</span></div>
+          <div class="tech-item"><b>Insert before</b><span>checkLiveMode true -> updateInventory</span></div>
+          <div class="tech-item"><b>Input</b><span>planned_updates[], max_delta</span></div>
+          <div class="tech-item"><b>Output</b><span>approved or cancelled</span></div>
+        </div>`;
+      target.before(gate);
+      bindParagraphControls(gate);
+      paragraphs = [...document.querySelectorAll(".story-paragraph")];
+      pushChange("PATCH insert_step_before", "beforeNode=updateInventory, newNode=approve_live_inventory_write, type=HumanApproval, reconnect=true.");
+    });
+
+    document.getElementById("makeDryRunDefault").addEventListener("click", () => {
+      document.querySelectorAll('[data-node="inputSchema.live_mode"], [data-node="checkLiveMode"]').forEach((slot) => {
+        slot.dataset.guard = "defaults to dry run; live writes require explicit approval";
+        if (slot.dataset.slot.includes("live_mode")) {
+          slot.dataset.slot = "dry-run by default";
+          slot.innerHTML = `dry-run by default <svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>`;
+        }
+      });
+      if (activeSlot) selectSlot(activeSlot);
+      pushChange("PATCH update_input_default", "inputSchema.live_mode=false; checkLiveMode guard becomes explicit operator approval before Shopify writes.");
+    });
+
+    document.getElementById("toggleDetails").addEventListener("click", () => {
+      const shouldOpen = !paragraphs.every((paragraph) => paragraph.classList.contains("is-open"));
+      paragraphs.forEach((paragraph) => paragraph.classList.toggle("is-open", shouldOpen));
+    });
+  </script>
+</body>
+</html>

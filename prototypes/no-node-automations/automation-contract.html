@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Automation Contract Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #eef2f1;
+      --surface: #ffffff;
+      --paper: #fffdf7;
+      --ink: #1c2430;
+      --muted: #667085;
+      --line: #d5ddda;
+      --line-strong: #b7c4bf;
+      --accent: #245b52;
+      --accent-soft: #dcefeb;
+      --blue: #244f9e;
+      --blue-soft: #e5ecfb;
+      --red: #b42318;
+      --red-soft: #ffe5df;
+      --amber: #8a5d00;
+      --amber-soft: #fff2c9;
+      --green: #0f7b4f;
+      --green-soft: #dff3e8;
+      --violet: #5e4aa1;
+      --violet-soft: #eee9ff;
+      --radius: 8px;
+      --shadow: 0 18px 44px rgba(33, 55, 49, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    button { border: 0; cursor: pointer; font: inherit; }
+
+    .icon {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 2;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.86);
+      padding: 14px 22px;
+      backdrop-filter: blur(14px);
+    }
+
+    .brandline {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 820;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    .brandline h1 { margin-bottom: 2px; font-size: 20px; line-height: 1.18; }
+    .brandline p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.35; }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .icon-button, .text-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 36px;
+      min-width: 36px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .text-button { gap: 8px; padding: 0 12px; }
+    .primary-button { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 310px minmax(560px, 1fr) 370px;
+      min-height: 0;
+    }
+
+    .rail, .evidence {
+      overflow: auto;
+      min-height: 0;
+      padding: 18px;
+    }
+
+    .rail { border-right: 1px solid var(--line); background: #e5ebe8; }
+    .evidence { border-left: 1px solid var(--line); background: #e7eeec; }
+
+    .section-title {
+      margin: 6px 0 10px;
+      color: #5e6a67;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .coverage-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      padding: 14px;
+      box-shadow: 0 10px 30px rgba(36, 66, 59, 0.08);
+    }
+
+    .coverage-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .coverage-top b { font-size: 28px; line-height: 1; }
+    .coverage-top span { color: var(--muted); font-size: 12px; font-weight: 700; }
+
+    .bar { height: 9px; border-radius: 999px; background: #d9e1de; overflow: hidden; }
+    .bar span { display: block; width: 86%; height: 100%; background: linear-gradient(90deg, var(--green), #2c6ecb); }
+
+    .filter-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .filter-button {
+      height: 30px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 740;
+    }
+
+    .filter-button.is-active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .contract-nav { display: grid; gap: 8px; }
+
+    .nav-clause {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      background: transparent;
+      color: var(--ink);
+      padding: 10px;
+      text-align: left;
+    }
+
+    .nav-clause.is-active {
+      border-color: var(--line-strong);
+      background: var(--surface);
+      box-shadow: 0 8px 22px rgba(29, 48, 44, 0.08);
+    }
+
+    .status-icon {
+      display: grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .status-icon.partial { background: var(--amber-soft); color: var(--amber); }
+    .status-icon.proposed { background: var(--violet-soft); color: var(--violet); }
+    .status-icon.risk { background: var(--red-soft); color: var(--red); }
+
+    .nav-clause strong { display: block; font-size: 13px; line-height: 1.2; }
+    .nav-clause small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+    code {
+      color: #3d4a48;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .contract {
+      min-width: 0;
+      overflow: auto;
+      padding: 28px;
+    }
+
+    .paper {
+      max-width: 980px;
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .paper-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      border-bottom: 1px solid var(--line);
+      padding: 24px 28px;
+    }
+
+    .paper-header h2 { margin-bottom: 7px; font-size: 25px; line-height: 1.15; }
+    .paper-header p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .signoff-box {
+      min-width: 190px;
+      border: 1px solid #adc9c2;
+      border-radius: var(--radius);
+      background: var(--accent-soft);
+      padding: 12px;
+    }
+
+    .signoff-box b { display: block; color: var(--accent); font-size: 15px; }
+    .signoff-box span { color: #58726c; font-size: 12px; }
+
+    .contract-body {
+      display: grid;
+      gap: 28px;
+      padding: 28px;
+    }
+
+    .contract-section h3 {
+      margin-bottom: 10px;
+      color: #5f6d68;
+      font-size: 13px;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .clause-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .clause {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      padding: 13px;
+      cursor: pointer;
+    }
+
+    .clause.is-active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(36, 91, 82, 0.13);
+    }
+
+    .clause[hidden] { display: none; }
+
+    .clause-number {
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 7px;
+      background: #edf2f0;
+      color: #53615e;
+      font-size: 12px;
+      font-weight: 820;
+    }
+
+    .clause p { margin-bottom: 0; font-size: 16px; line-height: 1.45; }
+
+    .clause-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      background: #eef2f5;
+      color: #596572;
+      padding: 0 8px;
+      font-size: 11px;
+      font-weight: 760;
+    }
+
+    .tag.covered { background: var(--green-soft); color: var(--green); }
+    .tag.branch { background: var(--amber-soft); color: var(--amber); }
+    .tag.split { background: var(--violet-soft); color: var(--violet); }
+    .tag.risk { background: var(--red-soft); color: var(--red); }
+    .tag.call { background: var(--blue-soft); color: var(--blue); }
+
+    .clause-action {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--paper);
+      color: #5c6865;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 10px 30px rgba(36, 66, 59, 0.08);
+    }
+
+    .panel + .panel { margin-top: 16px; }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+      padding: 14px;
+    }
+
+    .panel-header h3 { margin: 0; font-size: 14px; }
+    .panel-body { padding: 14px; }
+
+    .evidence-title { display: grid; gap: 8px; }
+    .evidence-title b { font-size: 18px; line-height: 1.2; }
+    .evidence-title p { margin-bottom: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+
+    .field-list { display: grid; gap: 9px; margin-top: 14px; }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: 102px 1fr;
+      gap: 10px;
+      border-bottom: 1px solid #edf1ef;
+      padding-bottom: 8px;
+      font-size: 13px;
+    }
+
+    .field-row:last-child { border-bottom: 0; padding-bottom: 0; }
+    .field-row span { color: var(--muted); font-size: 12px; font-weight: 760; }
+
+    .amend-form {
+      display: grid;
+      gap: 10px;
+    }
+
+    .amend-form label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 780;
+      text-transform: uppercase;
+    }
+
+    .amend-form textarea,
+    .amend-form input,
+    .amend-form select {
+      width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fffdf8;
+      color: var(--ink);
+      padding: 9px 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .amend-form textarea {
+      min-height: 86px;
+      resize: vertical;
+      line-height: 1.4;
+    }
+
+    .edit-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .edit-actions .wide { grid-column: 1 / -1; }
+
+    .edit-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: #fffdf8;
+      color: var(--ink);
+      padding: 0 10px;
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .edit-button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .change-feed {
+      display: grid;
+      gap: 8px;
+    }
+
+    .change-item {
+      border-left: 3px solid var(--accent);
+      border-radius: 0 7px 7px 0;
+      background: #f8fbf8;
+      padding: 9px 10px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .change-item b {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 12px;
+    }
+
+    .branch-map {
+      display: grid;
+      gap: 8px;
+    }
+
+    .branch-row {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 9px;
+      align-items: start;
+      font-size: 13px;
+    }
+
+    .branch-row .status-icon { width: 20px; height: 20px; }
+    .branch-row small { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 1200px) {
+      .layout { grid-template-columns: 280px minmax(0, 1fr); }
+      .evidence {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+      .panel + .panel { margin-top: 0; }
+    }
+
+    @media (max-width: 780px) {
+      .topbar { align-items: flex-start; flex-direction: column; padding: 14px; }
+      .actions { width: 100%; overflow-x: auto; padding-bottom: 2px; }
+      .layout { display: block; }
+      .rail { border-right: 0; border-bottom: 1px solid var(--line); }
+      .contract { padding: 12px; }
+      .paper-header { grid-template-columns: 1fr; padding: 20px 16px; }
+      .contract-body { padding: 16px; }
+      .clause { grid-template-columns: auto minmax(0, 1fr); }
+      .clause-action { grid-column: 2; }
+      .evidence { display: block; padding: 12px; }
+      .panel + .panel, .panel { margin-bottom: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brandline">
+        <div class="brand-mark">R</div>
+        <div>
+          <h1>Automation Contract</h1>
+          <p>A deterministic contract projection of the execution graph. Clause edits compile into graph patches.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="icon-button" type="button" title="Search clauses"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></button>
+        <button class="text-button" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>Amend</button>
+        <button class="text-button primary-button" id="runChecks" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Verify</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="rail" aria-label="Contract navigation">
+        <div class="section-title">Coverage</div>
+        <section class="coverage-card">
+          <div class="coverage-top"><b id="coverageValue">86%</b><span>12 of 14 clauses</span></div>
+          <div class="bar"><span id="coverageBar"></span></div>
+        </section>
+
+        <div class="section-title">Filters</div>
+        <div class="filter-group" role="group" aria-label="Clause filters">
+          <button class="filter-button is-active" data-filter="all" type="button">All</button>
+          <button class="filter-button" data-filter="branch" type="button">Branches</button>
+          <button class="filter-button" data-filter="split" type="button">Split</button>
+          <button class="filter-button" data-filter="call" type="button">Calls</button>
+          <button class="filter-button" data-filter="risk" type="button">Risks</button>
+        </div>
+
+        <div class="section-title">Clauses</div>
+        <div class="contract-nav">
+          <button class="nav-clause is-active" data-target="c1" type="button">
+            <span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span>
+            <span><strong>Source collection</strong><small>loops</small></span><code>C1</code>
+          </button>
+          <button class="nav-clause" data-target="c4" type="button">
+            <span class="status-icon partial"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+            <span><strong>Live mode default</strong><small>risk</small></span><code>C4</code>
+          </button>
+          <button class="nav-clause" data-target="c5" type="button">
+            <span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span>
+            <span><strong>Variant split</strong><small>split</small></span><code>C5</code>
+          </button>
+          <button class="nav-clause" data-target="c10" type="button">
+            <span class="status-icon partial"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+            <span><strong>Update failure</strong><small>onError</small></span><code>C10</code>
+          </button>
+          <button class="nav-clause" data-target="c13" type="button">
+            <span class="status-icon proposed"><svg class="icon" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg></span>
+            <span><strong>Child scenario calls</strong><small>proposed</small></span><code>C13</code>
+          </button>
+        </div>
+      </aside>
+
+      <main class="contract" aria-label="Contract document">
+        <article class="paper">
+          <header class="paper-header">
+            <div>
+              <h2>Reconcile Inventory: EasyBill to Shopify</h2>
+              <p>This contract translates the attached v28 graph into reviewable promises instead of asking a human to inspect 53 nodes and 49 edges.</p>
+            </div>
+            <div class="signoff-box">
+              <b>Review live mode</b>
+              <span>2 proposed call clauses are design examples</span>
+            </div>
+          </header>
+
+          <div class="contract-body">
+            <section class="contract-section">
+              <h3>Source completeness</h3>
+              <ul class="clause-list">
+                <li class="clause is-active" id="c1" data-type="loop" data-status="covered" data-title="Source collection" data-node="collectEb, collectShopify" data-evidence="EasyBill uses a page loop with maxIterations 20; Shopify uses a cursor loop with maxIterations 100." data-test="Both loops have true and false completion exits.">
+                  <span class="clause-number">C1</span>
+                  <div><p>The automation must collect every EasyBill PRODUCT position and every Shopify product before comparing inventory.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag">loops</span><span class="tag">collectEb</span><span class="tag">collectShopify</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c2" data-type="loop" data-status="covered" data-title="EasyBill stop condition" data-node="checkMoreEb" data-evidence="The EasyBill loop exits when current page is not less than total pages." data-test="checkMoreEb false branch reaches EB Complete.">
+                  <span class="clause-number">C2</span>
+                  <div><p>The EasyBill loop stops only after the current page reaches the total page count, with a hard cap of 20 iterations.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag branch">branch</span><span class="tag">max 20</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c3" data-type="loop" data-status="covered" data-title="Shopify stop condition" data-node="checkNextShopify" data-evidence="The Shopify loop continues while next_cursor is not empty and exits through Shopify Complete." data-test="checkNextShopify false branch reaches Shopify Complete.">
+                  <span class="clause-number">C3</span>
+                  <div><p>The Shopify loop continues while a next cursor exists, with a hard cap of 100 product pages.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag branch">branch</span><span class="tag">max 100</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+              </ul>
+            </section>
+
+            <section class="contract-section">
+              <h3>Safety mode</h3>
+              <ul class="clause-list">
+                <li class="clause" id="c4" data-type="risk branch" data-status="risk" data-title="Live mode default" data-node="inputSchema.live_mode, checkLiveMode" data-evidence="Input description says unchecked dry run; otherwise defaults to live updates. checkLiveMode tests variables.live_mode != false." data-test="Needs prominent review because absent live_mode means writes.">
+                  <span class="clause-number">C4</span>
+                  <div><p>If live_mode is not explicitly false, mismatched variants may update Shopify inventory.</p><div class="clause-tags"><span class="tag risk">risk</span><span class="tag branch">branch</span><span class="tag">checkLiveMode</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+              </ul>
+            </section>
+
+            <section class="contract-section">
+              <h3>Variant split outcomes</h3>
+              <ul class="clause-list">
+                <li class="clause" id="c5" data-type="split" data-status="covered" data-title="Variant split" data-node="splitVariants" data-evidence="Flattened variants enter the Reconcile Variants Split; queryAllItems runs after the split completes." data-test="Every variant produces one outcome object or finish status.">
+                  <span class="clause-number">C5</span>
+                  <div><p>Every Shopify variant is reconciled independently, and the run joins only after all split branches finish.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag split">split</span><span class="tag">join</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c6" data-type="branch split" data-status="covered" data-title="No SKU branch" data-node="checkHasSku" data-evidence="checkHasSku false goes to tagNoSku, then skipNoSku." data-test="Variant without SKU is recorded and skipped.">
+                  <span class="clause-number">C6</span>
+                  <div><p>If a variant has no SKU, record No SKU and do not attempt an EasyBill match or Shopify update.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag branch">branch</span><span class="tag">No SKU</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c7" data-type="branch split" data-status="covered" data-title="Not in EasyBill branch" data-node="checkFound" data-evidence="findEbMatch feeds checkFound; false goes to tagNotInEb and skipNotInEb." data-test="SKU absent from EasyBill is recorded and skipped.">
+                  <span class="clause-number">C7</span>
+                  <div><p>If the Shopify SKU is not found in EasyBill, record Not in EB and do not update Shopify.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag branch">branch</span><span class="tag">Not in EB</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c8" data-type="branch split" data-status="covered" data-title="Not managed branch" data-node="checkManaged" data-evidence="checkManaged false goes to tagNotManaged and skipNotManaged." data-test="EasyBill stock != YES is classified as Not Managed.">
+                  <span class="clause-number">C8</span>
+                  <div><p>If EasyBill says the position is not stock-managed, record Not Managed and do not update Shopify.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag branch">branch</span><span class="tag">Not Managed</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c9" data-type="branch split" data-status="covered" data-title="In sync or update branch" data-node="checkDiffers, checkLiveMode" data-evidence="Equal quantities go to tagInSync. Different quantities branch into dry-run Would Update or live Update Shopify." data-test="All three statuses are represented: In Sync, Would Update, Synced.">
+                  <span class="clause-number">C9</span>
+                  <div><p>If quantities match, record In Sync. If quantities differ, either preview Would Update or perform a live Shopify inventory update.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag branch">branch</span><span class="tag">live/dry</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c10" data-type="risk branch split" data-status="risk" data-title="Update failure branch" data-node="updateInventory onError" data-evidence="updateInventory has an onError edge to saveFailedItem and skipFailed." data-test="Visible in graph; contract should require retry/escalation policy if this becomes production-critical.">
+                  <span class="clause-number">C10</span>
+                  <div><p>If Shopify inventory update fails, record Failed. The contract should decide whether failure also needs retries or operator escalation.</p><div class="clause-tags"><span class="tag risk">risk</span><span class="tag branch">onError</span><span class="tag">Failed</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+              </ul>
+            </section>
+
+            <section class="contract-section">
+              <h3>Reporting and child scenarios</h3>
+              <ul class="clause-list">
+                <li class="clause" id="c11" data-type="report" data-status="covered" data-title="Report sections" data-node="queryAllItems, filterChanges, filterInSync, filterNotInEb, filterNoSku, filterNotManaged, filterFailed" data-evidence="The graph queries all run results and filters each category before serializing JSON." data-test="Every split outcome appears in a report filter.">
+                  <span class="clause-number">C11</span>
+                  <div><p>The final report must contain Changes, In Sync, Not in EB, No SKU, Not Managed, and Failed sections.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag">report</span><span class="tag">join</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c12" data-type="report" data-status="covered" data-title="Report persistence" data-node="serializeJson, generateHtml, saveReport, finishComplete" data-evidence="Serialized report data is converted to HTML, saved as an object_model instance, then the run finishes." data-test="saveReport succeeds before Reconciliation Complete.">
+                  <span class="clause-number">C12</span>
+                  <div><p>The run is complete only after the HTML report is generated and saved.</p><div class="clause-tags"><span class="tag covered">covered</span><span class="tag">saveReport</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c13" data-type="call" data-status="proposed" data-title="Child scenario calls" data-node="normalize_catalog_items, shopify_inventory_writer, publish_ops_report" data-evidence="These are explicit UI examples for cross-scenario calls; the attached JSON does not appear to contain embedded workflow-call nodes." data-test="Reviewer can verify call inputs and outputs without seeing a node canvas.">
+                  <span class="clause-number">C13</span>
+                  <div><p>Reusable work such as catalog normalization, Shopify write policy, and report publishing may be expressed as child scenario calls with declared inputs and outputs.</p><div class="clause-tags"><span class="tag call">call example</span><span class="tag">not in JSON</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+                <li class="clause" id="c14" data-type="call risk" data-status="proposed" data-title="Call boundary contract" data-node="scenario call boundary" data-evidence="For future workflow readability, a child call should show inputs, outputs, timeout, retries, and side effects inline." data-test="No hidden side effects across scenario boundaries.">
+                  <span class="clause-number">C14</span>
+                  <div><p>Every child scenario call must state its side effects, retry behavior, and resume behavior where humans can review it.</p><div class="clause-tags"><span class="tag call">call example</span><span class="tag risk">boundary</span></div></div>
+                  <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+                </li>
+              </ul>
+            </section>
+          </div>
+        </article>
+      </main>
+
+      <aside class="evidence" aria-label="Evidence">
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Clause evidence</h3>
+            <button class="icon-button" type="button" title="Copy evidence"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          </div>
+          <div class="panel-body">
+            <div class="evidence-title">
+              <b id="evidenceTitle">Source collection</b>
+              <p id="evidenceText">EasyBill uses a page loop with maxIterations 20; Shopify uses a cursor loop with maxIterations 100.</p>
+            </div>
+            <div class="field-list">
+              <div class="field-row"><span>Clause</span><code id="evidenceClause">C1</code></div>
+              <div class="field-row"><span>Status</span><code id="evidenceStatus">covered</code></div>
+              <div class="field-row"><span>Node or call</span><code id="evidenceNode">collectEb, collectShopify</code></div>
+              <div class="field-row"><span>View block</span><code id="evidenceBlock">contract.clause.c1</code></div>
+              <div class="field-row"><span>Patch type</span><code id="evidencePatch">assert_graph_slice</code></div>
+              <div class="field-row"><span>Test</span><code id="selectedTest">Both loops have true and false completion exits.</code></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Amend selected clause</h3>
+            <button class="icon-button" id="resetAmendment" type="button" title="Reset amendment"><svg class="icon" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/></svg></button>
+          </div>
+          <div class="panel-body amend-form">
+            <div>
+              <label for="clauseText">Clause text</label>
+              <textarea id="clauseText">The automation must collect every EasyBill PRODUCT position and every Shopify product before comparing inventory.</textarea>
+            </div>
+            <div>
+              <label for="clauseStatus">Status</label>
+              <select id="clauseStatus">
+                <option value="covered">covered</option>
+                <option value="risk">risk</option>
+                <option value="proposed">proposed</option>
+              </select>
+            </div>
+            <div class="edit-actions">
+              <button class="edit-button primary wide" id="applyClauseEdit" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>Apply clause edit</button>
+              <button class="edit-button" id="addRetryClause" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add retry clause</button>
+              <button class="edit-button" id="promoteCallClause" type="button"><svg class="icon" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>Promote call</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Split branch map</h3>
+            <button class="icon-button" type="button" title="Run branch checks"><svg class="icon" viewBox="0 0 24 24"><path d="M5 3v18l15-9Z"/></svg></button>
+          </div>
+          <div class="panel-body branch-map">
+            <div class="branch-row"><span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><div>No SKU <small>checkHasSku false -> tagNoSku</small></div></div>
+            <div class="branch-row"><span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><div>Not in EB <small>checkFound false -> tagNotInEb</small></div></div>
+            <div class="branch-row"><span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><div>Not Managed <small>checkManaged false -> tagNotManaged</small></div></div>
+            <div class="branch-row"><span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><div>In Sync <small>checkDiffers false -> tagInSync</small></div></div>
+            <div class="branch-row"><span class="status-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></span><div>Would Update <small>checkLiveMode false -> saveDryItem</small></div></div>
+            <div class="branch-row"><span class="status-icon partial"><svg class="icon" viewBox="0 0 24 24"><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span><div>Failed <small>updateInventory onError -> saveFailedItem</small></div></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h3>Change queue</h3>
+            <button class="icon-button" type="button" title="Accept suggestion"><svg class="icon" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></button>
+          </div>
+          <div class="panel-body change-feed" id="contractChangeFeed">
+            <div class="change-item"><b>No pending graph patches</b>Select a clause, edit text or status, then apply. Amendments compile into graph patch commands.</div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const clauses = [...document.querySelectorAll(".clause")];
+    const navClauses = [...document.querySelectorAll(".nav-clause")];
+    const filterButtons = [...document.querySelectorAll(".filter-button")];
+    const evidenceTitle = document.getElementById("evidenceTitle");
+    const evidenceText = document.getElementById("evidenceText");
+    const evidenceClause = document.getElementById("evidenceClause");
+    const evidenceStatus = document.getElementById("evidenceStatus");
+    const evidenceNode = document.getElementById("evidenceNode");
+    const evidenceBlock = document.getElementById("evidenceBlock");
+    const evidencePatch = document.getElementById("evidencePatch");
+    const selectedTest = document.getElementById("selectedTest");
+    const clauseText = document.getElementById("clauseText");
+    const clauseStatus = document.getElementById("clauseStatus");
+    const contractChangeFeed = document.getElementById("contractChangeFeed");
+    let activeClause = document.querySelector(".clause.is-active");
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      })[char]);
+    }
+
+    function pushContractChange(title, detail) {
+      if (contractChangeFeed.textContent.includes("No pending graph patches")) contractChangeFeed.innerHTML = "";
+      const item = document.createElement("div");
+      item.className = "change-item";
+      item.innerHTML = `<b>${escapeHtml(title)}</b>${escapeHtml(detail)}`;
+      contractChangeFeed.prepend(item);
+    }
+
+    function bindClause(clause) {
+      if (clause.dataset.bound) return;
+      clause.dataset.bound = "true";
+      clause.addEventListener("click", () => selectClause(clause));
+    }
+
+    function selectClause(clause) {
+      clauses.forEach((item) => item.classList.remove("is-active"));
+      navClauses.forEach((item) => item.classList.toggle("is-active", item.dataset.target === clause.id));
+      clause.classList.add("is-active");
+      evidenceTitle.textContent = clause.dataset.title;
+      evidenceText.textContent = clause.dataset.evidence;
+      evidenceClause.textContent = clause.id.toUpperCase();
+      evidenceStatus.textContent = clause.dataset.status;
+      evidenceNode.textContent = clause.dataset.node;
+      evidenceBlock.textContent = `contract.clause.${clause.id}`;
+      evidencePatch.textContent = clause.dataset.type.includes("call") ? "upsert_scenario_call" : clause.dataset.type.includes("risk") ? "add_guard_or_policy" : "assert_graph_slice";
+      selectedTest.textContent = clause.dataset.test;
+      clauseText.value = clause.querySelector("p").textContent;
+      clauseStatus.value = ["covered", "risk", "proposed"].includes(clause.dataset.status) ? clause.dataset.status : "covered";
+      activeClause = clause;
+      clause.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+
+    clauses.forEach(bindClause);
+    navClauses.forEach((button) => {
+      button.addEventListener("click", () => {
+        const target = document.getElementById(button.dataset.target);
+        if (target) selectClause(target);
+      });
+    });
+
+    filterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        filterButtons.forEach((item) => item.classList.remove("is-active"));
+        button.classList.add("is-active");
+        const filter = button.dataset.filter;
+        clauses.forEach((clause) => {
+          clause.hidden = filter !== "all" && !clause.dataset.type.split(" ").includes(filter);
+        });
+      });
+    });
+
+    document.getElementById("runChecks").addEventListener("click", () => {
+      const value = document.getElementById("coverageValue");
+      const bar = document.getElementById("coverageBar");
+      value.textContent = "92%";
+      bar.style.width = "92%";
+      setTimeout(() => {
+        value.textContent = "86%";
+        bar.style.width = "86%";
+      }, 1100);
+    });
+
+    document.getElementById("resetAmendment").addEventListener("click", () => {
+      if (activeClause) selectClause(activeClause);
+    });
+
+    document.getElementById("applyClauseEdit").addEventListener("click", () => {
+      if (!activeClause) return;
+      const paragraph = activeClause.querySelector("p");
+      paragraph.textContent = clauseText.value;
+      activeClause.dataset.status = clauseStatus.value;
+      evidenceStatus.textContent = clauseStatus.value;
+      const statusTag = activeClause.querySelector(".clause-tags .tag");
+      if (statusTag) {
+        statusTag.className = `tag ${clauseStatus.value === "proposed" ? "call" : clauseStatus.value}`;
+        statusTag.textContent = clauseStatus.value;
+      }
+      pushContractChange("PATCH amend_contract_clause", `viewBlock=contract.clause.${activeClause.id}; graphRefs.nodes=[${activeClause.dataset.node}]; status=${clauseStatus.value}; text="${clauseText.value}"`);
+    });
+
+    document.getElementById("addRetryClause").addEventListener("click", () => {
+      if (document.getElementById("c15")) return;
+      const list = document.querySelector("#c10").closest(".clause-list");
+      const clause = document.createElement("li");
+      clause.className = "clause";
+      clause.id = "c15";
+      clause.dataset.type = "risk branch split";
+      clause.dataset.status = "proposed";
+      clause.dataset.title = "Retry update failure";
+      clause.dataset.node = "updateInventory retry policy";
+      clause.dataset.evidence = "Human amendment: retry transient Shopify update failures before saving Failed.";
+      clause.dataset.test = "429 and 5xx responses retry before Failed.";
+      clause.innerHTML = `
+        <span class="clause-number">C15</span>
+        <div><p>Transient Shopify update failures retry three times before the variant is recorded as Failed.</p><div class="clause-tags"><span class="tag call">proposed</span><span class="tag risk">retry</span><span class="tag branch">onError</span></div></div>
+        <button class="clause-action" type="button" title="Clause detail"><svg class="icon" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>`;
+      list.appendChild(clause);
+      clauses.push(clause);
+      bindClause(clause);
+      selectClause(clause);
+      pushContractChange("PATCH add_retry_policy", "targetNode=updateInventory; retry=3 attempts; onExhausted=saveFailedItem.");
+    });
+
+    document.getElementById("promoteCallClause").addEventListener("click", () => {
+      const callClause = document.getElementById("c13");
+      selectClause(callClause);
+      callClause.dataset.status = "covered";
+      callClause.querySelector("p").textContent = "Catalog normalization, Shopify write policy, and report publishing are promoted to named child scenario calls with declared inputs and outputs.";
+      clauseText.value = callClause.querySelector("p").textContent;
+      clauseStatus.value = "covered";
+      evidenceStatus.textContent = "covered";
+      pushContractChange("PATCH convert_subgraph_to_scenario_call", "calls=[normalize_catalog_items, shopify_inventory_writer, publish_ops_report] with typed inputs/outputs.");
+    });
+  </script>
+</body>
+</html>
