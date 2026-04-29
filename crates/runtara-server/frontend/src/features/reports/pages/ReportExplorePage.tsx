@@ -1357,8 +1357,8 @@ function isChartViz(value: ExploreVizType): value is ReportChartKind {
   return !['table', 'metric'].includes(value);
 }
 
-function columnKey(column: ReportDatasetQueryColumn): string {
-  return column.field ?? column.key ?? '';
+function columnKey(column?: ReportDatasetQueryColumn): string {
+  return column?.field ?? column?.key ?? '';
 }
 
 function fieldLabel(dataset: ReportDatasetDefinition, field: string): string {
