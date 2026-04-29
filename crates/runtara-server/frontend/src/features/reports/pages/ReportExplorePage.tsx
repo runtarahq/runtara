@@ -221,14 +221,17 @@ export function ReportExplorePage() {
   };
 
   const addDimension = (field: string) => {
-    updateState((current) => ({
-      ...current,
-      dimensions: current.dimensions.includes(field)
+    updateState((current) => {
+      const dimensions = current.dimensions.includes(field)
         ? current.dimensions
-        : [...current.dimensions, field],
-      vizType: recommendVizType(dataset, [...current.dimensions, field], current.measures),
-      page: { ...current.page, offset: 0 },
-    }));
+        : [...current.dimensions, field];
+      return {
+        ...current,
+        dimensions,
+        vizType: preserveVizType(dataset, current, dimensions, current.measures),
+        page: { ...current.page, offset: 0 },
+      };
+    });
   };
 
   const addMeasure = (id: string) => {
@@ -239,7 +242,7 @@ export function ReportExplorePage() {
       return {
         ...current,
         measures,
-        vizType: recommendVizType(dataset, current.dimensions, measures),
+        vizType: preserveVizType(dataset, current, current.dimensions, measures),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -252,7 +255,7 @@ export function ReportExplorePage() {
         ...current,
         dimensions,
         sort: current.sort.filter((sort) => sort.field !== field),
-        vizType: recommendVizType(dataset, dimensions, current.measures),
+        vizType: preserveVizType(dataset, current, dimensions, current.measures),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -265,7 +268,7 @@ export function ReportExplorePage() {
         ...current,
         measures,
         sort: current.sort.filter((sort) => sort.field !== id),
-        vizType: recommendVizType(dataset, current.dimensions, measures),
+        vizType: preserveVizType(dataset, current, current.dimensions, measures),
         page: { ...current.page, offset: 0 },
       };
     });
@@ -1103,6 +1106,25 @@ function recommendVizType(
   }
   if (dimensions.length === 1 && measures.length >= 1) return 'bar';
   return 'table';
+}
+
+function preserveVizType(
+  dataset: ReportDatasetDefinition | undefined,
+  current: ExploreState,
+  dimensions: string[],
+  measures: string[]
+): ExploreVizType {
+  if (
+    dataset &&
+    vizValidity(current.vizType, dataset, {
+      ...current,
+      dimensions,
+      measures,
+    }).valid
+  ) {
+    return current.vizType;
+  }
+  return recommendVizType(dataset, dimensions, measures);
 }
 
 function vizValidity(
