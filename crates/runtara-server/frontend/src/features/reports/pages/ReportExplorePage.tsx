@@ -96,6 +96,7 @@ export function ReportExplorePage() {
   const { data: report, isFetching, isError, error } = useReport(reportId);
   const updateReport = useUpdateReport();
   const [state, setState] = useState<ExploreState | null>(null);
+  const [stateKey, setStateKey] = useState('');
   const [fieldSearch, setFieldSearch] = useState('');
   const [draftFilterField, setDraftFilterField] = useState('');
   const [draftFilterOp, setDraftFilterOp] = useState('eq');
@@ -121,9 +122,12 @@ export function ReportExplorePage() {
   }, [report, searchParams]);
 
   useEffect(() => {
-    if (!report || datasets.length === 0 || state) return;
+    if (!report || datasets.length === 0) return;
+    const nextStateKey = `${report.id}:${searchParams.get('block') ?? ''}`;
+    if (state && stateKey === nextStateKey) return;
     setState(initialExploreState(report.definition, datasets, searchParams));
-  }, [datasets, report, searchParams, state]);
+    setStateKey(nextStateKey);
+  }, [datasets, report, searchParams, state, stateKey]);
 
   const dataset = useMemo(
     () => datasets.find((candidate) => candidate.id === state?.datasetId),
@@ -141,7 +145,6 @@ export function ReportExplorePage() {
 
   const queryRequest = useMemo<ReportDatasetQueryRequest | undefined>(() => {
     if (!dataset || !state || state.measures.length === 0) return undefined;
-    const orderBy = state.sort.length > 0 ? state.sort : defaultSort(state);
     return {
       filters: reportFilters,
       datasetFilters: state.filters.map(({ field, op, value }) => ({
@@ -151,7 +154,7 @@ export function ReportExplorePage() {
       })),
       dimensions: state.dimensions,
       measures: state.measures,
-      orderBy,
+      orderBy: state.sort,
       limit: state.limit,
       search:
         state.search.trim().length > 0 && state.dimensions.length > 0
@@ -173,6 +176,8 @@ export function ReportExplorePage() {
     if (!report || !dataset || !state) return null;
     return buildSavedBlock(report.definition, dataset, state);
   }, [dataset, report, state]);
+
+  const sourceBlockId = searchParams.get('block');
 
   const handleReportFilterChanges = (updates: Record<string, unknown>) => {
     setSearchParams(
@@ -321,9 +326,20 @@ export function ReportExplorePage() {
     }));
   };
 
-  const handleSaveBlock = async () => {
+  const handleSaveBlock = async (mode: 'append' | 'replace' = 'append') => {
     if (!report || !savedBlock || !state) return;
-    const nextDefinition = appendBlockToDefinition(report.definition, savedBlock);
+    const nextBlock =
+      mode === 'replace' && sourceBlockId
+        ? {
+            ...savedBlock,
+            id: sourceBlockId,
+            title: state.blockTitle || savedBlock.title,
+          }
+        : savedBlock;
+    const nextDefinition =
+      mode === 'replace' && sourceBlockId
+        ? replaceBlockInDefinition(report.definition, sourceBlockId, nextBlock)
+        : appendBlockToDefinition(report.definition, nextBlock);
     await updateReport.mutateAsync({
       id: report.id,
       data: {
@@ -335,7 +351,7 @@ export function ReportExplorePage() {
         definition: nextDefinition,
       },
     });
-    setSavedMessage(`Saved "${savedBlock.title ?? savedBlock.id}".`);
+    setSavedMessage(`Saved "${nextBlock.title ?? nextBlock.id}".`);
     navigate(buildReportPath(report.id, report.definition, searchParams));
   };
 
@@ -393,8 +409,23 @@ export function ReportExplorePage() {
     ...item,
     validity: vizValidity(item.value, dataset, state),
   }));
+  const currentVizValidity = vizValidity(state.vizType, dataset, state);
   const columns = query.data?.columns ?? [];
   const blockPreview = buildPreviewBlock(dataset, state, columns);
+  const canSaveBlock = Boolean(
+    savedBlock &&
+      currentVizValidity.valid &&
+      !query.isFetching &&
+      !query.isError &&
+      query.data
+  );
+  const canReplaceBlock = Boolean(
+    canSaveBlock &&
+      sourceBlockId &&
+      report.definition.blocks.some(
+        (block) => block.id === sourceBlockId && block.dataset
+      )
+  );
 
   return (
     <TilesPage
@@ -410,11 +441,11 @@ export function ReportExplorePage() {
           </Link>
           <Button
             className="h-11 rounded-full sm:px-5"
-            disabled={!savedBlock || updateReport.isPending}
-            onClick={handleSaveBlock}
+            disabled={!canSaveBlock || updateReport.isPending}
+            onClick={() => handleSaveBlock(canReplaceBlock ? 'replace' : 'append')}
           >
             <Save className="mr-2 h-4 w-4" />
-            Save as block
+            {canReplaceBlock ? 'Update block' : 'Save as block'}
           </Button>
         </div>
       }
@@ -608,9 +639,9 @@ export function ReportExplorePage() {
               </SelectContent>
             </Select>
             <div className="rounded-md bg-muted/30 p-3 text-xs text-muted-foreground">
-              {vizValidity(state.vizType, dataset, state).valid
+              {currentVizValidity.valid
                 ? chartRecommendation(dataset, state)
-                : vizValidity(state.vizType, dataset, state).reason}
+                : currentVizValidity.reason}
             </div>
           </section>
 
@@ -676,12 +707,22 @@ export function ReportExplorePage() {
                   min={1}
                   max={500}
                   value={state.limit}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const limit = clampNumber(
+                      event.target.value,
+                      1,
+                      500,
+                      DEFAULT_LIMIT
+                    );
                     updateState((current) => ({
                       ...current,
-                      limit: clampNumber(event.target.value, 1, 500, DEFAULT_LIMIT),
-                    }))
-                  }
+                      limit,
+                      page: {
+                        offset: 0,
+                        size: Math.min(current.page.size, limit),
+                      },
+                    }));
+                  }}
                 />
               </div>
               <div className="space-y-1">
@@ -826,12 +867,24 @@ export function ReportExplorePage() {
             />
             <Button
               className="w-full"
-              disabled={!savedBlock || updateReport.isPending}
-              onClick={handleSaveBlock}
+              disabled={!canSaveBlock || updateReport.isPending}
+              onClick={() => handleSaveBlock(canReplaceBlock ? 'replace' : 'append')}
             >
               <Save className="mr-2 h-4 w-4" />
-              Save as report block
+              {canReplaceBlock ? 'Update report block' : 'Save as report block'}
             </Button>
+            {canReplaceBlock && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={!canSaveBlock || updateReport.isPending}
+                onClick={() => handleSaveBlock('append')}
+              >
+                <Save className="mr-2 h-4 w-4" />
+                Save as copy
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -1355,6 +1408,19 @@ function buildSavedBlock(
     id,
     title: state.blockTitle || humanizeFieldName(id),
     source: { schema: '' },
+  };
+}
+
+function replaceBlockInDefinition(
+  definition: ReportDefinition,
+  blockId: string,
+  block: ReportBlockDefinition
+): ReportDefinition {
+  return {
+    ...definition,
+    blocks: definition.blocks.map((candidate) =>
+      candidate.id === blockId ? block : candidate
+    ),
   };
 }
 

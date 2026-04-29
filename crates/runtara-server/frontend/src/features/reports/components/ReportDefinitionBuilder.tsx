@@ -28,6 +28,7 @@ import { Switch } from '@/shared/components/ui/switch';
 import { Textarea } from '@/shared/components/ui/textarea';
 import {
   ReportAggregateFn,
+  ReportBlockDatasetQuery,
   ReportBlockDefinition,
   ReportBlockType,
   ReportChartKind,
@@ -38,6 +39,12 @@ import {
   ReportLayoutNode,
   ReportTableColumn,
 } from '../types';
+import {
+  createDefaultDatasetBlockQuery,
+  datasetFieldLabel,
+  datasetQueryOutputFields,
+  reconcileDatasetBlock,
+} from '../datasetBlocks';
 import {
   extractLayoutBlockReferences,
   humanizeFieldName,
@@ -679,6 +686,18 @@ function ReportBlockEditor({
     onChange(convertBlockType(block, type, fields));
   };
 
+  const updateDataset = (datasetId: string) => {
+    const nextDataset = datasets.find((candidate) => candidate.id === datasetId);
+    if (!nextDataset) return;
+    onChange(
+      reconcileDatasetBlock(
+        block,
+        nextDataset,
+        createDefaultDatasetBlockQuery(nextDataset)
+      )
+    );
+  };
+
   return (
     <div className="flex flex-col gap-4 rounded-lg border bg-background p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -765,11 +784,27 @@ function ReportBlockEditor({
         </Field>
         {isDatasetBlock ? (
           <Field label="Dataset">
-            <Input
-              value={dataset?.label ?? block.dataset?.id ?? ''}
-              readOnly
-              className="bg-muted/40"
-            />
+            <Select
+              value={dataset?.id ?? block.dataset?.id ?? NONE_VALUE}
+              disabled={datasets.length === 0}
+              onValueChange={updateDataset}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select dataset" />
+              </SelectTrigger>
+              <SelectContent>
+                {!dataset && block.dataset?.id && (
+                  <SelectItem value={block.dataset.id} disabled>
+                    Missing dataset: {block.dataset.id}
+                  </SelectItem>
+                )}
+                {datasets.map((datasetOption) => (
+                  <SelectItem key={datasetOption.id} value={datasetOption.id}>
+                    {datasetOption.label || datasetOption.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
         ) : (
           <Field label="Schema">
@@ -806,7 +841,11 @@ function ReportBlockEditor({
       <Separator />
 
       {isDatasetBlock ? (
-        <DatasetBlockSettings block={block} dataset={dataset} />
+        <DatasetBlockSettings
+          block={block}
+          dataset={dataset}
+          onChange={onChange}
+        />
       ) : (
         <>
           {blockType === 'table' && (
@@ -850,75 +889,260 @@ function ReportBlockEditor({
 function DatasetBlockSettings({
   block,
   dataset,
+  onChange,
 }: {
   block: ReportBlockDefinition;
   dataset: ReportDatasetDefinition | undefined;
+  onChange: (block: ReportBlockDefinition) => void;
 }) {
   const query = block.dataset;
   if (!query) return null;
 
-  const dimensions = (query.dimensions ?? []).map((field) =>
-    dataset?.dimensions.find((dimension) => dimension.field === field)?.label ??
-    field
-  );
-  const measures = (query.measures ?? []).map(
-    (id) => dataset?.measures.find((measure) => measure.id === id)?.label ?? id
-  );
+  if (!dataset) {
+    return (
+      <div className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+        This block references missing dataset "{query.id}".
+      </div>
+    );
+  }
+
+  const dimensions = query.dimensions ?? [];
+  const measures = query.measures ?? [];
+  const selectedDimensions = new Set(dimensions);
+  const selectedMeasures = new Set(measures);
+  const outputFields = datasetQueryOutputFields(query);
   const sort = query.orderBy?.[0];
 
+  const updateQuery = (nextQuery: ReportBlockDatasetQuery) => {
+    onChange(reconcileDatasetBlock(block, dataset, nextQuery));
+  };
+
+  const updateBlock = (patch: Partial<ReportBlockDefinition>) => {
+    onChange({ ...block, ...patch });
+  };
+
   return (
-    <div className="grid gap-3 md:grid-cols-2">
+    <div className="flex flex-col gap-4">
+      <div className="grid gap-3 md:grid-cols-2">
       <Field label="Dataset ID">
         <Input value={query.id} readOnly className="bg-muted/40" />
       </Field>
       <Field label="Source schema">
         <Input
-          value={dataset?.source.schema ?? 'Unknown dataset'}
+          value={dataset.source.schema}
           readOnly
           className="bg-muted/40"
         />
-      </Field>
-      <Field label="Dimensions">
-        <ReadOnlyPills values={dimensions} empty="No dimensions" />
-      </Field>
-      <Field label="Measures">
-        <ReadOnlyPills values={measures} empty="No measures" />
       </Field>
       <Field label="Sort">
-        <Input
-          value={sort ? `${sort.field} ${sort.direction}` : 'No explicit sort'}
-          readOnly
-          className="bg-muted/40"
-        />
+        <Select
+          value={sort?.field ?? NONE_VALUE}
+          onValueChange={(field) =>
+            updateQuery({
+              ...query,
+              orderBy:
+                field === NONE_VALUE
+                  ? []
+                  : [
+                      {
+                        field,
+                        direction: sort?.direction ?? 'desc',
+                      },
+                    ],
+            })
+          }
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NONE_VALUE}>No explicit sort</SelectItem>
+            {outputFields.map((field) => (
+              <SelectItem key={field} value={field}>
+                {datasetFieldLabel(dataset, field)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      <Field label="Sort direction">
+        <Select
+          value={sort?.direction ?? 'desc'}
+          disabled={!sort}
+          onValueChange={(direction) =>
+            updateQuery({
+              ...query,
+              orderBy: sort ? [{ ...sort, direction }] : [],
+            })
+          }
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="desc">Descending</SelectItem>
+            <SelectItem value="asc">Ascending</SelectItem>
+          </SelectContent>
+        </Select>
       </Field>
       <Field label="Limit">
         <Input
+          type="number"
+          min={1}
           value={String(query.limit ?? 100)}
-          readOnly
-          className="bg-muted/40"
+          onChange={(event) =>
+            updateQuery({
+              ...query,
+              limit: Math.max(1, Number(event.target.value) || 100),
+            })
+          }
         />
       </Field>
-    </div>
-  );
-}
+      </div>
 
-function ReadOnlyPills({
-  values,
-  empty,
-}: {
-  values: string[];
-  empty: string;
-}) {
-  return (
-    <div className="flex min-h-10 flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2">
-      {values.length > 0 ? (
-        values.map((value) => (
-          <Badge key={value} variant="secondary">
-            {value}
-          </Badge>
-        ))
-      ) : (
-        <span className="text-sm text-muted-foreground">{empty}</span>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="space-y-2">
+          <Label>Dimensions</Label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {dataset.dimensions.map((dimension) => (
+              <label
+                key={dimension.field}
+                className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm"
+              >
+                <Checkbox
+                  checked={selectedDimensions.has(dimension.field)}
+                  onCheckedChange={(checked) => {
+                    const nextDimensions = checked
+                      ? [...dimensions, dimension.field]
+                      : dimensions.filter((field) => field !== dimension.field);
+                    updateQuery({
+                      ...query,
+                      dimensions: nextDimensions,
+                      orderBy: (query.orderBy ?? []).filter((item) =>
+                        [...nextDimensions, ...measures].includes(item.field)
+                      ),
+                    });
+                  }}
+                />
+                <span className="truncate">{dimension.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Measures</Label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {dataset.measures.map((measure) => (
+              <label
+                key={measure.id}
+                className="flex min-h-10 items-center gap-2 rounded-md border px-3 py-2 text-sm"
+              >
+                <Checkbox
+                  checked={selectedMeasures.has(measure.id)}
+                  onCheckedChange={(checked) => {
+                    const nextMeasures = checked
+                      ? [...measures, measure.id]
+                      : measures.filter((field) => field !== measure.id);
+                    updateQuery({
+                      ...query,
+                      measures: nextMeasures,
+                      orderBy: (query.orderBy ?? []).filter((item) =>
+                        [...dimensions, ...nextMeasures].includes(item.field)
+                      ),
+                    });
+                  }}
+                />
+                <span className="truncate">{measure.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {block.type === 'chart' && (
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field label="Chart type">
+            <Select
+              value={block.chart?.kind ?? 'bar'}
+              onValueChange={(kind) =>
+                updateBlock({
+                  chart: {
+                    kind: kind as ReportChartKind,
+                    x: block.chart?.x ?? dimensions[0] ?? outputFields[0] ?? '',
+                    series: block.chart?.series ?? [],
+                  },
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CHART_KIND_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="X-axis">
+            <Select
+              value={block.chart?.x ?? dimensions[0] ?? NONE_VALUE}
+              onValueChange={(x) =>
+                updateBlock({
+                  chart: {
+                    kind: block.chart?.kind ?? 'bar',
+                    x,
+                    series: block.chart?.series ?? [],
+                  },
+                })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {outputFields.map((field) => (
+                  <SelectItem key={field} value={field}>
+                    {datasetFieldLabel(dataset, field)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        </div>
+      )}
+
+      {block.type === 'metric' && (
+        <Field label="Metric value">
+          <Select
+            value={block.metric?.valueField ?? measures[0] ?? NONE_VALUE}
+            onValueChange={(valueField) =>
+              updateBlock({
+                metric: {
+                  valueField,
+                  label: datasetFieldLabel(dataset, valueField),
+                  format: dataset.measures.find(
+                    (measure) => measure.id === valueField
+                  )?.format,
+                },
+              })
+            }
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {outputFields.map((field) => (
+                <SelectItem key={field} value={field}>
+                  {datasetFieldLabel(dataset, field)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
       )}
     </div>
   );

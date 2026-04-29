@@ -37,6 +37,7 @@ import {
   humanizeFieldName,
   slugify,
 } from '../utils';
+import { reconcileDatasetBlock } from '../datasetBlocks';
 
 const EMPTY_DEFINITION: ReportDefinition = {
   definitionVersion: 1,
@@ -390,7 +391,7 @@ function ReportDatasetsEditor({
     nextDatasets: ReportDatasetDefinition[],
     rename?: { previousId: string; nextId: string }
   ) => {
-    const blocks =
+    const renamedBlocks =
       rename && rename.previousId !== rename.nextId
         ? definition.blocks.map((block) =>
             block.dataset?.id === rename.previousId
@@ -401,6 +402,14 @@ function ReportDatasetsEditor({
               : block
           )
         : definition.blocks;
+    const nextDatasetById = new Map(
+      nextDatasets.map((dataset) => [dataset.id, dataset])
+    );
+    const blocks = renamedBlocks.map((block) => {
+      if (!block.dataset) return block;
+      const dataset = nextDatasetById.get(block.dataset.id);
+      return dataset ? reconcileDatasetBlock(block, dataset) : block;
+    });
     onChange({ ...definition, datasets: nextDatasets, blocks });
   };
 
@@ -422,12 +431,35 @@ function ReportDatasetsEditor({
     const schema =
       schemas.find((candidate) => candidate.name === selectedSchema) ??
       schemas[0];
+    if (!schema) return;
     const dataset = createDefaultDataset(schema, datasets);
     updateDatasets([...datasets, dataset]);
   };
 
   const removeDataset = (index: number) => {
-    updateDatasets(datasets.filter((_, currentIndex) => currentIndex !== index));
+    const removedDatasetId = datasets[index]?.id;
+    const nextDatasets = datasets.filter(
+      (_, currentIndex) => currentIndex !== index
+    );
+    if (!removedDatasetId) {
+      updateDatasets(nextDatasets);
+      return;
+    }
+
+    const removedBlockIds = new Set(
+      definition.blocks
+        .filter((block) => block.dataset?.id === removedDatasetId)
+        .map((block) => block.id)
+    );
+    const blocks = definition.blocks.filter(
+      (block) => !removedBlockIds.has(block.id)
+    );
+    onChange({
+      ...definition,
+      datasets: nextDatasets,
+      blocks,
+      layout: removeLayoutBlockReferences(definition.layout, removedBlockIds),
+    });
   };
 
   return (
@@ -439,7 +471,13 @@ function ReportDatasetsEditor({
           </h2>
           <Badge variant="secondary">{datasets.length} datasets</Badge>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={addDataset}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={schemas.length === 0}
+          onClick={addDataset}
+        >
           <Plus className="mr-2 size-4" />
           Add dataset
         </Button>
@@ -969,6 +1007,65 @@ function getSchemaFieldNames(schema: Schema | undefined): string[] {
   return (schema?.columns ?? [])
     .map((column) => column.name)
     .filter((field) => field && field !== 'id');
+}
+
+function removeLayoutBlockReferences(
+  layout: ReportDefinition['layout'],
+  removedBlockIds: Set<string>
+): ReportDefinition['layout'] {
+  if (!layout) return layout;
+  return layout
+    .map((node) => removeLayoutBlockReference(node, removedBlockIds))
+    .filter(
+      (node): node is NonNullable<ReportDefinition['layout']>[number] =>
+        Boolean(node)
+    );
+}
+
+function removeLayoutBlockReference(
+  node: NonNullable<ReportDefinition['layout']>[number],
+  removedBlockIds: Set<string>
+): NonNullable<ReportDefinition['layout']>[number] | null {
+  if (node.type === 'block') {
+    return removedBlockIds.has(node.blockId) ? null : node;
+  }
+
+  if (node.type === 'metric_row') {
+    const blocks = node.blocks.filter((blockId) => !removedBlockIds.has(blockId));
+    return blocks.length === 0 ? null : { ...node, blocks };
+  }
+
+  if (node.type === 'section') {
+    return {
+      ...node,
+      children: removeLayoutBlockReferences(
+        node.children,
+        removedBlockIds
+      ),
+    };
+  }
+
+  if (node.type === 'columns') {
+    return {
+      ...node,
+      columns: node.columns.map((column) => ({
+        ...column,
+        children: removeLayoutBlockReferences(
+          column.children,
+          removedBlockIds
+        ),
+      })),
+    };
+  }
+
+  if (node.type === 'grid') {
+    const items = node.items.filter(
+      (item) => !removedBlockIds.has(item.blockId)
+    );
+    return items.length === 0 ? null : { ...node, items };
+  }
+
+  return node;
 }
 
 function inferReportPrimarySchema(definition: ReportDefinition): string {
