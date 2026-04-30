@@ -1,8 +1,9 @@
 use serde_json::Value;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use crate::api::dto::object_model::{AggregateRequest, AggregateSpec, Condition};
-use crate::api::dto::reports::ReportSourceJoin;
+use crate::api::dto::reports::{ReportOrderBy, ReportSourceJoin};
 
 use super::{ReportServiceError, combine_conditions};
 
@@ -212,6 +213,290 @@ pub(super) fn split_qualified_condition(
             Ok((None, by_alias))
         }
         None => Ok((Some(c), HashMap::new())),
+    }
+}
+
+pub(super) fn primary_pushdown_condition(
+    condition: Option<Condition>,
+    alias_set: &HashSet<&str>,
+    block_id: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    let Some(condition) = condition else {
+        return Ok(None);
+    };
+    primary_pushdown_condition_inner(condition, alias_set, block_id)
+}
+
+fn primary_pushdown_condition_inner(
+    condition: Condition,
+    alias_set: &HashSet<&str>,
+    block_id: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    if condition.op.eq_ignore_ascii_case("AND") {
+        let children = condition
+            .arguments
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|argument| serde_json::from_value::<Condition>(argument).ok())
+            .map(|child| primary_pushdown_condition_inner(child, alias_set, block_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        return Ok(combine_conditions(children));
+    }
+
+    if condition_can_run_on_primary(&condition, alias_set, block_id)? {
+        Ok(Some(condition))
+    } else {
+        Ok(None)
+    }
+}
+
+fn condition_can_run_on_primary(
+    condition: &Condition,
+    alias_set: &HashSet<&str>,
+    block_id: &str,
+) -> Result<bool, ReportServiceError> {
+    let mut uses_join_alias = false;
+    let mut found_unknown: Option<String> = None;
+    walk_condition_field_refs(condition, &mut |field| {
+        let Some(alias) = field_alias_prefix(field) else {
+            return;
+        };
+        if alias_set.contains(alias) {
+            uses_join_alias = true;
+        } else if found_unknown.is_none() {
+            found_unknown = Some(alias.to_string());
+        }
+    });
+
+    if let Some(alias) = found_unknown {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' condition references unknown join alias '{}'",
+            block_id, alias
+        )));
+    }
+
+    Ok(!uses_join_alias)
+}
+
+pub(super) fn condition_matches_row(
+    condition: &Condition,
+    row: &serde_json::Map<String, Value>,
+    block_id: &str,
+) -> Result<bool, ReportServiceError> {
+    let op = condition.op.to_ascii_uppercase();
+    let args = condition.arguments.as_deref().unwrap_or(&[]);
+    match op.as_str() {
+        "AND" => {
+            for argument in args {
+                let child = condition_child(argument, block_id)?;
+                if !condition_matches_row(&child, row, block_id)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        "OR" => {
+            for argument in args {
+                let child = condition_child(argument, block_id)?;
+                if condition_matches_row(&child, row, block_id)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "NOT" => {
+            let Some(argument) = args.first() else {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' NOT condition requires one argument",
+                    block_id
+                )));
+            };
+            let child = condition_child(argument, block_id)?;
+            Ok(!condition_matches_row(&child, row, block_id)?)
+        }
+        "EQ" => compare_binary(args, row, block_id, |ordering, equal| {
+            equal || ordering == Some(Ordering::Equal)
+        }),
+        "NE" => compare_binary(args, row, block_id, |ordering, equal| {
+            !(equal || ordering == Some(Ordering::Equal))
+        }),
+        "GT" => compare_binary(args, row, block_id, |ordering, _| {
+            ordering == Some(Ordering::Greater)
+        }),
+        "GTE" => compare_binary(args, row, block_id, |ordering, equal| {
+            equal || matches!(ordering, Some(Ordering::Greater | Ordering::Equal))
+        }),
+        "LT" => compare_binary(args, row, block_id, |ordering, _| {
+            ordering == Some(Ordering::Less)
+        }),
+        "LTE" => compare_binary(args, row, block_id, |ordering, equal| {
+            equal || matches!(ordering, Some(Ordering::Less | Ordering::Equal))
+        }),
+        "IN" | "NOT_IN" => {
+            if args.len() != 2 {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' {} condition requires two arguments",
+                    block_id, condition.op
+                )));
+            }
+            let left = operand_value(&args[0], row, true);
+            let values = args[1].as_array().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Block '{}' {} condition second argument must be an array",
+                    block_id, condition.op
+                ))
+            })?;
+            let contains = values.iter().any(|value| values_equal(&left, value));
+            Ok(if op == "IN" { contains } else { !contains })
+        }
+        "CONTAINS" => {
+            if args.len() != 2 {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' CONTAINS condition requires two arguments",
+                    block_id
+                )));
+            }
+            let left = operand_value(&args[0], row, true);
+            let needle = args[1].as_str().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Block '{}' CONTAINS condition second argument must be a string",
+                    block_id
+                ))
+            })?;
+            Ok(left
+                .as_str()
+                .is_some_and(|haystack| haystack.contains(needle)))
+        }
+        "IS_DEFINED" => unary_field(args, row, block_id, |value| !value.is_null()),
+        "IS_EMPTY" => unary_field(args, row, block_id, row_value_is_empty),
+        "IS_NOT_EMPTY" => unary_field(args, row, block_id, |value| !row_value_is_empty(value)),
+        _ => Err(ReportServiceError::Validation(format!(
+            "Block '{}' joined table post-filter does not support condition op '{}'",
+            block_id, condition.op
+        ))),
+    }
+}
+
+fn condition_child(argument: &Value, block_id: &str) -> Result<Condition, ReportServiceError> {
+    serde_json::from_value::<Condition>(argument.clone()).map_err(|err| {
+        ReportServiceError::Validation(format!(
+            "Block '{}' condition child is invalid: {}",
+            block_id, err
+        ))
+    })
+}
+
+fn compare_binary(
+    args: &[Value],
+    row: &serde_json::Map<String, Value>,
+    block_id: &str,
+    predicate: impl FnOnce(Option<Ordering>, bool) -> bool,
+) -> Result<bool, ReportServiceError> {
+    if args.len() != 2 {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' comparison condition requires two arguments",
+            block_id
+        )));
+    }
+    let left = operand_value(&args[0], row, true);
+    let right = operand_value(&args[1], row, false);
+    Ok(predicate(
+        compare_values(&left, &right),
+        values_equal(&left, &right),
+    ))
+}
+
+fn unary_field(
+    args: &[Value],
+    row: &serde_json::Map<String, Value>,
+    block_id: &str,
+    predicate: impl FnOnce(&Value) -> bool,
+) -> Result<bool, ReportServiceError> {
+    if args.len() != 1 {
+        return Err(ReportServiceError::Validation(format!(
+            "Block '{}' unary condition requires one argument",
+            block_id
+        )));
+    }
+    Ok(predicate(&operand_value(&args[0], row, true)))
+}
+
+fn operand_value(argument: &Value, row: &serde_json::Map<String, Value>, field_ref: bool) -> Value {
+    if field_ref && let Some(field) = argument.as_str() {
+        return row.get(field).cloned().unwrap_or(Value::Null);
+    }
+    argument.clone()
+}
+
+pub(super) fn sort_rows(rows: &mut [serde_json::Map<String, Value>], sort: &[ReportOrderBy]) {
+    if sort.is_empty() {
+        return;
+    }
+    rows.sort_by(|left, right| compare_rows(left, right, sort));
+}
+
+fn compare_rows(
+    left: &serde_json::Map<String, Value>,
+    right: &serde_json::Map<String, Value>,
+    sort: &[ReportOrderBy],
+) -> Ordering {
+    for entry in sort {
+        let left_value = left.get(&entry.field).unwrap_or(&Value::Null);
+        let right_value = right.get(&entry.field).unwrap_or(&Value::Null);
+        let ordering = compare_values(left_value, right_value).unwrap_or(Ordering::Equal);
+        let ordering = if entry.direction.eq_ignore_ascii_case("desc") {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_values(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Null, Value::Null) => Some(Ordering::Equal),
+        (Value::Null, _) => Some(Ordering::Greater),
+        (_, Value::Null) => Some(Ordering::Less),
+        (Value::Number(left), Value::Number(right)) => left.as_f64()?.partial_cmp(&right.as_f64()?),
+        (Value::String(left), Value::String(right)) => Some(left.cmp(right)),
+        (Value::Bool(left), Value::Bool(right)) => Some(left.cmp(right)),
+        _ => Some(value_sort_key(left).cmp(&value_sort_key(right))),
+    }
+}
+
+fn values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(_), Value::Number(_)) => {
+            compare_values(left, right) == Some(Ordering::Equal)
+        }
+        _ => left == right,
+    }
+}
+
+fn value_sort_key(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn row_value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(value) => value.trim().is_empty(),
+        Value::Array(values) => values.is_empty(),
+        Value::Object(values) => values.is_empty(),
+        _ => false,
     }
 }
 
@@ -505,6 +790,80 @@ mod tests {
         let condition = cond("EQ", vec![json!("q.foo"), json!("bar")]);
         let err = split_qualified_condition(Some(condition), &aliases, "block").unwrap_err();
         assert!(err.to_string().contains("unknown join alias 'q'"));
+    }
+
+    #[test]
+    fn primary_pushdown_keeps_only_safe_and_terms() {
+        let aliases: HashSet<&str> = ["p"].into_iter().collect();
+        let condition = cond(
+            "AND",
+            vec![
+                serde_json::to_value(cond("EQ", vec![json!("status"), json!("active")])).unwrap(),
+                serde_json::to_value(cond("EQ", vec![json!("p.category"), json!("network")]))
+                    .unwrap(),
+            ],
+        );
+
+        let pushed = primary_pushdown_condition(Some(condition), &aliases, "block")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(pushed.op, "EQ");
+        assert_eq!(
+            pushed.arguments.unwrap(),
+            vec![json!("status"), json!("active")]
+        );
+    }
+
+    #[test]
+    fn primary_pushdown_drops_or_with_join_terms() {
+        let aliases: HashSet<&str> = ["p"].into_iter().collect();
+        let condition = cond(
+            "OR",
+            vec![
+                serde_json::to_value(cond("EQ", vec![json!("status"), json!("active")])).unwrap(),
+                serde_json::to_value(cond("EQ", vec![json!("p.category"), json!("network")]))
+                    .unwrap(),
+            ],
+        );
+
+        let pushed = primary_pushdown_condition(Some(condition), &aliases, "block").unwrap();
+
+        assert!(pushed.is_none());
+    }
+
+    #[test]
+    fn condition_matches_row_handles_qualified_or_and_not_terms() {
+        let row = serde_json::Map::from_iter([
+            ("status".to_string(), json!("inactive")),
+            ("p.category".to_string(), json!("network")),
+            ("qty".to_string(), json!(10)),
+        ]);
+        let condition = cond(
+            "AND",
+            vec![
+                serde_json::to_value(cond(
+                    "OR",
+                    vec![
+                        serde_json::to_value(cond("EQ", vec![json!("status"), json!("active")]))
+                            .unwrap(),
+                        serde_json::to_value(cond(
+                            "EQ",
+                            vec![json!("p.category"), json!("network")],
+                        ))
+                        .unwrap(),
+                    ],
+                ))
+                .unwrap(),
+                serde_json::to_value(cond(
+                    "NOT",
+                    vec![serde_json::to_value(cond("LT", vec![json!("qty"), json!(1)])).unwrap()],
+                ))
+                .unwrap(),
+            ],
+        );
+
+        assert!(condition_matches_row(&condition, &row, "block").unwrap());
     }
 
     #[test]

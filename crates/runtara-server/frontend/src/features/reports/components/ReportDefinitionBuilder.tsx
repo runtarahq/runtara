@@ -2095,6 +2095,7 @@ function emptyReportSource(): ReportBlockDefinition['source'] {
     aggregates: [],
     orderBy: [],
     filterMappings: [],
+    join: [],
   };
 }
 

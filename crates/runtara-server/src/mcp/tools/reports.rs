@@ -1257,7 +1257,8 @@ fn report_authoring_schema() -> Value {
             "groupBy": "Aggregate output grouping fields.",
             "aggregates": "Aggregate specs. Report aggregate specs use {alias, op, field?, distinct?, orderBy?, expression?}. Use op/field here, not fn/column.",
             "orderBy": "Sort array using {field, direction}. Field must be a row field, groupBy field, or aggregate alias depending on source mode.",
-            "limit": "Optional row/group cap."
+            "limit": "Optional row/group cap.",
+            "join": "Optional single-hop Object Model joins. Use [{schema, alias?, connectionId?, parentField, field, op?, kind?}] and qualify joined fields as <alias>.<field>."
         },
         "datasetShape": {
             "id": "Stable dataset id, unique within definition.datasets.",
@@ -1359,6 +1360,25 @@ fn report_authoring_schema() -> Value {
                     ],
                     "defaultSort": [{"field": "sku", "direction": "asc"}],
                     "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]}
+                }
+            },
+            "joinedTable": {
+                "id": "stock_with_product",
+                "type": "table",
+                "title": "Stock with product details",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "join": [{"schema": "TDProduct", "alias": "product", "parentField": "sku", "field": "sku", "kind": "left"}],
+                    "condition": {"op": "EQ", "arguments": ["product.category_leaf_id", {"filter": "category", "path": "value"}]}
+                },
+                "table": {
+                    "columns": [
+                        {"field": "sku", "label": "SKU"},
+                        {"field": "qty", "label": "Qty"},
+                        {"field": "product.part_number", "label": "Part Number"}
+                    ],
+                    "defaultSort": [{"field": "product.part_number", "direction": "asc"}]
                 }
             },
             "chart": {
@@ -3592,6 +3612,45 @@ mod tests {
         let codes = issue_codes(&issues);
 
         assert!(codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_block_source_join_shape() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "join": [{
+                        "schema": "TDProduct",
+                        "alias": "product",
+                        "parentField": "sku",
+                        "field": "sku",
+                        "kind": "left"
+                    }],
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": ["product.category_leaf_id", "leaf-1"]
+                    }
+                },
+                "table": {
+                    "columns": [
+                        {"field": "sku"},
+                        {"field": "product.part_number"}
+                    ]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"MISSING_JOIN_SCHEMA"));
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {

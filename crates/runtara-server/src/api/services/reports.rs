@@ -21,13 +21,15 @@ use crate::api::services::object_model::{
 mod query_plan;
 
 use self::query_plan::{
-    JoinResolution, build_alias_index, empty_join_result, enrich_aggregate_result,
-    field_alias_prefix, split_qualified_condition, strip_alias_from_condition,
-    validate_join_request, value_to_lookup_key,
+    JoinResolution, build_alias_index, condition_matches_row, empty_join_result,
+    enrich_aggregate_result, field_alias_prefix, primary_pushdown_condition, sort_rows,
+    split_qualified_condition, strip_alias_from_condition, validate_join_request,
+    value_to_lookup_key,
 };
 
 const MAX_TABLE_PAGE_SIZE: i64 = 500;
 const MAX_AGGREGATE_ROWS: i64 = 1000;
+const MAX_JOIN_POST_FILTER_ROWS: i64 = 50_000;
 /// Cap on rows fetched per join from a dimension schema. Broadcast-hash
 /// join breaks down (round trip + memory) past this; report a validation
 /// error so the caller adds a more selective `<alias>.<field>` condition.
@@ -1443,6 +1445,17 @@ impl ReportService {
                 )
                 .await;
         }
+        if !block.source.join.is_empty() {
+            return self
+                .render_joined_filter_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await;
+        }
 
         let table = block.table.as_ref();
         let page_size = clamp_page_size(
@@ -1538,6 +1551,149 @@ impl ReportService {
                 "totalCount": total_count,
                 "hasNextPage": offset + page_size < total_count
             }
+        }))
+    }
+
+    async fn render_joined_filter_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
+
+        let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
+        let alias_to_join = build_alias_index(&block.source.join, &block.id)?;
+        let alias_set: HashSet<&str> = alias_to_join.keys().map(|alias| alias.as_str()).collect();
+        let primary_condition =
+            primary_pushdown_condition(condition.clone(), &alias_set, &block.id)?;
+
+        let filter_request = FilterRequest {
+            offset: 0,
+            limit: MAX_JOIN_POST_FILTER_ROWS,
+            condition: primary_condition,
+            sort_by: None,
+            sort_order: None,
+            score_expression: None,
+            order_by: None,
+        };
+
+        let (instances, total_candidates) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                filter_request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        if total_candidates > MAX_JOIN_POST_FILTER_ROWS {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' joined table query matched {} primary rows before post-filtering; cap is {}. Add a more selective primary-schema condition.",
+                block.id, total_candidates, MAX_JOIN_POST_FILTER_ROWS
+            )));
+        }
+
+        let mut rows = instances
+            .into_iter()
+            .filter_map(|instance| match flatten_instance(instance) {
+                Value::Object(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let join_data = self
+            .resolve_filter_join_data(tenant_id, block, &alias_to_join, &rows)
+            .await?;
+        rows = enrich_filter_join_rows(&alias_to_join, &join_data, rows);
+
+        if let Some(condition) = &condition {
+            rows = rows
+                .into_iter()
+                .filter_map(
+                    |row| match condition_matches_row(condition, &row, &block.id) {
+                        Ok(true) => Some(Ok(row)),
+                        Ok(false) => None,
+                        Err(err) => Some(Err(err)),
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+
+        sort_rows(&mut rows, &sort);
+        let total_count = rows.len() as i64;
+        let rows = rows
+            .into_iter()
+            .skip(offset as usize)
+            .take(page_size as usize)
+            .map(Value::Object)
+            .collect::<Vec<_>>();
+        let condition_context = ReportConditionRuntimeContext {
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+        };
+        let rows = self
+            .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
+            .await?;
+
+        let columns = table
+            .map(|table| {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        json!({
+                            "key": column.field,
+                            "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
+                            "format": column.format,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(json!({
+            "columns": columns,
+            "rows": rows,
+            "page": {
+                "offset": offset,
+                "size": page_size,
+                "totalCount": total_count,
+                "hasNextPage": offset + page_size < total_count
+            },
+            "diagnostics": [{
+                "severity": "warning",
+                "code": "JOIN_BROADCAST_POST_FILTER",
+                "message": format!("Block '{}' used bounded broadcast join post-filtering.", block.id)
+            }]
         }))
     }
 
@@ -1837,6 +1993,102 @@ impl ReportService {
             &alias_to_join,
             &join_data,
         ))
+    }
+
+    async fn resolve_filter_join_data(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        alias_to_join: &HashMap<String, &ReportSourceJoin>,
+        primary_rows: &[serde_json::Map<String, Value>],
+    ) -> Result<HashMap<String, JoinResolution>, ReportServiceError> {
+        let mut join_data = HashMap::new();
+        for (alias, join) in alias_to_join {
+            let mut seen_keys = HashSet::new();
+            let mut parent_keys = Vec::new();
+            for row in primary_rows {
+                let Some(value) = row.get(&join.parent_field) else {
+                    continue;
+                };
+                if value_is_empty(value) {
+                    continue;
+                }
+                let key = value_to_lookup_key(value);
+                if seen_keys.insert(key) {
+                    parent_keys.push(value.clone());
+                }
+            }
+
+            if parent_keys.is_empty() {
+                join_data.insert(
+                    alias.clone(),
+                    JoinResolution {
+                        parent_keys,
+                        by_key: HashMap::new(),
+                    },
+                );
+                continue;
+            }
+
+            let filter = FilterRequest {
+                offset: 0,
+                limit: MAX_BROADCAST_JOIN_DIM_ROWS,
+                condition: Some(Condition {
+                    op: "IN".to_string(),
+                    arguments: Some(vec![
+                        Value::String(join.field.clone()),
+                        Value::Array(parent_keys.clone()),
+                    ]),
+                }),
+                sort_by: None,
+                sort_order: None,
+                score_expression: None,
+                order_by: None,
+            };
+
+            let (dim_instances, total) = self
+                .instance_service
+                .filter_instances_by_schema(
+                    tenant_id,
+                    &join.schema,
+                    filter,
+                    join.connection_id.as_deref(),
+                )
+                .await
+                .map_err(map_object_model_error)?;
+
+            if total > MAX_BROADCAST_JOIN_DIM_ROWS {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' join '{}' would broadcast {} rows from '{}'; cap is {}. Add a more selective condition.",
+                    block.id, alias, total, join.schema, MAX_BROADCAST_JOIN_DIM_ROWS
+                )));
+            }
+
+            let by_key = dim_instances
+                .into_iter()
+                .filter_map(|instance| match flatten_instance(instance) {
+                    Value::Object(row) => {
+                        let key = row.get(&join.field).cloned()?;
+                        Some((key, row))
+                    }
+                    _ => None,
+                })
+                .filter(|(key, _)| !value_is_empty(key))
+                .fold(HashMap::new(), |mut by_key, (key, row)| {
+                    by_key.entry(value_to_lookup_key(&key)).or_insert(row);
+                    by_key
+                });
+
+            join_data.insert(
+                alias.clone(),
+                JoinResolution {
+                    parent_keys,
+                    by_key,
+                },
+            );
+        }
+
+        Ok(join_data)
     }
 
     /// Query the dimension schema and build a lookup keyed by the join's `field`.
@@ -3677,6 +3929,39 @@ fn aggregate_rows_to_maps(
         .collect()
 }
 
+fn enrich_filter_join_rows(
+    alias_to_join: &HashMap<String, &ReportSourceJoin>,
+    join_data: &HashMap<String, JoinResolution>,
+    rows: Vec<serde_json::Map<String, Value>>,
+) -> Vec<serde_json::Map<String, Value>> {
+    rows.into_iter()
+        .filter_map(|mut row| {
+            for (alias, join) in alias_to_join {
+                let dim_row = row
+                    .get(&join.parent_field)
+                    .filter(|value| !value_is_empty(value))
+                    .and_then(|value| {
+                        join_data
+                            .get(alias)
+                            .and_then(|data| data.by_key.get(&value_to_lookup_key(value)))
+                    });
+
+                let Some(dim_row) = dim_row else {
+                    if matches!(join.kind, ReportJoinKind::Inner) {
+                        return None;
+                    }
+                    continue;
+                };
+
+                for (field, value) in dim_row {
+                    row.insert(format!("{}.{}", alias, field), value.clone());
+                }
+            }
+            Some(row)
+        })
+        .collect()
+}
+
 fn build_table_column_condition(
     condition_context: ReportConditionRuntimeContext<'_>,
     source: &ReportTableColumnSource,
@@ -5052,6 +5337,67 @@ mod tests {
         .unwrap();
 
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn filter_join_enrichment_adds_qualified_dimension_fields() {
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Left,
+        };
+        let alias_to_join = HashMap::from([("p".to_string(), &join)]);
+        let mut dim_row = serde_json::Map::new();
+        dim_row.insert("sku".to_string(), json!("ABC-1"));
+        dim_row.insert("part_number".to_string(), json!("PN-1"));
+        let join_data = HashMap::from([(
+            "p".to_string(),
+            JoinResolution {
+                parent_keys: vec![json!("ABC-1")],
+                by_key: HashMap::from([("ABC-1".to_string(), dim_row)]),
+            },
+        )]);
+        let rows = vec![serde_json::Map::from_iter([(
+            "sku".to_string(),
+            json!("ABC-1"),
+        )])];
+
+        let enriched = enrich_filter_join_rows(&alias_to_join, &join_data, rows);
+
+        assert_eq!(enriched[0].get("p.part_number"), Some(&json!("PN-1")));
+    }
+
+    #[test]
+    fn filter_join_enrichment_drops_missing_inner_rows() {
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Inner,
+        };
+        let alias_to_join = HashMap::from([("p".to_string(), &join)]);
+        let join_data = HashMap::from([(
+            "p".to_string(),
+            JoinResolution {
+                parent_keys: vec![json!("ABC-1")],
+                by_key: HashMap::new(),
+            },
+        )]);
+        let rows = vec![serde_json::Map::from_iter([(
+            "sku".to_string(),
+            json!("ABC-1"),
+        )])];
+
+        let enriched = enrich_filter_join_rows(&alias_to_join, &join_data, rows);
+
+        assert!(enriched.is_empty());
     }
 
     #[test]

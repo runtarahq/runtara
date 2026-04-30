@@ -58,6 +58,11 @@ type TableData = {
     totalCount?: number;
     hasNextPage?: boolean;
   };
+  diagnostics?: Array<{
+    severity?: 'warning' | string;
+    code?: string;
+    message: string;
+  }>;
 };
 
 type TableBlockProps = {
@@ -89,6 +94,7 @@ export function TableBlock({
   const columns = normalizeColumns(data.columns, configuredColumns);
   const page = data.page ?? { offset: 0, size: 50, hasNextPage: false };
   const pageSizeOptions = getPageSizeOptions(block, page.size);
+  const diagnostics = data.diagnostics ?? [];
 
   if (columns.length === 0) {
     return (
@@ -244,6 +250,15 @@ export function TableBlock({
           </div>
         </div>
       </div>
+      {diagnostics.length > 0 && (
+        <div className="border-t bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+          {diagnostics.map((diagnostic, index) => (
+            <p key={`${diagnostic.code ?? 'diagnostic'}-${index}`}>
+              {diagnostic.message}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -201,9 +201,20 @@ export interface ReportSource {
   }>;
   orderBy?: ReportOrderBy[];
   limit?: number;
+  join?: ReportSourceJoin[];
 }
 
-export interface ReportTableColumnSource extends ReportSource {
+export interface ReportSourceJoin {
+  schema: string;
+  alias?: string;
+  connectionId?: string;
+  parentField: string;
+  field: string;
+  op?: string;
+  kind?: 'inner' | 'left';
+}
+
+export interface ReportTableColumnSource extends Omit<ReportSource, 'join'> {
   join?: Array<{
     parentField: string;
     field: string;
