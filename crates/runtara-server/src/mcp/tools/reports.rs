@@ -1229,7 +1229,7 @@ fn report_authoring_schema() -> Value {
                 "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
                 "defaultSort": [{"field": "sku", "direction": "asc"}],
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
-                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' with its own aggregate source joined to the parent row."
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts or type='value' with source.select for scalar joined lookups."
             },
             "chart": {
                 "type": "chart",
@@ -1250,6 +1250,7 @@ fn report_authoring_schema() -> Value {
         },
         "sourceShape": {
             "schema": "Object Model schema name. Use get_object_schema to inspect valid fields.",
+            "select": "Table value-column source only: scalar field to copy from the joined schema.",
             "connectionId": "Optional connection id for connection-scoped schemas.",
             "mode": "filter | aggregate",
             "condition": "Optional Object Model condition DSL.",
@@ -1297,6 +1298,7 @@ fn report_authoring_schema() -> Value {
             "For table.columns, use Object Model row fields when source.mode='filter'.",
             "For aggregate table.columns, use source.groupBy fields and source.aggregates aliases, including expr aliases.",
             "For chart table columns, field is a synthetic cell key; configure column.chart and column.source.join.",
+            "For scalar value table columns, use type='value' plus column.source.select and one column.source.join entry.",
             "For chart.x, use an aggregate output field, usually a source.groupBy field.",
             "For chart.series[].field and metric.valueField, use aggregate aliases from source.aggregates.",
             "For source.orderBy and table.defaultSort, use field, not column.",
@@ -1376,6 +1378,18 @@ fn report_authoring_schema() -> Value {
                     "columns": [
                         {"field": "sku", "label": "SKU"},
                         {"field": "qty", "label": "Qty"},
+                        {
+                            "field": "part_number_lookup",
+                            "label": "Part Number",
+                            "type": "value",
+                            "source": {
+                                "schema": "TDProduct",
+                                "mode": "filter",
+                                "select": "part_number",
+                                "join": [{"parentField": "sku", "field": "sku", "kind": "left"}],
+                                "orderBy": [{"field": "createdAt", "direction": "asc"}]
+                            }
+                        },
                         {"field": "product.part_number", "label": "Part Number"}
                     ],
                     "defaultSort": [{"field": "product.part_number", "direction": "asc"}]
@@ -2438,7 +2452,8 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "Each table column must include field.",
                 ));
             }
-            if column.get("type").and_then(Value::as_str) == Some("chart") {
+            let column_type = column.get("type").and_then(Value::as_str);
+            if column_type == Some("chart") {
                 if let Some(chart) = column.get("chart") {
                     collect_chart_issues(&format!("{path}.columns[{index}].chart"), chart, issues);
                 } else {
@@ -2452,6 +2467,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     collect_table_column_source_issues(
                         &format!("{path}.columns[{index}].source"),
                         source,
+                        "chart",
                         issues,
                     );
                 } else {
@@ -2461,6 +2477,15 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                         "Chart table columns must include an aggregate source joined to the parent row.",
                     ));
                 }
+            } else if column_type == Some("value")
+                && let Some(source) = column.get("source")
+            {
+                collect_table_column_source_issues(
+                    &format!("{path}.columns[{index}].source"),
+                    source,
+                    "value",
+                    issues,
+                );
             }
         }
     }
@@ -2484,6 +2509,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
 fn collect_table_column_source_issues(
     path: &str,
     source: &Value,
+    column_type: &str,
     issues: &mut Vec<AuthoringIssue>,
 ) {
     collect_unknown_keys_with_messages(
@@ -2491,6 +2517,7 @@ fn collect_table_column_source_issues(
         source,
         &[
             "schema",
+            "select",
             "connectionId",
             "mode",
             "condition",
@@ -2527,12 +2554,37 @@ fn collect_table_column_source_issues(
         }
     }
 
-    if source.get("mode").and_then(Value::as_str) != Some("aggregate") {
+    if column_type == "chart" && source.get("mode").and_then(Value::as_str) != Some("aggregate") {
         issues.push(error(
             format!("{path}.mode"),
             "INVALID_TABLE_COLUMN_SOURCE_MODE",
             "Chart table column sources must use mode='aggregate'.",
         ));
+    }
+    if column_type == "value" {
+        if source
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("filter")
+            != "filter"
+        {
+            issues.push(error(
+                format!("{path}.mode"),
+                "INVALID_TABLE_COLUMN_SOURCE_MODE",
+                "Value table column sources must use mode='filter'.",
+            ));
+        }
+        if source
+            .get("select")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            issues.push(error(
+                format!("{path}.select"),
+                "MISSING_TABLE_VALUE_SELECT",
+                "Value table column sources must include select.",
+            ));
+        }
     }
     if let Some(aggregates) = source.get("aggregates").and_then(Value::as_array) {
         for (index, aggregate) in aggregates.iter().enumerate() {
@@ -2549,7 +2601,7 @@ fn collect_table_column_source_issues(
             collect_unknown_keys(
                 &format!("{path}.join[{index}]"),
                 join_entry,
-                &["parentField", "field", "op"],
+                &["parentField", "field", "op", "kind"],
                 issues,
             );
         }
@@ -3651,6 +3703,66 @@ mod tests {
 
         assert!(!codes.contains(&"MISSING_JOIN_SCHEMA"));
         assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_value_column_source_select() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {"schema": "StockSnapshot", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "part_number",
+                        "type": "value",
+                        "source": {
+                            "schema": "TDProduct",
+                            "mode": "filter",
+                            "select": "part_number",
+                            "join": [{"parentField": "sku", "field": "sku", "kind": "left"}]
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_value_column_source_without_select() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {"schema": "StockSnapshot", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "part_number",
+                        "type": "value",
+                        "source": {
+                            "schema": "TDProduct",
+                            "mode": "filter",
+                            "join": [{"parentField": "sku", "field": "sku"}]
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {

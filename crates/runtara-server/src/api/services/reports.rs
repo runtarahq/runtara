@@ -956,6 +956,15 @@ impl ReportService {
                             column,
                         )
                         .await?;
+                    } else if column.is_value_lookup() {
+                        self.validate_table_value_column(
+                            tenant_id,
+                            block,
+                            &schema_fields,
+                            &aggregate_output_fields,
+                            column,
+                        )
+                        .await?;
                     } else if !is_table_value_field(&column.field) {
                         return Err(ReportServiceError::Validation(format!(
                             "Block '{}' references unknown table field '{}'",
@@ -1366,6 +1375,102 @@ impl ReportService {
                 return Err(ReportServiceError::Validation(format!(
                     "Block '{}' chart table column '{}' references unknown chart series field '{}'",
                     block.id, column.field, series.field
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn validate_table_value_column(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        parent_schema_fields: &HashSet<String>,
+        parent_output_fields: &HashSet<String>,
+        column: &ReportTableColumn,
+    ) -> Result<(), ReportServiceError> {
+        let Some(source) = &column.source else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' must define source",
+                block.id, column.field
+            )));
+        };
+        if source.mode != ReportSourceMode::Filter {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.mode must be filter",
+                block.id, column.field
+            )));
+        }
+        if !source.group_by.is_empty() || !source.aggregates.is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source must not define groupBy or aggregates",
+                block.id, column.field
+            )));
+        }
+        let Some(select) = source
+            .select
+            .as_deref()
+            .filter(|select| !select.trim().is_empty())
+        else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.select is required",
+                block.id, column.field
+            )));
+        };
+        if source.join.len() != 1 {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' requires exactly one source.join entry",
+                block.id, column.field
+            )));
+        }
+        if source.schema.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' must specify an Object Model schema",
+                block.id, column.field
+            )));
+        }
+
+        let nested_schema = self
+            .schema_service
+            .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
+            .await
+            .map_err(map_object_model_error)?;
+        let nested_schema_fields: HashSet<_> = nested_schema
+            .columns
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
+
+        if !is_schema_field(&nested_schema_fields, select) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.select '{}' is not a column on '{}'",
+                block.id, column.field, select, source.schema
+            )));
+        }
+
+        let join = &source.join[0];
+        let parent_field_ok = match block.source.mode {
+            ReportSourceMode::Filter => is_schema_field(parent_schema_fields, &join.parent_field),
+            ReportSourceMode::Aggregate => parent_output_fields.contains(&join.parent_field),
+        };
+        if !parent_field_ok {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' references unknown parent join field '{}'",
+                block.id, column.field, join.parent_field
+            )));
+        }
+        if !is_schema_field(&nested_schema_fields, &join.field) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' join field '{}' is not a column on '{}'",
+                block.id, column.field, join.field, source.schema
+            )));
+        }
+        for order_by in &source.order_by {
+            if !is_schema_field(&nested_schema_fields, &order_by.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' value table column '{}' references unknown orderBy field '{}'",
+                    block.id, column.field, order_by.field
                 )));
             }
         }
@@ -1811,26 +1916,230 @@ impl ReportService {
             .iter()
             .filter(|column| column.is_chart())
             .collect();
-        if chart_columns.is_empty() {
+        let value_columns: Vec<_> = table
+            .columns
+            .iter()
+            .filter(|column| column.is_value_lookup())
+            .collect();
+        if chart_columns.is_empty() && value_columns.is_empty() {
             return Ok(rows);
         }
 
-        let mut hydrated_rows = Vec::with_capacity(rows.len());
-        for row in rows {
-            let Value::Object(mut object) = row else {
-                hydrated_rows.push(row);
-                continue;
-            };
+        let mut hydrated_rows = rows
+            .into_iter()
+            .filter_map(|row| match row {
+                Value::Object(object) => Some(object),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if !value_columns.is_empty() {
+            self.hydrate_table_value_columns(
+                tenant_id,
+                condition_context,
+                &value_columns,
+                &mut hydrated_rows,
+            )
+            .await?;
+        }
+
+        let mut output_rows = Vec::with_capacity(hydrated_rows.len());
+        for mut object in hydrated_rows {
             for column in &chart_columns {
                 let cell = self
                     .render_table_chart_cell(tenant_id, condition_context, column, &object)
                     .await?;
                 object.insert(column.field.clone(), cell);
             }
-            hydrated_rows.push(Value::Object(object));
+            output_rows.push(Value::Object(object));
         }
 
-        Ok(hydrated_rows)
+        Ok(output_rows)
+    }
+
+    async fn hydrate_table_value_columns(
+        &self,
+        tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
+        value_columns: &[&ReportTableColumn],
+        rows: &mut Vec<serde_json::Map<String, Value>>,
+    ) -> Result<(), ReportServiceError> {
+        let condition_filter_defs = block_condition_filter_definitions(
+            condition_context.definition,
+            condition_context.block,
+        );
+        let condition_filter_values = block_condition_filter_values(
+            condition_context.block,
+            condition_context.resolved_filters,
+            condition_context.block_request,
+        );
+        let mut keep_rows = vec![true; rows.len()];
+        for column in value_columns {
+            let Some(source) = &column.source else {
+                continue;
+            };
+            let select = source.select.as_deref().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Value table column '{}' requires source.select",
+                    column.field
+                ))
+            })?;
+            let join = source.join.first().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Value table column '{}' requires source.join",
+                    column.field
+                ))
+            })?;
+            let mut seen_keys = HashSet::new();
+            let mut parent_keys = Vec::new();
+            for row in rows.iter() {
+                let Some(value) = row.get(&join.parent_field) else {
+                    continue;
+                };
+                if value_is_empty(value) {
+                    continue;
+                }
+                if seen_keys.insert(value_to_lookup_key(value)) {
+                    parent_keys.push(value.clone());
+                }
+            }
+
+            let source_condition = resolve_optional_report_condition(
+                source.condition.as_ref(),
+                &condition_filter_defs,
+                &condition_filter_values,
+                &format!(
+                    "block '{}' value table column '{}'",
+                    condition_context.block.id, column.field
+                ),
+            )?;
+            let values_by_key = if parent_keys.is_empty() {
+                HashMap::new()
+            } else {
+                self.lookup_table_value_column(
+                    tenant_id,
+                    source,
+                    join,
+                    select,
+                    source_condition,
+                    &parent_keys,
+                )
+                .await?
+            };
+
+            for (index, row) in rows.iter_mut().enumerate() {
+                let value = row
+                    .get(&join.parent_field)
+                    .and_then(|parent_value| values_by_key.get(&value_to_lookup_key(parent_value)))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if value_is_empty(&value) && matches!(join.kind, ReportJoinKind::Inner) {
+                    keep_rows[index] = false;
+                }
+                row.insert(column.field.clone(), value);
+            }
+        }
+
+        let mut index = 0;
+        rows.retain(|_| {
+            let keep = keep_rows[index];
+            index += 1;
+            keep
+        });
+        Ok(())
+    }
+
+    async fn lookup_table_value_column(
+        &self,
+        tenant_id: &str,
+        source: &ReportTableColumnSource,
+        join: &ReportTableColumnJoin,
+        select: &str,
+        source_condition: Option<Condition>,
+        parent_keys: &[Value],
+    ) -> Result<HashMap<String, Value>, ReportServiceError> {
+        let join_condition = Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![
+                Value::String(join.field.clone()),
+                Value::Array(parent_keys.to_vec()),
+            ]),
+        };
+        let condition = combine_conditions(
+            source_condition
+                .into_iter()
+                .chain(std::iter::once(join_condition))
+                .collect(),
+        );
+        let sort_by = if source.order_by.is_empty() {
+            Some(vec![join.field.clone(), "id".to_string()])
+        } else {
+            Some(
+                source
+                    .order_by
+                    .iter()
+                    .map(|order| order.field.clone())
+                    .collect(),
+            )
+        };
+        let sort_order = if source.order_by.is_empty() {
+            Some(vec!["asc".to_string(), "asc".to_string()])
+        } else {
+            Some(
+                source
+                    .order_by
+                    .iter()
+                    .map(|order| normalize_sort_direction(&order.direction))
+                    .collect(),
+            )
+        };
+        let request = FilterRequest {
+            offset: 0,
+            limit: MAX_BROADCAST_JOIN_DIM_ROWS,
+            condition,
+            sort_by,
+            sort_order,
+            score_expression: None,
+            order_by: None,
+        };
+        let (instances, total) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &source.schema,
+                request,
+                source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        if total > MAX_BROADCAST_JOIN_DIM_ROWS {
+            return Err(ReportServiceError::Validation(format!(
+                "Value table column lookup on '{}' would broadcast {} rows; cap is {}. Add a more selective source.condition.",
+                source.schema, total, MAX_BROADCAST_JOIN_DIM_ROWS
+            )));
+        }
+
+        let mut values_by_key = HashMap::new();
+        for instance in instances {
+            let Value::Object(row) = flatten_instance(instance) else {
+                continue;
+            };
+            let Some(key) = row.get(&join.field) else {
+                continue;
+            };
+            if value_is_empty(key) {
+                continue;
+            }
+            let Some(value) = row.get(select) else {
+                continue;
+            };
+            values_by_key
+                .entry(value_to_lookup_key(key))
+                .or_insert_with(|| value.clone());
+        }
+
+        Ok(values_by_key)
     }
 
     async fn render_table_chart_cell(
@@ -4840,6 +5149,25 @@ mod tests {
 
         assert!(block.source.is_empty());
         assert_eq!(block.dataset.unwrap().id, "stock_snapshots");
+    }
+
+    #[test]
+    fn value_table_column_source_deserializes_select_and_default_join_kind() {
+        let column: ReportTableColumn = serde_json::from_value(json!({
+            "field": "part_number",
+            "type": "value",
+            "source": {
+                "schema": "TDProduct",
+                "mode": "filter",
+                "select": "part_number",
+                "join": [{"parentField": "sku", "field": "sku"}]
+            }
+        }))
+        .unwrap();
+
+        let source = column.source.unwrap();
+        assert_eq!(source.select.as_deref(), Some("part_number"));
+        assert_eq!(source.join[0].kind, ReportJoinKind::Left);
     }
 
     #[test]

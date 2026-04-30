@@ -215,10 +215,12 @@ export interface ReportSourceJoin {
 }
 
 export interface ReportTableColumnSource extends Omit<ReportSource, 'join'> {
+  select?: string;
   join?: Array<{
     parentField: string;
     field: string;
     op?: string;
+    kind?: 'inner' | 'left';
   }>;
 }
 
