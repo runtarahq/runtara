@@ -1253,7 +1253,7 @@ fn report_authoring_schema() -> Value {
             "select": "Table value-column source only: scalar field to copy from the joined schema.",
             "connectionId": "Optional connection id for connection-scoped schemas.",
             "mode": "filter | aggregate",
-            "condition": "Optional Object Model condition DSL.",
+            "condition": "Optional Object Model condition DSL. IN/NOT_IN may use same-store subquery operands: {\"subquery\":{\"schema\":\"TDProduct\",\"select\":\"sku\",\"condition\":{...}}}.",
             "filterMappings": "Optional mappings from global filter ids to source fields.",
             "groupBy": "Aggregate output grouping fields.",
             "aggregates": "Aggregate specs. Report aggregate specs use {alias, op, field?, distinct?, orderBy?, expression?}. Use op/field here, not fn/column.",
@@ -1302,6 +1302,7 @@ fn report_authoring_schema() -> Value {
             "For chart.x, use an aggregate output field, usually a source.groupBy field.",
             "For chart.series[].field and metric.valueField, use aggregate aliases from source.aggregates.",
             "For source.orderBy and table.defaultSort, use field, not column.",
+            "For large category/product filters, prefer IN with a same-store subquery instead of materializing large value arrays.",
             "For dataset-backed blocks, table columns/chart fields/metric valueField use selected block.dataset dimensions and measures."
         ],
         "commonMistakes": [
@@ -2971,6 +2972,15 @@ fn collect_condition_filter_ref_issues(
                 )),
             }
         }
+        if let Some(condition) = condition_subquery_condition(argument) {
+            collect_condition_filter_ref_issues(
+                &format!("{argument_path}.subquery.condition"),
+                condition,
+                filter_metadata,
+                issues,
+            );
+            continue;
+        }
         if is_condition_object(argument) {
             collect_condition_filter_ref_issues(&argument_path, argument, filter_metadata, issues);
         }
@@ -3073,6 +3083,15 @@ fn is_known_condition_filter_ref_path(path: &str) -> bool {
 }
 
 fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_condition_issues_at(path, condition, issues, false);
+}
+
+fn collect_condition_issues_at(
+    path: &str,
+    condition: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+    inside_subquery: bool,
+) {
     collect_unknown_keys(path, condition, &["op", "arguments"], issues);
     if condition.get("op").and_then(Value::as_str).is_none() {
         issues.push(error(
@@ -3093,6 +3112,11 @@ fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<Auth
         ));
         return;
     };
+    let op = condition
+        .get("op")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
     for (index, argument) in arguments.iter().enumerate() {
         let argument_path = format!("{path}.arguments[{index}]");
         if is_mapping_value_object(argument) {
@@ -3101,10 +3125,117 @@ fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<Auth
                 "UNSUPPORTED_CONDITION_MAPPING_VALUE",
                 "Report source conditions do not evaluate workflow MappingValue reference/template objects. Use filterMappings, appliesTo, {\"filter\":\"...\",\"path\":\"...\"}, or literal Object Model condition arguments.",
             ));
+        } else if collect_condition_subquery_issues(
+            &argument_path,
+            argument,
+            issues,
+            inside_subquery,
+            &op,
+            index,
+        ) {
+            // handled by collect_condition_subquery_issues
         } else if is_condition_object(argument) {
-            collect_condition_issues(&argument_path, argument, issues);
+            collect_condition_issues_at(&argument_path, argument, issues, inside_subquery);
         }
     }
+}
+
+fn collect_condition_subquery_issues(
+    path: &str,
+    argument: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+    inside_subquery: bool,
+    op: &str,
+    argument_index: usize,
+) -> bool {
+    let Some(object) = argument.as_object() else {
+        return false;
+    };
+    let Some(subquery_value) = object.get("subquery") else {
+        return false;
+    };
+    if inside_subquery {
+        issues.push(error(
+            format!("{path}.subquery"),
+            "NESTED_CONDITION_SUBQUERY",
+            "Report source condition subqueries cannot contain nested subqueries.",
+        ));
+    }
+    if !matches!(op, "IN" | "NOT_IN") || argument_index != 1 {
+        issues.push(error(
+            format!("{path}.subquery"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subqueries are only supported as the second argument of IN or NOT_IN.",
+        ));
+    }
+    if object.len() != 1 {
+        issues.push(error(
+            path.to_string(),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subquery operands must contain only the subquery key.",
+        ));
+    }
+    let Some(subquery) = subquery_value.as_object() else {
+        issues.push(error(
+            format!("{path}.subquery"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subquery must be an object.",
+        ));
+        return true;
+    };
+    collect_unknown_keys(
+        &format!("{path}.subquery"),
+        subquery_value,
+        &["schema", "select", "condition", "connectionId"],
+        issues,
+    );
+    if subquery
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        issues.push(error(
+            format!("{path}.subquery.schema"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subqueries must include schema.",
+        ));
+    }
+    if subquery
+        .get("select")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        issues.push(error(
+            format!("{path}.subquery.select"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subqueries must include select.",
+        ));
+    }
+    if let Some(condition) = subquery.get("condition") {
+        if is_condition_object(condition) {
+            collect_condition_issues_at(
+                &format!("{path}.subquery.condition"),
+                condition,
+                issues,
+                true,
+            );
+        } else {
+            issues.push(error(
+                format!("{path}.subquery.condition"),
+                "INVALID_CONDITION_SUBQUERY",
+                "Report source condition subquery.condition must be a condition object.",
+            ));
+        }
+    }
+    true
+}
+
+fn condition_subquery_condition(argument: &Value) -> Option<&Value> {
+    argument
+        .as_object()?
+        .get("subquery")?
+        .as_object()?
+        .get("condition")
 }
 
 fn is_condition_object(value: &Value) -> bool {
@@ -3630,6 +3761,95 @@ mod tests {
 
         assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
         assert!(!codes.contains(&"INVALID_CONDITION_FILTER_REF_PATH"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_condition_filter_ref_inside_subquery() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "filters": [{
+                "id": "category",
+                "label": "Category",
+                "type": "multi_select"
+            }],
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "IN",
+                        "arguments": [
+                            "sku",
+                            {
+                                "subquery": {
+                                    "schema": "TDProduct",
+                                    "select": "sku",
+                                    "condition": {
+                                        "op": "IN",
+                                        "arguments": [
+                                            "category_leaf_id",
+                                            {"filter": "category", "path": "values"}
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+        assert!(!codes.contains(&"INVALID_CONDITION_FILTER_REF_PATH"));
+        assert!(!codes.contains(&"INVALID_CONDITION_SUBQUERY"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_nested_condition_subquery() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "IN",
+                        "arguments": [
+                            "sku",
+                            {
+                                "subquery": {
+                                    "schema": "TDProduct",
+                                    "select": "sku",
+                                    "condition": {
+                                        "op": "IN",
+                                        "arguments": [
+                                            "category_leaf_id",
+                                            {"subquery": {"schema": "Category", "select": "id"}}
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"NESTED_CONDITION_SUBQUERY"));
     }
 
     #[test]

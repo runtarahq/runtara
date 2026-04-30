@@ -112,9 +112,12 @@ pub use types::{ColumnDefinition, ColumnType, IndexDefinition, TextIndexKind, Ve
 // Re-export SQL utilities for advanced users
 pub use sql::aggregate::{
     AggregateFn, AggregateOrderBy, AggregateRequest, AggregateResult, AggregateSpec, AggregateSql,
-    SortDirection, build_aggregate_query,
+    SortDirection, build_aggregate_query, build_aggregate_query_with_subqueries,
 };
-pub use sql::condition::{build_condition_clause, build_order_by_clause};
+pub use sql::condition::{
+    build_condition_clause, build_condition_clause_with_subqueries, build_order_by_clause,
+    collect_condition_subquery_schema_names,
+};
 pub use sql::ddl::DdlGenerator;
 pub use sql::expr::{ExprFn, ExprFnCall, ExprNode, ExprOp, ExprOperation, ExprValue};
 pub use sql::sanitize::{quote_identifier, validate_identifier};

@@ -4,6 +4,7 @@
 //! and their instances in a PostgreSQL database.
 
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 
 use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
 use crate::error::{ObjectStoreError, Result};
@@ -11,8 +12,13 @@ use crate::instance::{
     Condition, FilterRequest, Instance, OrderByEntry, OrderByTarget, SimpleFilter,
 };
 use crate::schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
-use crate::sql::aggregate::{AggregateRequest, AggregateResult, build_aggregate_query};
-use crate::sql::condition::{build_condition_clause, build_order_by_clause, field_to_sql};
+use crate::sql::aggregate::{
+    AggregateRequest, AggregateResult, build_aggregate_query_with_subqueries,
+};
+use crate::sql::condition::{
+    build_condition_clause_with_subqueries, build_order_by_clause,
+    collect_condition_subquery_schema_names, field_to_sql,
+};
 use crate::sql::ddl::DdlGenerator;
 use crate::sql::expr::{ExprNode, render_row_expression, validate_row_expression};
 use crate::sql::sanitize::quote_identifier;
@@ -630,8 +636,11 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
-        let sql =
-            build_aggregate_query(&schema, &request).map_err(ObjectStoreError::InvalidCondition)?;
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(request.condition.as_ref())
+            .await?;
+        let sql = build_aggregate_query_with_subqueries(&schema, &request, &subquery_schemas)
+            .map_err(ObjectStoreError::InvalidCondition)?;
 
         // Effective LIMIT / OFFSET.
         let cap = DEFAULT_AGGREGATE_RESULT_ROW_LIMIT as i64;
@@ -903,10 +912,18 @@ impl ObjectStore {
             return Ok(0); // Nothing to update
         }
 
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(Some(&condition))
+            .await?;
+
         // Build WHERE clause from condition
-        let (where_clause, condition_params) =
-            build_condition_clause(&condition, &mut param_idx, &schema)
-                .map_err(ObjectStoreError::InvalidCondition)?;
+        let (where_clause, condition_params) = build_condition_clause_with_subqueries(
+            &condition,
+            &mut param_idx,
+            &schema,
+            &subquery_schemas,
+        )
+        .map_err(ObjectStoreError::InvalidCondition)?;
 
         let base_where = format!("deleted = FALSE AND ({})", where_clause);
 
@@ -963,11 +980,19 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(Some(&condition))
+            .await?;
+
         // Build WHERE clause from condition
         let mut param_offset = 1i32;
-        let (where_clause, condition_params) =
-            build_condition_clause(&condition, &mut param_offset, &schema)
-                .map_err(ObjectStoreError::InvalidCondition)?;
+        let (where_clause, condition_params) = build_condition_clause_with_subqueries(
+            &condition,
+            &mut param_offset,
+            &schema,
+            &subquery_schemas,
+        )
+        .map_err(ObjectStoreError::InvalidCondition)?;
 
         let mut tx = self.pool.begin().await?;
 
@@ -1887,11 +1912,37 @@ impl ObjectStore {
         })
     }
 
+    async fn resolve_condition_subquery_schemas(
+        &self,
+        condition: Option<&Condition>,
+    ) -> Result<HashMap<String, Schema>> {
+        let Some(condition) = condition else {
+            return Ok(HashMap::new());
+        };
+
+        let names = collect_condition_subquery_schema_names(condition)
+            .map_err(ObjectStoreError::InvalidCondition)?;
+        let mut schemas = HashMap::with_capacity(names.len());
+        for name in names {
+            let schema = self
+                .get_schema(&name)
+                .await?
+                .ok_or_else(|| ObjectStoreError::schema_not_found(&name))?;
+            schemas.insert(name, schema);
+        }
+
+        Ok(schemas)
+    }
+
     async fn filter_instances_internal(
         &self,
         schema: &Schema,
         filter: FilterRequest,
     ) -> Result<(Vec<Instance>, i64)> {
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(filter.condition.as_ref())
+            .await?;
+
         // Build column list
         let mut select_columns = Vec::new();
 
@@ -1915,8 +1966,13 @@ impl ObjectStore {
         // Build WHERE clause from condition (params: $1..$N1)
         let (where_clause, where_params) = if let Some(condition) = filter.condition {
             let mut param_offset = 1;
-            build_condition_clause(&condition, &mut param_offset, schema)
-                .map_err(ObjectStoreError::InvalidCondition)?
+            build_condition_clause_with_subqueries(
+                &condition,
+                &mut param_offset,
+                schema,
+                &subquery_schemas,
+            )
+            .map_err(ObjectStoreError::InvalidCondition)?
         } else {
             ("TRUE".to_string(), Vec::new())
         };

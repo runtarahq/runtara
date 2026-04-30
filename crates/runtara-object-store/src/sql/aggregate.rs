@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::instance::Condition;
 use crate::schema::Schema;
-use crate::sql::condition::{build_condition_clause, field_to_sql, resolve_sql_cast};
+use crate::sql::condition::{
+    build_condition_clause, build_condition_clause_with_subqueries, field_to_sql, resolve_sql_cast,
+};
 use crate::sql::expr::{
     AliasKind, AliasSqlMap, ExprNode, column_kind, render_expression, validate_expression,
 };
@@ -300,6 +302,14 @@ pub fn build_aggregate_query(
     schema: &Schema,
     req: &AggregateRequest,
 ) -> Result<AggregateSql, String> {
+    build_aggregate_query_with_subqueries(schema, req, &HashMap::new())
+}
+
+pub fn build_aggregate_query_with_subqueries(
+    schema: &Schema,
+    req: &AggregateRequest,
+    subquery_schemas: &HashMap<String, Schema>,
+) -> Result<AggregateSql, String> {
     if req.aggregates.is_empty() {
         return Err("aggregates must contain at least one entry".to_string());
     }
@@ -374,7 +384,16 @@ pub fn build_aggregate_query(
     // ---- WHERE clause (condition) -----------------------------------------
     let (where_clause, params) = if let Some(condition) = &req.condition {
         let mut param_offset = 1i32;
-        build_condition_clause(condition, &mut param_offset, schema)?
+        if subquery_schemas.is_empty() {
+            build_condition_clause(condition, &mut param_offset, schema)?
+        } else {
+            build_condition_clause_with_subqueries(
+                condition,
+                &mut param_offset,
+                schema,
+                subquery_schemas,
+            )?
+        }
     } else {
         ("TRUE".to_string(), Vec::new())
     };

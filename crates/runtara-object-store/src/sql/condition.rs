@@ -6,6 +6,25 @@ use crate::instance::Condition;
 use crate::schema::Schema;
 use crate::sql::sanitize::quote_identifier;
 use crate::types::ColumnType;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionSubquery {
+    pub schema: String,
+    pub select: String,
+    #[serde(default, rename = "connectionId")]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub condition: Option<Condition>,
+}
+
+#[derive(Clone, Copy)]
+struct ConditionBuildContext<'a> {
+    subquery_schemas: Option<&'a HashMap<String, Schema>>,
+    allow_subqueries: bool,
+}
 
 /// Map camelCase system field names to their snake_case SQL column equivalents.
 pub(crate) fn field_to_sql(field: &str) -> &str {
@@ -86,7 +105,42 @@ pub fn build_condition_clause(
     param_offset: &mut i32,
     schema: &Schema,
 ) -> Result<(String, Vec<serde_json::Value>), String> {
-    build_condition_clause_at(condition, param_offset, schema, "condition")
+    build_condition_clause_at(
+        condition,
+        param_offset,
+        schema,
+        "condition",
+        ConditionBuildContext {
+            subquery_schemas: None,
+            allow_subqueries: false,
+        },
+    )
+}
+
+pub fn build_condition_clause_with_subqueries(
+    condition: &Condition,
+    param_offset: &mut i32,
+    schema: &Schema,
+    subquery_schemas: &HashMap<String, Schema>,
+) -> Result<(String, Vec<serde_json::Value>), String> {
+    build_condition_clause_at(
+        condition,
+        param_offset,
+        schema,
+        "condition",
+        ConditionBuildContext {
+            subquery_schemas: Some(subquery_schemas),
+            allow_subqueries: true,
+        },
+    )
+}
+
+pub fn collect_condition_subquery_schema_names(
+    condition: &Condition,
+) -> Result<HashSet<String>, String> {
+    let mut schemas = HashSet::new();
+    collect_condition_subquery_schema_names_at(condition, false, &mut schemas, "condition")?;
+    Ok(schemas)
 }
 
 fn argument_path(condition_path: &str, index: usize) -> String {
@@ -178,11 +232,210 @@ fn deserialize_condition_arg(value: &serde_json::Value, path: &str) -> Result<Co
     })
 }
 
+fn parse_subquery_operand(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<Option<ConditionSubquery>, String> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(subquery) = object.get("subquery") else {
+        return Ok(None);
+    };
+    if object.len() != 1 {
+        return Err(format!(
+            "{}: subquery operand must contain only the 'subquery' key",
+            path
+        ));
+    }
+    let parsed = serde_json::from_value::<ConditionSubquery>(subquery.clone()).map_err(|err| {
+        format!(
+            "{}.subquery: expected {{schema, select, condition?}}; {}",
+            path, err
+        )
+    })?;
+    if parsed.schema.trim().is_empty() {
+        return Err(format!("{}.subquery.schema: schema cannot be empty", path));
+    }
+    if parsed.select.trim().is_empty() {
+        return Err(format!("{}.subquery.select: select cannot be empty", path));
+    }
+    Ok(Some(parsed))
+}
+
+fn collect_condition_subquery_schema_names_at(
+    condition: &Condition,
+    inside_subquery: bool,
+    schemas: &mut HashSet<String>,
+    condition_path: &str,
+) -> Result<(), String> {
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(());
+    };
+
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument_path = argument_path(condition_path, index);
+        if let Some(subquery) = parse_subquery_operand(argument, &argument_path)? {
+            if inside_subquery {
+                return Err(format!(
+                    "{}: nested subqueries are not supported",
+                    argument_path
+                ));
+            }
+            schemas.insert(subquery.schema.clone());
+            if let Some(child) = subquery.condition.as_ref() {
+                collect_condition_subquery_schema_names_at(child, true, schemas, &argument_path)?;
+            }
+            continue;
+        }
+
+        if let Ok(child) = serde_json::from_value::<Condition>(argument.clone()) {
+            collect_condition_subquery_schema_names_at(
+                &child,
+                inside_subquery,
+                schemas,
+                &argument_path,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_field_name_from_str<'a>(
+    raw_field: &'a str,
+    path: &str,
+    description: &str,
+) -> Result<&'a str, String> {
+    if raw_field.is_empty() {
+        return Err(format!("{}: {} string cannot be empty", path, description));
+    }
+
+    if !raw_field
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "{}: {} string contains invalid characters; expected alphanumeric, underscore, or hyphen",
+            path, description
+        ));
+    }
+
+    Ok(raw_field)
+}
+
+fn schema_has_field(schema: &Schema, field: &str) -> bool {
+    matches!(field, "id" | "created_at" | "updated_at")
+        || schema.columns.iter().any(|column| column.name == field)
+}
+
+fn build_subquery_condition_clause(
+    outer_field: &str,
+    subquery: &ConditionSubquery,
+    param_offset: &mut i32,
+    schema: &Schema,
+    condition_path: &str,
+    negate: bool,
+    context: ConditionBuildContext<'_>,
+) -> Result<(String, Vec<serde_json::Value>), String> {
+    if !context.allow_subqueries {
+        return Err(format!(
+            "{}: subquery operands require a same-store condition context",
+            argument_path(condition_path, 1)
+        ));
+    }
+
+    let subquery_schemas = context.subquery_schemas.ok_or_else(|| {
+        format!(
+            "{}: subquery operands require resolved same-store schemas",
+            argument_path(condition_path, 1)
+        )
+    })?;
+    let subquery_schema = subquery_schemas.get(&subquery.schema).ok_or_else(|| {
+        format!(
+            "{}.subquery.schema: schema '{}' was not resolved for this condition",
+            argument_path(condition_path, 1),
+            subquery.schema
+        )
+    })?;
+
+    let parent_cast = resolve_sql_cast(outer_field, schema);
+    if !schema_has_field(schema, outer_field) {
+        return Err(format!(
+            "{}: unknown field '{}'",
+            argument_path(condition_path, 0),
+            outer_field
+        ));
+    }
+
+    let select_field = field_to_sql(validate_field_name_from_str(
+        &subquery.select,
+        &format!("{}.subquery.select", argument_path(condition_path, 1)),
+        "select field name",
+    )?);
+    if !schema_has_field(subquery_schema, select_field) {
+        return Err(format!(
+            "{}.subquery.select: unknown field '{}' on schema '{}'",
+            argument_path(condition_path, 1),
+            subquery.select,
+            subquery.schema
+        ));
+    }
+    let subquery_cast = resolve_sql_cast(select_field, subquery_schema);
+    if parent_cast != subquery_cast {
+        return Err(format!(
+            "{}.subquery.select: field '{}' has SQL cast {}, but parent field '{}' has SQL cast {}",
+            argument_path(condition_path, 1),
+            subquery.select,
+            subquery_cast,
+            outer_field,
+            parent_cast
+        ));
+    }
+
+    let (subquery_where, params) = if let Some(condition) = subquery.condition.as_ref() {
+        build_condition_clause_at(
+            condition,
+            param_offset,
+            subquery_schema,
+            &format!("{}.subquery.condition", argument_path(condition_path, 1)),
+            ConditionBuildContext {
+                subquery_schemas: context.subquery_schemas,
+                allow_subqueries: false,
+            },
+        )?
+    } else {
+        ("TRUE".to_string(), Vec::new())
+    };
+
+    let subquery_sql = format!(
+        "SELECT {}::{} FROM {} WHERE deleted = FALSE AND ({})",
+        quote_identifier(select_field),
+        subquery_cast,
+        quote_identifier(&subquery_schema.table_name),
+        subquery_where
+    );
+    let in_clause = format!(
+        "{}::{} IN ({})",
+        quote_identifier(outer_field),
+        parent_cast,
+        subquery_sql
+    );
+    let clause = if negate {
+        format!("NOT ({})", in_clause)
+    } else {
+        in_clause
+    };
+
+    Ok((clause, params))
+}
+
 fn build_condition_clause_at(
     condition: &Condition,
     param_offset: &mut i32,
     schema: &Schema,
     condition_path: &str,
+    context: ConditionBuildContext<'_>,
 ) -> Result<(String, Vec<serde_json::Value>), String> {
     let op = condition.op.to_uppercase();
     let args = condition.arguments.as_ref();
@@ -201,6 +454,7 @@ fn build_condition_clause_at(
                         param_offset,
                         schema,
                         &child_path,
+                        context,
                     )?;
                     clauses.push(format!("({})", clause));
                     params.append(&mut sub_params);
@@ -230,6 +484,7 @@ fn build_condition_clause_at(
                         param_offset,
                         schema,
                         &child_path,
+                        context,
                     )?;
                     clauses.push(format!("({})", clause));
                     params.append(&mut sub_params);
@@ -258,8 +513,13 @@ fn build_condition_clause_at(
                 }
                 let child_path = argument_path(condition_path, 0);
                 let sub_condition = deserialize_condition_arg(&args[0], &child_path)?;
-                let (clause, sub_params) =
-                    build_condition_clause_at(&sub_condition, param_offset, schema, &child_path)?;
+                let (clause, sub_params) = build_condition_clause_at(
+                    &sub_condition,
+                    param_offset,
+                    schema,
+                    &child_path,
+                    context,
+                )?;
                 params.extend(sub_params);
                 Ok((format!("NOT ({})", clause), params))
             } else {
@@ -279,6 +539,12 @@ fn build_condition_clause_at(
                 }
                 let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
                 let value = &args[1];
+                if parse_subquery_operand(value, &argument_path(condition_path, 1))?.is_some() {
+                    return Err(format!(
+                        "{}: subquery operands are only supported as the second argument of IN or NOT_IN",
+                        argument_path(condition_path, 1)
+                    ));
+                }
 
                 // Map camelCase system fields to snake_case SQL columns
                 let field = field_to_sql(raw_field);
@@ -375,14 +641,28 @@ fn build_condition_clause_at(
                     ));
                 }
                 let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
+                let field = field_to_sql(raw_field);
+
+                if let Some(subquery) =
+                    parse_subquery_operand(&args[1], &argument_path(condition_path, 1))?
+                {
+                    return build_subquery_condition_clause(
+                        field,
+                        &subquery,
+                        param_offset,
+                        schema,
+                        condition_path,
+                        false,
+                        context,
+                    );
+                }
+
                 let values = args[1].as_array().ok_or_else(|| {
                     format!(
-                        "{}: second argument must be an array of values",
+                        "{}: second argument must be an array of values or a subquery operand",
                         argument_path(condition_path, 1)
                     )
                 })?;
-
-                let field = field_to_sql(raw_field);
 
                 params.push(serde_json::Value::Array(values.clone()));
 
@@ -409,14 +689,28 @@ fn build_condition_clause_at(
                     ));
                 }
                 let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
+                let field = field_to_sql(raw_field);
+
+                if let Some(subquery) =
+                    parse_subquery_operand(&args[1], &argument_path(condition_path, 1))?
+                {
+                    return build_subquery_condition_clause(
+                        field,
+                        &subquery,
+                        param_offset,
+                        schema,
+                        condition_path,
+                        true,
+                        context,
+                    );
+                }
+
                 let values = args[1].as_array().ok_or_else(|| {
                     format!(
-                        "{}: second argument must be an array of values",
+                        "{}: second argument must be an array of values or a subquery operand",
                         argument_path(condition_path, 1)
                     )
                 })?;
-
-                let field = field_to_sql(raw_field);
 
                 params.push(serde_json::Value::Array(values.clone()));
 
@@ -1135,6 +1429,109 @@ mod tests {
         assert!(clause.starts_with("NOT"));
         assert!(clause.contains("ANY"));
         assert_eq!(params[0], serde_json::json!(["deleted", "archived"]));
+    }
+
+    #[test]
+    fn test_in_condition_with_subquery() {
+        let schema = make_test_schema();
+        let product_schema = Schema {
+            id: "product-id".to_string(),
+            name: "products".to_string(),
+            description: None,
+            table_name: "product_table".to_string(),
+            columns: vec![
+                ColumnDefinition::new("name", crate::types::ColumnType::String),
+                ColumnDefinition::new("category", crate::types::ColumnType::String),
+            ],
+            indexes: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let subquery_schemas = HashMap::from([("products".to_string(), product_schema)]);
+        let condition = Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!({
+                    "subquery": {
+                        "schema": "products",
+                        "select": "name",
+                        "condition": {
+                            "op": "EQ",
+                            "arguments": ["category", "networking"]
+                        }
+                    }
+                }),
+            ]),
+        };
+
+        let mut offset = 1;
+        let (clause, params) = build_condition_clause_with_subqueries(
+            &condition,
+            &mut offset,
+            &schema,
+            &subquery_schemas,
+        )
+        .unwrap();
+
+        assert_eq!(
+            clause,
+            "\"name\"::text IN (SELECT \"name\"::text FROM \"product_table\" WHERE deleted = FALSE AND (\"category\"::text = $1::text))"
+        );
+        assert_eq!(params, vec![serde_json::json!("networking")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_collect_condition_subquery_schema_names_rejects_nested_subquery() {
+        let condition = Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!({
+                    "subquery": {
+                        "schema": "products",
+                        "select": "name",
+                        "condition": {
+                            "op": "IN",
+                            "arguments": [
+                                "category",
+                                {
+                                    "subquery": {
+                                        "schema": "categories",
+                                        "select": "id"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }),
+            ]),
+        };
+
+        let err = collect_condition_subquery_schema_names(&condition).unwrap_err();
+        assert!(err.contains("nested subqueries are not supported"));
+    }
+
+    #[test]
+    fn test_eq_condition_rejects_subquery_operand() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "EQ".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!({
+                    "subquery": {
+                        "schema": "products",
+                        "select": "name"
+                    }
+                }),
+            ]),
+        };
+
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("only supported as the second argument of IN or NOT_IN"));
     }
 
     // ==================== Nullability Operations ====================

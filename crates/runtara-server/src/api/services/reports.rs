@@ -1031,6 +1031,13 @@ impl ReportService {
                 &block_condition_filter_defs,
                 &format!("block '{}'", block.id),
             )?;
+            self.validate_report_condition_subqueries(
+                tenant_id,
+                block.source.condition.as_ref(),
+                block.source.connection_id.as_deref(),
+                &format!("block '{}'", block.id),
+            )
+            .await?;
             if let Some(table) = &block.table {
                 for column in &table.columns {
                     if let Some(source) = &column.source {
@@ -1039,6 +1046,13 @@ impl ReportService {
                             &block_condition_filter_defs,
                             &format!("block '{}' table column '{}'", block.id, column.field),
                         )?;
+                        self.validate_report_condition_subqueries(
+                            tenant_id,
+                            source.condition.as_ref(),
+                            source.connection_id.as_deref(),
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1255,6 +1269,111 @@ impl ReportService {
                     "Filter '{}' options reference unknown field '{}'",
                     filter.id, field
                 )));
+            }
+        }
+
+        if let Some(condition) = options.get("condition") {
+            let condition =
+                serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+                    ReportServiceError::Validation(format!(
+                        "Filter '{}' options.condition is invalid: {}",
+                        filter.id, err
+                    ))
+                })?;
+            self.validate_report_condition_subqueries(
+                tenant_id,
+                Some(&condition),
+                connection_id,
+                &format!("filter '{}'", filter.id),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn validate_report_condition_subqueries(
+        &self,
+        tenant_id: &str,
+        condition: Option<&Condition>,
+        parent_connection_id: Option<&str>,
+        context: &str,
+    ) -> Result<(), ReportServiceError> {
+        let Some(condition) = condition else {
+            return Ok(());
+        };
+        let mut stack = vec![(condition.clone(), false)];
+
+        while let Some((condition, inside_subquery)) = stack.pop() {
+            let Some(arguments) = condition.arguments.as_ref() else {
+                continue;
+            };
+            let op = condition.op.to_ascii_uppercase();
+            for (index, argument) in arguments.iter().enumerate() {
+                if let Some(subquery) = parse_report_condition_subquery_operand(argument)? {
+                    if !matches!(op.as_str(), "IN" | "NOT_IN") || index != 1 {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition subqueries are only supported as the second argument of IN or NOT_IN",
+                            context
+                        )));
+                    }
+                    if inside_subquery {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition contains a nested subquery; nested subqueries are not supported",
+                            context
+                        )));
+                    }
+
+                    let subquery_connection_id = subquery
+                        .get("connectionId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if let Some(subquery_connection_id) = subquery_connection_id
+                        && Some(subquery_connection_id) != parent_connection_id
+                    {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition subquery must use the same Object Store connection as its parent source",
+                            context
+                        )));
+                    }
+
+                    let schema_name = subquery
+                        .get("schema")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    let select_field = subquery
+                        .get("select")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    let schema = self
+                        .schema_service
+                        .get_schema_by_name(schema_name, tenant_id, parent_connection_id)
+                        .await
+                        .map_err(map_object_model_error)?;
+                    let schema_fields: HashSet<_> = schema
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect();
+                    if !is_schema_field(&schema_fields, select_field) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition subquery select field '{}' is not a column on '{}'",
+                            context, select_field, schema_name
+                        )));
+                    }
+
+                    if let Some(child) = subquery.get("condition").and_then(condition_from_value) {
+                        stack.push((child, true));
+                    }
+                    continue;
+                }
+
+                if let Some(child) = condition_from_value(argument) {
+                    stack.push((child, inside_subquery));
+                }
             }
         }
 
@@ -2987,6 +3106,19 @@ fn validate_report_condition_filter_refs(
             })?;
             validate_condition_filter_ref_path(filter, &reference, context)?;
         }
+        if let Some(subquery) = parse_report_condition_subquery_operand(argument)? {
+            if let Some(condition) = subquery.get("condition") {
+                let child =
+                    serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+                        ReportServiceError::Validation(format!(
+                            "{} condition subquery.condition is invalid: {}",
+                            context, err
+                        ))
+                    })?;
+                validate_report_condition_filter_refs(Some(&child), filter_defs, context)?;
+            }
+            continue;
+        }
         if let Some(child) = condition_from_value(argument) {
             validate_report_condition_filter_refs(Some(&child), filter_defs, context)?;
         }
@@ -3036,9 +3168,9 @@ fn resolve_report_condition_values(
     }
 
     if matches!(op.as_str(), "IN" | "NOT_IN")
-        && resolved_arguments
-            .get(1)
-            .is_some_and(|argument| !argument.is_array())
+        && resolved_arguments.get(1).is_some_and(|argument| {
+            !argument.is_array() && !is_report_condition_subquery_operand(argument)
+        })
     {
         return Err(ReportServiceError::Validation(format!(
             "{} condition operator '{}' requires an array value; use a multi_select filter with path 'values'",
@@ -3114,6 +3246,10 @@ fn resolve_report_condition_argument(
         return resolve_report_condition_filter_ref(&reference, filter_defs, values, context);
     }
 
+    if parse_report_condition_subquery_operand(argument)?.is_some() {
+        return resolve_report_condition_subquery_argument(argument, filter_defs, values, context);
+    }
+
     if let Some(condition) = condition_from_value(argument) {
         let Some(resolved) =
             resolve_report_condition_values(&condition, filter_defs, values, context)?
@@ -3129,6 +3265,42 @@ fn resolve_report_condition_argument(
     }
 
     Ok(Some(argument.clone()))
+}
+
+fn resolve_report_condition_subquery_argument(
+    argument: &Value,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Value>, ReportServiceError> {
+    let Some(subquery) = parse_report_condition_subquery_operand(argument)? else {
+        return Ok(Some(argument.clone()));
+    };
+    let mut subquery = subquery.clone();
+    if let Some(condition) = subquery.get("condition").cloned() {
+        let condition = serde_json::from_value::<Condition>(condition).map_err(|err| {
+            ReportServiceError::Validation(format!(
+                "{} condition subquery.condition is invalid: {}",
+                context, err
+            ))
+        })?;
+        match resolve_report_condition_values(&condition, filter_defs, values, context)? {
+            Some(resolved) => {
+                let resolved_value = serde_json::to_value(resolved).map_err(|err| {
+                    ReportServiceError::Validation(format!(
+                        "{} condition could not serialize resolved subquery condition: {}",
+                        context, err
+                    ))
+                })?;
+                subquery.insert("condition".to_string(), resolved_value);
+            }
+            None => {
+                subquery.remove("condition");
+            }
+        }
+    }
+
+    Ok(Some(json!({ "subquery": Value::Object(subquery) })))
 }
 
 fn resolve_report_condition_filter_ref(
@@ -3232,6 +3404,80 @@ fn parse_report_condition_filter_ref(
         filter_id: filter_id.to_string(),
         path: path.to_string(),
     }))
+}
+
+fn parse_report_condition_subquery_operand(
+    value: &Value,
+) -> Result<Option<&serde_json::Map<String, Value>>, ReportServiceError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(subquery_value) = object.get("subquery") else {
+        return Ok(None);
+    };
+    if object.len() != 1 {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery operands must contain only the 'subquery' key".to_string(),
+        ));
+    }
+    let Some(subquery) = subquery_value.as_object() else {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery operands must use an object value".to_string(),
+        ));
+    };
+    for key in subquery.keys() {
+        if !matches!(
+            key.as_str(),
+            "schema" | "select" | "condition" | "connectionId"
+        ) {
+            return Err(ReportServiceError::Validation(format!(
+                "Report condition subquery uses unsupported key '{}'",
+                key
+            )));
+        }
+    }
+    let Some(schema) = subquery
+        .get("schema")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return Err(ReportServiceError::Validation(
+            "Report condition subqueries must include schema".to_string(),
+        ));
+    };
+    if schema.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery schema cannot be empty".to_string(),
+        ));
+    }
+    let Some(select) = subquery
+        .get("select")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return Err(ReportServiceError::Validation(
+            "Report condition subqueries must include select".to_string(),
+        ));
+    };
+    if select.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery select cannot be empty".to_string(),
+        ));
+    }
+    if let Some(condition) = subquery.get("condition")
+        && condition_from_value(condition).is_none()
+    {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery.condition must be a condition object".to_string(),
+        ));
+    }
+    Ok(Some(subquery))
+}
+
+fn is_report_condition_subquery_operand(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("subquery"))
 }
 
 fn validate_condition_filter_ref_path(
@@ -5574,6 +5820,51 @@ mod tests {
         assert_eq!(
             resolved.arguments.unwrap(),
             vec![json!("vendor"), json!(["HPE", "Cisco"])]
+        );
+    }
+
+    #[test]
+    fn report_condition_resolves_filter_ref_inside_subquery() {
+        let filters = vec![report_filter(
+            "category",
+            ReportFilterType::MultiSelect,
+            true,
+        )];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("category".to_string(), json!(["leaf-a", "leaf-b"]))]);
+
+        let resolved = resolve_report_condition_values(
+            &cond(
+                "IN",
+                vec![
+                    json!("sku"),
+                    json!({
+                        "subquery": {
+                            "schema": "TDProduct",
+                            "select": "sku",
+                            "condition": {
+                                "op": "IN",
+                                "arguments": [
+                                    "category_leaf_id",
+                                    filter_ref("category", "values")
+                                ]
+                            }
+                        }
+                    }),
+                ],
+            ),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        let arguments = resolved.arguments.unwrap();
+        assert_eq!(arguments[0], json!("sku"));
+        assert_eq!(
+            arguments[1]["subquery"]["condition"]["arguments"][1],
+            json!(["leaf-a", "leaf-b"])
         );
     }
 
