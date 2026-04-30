@@ -18,17 +18,10 @@ import {
   useReactFlow,
   OnConnectEnd,
 } from '@xyflow/react';
-import { ListTree, Network } from 'lucide-react';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { toast } from '@/shared/hooks/useToast';
-import { cn } from '@/lib/utils.ts';
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from '@/shared/components/ui/tabs';
+import { Tabs, TabsContent } from '@/shared/components/ui/tabs';
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
@@ -69,7 +62,10 @@ import { NodeConfigDialog } from './NodeConfigDialog';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from './NodeForm/StepPickerModal';
 import { NodeConfigProvider } from './NodeConfigContext';
-import { WorkflowTimelineView } from './TimelineView';
+import {
+  type TimelineAddStepRequest,
+  WorkflowTimelineView,
+} from './TimelineView';
 
 // Re-export CreateStepContext type for external use
 export interface CreateStepContext {
@@ -164,8 +160,6 @@ type WorkflowEditorProps = {
   onResetNodeChanges?: (nodeId: string) => void;
 };
 
-type WorkflowEditorView = 'canvas' | 'timeline';
-
 export function WorkflowEditor({
   nodes: initialNodes,
   edges: initialEdges,
@@ -186,7 +180,6 @@ export function WorkflowEditor({
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showStepPicker, setShowStepPicker] = useState(false);
-  const [editorView, setEditorView] = useState<WorkflowEditorView>('canvas');
 
   // Callback for child node components to open config dialogs (including hidden nodes)
   const openNodeConfig = useCallback(
@@ -743,6 +736,124 @@ export function WorkflowEditor({
     []
   );
 
+  const handleTimelineAddStep = useCallback(
+    (request: TimelineAddStepRequest) => {
+      const sourceNode = request.sourceNodeId
+        ? nodes.find((node) => node.id === request.sourceNodeId)
+        : undefined;
+      const targetNode = request.targetNodeId
+        ? nodes.find((node) => node.id === request.targetNodeId)
+        : undefined;
+
+      const getAbsolutePosition = (node: Node): { x: number; y: number } => {
+        if (!node.parentId) return node.position;
+
+        const parent = nodes.find(
+          (candidate) => candidate.id === node.parentId
+        );
+        if (!parent) return node.position;
+
+        const parentPosition = getAbsolutePosition(parent);
+        return {
+          x: parentPosition.x + node.position.x,
+          y: parentPosition.y + node.position.y,
+        };
+      };
+
+      const getNodeSize = (node: Node): { width: number; height: number } => {
+        const nodeType = node.type || NODE_TYPES.BasicNode;
+        const fallbackSize = NODE_TYPE_SIZES[nodeType] || {
+          width: 180,
+          height: 48,
+        };
+
+        return {
+          width:
+            typeof node.style?.width === 'number'
+              ? node.style.width
+              : typeof node.width === 'number'
+                ? node.width
+                : fallbackSize.width,
+          height:
+            typeof node.style?.height === 'number'
+              ? node.style.height
+              : typeof node.height === 'number'
+                ? node.height
+                : fallbackSize.height,
+        };
+      };
+
+      let position = snapPositionToGrid({ x: 0, y: 0 });
+
+      if (sourceNode && targetNode) {
+        const sourcePosition = getAbsolutePosition(sourceNode);
+        const targetPosition = getAbsolutePosition(targetNode);
+        const sourceSize = getNodeSize(sourceNode);
+        const targetSize = getNodeSize(targetNode);
+
+        position = snapPositionToGrid({
+          x: (sourcePosition.x + sourceSize.width + targetPosition.x) / 2,
+          y:
+            targetPosition.y +
+            targetSize.height / 2 -
+            (NODE_TYPE_SIZES[NODE_TYPES.BasicNode]?.height || 48) / 2,
+        });
+
+        setCreateStepContext({
+          position,
+          insertionEdge: {
+            source: sourceNode.id,
+            target: targetNode.id,
+            sourceHandle: request.sourceHandle || 'source',
+          },
+        });
+        return;
+      }
+
+      if (sourceNode) {
+        const sourcePosition = getAbsolutePosition(sourceNode);
+        const sourceSize = getNodeSize(sourceNode);
+
+        position = snapPositionToGrid({
+          x: sourcePosition.x + sourceSize.width + 180,
+          y: sourcePosition.y,
+        });
+
+        setCreateStepContext({
+          position,
+          connection: {
+            source: sourceNode.id,
+            sourceHandle: request.sourceHandle || 'source',
+          },
+        });
+        return;
+      }
+
+      if (targetNode) {
+        const targetPosition = getAbsolutePosition(targetNode);
+        position = snapPositionToGrid({
+          x: Math.max(0, targetPosition.x - 288),
+          y: targetPosition.y,
+        });
+
+        setCreateStepContext({
+          position,
+          insertionEdge: {
+            source: '__start_indicator__',
+            target: targetNode.id,
+            sourceHandle: 'source',
+          },
+        });
+        return;
+      }
+
+      setCreateStepContext({
+        position,
+      });
+    },
+    [nodes]
+  );
+
   // Handle step picker selection - stores pending node for user confirmation
   const handleStepPickerSelect = useCallback(
     (result: StepPickerResult) => {
@@ -1193,29 +1304,8 @@ export function WorkflowEditor({
   return (
     <>
       <div className="relative h-full w-full">
-        <Tabs
-          value={editorView}
-          onValueChange={(value) => setEditorView(value as WorkflowEditorView)}
-          className="h-full"
-        >
-          <div className="pointer-events-none absolute left-4 top-4 z-20">
-            <TabsList className="pointer-events-auto shadow-sm">
-              <TabsTrigger value="canvas" className="gap-2">
-                <Network className="size-4" aria-hidden="true" />
-                Canvas
-              </TabsTrigger>
-              <TabsTrigger value="timeline" className="gap-2">
-                <ListTree className="size-4" aria-hidden="true" />
-                Timeline
-              </TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent
-            forceMount
-            value="canvas"
-            className={cn('m-0 h-full', editorView !== 'canvas' && 'hidden')}
-          >
+        <Tabs value="timeline" className="h-full">
+          <TabsContent value="canvas" className="m-0 h-full">
             <NodeConfigProvider value={nodeConfigContextValue}>
               <EdgeContextProvider
                 onInsertClick={handleEdgeInsertClick}
@@ -1324,16 +1414,13 @@ export function WorkflowEditor({
             </NodeConfigProvider>
           </TabsContent>
 
-          <TabsContent
-            forceMount
-            value="timeline"
-            className={cn('m-0 h-full', editorView !== 'timeline' && 'hidden')}
-          >
+          <TabsContent forceMount value="timeline" className="m-0 h-full">
             <NodeConfigProvider value={nodeConfigContextValue}>
               <WorkflowTimelineView
                 readOnly={readOnly}
                 debugInspectMode={debugInspectMode}
                 onEditNode={openNodeConfig}
+                onAddStep={handleTimelineAddStep}
               />
             </NodeConfigProvider>
           </TabsContent>

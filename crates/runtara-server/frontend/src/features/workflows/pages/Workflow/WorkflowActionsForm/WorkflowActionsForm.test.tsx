@@ -9,8 +9,6 @@ const defaultProps = {
   onSubmit: vi.fn(),
   onExportJSON: vi.fn(),
   onImportJSON: vi.fn(),
-  onAutoLayout: vi.fn(),
-  onAddNote: vi.fn(),
 };
 
 describe('WorkflowActionsForm', () => {

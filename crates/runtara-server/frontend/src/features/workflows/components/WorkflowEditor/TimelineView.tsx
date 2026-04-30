@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -23,6 +24,7 @@ import {
   GripVertical,
   ListTree,
   PenLine,
+  Plus,
   Repeat,
   Split,
   Workflow,
@@ -42,6 +44,14 @@ type WorkflowTimelineViewProps = {
   readOnly?: boolean;
   debugInspectMode?: boolean;
   onEditNode?: (nodeId: string) => void;
+  onAddStep?: (request: TimelineAddStepRequest) => void;
+};
+
+export type TimelineAddStepRequest = {
+  sourceNodeId?: string;
+  sourceHandle?: string;
+  targetNodeId?: string;
+  parentId?: string;
 };
 
 type TimelineItem = {
@@ -264,6 +274,23 @@ function getCaseIndex(label: string): number | null {
   return null;
 }
 
+function getRouteSourceHandle(edge: Edge): string {
+  if (edge.sourceHandle) return edge.sourceHandle;
+
+  const label = getEdgeLabel(edge);
+  const normalizedLabel = label.trim().toLowerCase();
+  const caseIndex = getCaseIndex(label);
+
+  if (normalizedLabel === 'true' || normalizedLabel === 'false') {
+    return normalizedLabel;
+  }
+  if (caseIndex !== null) return `case-${caseIndex}`;
+  if (normalizedLabel === 'default') return 'default';
+  if (normalizedLabel === 'next') return 'source';
+
+  return 'source';
+}
+
 function getBranchEdgeOrder(edge: Edge): [number, number, string] {
   const label = getEdgeLabel(edge);
   const normalizedLabel = label.trim().toLowerCase();
@@ -289,6 +316,66 @@ function compareBranchEdges(a: Edge, b: Edge): number {
 function isBranchEdge(edge: Edge, outgoingEdges: Edge[]): boolean {
   const label = getEdgeLabel(edge);
   return label !== 'next' || outgoingEdges.length > 1;
+}
+
+function createInsertionRequest(
+  items: TimelineItem[],
+  slotIndex: number,
+  listContext: TimelineListContext,
+  endTargetNode?: Node
+): TimelineAddStepRequest | null {
+  const previousItem = items[slotIndex - 1];
+  const nextItem = items[slotIndex];
+  const targetNode =
+    nextItem?.node ?? (!previousItem ? endTargetNode : undefined);
+
+  if (!previousItem && targetNode) {
+    if (listContext.type === 'lane' && listContext.branchSourceId) {
+      return {
+        sourceNodeId: listContext.branchSourceId,
+        sourceHandle: listContext.branchSourceHandle || 'source',
+        targetNodeId: targetNode.id,
+        parentId: listContext.parentId,
+      };
+    }
+
+    return {
+      targetNodeId: targetNode.id,
+      parentId: listContext.parentId,
+    };
+  }
+
+  if (previousItem) {
+    if (getStepType(previousItem.node) === 'Finish') return null;
+
+    const directTargetNode = nextItem?.node ?? endTargetNode;
+    const nextEdge = directTargetNode
+      ? previousItem.outgoingEdges.find(
+          (edge) => edge.target === directTargetNode.id
+        )
+      : undefined;
+
+    if (directTargetNode && !nextEdge) return null;
+
+    return {
+      sourceNodeId: previousItem.node.id,
+      sourceHandle: nextEdge ? getRouteSourceHandle(nextEdge) : 'source',
+      targetNodeId: nextEdge?.target,
+      parentId: listContext.parentId,
+    };
+  }
+
+  if (listContext.type === 'lane' && listContext.branchSourceId) {
+    return {
+      sourceNodeId: listContext.branchSourceId,
+      sourceHandle: listContext.branchSourceHandle || 'source',
+      parentId: listContext.parentId,
+    };
+  }
+
+  return {
+    parentId: listContext.parentId,
+  };
 }
 
 function collectReachableNodeIds(
@@ -633,7 +720,7 @@ function createLaneListContext(
   parentId: string | undefined,
   lane: BranchLane
 ): TimelineListContext {
-  const branchSourceHandle = lane.edge.sourceHandle || 'source';
+  const branchSourceHandle = getRouteSourceHandle(lane.edge);
 
   return {
     key: `lane:${parentId ?? 'root'}:${lane.edge.source}:${branchSourceHandle}`,
@@ -675,6 +762,116 @@ function collectTimelineListContexts(
   return contexts;
 }
 
+function TimelineInsertionPoint({
+  request,
+  depth,
+  onAddStep,
+}: {
+  request: TimelineAddStepRequest | null;
+  depth: number;
+  onAddStep?: (request: TimelineAddStepRequest) => void;
+}) {
+  if (!request || !onAddStep) return null;
+
+  return (
+    <div
+      className="group flex min-w-0 items-center gap-2 py-1"
+      style={{ marginLeft: depth * 24 }}
+    >
+      <span
+        className="h-px flex-1 border-t border-dashed border-border"
+        aria-hidden="true"
+      />
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="h-7 border-dashed bg-background px-2 text-xs text-muted-foreground shadow-none transition-colors group-hover:border-primary/60 group-hover:text-foreground"
+        onClick={() => onAddStep(request)}
+        aria-label="Add step here"
+      >
+        <Plus className="size-3.5" aria-hidden="true" />
+        Add step
+      </Button>
+      <span
+        className="h-px flex-1 border-t border-dashed border-border"
+        aria-hidden="true"
+      />
+    </div>
+  );
+}
+
+function TimelineItemList({
+  items,
+  depth,
+  listContext,
+  readOnly,
+  debugInspectMode,
+  expandedContainers,
+  onToggleContainer,
+  onEditNode,
+  onAddStep,
+  dragController,
+  routeController,
+  endTargetNode,
+}: {
+  items: TimelineItem[];
+  depth: number;
+  listContext: TimelineListContext;
+  readOnly?: boolean;
+  debugInspectMode?: boolean;
+  expandedContainers: Record<string, boolean>;
+  onToggleContainer: (nodeId: string) => void;
+  onEditNode?: (nodeId: string) => void;
+  onAddStep?: (request: TimelineAddStepRequest) => void;
+  dragController: TimelineDragController;
+  routeController: TimelineRouteController;
+  endTargetNode?: Node;
+}) {
+  const canAdd = !readOnly && !debugInspectMode && Boolean(onAddStep);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {canAdd && (
+        <TimelineInsertionPoint
+          request={createInsertionRequest(items, 0, listContext, endTargetNode)}
+          depth={depth}
+          onAddStep={onAddStep}
+        />
+      )}
+      {items.map((item, index) => (
+        <Fragment key={item.node.id}>
+          <WorkflowTimelineItem
+            item={item}
+            depth={depth}
+            listContext={listContext}
+            readOnly={readOnly}
+            debugInspectMode={debugInspectMode}
+            expandedContainers={expandedContainers}
+            onToggleContainer={onToggleContainer}
+            onEditNode={onEditNode}
+            onAddStep={onAddStep}
+            dragController={dragController}
+            routeController={routeController}
+          />
+          {canAdd && (
+            <TimelineInsertionPoint
+              request={createInsertionRequest(
+                items,
+                index + 1,
+                listContext,
+                endTargetNode
+              )}
+              depth={depth}
+              onAddStep={onAddStep}
+            />
+          )}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
 function BranchLaneGroups({
   lanes,
   sourceNode,
@@ -685,6 +882,7 @@ function BranchLaneGroups({
   expandedContainers,
   onToggleContainer,
   onEditNode,
+  onAddStep,
   dragController,
   routeController,
 }: {
@@ -697,6 +895,7 @@ function BranchLaneGroups({
   expandedContainers: Record<string, boolean>;
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
+  onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
 }) {
@@ -823,23 +1022,20 @@ function BranchLaneGroups({
                 )}
                 aria-hidden="true"
               />
-              <div className="space-y-2">
-                {lane.items.map((laneItem) => (
-                  <WorkflowTimelineItem
-                    key={laneItem.node.id}
-                    item={laneItem}
-                    depth={0}
-                    listContext={laneContext}
-                    readOnly={readOnly}
-                    debugInspectMode={debugInspectMode}
-                    expandedContainers={expandedContainers}
-                    onToggleContainer={onToggleContainer}
-                    onEditNode={onEditNode}
-                    dragController={dragController}
-                    routeController={routeController}
-                  />
-                ))}
-              </div>
+              <TimelineItemList
+                items={lane.items}
+                depth={0}
+                listContext={laneContext}
+                readOnly={readOnly}
+                debugInspectMode={debugInspectMode}
+                expandedContainers={expandedContainers}
+                onToggleContainer={onToggleContainer}
+                onEditNode={onEditNode}
+                onAddStep={onAddStep}
+                dragController={dragController}
+                routeController={routeController}
+                endTargetNode={lane.continuationNode}
+              />
               {lane.continuationNode && (
                 <LaneContinuationNode node={lane.continuationNode} />
               )}
@@ -860,6 +1056,7 @@ function WorkflowTimelineItem({
   expandedContainers,
   onToggleContainer,
   onEditNode,
+  onAddStep,
   dragController,
   routeController,
 }: {
@@ -871,6 +1068,7 @@ function WorkflowTimelineItem({
   expandedContainers: Record<string, boolean>;
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
+  onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
 }) {
@@ -1065,27 +1263,26 @@ function WorkflowTimelineItem({
         expandedContainers={expandedContainers}
         onToggleContainer={onToggleContainer}
         onEditNode={onEditNode}
+        onAddStep={onAddStep}
         dragController={dragController}
         routeController={routeController}
       />
 
       {isContainer && isExpanded && (
-        <div className="mt-2 flex flex-col gap-2">
-          {item.children.map((child) => (
-            <WorkflowTimelineItem
-              key={child.node.id}
-              item={child}
-              depth={depth + 1}
-              listContext={childListContext}
-              readOnly={readOnly}
-              debugInspectMode={debugInspectMode}
-              expandedContainers={expandedContainers}
-              onToggleContainer={onToggleContainer}
-              onEditNode={onEditNode}
-              dragController={dragController}
-              routeController={routeController}
-            />
-          ))}
+        <div className="mt-2">
+          <TimelineItemList
+            items={item.children}
+            depth={depth + 1}
+            listContext={childListContext}
+            readOnly={readOnly}
+            debugInspectMode={debugInspectMode}
+            expandedContainers={expandedContainers}
+            onToggleContainer={onToggleContainer}
+            onEditNode={onEditNode}
+            onAddStep={onAddStep}
+            dragController={dragController}
+            routeController={routeController}
+          />
         </div>
       )}
       {isDropAfter && (
@@ -1102,6 +1299,7 @@ export function WorkflowTimelineView({
   readOnly = false,
   debugInspectMode = false,
   onEditNode,
+  onAddStep,
 }: WorkflowTimelineViewProps) {
   const nodes = useWorkflowStore((state) => state.nodes);
   const edges = useWorkflowStore((state) => state.edges);
@@ -1388,6 +1586,16 @@ export function WorkflowTimelineView({
           <p className="mt-2 text-sm text-muted-foreground">
             Add the first step to see the automation timeline.
           </p>
+          {!readOnly && !debugInspectMode && onAddStep && (
+            <Button
+              type="button"
+              className="mt-4"
+              onClick={() => onAddStep({})}
+            >
+              <Plus aria-hidden="true" />
+              Add step
+            </Button>
+          )}
         </div>
       </div>
     );
@@ -1403,7 +1611,7 @@ export function WorkflowTimelineView({
                 Workflow Timeline
               </h2>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">{totalSteps} steps</Badge>
               <Badge variant="outline">{branchCount} branch edges</Badge>
               <Badge variant="outline">{containerCount} nested scopes</Badge>
@@ -1411,23 +1619,19 @@ export function WorkflowTimelineView({
           </div>
         </div>
 
-        <div className="flex flex-col gap-2">
-          {items.map((item) => (
-            <WorkflowTimelineItem
-              key={item.node.id}
-              item={item}
-              depth={0}
-              listContext={rootListContext}
-              readOnly={readOnly}
-              debugInspectMode={debugInspectMode}
-              expandedContainers={expandedContainers}
-              onToggleContainer={toggleContainer}
-              onEditNode={onEditNode}
-              dragController={dragController}
-              routeController={routeController}
-            />
-          ))}
-        </div>
+        <TimelineItemList
+          items={items}
+          depth={0}
+          listContext={rootListContext}
+          readOnly={readOnly}
+          debugInspectMode={debugInspectMode}
+          expandedContainers={expandedContainers}
+          onToggleContainer={toggleContainer}
+          onEditNode={onEditNode}
+          onAddStep={onAddStep}
+          dragController={dragController}
+          routeController={routeController}
+        />
       </div>
     </div>
   );

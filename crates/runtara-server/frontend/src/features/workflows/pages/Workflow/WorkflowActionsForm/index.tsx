@@ -6,10 +6,8 @@ import { Button } from '@/shared/components/ui/button';
 import * as form from './WorkflowActionsItem';
 import { useRef } from 'react';
 import {
-  Network,
   Save,
   Play,
-  StickyNote,
   Square,
   Download,
   Upload,
@@ -40,8 +38,6 @@ type Props = {
   onSubmit: (values: Record<string, any>) => void;
   onExportJSON: () => void;
   onImportJSON: (json: string) => void;
-  onAutoLayout: () => void;
-  onAddNote: () => void;
   isExecuting?: boolean;
   isExecutionActive?: boolean;
   isDirty?: boolean;
@@ -64,8 +60,6 @@ export function WorkflowActionsForm(props: Props) {
     onSubmit,
     onExportJSON,
     onImportJSON,
-    onAutoLayout,
-    onAddNote,
     isExecuting,
     isExecutionActive,
     isDirty,
@@ -302,34 +296,6 @@ export function WorkflowActionsForm(props: Props) {
               title="Import workflow"
             >
               <Download className="h-4 w-4" />
-            </Button>
-
-            <div className="mx-1 h-4 w-px bg-border" />
-
-            {/* Add note button */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 rounded p-0 text-muted-foreground hover:bg-muted hover:text-foreground"
-              disabled={isLoading || isExecuting}
-              onClick={onAddNote}
-              title="Add note"
-            >
-              <StickyNote className="h-4 w-4" />
-            </Button>
-
-            {/* Auto-layout button */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 rounded p-0 text-muted-foreground hover:bg-muted hover:text-foreground"
-              disabled={isLoading || isExecuting}
-              onClick={onAutoLayout}
-              title="Auto-layout"
-            >
-              <Network className="h-4 w-4" />
             </Button>
           </>
         )}

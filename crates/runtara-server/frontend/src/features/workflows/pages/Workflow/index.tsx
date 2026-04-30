@@ -1,5 +1,4 @@
 import { useParams, useSearchParams } from 'react-router';
-import { useReactFlow } from '@xyflow/react';
 import { toast } from 'sonner';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
@@ -194,8 +193,6 @@ export function Workflow() {
       setBlocker(false);
     };
   }, [hasUnsavedChanges, setBlocker]);
-
-  const { getViewport } = useReactFlow();
 
   // Fetch available versions
   const { data: versionsResponse } = useCustomQuery({
@@ -1662,22 +1659,6 @@ export function Workflow() {
     [confirmIfUnsavedChanges, performImportJSON]
   );
 
-  const handleAutoLayout = () => {
-    useWorkflowStore.getState().applyAutoLayout();
-  };
-
-  const handleAddNote = () => {
-    // Get the viewport center position in flow coordinates
-    const viewport = getViewport();
-    const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
-    const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
-
-    // Add note at the center of the visible viewport
-    useWorkflowStore.getState().addNote({ x: centerX, y: centerY });
-
-    toast.info('Note added to canvas');
-  };
-
   const isLoading =
     updateMutation.isPending ||
     scheduleMutation.isPending ||
@@ -1750,8 +1731,6 @@ export function Workflow() {
               onSubmit={handleSubmit}
               onExportJSON={handleExportJSON}
               onImportJSON={handleImportJSON}
-              onAutoLayout={handleAutoLayout}
-              onAddNote={handleAddNote}
               isExecuting={!!executingInstanceId}
               isExecutionActive={
                 executionInstanceData?.status &&
