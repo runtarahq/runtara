@@ -6,6 +6,25 @@ use crate::instance::Condition;
 use crate::schema::Schema;
 use crate::sql::sanitize::quote_identifier;
 use crate::types::ColumnType;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConditionSubquery {
+    pub schema: String,
+    pub select: String,
+    #[serde(default, rename = "connectionId")]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub condition: Option<Condition>,
+}
+
+#[derive(Clone, Copy)]
+struct ConditionBuildContext<'a> {
+    subquery_schemas: Option<&'a HashMap<String, Schema>>,
+    allow_subqueries: bool,
+}
 
 /// Map camelCase system field names to their snake_case SQL column equivalents.
 pub(crate) fn field_to_sql(field: &str) -> &str {
@@ -86,6 +105,338 @@ pub fn build_condition_clause(
     param_offset: &mut i32,
     schema: &Schema,
 ) -> Result<(String, Vec<serde_json::Value>), String> {
+    build_condition_clause_at(
+        condition,
+        param_offset,
+        schema,
+        "condition",
+        ConditionBuildContext {
+            subquery_schemas: None,
+            allow_subqueries: false,
+        },
+    )
+}
+
+pub fn build_condition_clause_with_subqueries(
+    condition: &Condition,
+    param_offset: &mut i32,
+    schema: &Schema,
+    subquery_schemas: &HashMap<String, Schema>,
+) -> Result<(String, Vec<serde_json::Value>), String> {
+    build_condition_clause_at(
+        condition,
+        param_offset,
+        schema,
+        "condition",
+        ConditionBuildContext {
+            subquery_schemas: Some(subquery_schemas),
+            allow_subqueries: true,
+        },
+    )
+}
+
+pub fn collect_condition_subquery_schema_names(
+    condition: &Condition,
+) -> Result<HashSet<String>, String> {
+    let mut schemas = HashSet::new();
+    collect_condition_subquery_schema_names_at(condition, false, &mut schemas, "condition")?;
+    Ok(schemas)
+}
+
+fn argument_path(condition_path: &str, index: usize) -> String {
+    format!("{}.arguments[{}]", condition_path, index)
+}
+
+fn required_arguments<'a>(
+    condition: &'a Condition,
+    condition_path: &str,
+    op: &str,
+    expected_shape: &str,
+) -> Result<&'a Vec<serde_json::Value>, String> {
+    condition.arguments.as_ref().ok_or_else(|| {
+        format!(
+            "{}: {} operation requires arguments ({})",
+            condition_path, op, expected_shape
+        )
+    })
+}
+
+fn validate_argument_count(
+    args: &[serde_json::Value],
+    condition_path: &str,
+    op: &str,
+    expected: usize,
+    expected_shape: &str,
+) -> Result<(), String> {
+    if args.len() != expected {
+        return Err(format!(
+            "{}: {} operation requires exactly {} argument{} ({})",
+            condition_path,
+            op,
+            expected,
+            if expected == 1 { "" } else { "s" },
+            expected_shape
+        ));
+    }
+    Ok(())
+}
+
+fn validate_field_name<'a>(
+    args: &'a [serde_json::Value],
+    index: usize,
+    condition_path: &str,
+    description: &str,
+) -> Result<&'a str, String> {
+    let path = argument_path(condition_path, index);
+    let raw_field = args[index].as_str().ok_or_else(|| {
+        format!(
+            "{}: {} argument must be a {} string",
+            path,
+            ordinal_argument(index),
+            description
+        )
+    })?;
+
+    if raw_field.is_empty() {
+        return Err(format!("{}: field name string cannot be empty", path));
+    }
+
+    if !raw_field
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "{}: field name string contains invalid characters; expected alphanumeric, underscore, or hyphen",
+            path
+        ));
+    }
+
+    Ok(raw_field)
+}
+
+fn ordinal_argument(index: usize) -> &'static str {
+    match index {
+        0 => "first",
+        1 => "second",
+        2 => "third",
+        _ => "argument",
+    }
+}
+
+fn deserialize_condition_arg(value: &serde_json::Value, path: &str) -> Result<Condition, String> {
+    serde_json::from_value::<Condition>(value.clone()).map_err(|err| {
+        format!(
+            "{}: expected condition object with op and optional arguments; {}",
+            path, err
+        )
+    })
+}
+
+fn parse_subquery_operand(
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<Option<ConditionSubquery>, String> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(subquery) = object.get("subquery") else {
+        return Ok(None);
+    };
+    if object.len() != 1 {
+        return Err(format!(
+            "{}: subquery operand must contain only the 'subquery' key",
+            path
+        ));
+    }
+    let parsed = serde_json::from_value::<ConditionSubquery>(subquery.clone()).map_err(|err| {
+        format!(
+            "{}.subquery: expected {{schema, select, condition?}}; {}",
+            path, err
+        )
+    })?;
+    if parsed.schema.trim().is_empty() {
+        return Err(format!("{}.subquery.schema: schema cannot be empty", path));
+    }
+    if parsed.select.trim().is_empty() {
+        return Err(format!("{}.subquery.select: select cannot be empty", path));
+    }
+    Ok(Some(parsed))
+}
+
+fn collect_condition_subquery_schema_names_at(
+    condition: &Condition,
+    inside_subquery: bool,
+    schemas: &mut HashSet<String>,
+    condition_path: &str,
+) -> Result<(), String> {
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(());
+    };
+
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument_path = argument_path(condition_path, index);
+        if let Some(subquery) = parse_subquery_operand(argument, &argument_path)? {
+            if inside_subquery {
+                return Err(format!(
+                    "{}: nested subqueries are not supported",
+                    argument_path
+                ));
+            }
+            schemas.insert(subquery.schema.clone());
+            if let Some(child) = subquery.condition.as_ref() {
+                collect_condition_subquery_schema_names_at(child, true, schemas, &argument_path)?;
+            }
+            continue;
+        }
+
+        if let Ok(child) = serde_json::from_value::<Condition>(argument.clone()) {
+            collect_condition_subquery_schema_names_at(
+                &child,
+                inside_subquery,
+                schemas,
+                &argument_path,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_field_name_from_str<'a>(
+    raw_field: &'a str,
+    path: &str,
+    description: &str,
+) -> Result<&'a str, String> {
+    if raw_field.is_empty() {
+        return Err(format!("{}: {} string cannot be empty", path, description));
+    }
+
+    if !raw_field
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "{}: {} string contains invalid characters; expected alphanumeric, underscore, or hyphen",
+            path, description
+        ));
+    }
+
+    Ok(raw_field)
+}
+
+fn schema_has_field(schema: &Schema, field: &str) -> bool {
+    matches!(field, "id" | "created_at" | "updated_at")
+        || schema.columns.iter().any(|column| column.name == field)
+}
+
+fn build_subquery_condition_clause(
+    outer_field: &str,
+    subquery: &ConditionSubquery,
+    param_offset: &mut i32,
+    schema: &Schema,
+    condition_path: &str,
+    negate: bool,
+    context: ConditionBuildContext<'_>,
+) -> Result<(String, Vec<serde_json::Value>), String> {
+    if !context.allow_subqueries {
+        return Err(format!(
+            "{}: subquery operands require a same-store condition context",
+            argument_path(condition_path, 1)
+        ));
+    }
+
+    let subquery_schemas = context.subquery_schemas.ok_or_else(|| {
+        format!(
+            "{}: subquery operands require resolved same-store schemas",
+            argument_path(condition_path, 1)
+        )
+    })?;
+    let subquery_schema = subquery_schemas.get(&subquery.schema).ok_or_else(|| {
+        format!(
+            "{}.subquery.schema: schema '{}' was not resolved for this condition",
+            argument_path(condition_path, 1),
+            subquery.schema
+        )
+    })?;
+
+    let parent_cast = resolve_sql_cast(outer_field, schema);
+    if !schema_has_field(schema, outer_field) {
+        return Err(format!(
+            "{}: unknown field '{}'",
+            argument_path(condition_path, 0),
+            outer_field
+        ));
+    }
+
+    let select_field = field_to_sql(validate_field_name_from_str(
+        &subquery.select,
+        &format!("{}.subquery.select", argument_path(condition_path, 1)),
+        "select field name",
+    )?);
+    if !schema_has_field(subquery_schema, select_field) {
+        return Err(format!(
+            "{}.subquery.select: unknown field '{}' on schema '{}'",
+            argument_path(condition_path, 1),
+            subquery.select,
+            subquery.schema
+        ));
+    }
+    let subquery_cast = resolve_sql_cast(select_field, subquery_schema);
+    if parent_cast != subquery_cast {
+        return Err(format!(
+            "{}.subquery.select: field '{}' has SQL cast {}, but parent field '{}' has SQL cast {}",
+            argument_path(condition_path, 1),
+            subquery.select,
+            subquery_cast,
+            outer_field,
+            parent_cast
+        ));
+    }
+
+    let (subquery_where, params) = if let Some(condition) = subquery.condition.as_ref() {
+        build_condition_clause_at(
+            condition,
+            param_offset,
+            subquery_schema,
+            &format!("{}.subquery.condition", argument_path(condition_path, 1)),
+            ConditionBuildContext {
+                subquery_schemas: context.subquery_schemas,
+                allow_subqueries: false,
+            },
+        )?
+    } else {
+        ("TRUE".to_string(), Vec::new())
+    };
+
+    let subquery_sql = format!(
+        "SELECT {}::{} FROM {} WHERE deleted = FALSE AND ({})",
+        quote_identifier(select_field),
+        subquery_cast,
+        quote_identifier(&subquery_schema.table_name),
+        subquery_where
+    );
+    let in_clause = format!(
+        "{}::{} IN ({})",
+        quote_identifier(outer_field),
+        parent_cast,
+        subquery_sql
+    );
+    let clause = if negate {
+        format!("NOT ({})", in_clause)
+    } else {
+        in_clause
+    };
+
+    Ok((clause, params))
+}
+
+fn build_condition_clause_at(
+    condition: &Condition,
+    param_offset: &mut i32,
+    schema: &Schema,
+    condition_path: &str,
+    context: ConditionBuildContext<'_>,
+) -> Result<(String, Vec<serde_json::Value>), String> {
     let op = condition.op.to_uppercase();
     let args = condition.arguments.as_ref();
 
@@ -95,79 +446,104 @@ pub fn build_condition_clause(
         "AND" => {
             if let Some(args) = args {
                 let mut clauses = Vec::new();
-                for arg in args {
-                    if let Ok(sub_condition) = serde_json::from_value::<Condition>(arg.clone()) {
-                        let (clause, mut sub_params) =
-                            build_condition_clause(&sub_condition, param_offset, schema)?;
-                        clauses.push(format!("({})", clause));
-                        params.append(&mut sub_params);
-                    }
+                for (i, arg) in args.iter().enumerate() {
+                    let child_path = argument_path(condition_path, i);
+                    let sub_condition = deserialize_condition_arg(arg, &child_path)?;
+                    let (clause, mut sub_params) = build_condition_clause_at(
+                        &sub_condition,
+                        param_offset,
+                        schema,
+                        &child_path,
+                        context,
+                    )?;
+                    clauses.push(format!("({})", clause));
+                    params.append(&mut sub_params);
                 }
                 if clauses.is_empty() {
-                    return Err("AND operation requires at least one condition".to_string());
+                    return Err(format!(
+                        "{}: AND operation requires at least one condition argument",
+                        condition_path
+                    ));
                 }
                 Ok((clauses.join(" AND "), params))
             } else {
-                Err("AND operation requires arguments".to_string())
+                Err(format!(
+                    "{}: AND operation requires arguments (condition, ...)",
+                    condition_path
+                ))
             }
         }
         "OR" => {
             if let Some(args) = args {
                 let mut clauses = Vec::new();
-                for arg in args {
-                    if let Ok(sub_condition) = serde_json::from_value::<Condition>(arg.clone()) {
-                        let (clause, mut sub_params) =
-                            build_condition_clause(&sub_condition, param_offset, schema)?;
-                        clauses.push(format!("({})", clause));
-                        params.append(&mut sub_params);
-                    }
+                for (i, arg) in args.iter().enumerate() {
+                    let child_path = argument_path(condition_path, i);
+                    let sub_condition = deserialize_condition_arg(arg, &child_path)?;
+                    let (clause, mut sub_params) = build_condition_clause_at(
+                        &sub_condition,
+                        param_offset,
+                        schema,
+                        &child_path,
+                        context,
+                    )?;
+                    clauses.push(format!("({})", clause));
+                    params.append(&mut sub_params);
                 }
                 if clauses.is_empty() {
-                    return Err("OR operation requires at least one condition".to_string());
+                    return Err(format!(
+                        "{}: OR operation requires at least one condition argument",
+                        condition_path
+                    ));
                 }
                 Ok((clauses.join(" OR "), params))
             } else {
-                Err("OR operation requires arguments".to_string())
+                Err(format!(
+                    "{}: OR operation requires arguments (condition, ...)",
+                    condition_path
+                ))
             }
         }
         "NOT" => {
             if let Some(args) = args {
                 if args.len() != 1 {
-                    return Err("NOT operation requires exactly one argument".to_string());
+                    return Err(format!(
+                        "{}: NOT operation requires exactly one argument (condition)",
+                        condition_path
+                    ));
                 }
-                if let Ok(sub_condition) = serde_json::from_value::<Condition>(args[0].clone()) {
-                    let (clause, sub_params) =
-                        build_condition_clause(&sub_condition, param_offset, schema)?;
-                    params.extend(sub_params);
-                    Ok((format!("NOT ({})", clause), params))
-                } else {
-                    Err("NOT operation requires a Condition argument".to_string())
-                }
+                let child_path = argument_path(condition_path, 0);
+                let sub_condition = deserialize_condition_arg(&args[0], &child_path)?;
+                let (clause, sub_params) = build_condition_clause_at(
+                    &sub_condition,
+                    param_offset,
+                    schema,
+                    &child_path,
+                    context,
+                )?;
+                params.extend(sub_params);
+                Ok((format!("NOT ({})", clause), params))
             } else {
-                Err("NOT operation requires an argument".to_string())
+                Err(format!(
+                    "{}: NOT operation requires arguments (condition)",
+                    condition_path
+                ))
             }
         }
         "EQ" | "NE" | "GT" | "LT" | "GTE" | "LTE" => {
             if let Some(args) = args {
                 if args.len() != 2 {
-                    return Err(format!("{} operation requires exactly 2 arguments", op));
+                    return Err(format!(
+                        "{}: {} operation requires exactly 2 arguments (field, value)",
+                        condition_path, op
+                    ));
                 }
-                let raw_field = args[0]
-                    .as_str()
-                    .ok_or("First argument must be a field name")?;
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
                 let value = &args[1];
-
-                // Validate field name is not empty
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name to prevent SQL injection
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
+                if parse_subquery_operand(value, &argument_path(condition_path, 1))?.is_some() {
+                    return Err(format!(
+                        "{}: subquery operands are only supported as the second argument of IN or NOT_IN",
+                        argument_path(condition_path, 1)
+                    ));
                 }
 
                 // Map camelCase system fields to snake_case SQL columns
@@ -190,7 +566,8 @@ pub fn build_condition_clause(
                         "NE" => "IS NOT NULL",
                         _ => {
                             return Err(format!(
-                                "{} operation with NULL value is not supported",
+                                "{}: {} operation with NULL value is not supported",
+                                argument_path(condition_path, 1),
                                 op
                             ));
                         }
@@ -218,30 +595,27 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err(format!("{} operation requires arguments", op))
+                Err(format!(
+                    "{}: {} operation requires arguments (field, value)",
+                    condition_path, op
+                ))
             }
         }
         "CONTAINS" => {
             if let Some(args) = args {
                 if args.len() != 2 {
-                    return Err("CONTAINS operation requires exactly 2 arguments".to_string());
+                    return Err(format!(
+                        "{}: CONTAINS operation requires exactly 2 arguments (field, string)",
+                        condition_path
+                    ));
                 }
-                let raw_field = args[0]
-                    .as_str()
-                    .ok_or("First argument must be a field name")?;
-                let value = args[1].as_str().ok_or("Second argument must be a string")?;
-
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
-                }
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
+                let value = args[1].as_str().ok_or_else(|| {
+                    format!(
+                        "{}: second argument must be a string value",
+                        argument_path(condition_path, 1)
+                    )
+                })?;
 
                 let field = field_to_sql(raw_field);
 
@@ -252,34 +626,43 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err("CONTAINS operation requires arguments".to_string())
+                Err(format!(
+                    "{}: CONTAINS operation requires arguments (field, string)",
+                    condition_path
+                ))
             }
         }
         "IN" => {
             if let Some(args) = args {
                 if args.len() != 2 {
-                    return Err("IN operation requires exactly 2 arguments".to_string());
+                    return Err(format!(
+                        "{}: IN operation requires exactly 2 arguments (field, array)",
+                        condition_path
+                    ));
                 }
-                let raw_field = args[0]
-                    .as_str()
-                    .ok_or("First argument must be a field name")?;
-                let values = args[1]
-                    .as_array()
-                    .ok_or("Second argument must be an array")?;
-
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
-                }
-
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
                 let field = field_to_sql(raw_field);
+
+                if let Some(subquery) =
+                    parse_subquery_operand(&args[1], &argument_path(condition_path, 1))?
+                {
+                    return build_subquery_condition_clause(
+                        field,
+                        &subquery,
+                        param_offset,
+                        schema,
+                        condition_path,
+                        false,
+                        context,
+                    );
+                }
+
+                let values = args[1].as_array().ok_or_else(|| {
+                    format!(
+                        "{}: second argument must be an array of values or a subquery operand",
+                        argument_path(condition_path, 1)
+                    )
+                })?;
 
                 params.push(serde_json::Value::Array(values.clone()));
 
@@ -291,34 +674,43 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err("IN operation requires arguments".to_string())
+                Err(format!(
+                    "{}: IN operation requires arguments (field, array)",
+                    condition_path
+                ))
             }
         }
         "NOT_IN" => {
             if let Some(args) = args {
                 if args.len() != 2 {
-                    return Err("NOT_IN operation requires exactly 2 arguments".to_string());
+                    return Err(format!(
+                        "{}: NOT_IN operation requires exactly 2 arguments (field, array)",
+                        condition_path
+                    ));
                 }
-                let raw_field = args[0]
-                    .as_str()
-                    .ok_or("First argument must be a field name")?;
-                let values = args[1]
-                    .as_array()
-                    .ok_or("Second argument must be an array")?;
-
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
-                }
-
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
                 let field = field_to_sql(raw_field);
+
+                if let Some(subquery) =
+                    parse_subquery_operand(&args[1], &argument_path(condition_path, 1))?
+                {
+                    return build_subquery_condition_clause(
+                        field,
+                        &subquery,
+                        param_offset,
+                        schema,
+                        condition_path,
+                        true,
+                        context,
+                    );
+                }
+
+                let values = args[1].as_array().ok_or_else(|| {
+                    format!(
+                        "{}: second argument must be an array of values or a subquery operand",
+                        argument_path(condition_path, 1)
+                    )
+                })?;
 
                 params.push(serde_json::Value::Array(values.clone()));
 
@@ -330,27 +722,21 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err("NOT_IN operation requires arguments".to_string())
+                Err(format!(
+                    "{}: NOT_IN operation requires arguments (field, array)",
+                    condition_path
+                ))
             }
         }
         "IS_EMPTY" => {
             if let Some(args) = args {
                 if args.len() != 1 {
-                    return Err("IS_EMPTY operation requires exactly 1 argument".to_string());
+                    return Err(format!(
+                        "{}: IS_EMPTY operation requires exactly 1 argument (field)",
+                        condition_path
+                    ));
                 }
-                let raw_field = args[0].as_str().ok_or("Argument must be a field name")?;
-
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
-                }
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
 
                 let field = field_to_sql(raw_field);
 
@@ -358,27 +744,21 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err("IS_EMPTY operation requires an argument".to_string())
+                Err(format!(
+                    "{}: IS_EMPTY operation requires arguments (field)",
+                    condition_path
+                ))
             }
         }
         "IS_NOT_EMPTY" => {
             if let Some(args) = args {
                 if args.len() != 1 {
-                    return Err("IS_NOT_EMPTY operation requires exactly 1 argument".to_string());
+                    return Err(format!(
+                        "{}: IS_NOT_EMPTY operation requires exactly 1 argument (field)",
+                        condition_path
+                    ));
                 }
-                let raw_field = args[0].as_str().ok_or("Argument must be a field name")?;
-
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
-                }
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
 
                 let field = field_to_sql(raw_field);
 
@@ -386,27 +766,21 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err("IS_NOT_EMPTY operation requires an argument".to_string())
+                Err(format!(
+                    "{}: IS_NOT_EMPTY operation requires arguments (field)",
+                    condition_path
+                ))
             }
         }
         "IS_DEFINED" => {
             if let Some(args) = args {
                 if args.len() != 1 {
-                    return Err("IS_DEFINED operation requires exactly 1 argument".to_string());
+                    return Err(format!(
+                        "{}: IS_DEFINED operation requires exactly 1 argument (field)",
+                        condition_path
+                    ));
                 }
-                let raw_field = args[0].as_str().ok_or("Argument must be a field name")?;
-
-                if raw_field.is_empty() {
-                    return Err("Field name cannot be empty".to_string());
-                }
-
-                // Validate field name
-                if !raw_field
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-                {
-                    return Err("Field name contains invalid characters".to_string());
-                }
+                let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
 
                 let field = field_to_sql(raw_field);
 
@@ -414,28 +788,27 @@ pub fn build_condition_clause(
 
                 Ok((clause, params))
             } else {
-                Err("IS_DEFINED operation requires an argument".to_string())
+                Err(format!(
+                    "{}: IS_DEFINED operation requires arguments (field)",
+                    condition_path
+                ))
             }
         }
         "SIMILARITY_GTE" => {
-            let args = args.ok_or("SIMILARITY_GTE operation requires arguments")?;
-            if args.len() != 3 {
-                return Err("SIMILARITY_GTE operation requires exactly 3 arguments \
-                     (field, value, threshold)"
-                    .to_string());
-            }
-            let raw_field = args[0]
-                .as_str()
-                .ok_or("First argument must be a field name")?;
-            if raw_field.is_empty() {
-                return Err("Field name cannot be empty".to_string());
-            }
-            if !raw_field
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err("Field name contains invalid characters".to_string());
-            }
+            let args = required_arguments(
+                condition,
+                condition_path,
+                "SIMILARITY_GTE",
+                "field, value, threshold",
+            )?;
+            validate_argument_count(
+                args,
+                condition_path,
+                "SIMILARITY_GTE",
+                3,
+                "field, value, threshold",
+            )?;
+            let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
             let field = field_to_sql(raw_field);
 
             // Reject SIMILARITY_GTE on non-text columns (covers schema columns
@@ -443,20 +816,29 @@ pub fn build_condition_clause(
             let cast = resolve_sql_cast(field, schema);
             if cast != "text" {
                 return Err(format!(
-                    "SIMILARITY_GTE requires a string/enum column; '{}' has SQL cast {}",
-                    field, cast
+                    "{}: SIMILARITY_GTE requires a string/enum column; '{}' has SQL cast {}",
+                    argument_path(condition_path, 0),
+                    field,
+                    cast
                 ));
             }
 
-            let value = args[1]
-                .as_str()
-                .ok_or("Second argument must be a string value")?;
-            let threshold = args[2]
-                .as_f64()
-                .ok_or("Third argument must be a numeric threshold")?;
+            let value = args[1].as_str().ok_or_else(|| {
+                format!(
+                    "{}: second argument must be a string value",
+                    argument_path(condition_path, 1)
+                )
+            })?;
+            let threshold = args[2].as_f64().ok_or_else(|| {
+                format!(
+                    "{}: third argument must be a numeric threshold",
+                    argument_path(condition_path, 2)
+                )
+            })?;
             if !(0.0..=1.0).contains(&threshold) || threshold.is_nan() {
                 return Err(format!(
-                    "SIMILARITY_GTE threshold must be between 0.0 and 1.0, got {}",
+                    "{}: SIMILARITY_GTE threshold must be between 0.0 and 1.0, got {}",
+                    argument_path(condition_path, 2),
                     threshold
                 ));
             }
@@ -475,25 +857,20 @@ pub fn build_condition_clause(
             } else {
                 "<->"
             };
-            let args = args.ok_or_else(|| format!("{} requires arguments", op_name))?;
-            if args.len() != 3 {
-                return Err(format!(
-                    "{} requires exactly 3 arguments (vector_field, vector_literal, threshold)",
-                    op_name
-                ));
-            }
-            let raw_field = args[0]
-                .as_str()
-                .ok_or("First argument must be a vector field name")?;
-            if raw_field.is_empty() {
-                return Err("Field name cannot be empty".to_string());
-            }
-            if !raw_field
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err("Field name contains invalid characters".to_string());
-            }
+            let args = required_arguments(
+                condition,
+                condition_path,
+                op_name,
+                "vector_field, vector_literal, threshold",
+            )?;
+            validate_argument_count(
+                args,
+                condition_path,
+                op_name,
+                3,
+                "vector_field, vector_literal, threshold",
+            )?;
+            let raw_field = validate_field_name(args, 0, condition_path, "vector field name")?;
             let field = field_to_sql(raw_field);
 
             // First arg must reference a vector column. Pull the dimension so
@@ -503,22 +880,34 @@ pub fn build_condition_clause(
                     ColumnType::Vector { dimension, .. } => *dimension,
                     other => {
                         return Err(format!(
-                            "{} requires a vector column; '{}' has type {:?}",
-                            op_name, field, other
+                            "{}: {} requires a vector column; '{}' has type {:?}",
+                            argument_path(condition_path, 0),
+                            op_name,
+                            field,
+                            other
                         ));
                     }
                 },
                 None => {
-                    return Err(format!("{} unknown column '{}'", op_name, field));
+                    return Err(format!(
+                        "{}: {} unknown column '{}'",
+                        argument_path(condition_path, 0),
+                        op_name,
+                        field
+                    ));
                 }
             };
 
-            let arr = args[1]
-                .as_array()
-                .ok_or("Second argument must be a JSON array of numbers")?;
+            let arr = args[1].as_array().ok_or_else(|| {
+                format!(
+                    "{}: second argument must be a JSON array of numbers",
+                    argument_path(condition_path, 1)
+                )
+            })?;
             if arr.len() as u32 != dimension {
                 return Err(format!(
-                    "{}: vector literal dimension {} does not match column '{}' dimension {}",
+                    "{}: {} vector literal dimension {} does not match column '{}' dimension {}",
+                    argument_path(condition_path, 1),
                     op_name,
                     arr.len(),
                     field,
@@ -528,12 +917,18 @@ pub fn build_condition_clause(
             let mut parts: Vec<String> = Vec::with_capacity(arr.len());
             for (i, v) in arr.iter().enumerate() {
                 let f = v.as_f64().ok_or_else(|| {
-                    format!("{}: vector element at index {} is not a number", op_name, i)
+                    format!(
+                        "{}[{}]: vector element must be a number",
+                        argument_path(condition_path, 1),
+                        i
+                    )
                 })?;
                 if !f.is_finite() {
                     return Err(format!(
-                        "{}: vector element at index {} is not finite ({})",
-                        op_name, i, f
+                        "{}[{}]: vector element must be finite, got {}",
+                        argument_path(condition_path, 1),
+                        i,
+                        f
                     ));
                 }
                 parts.push(
@@ -545,12 +940,17 @@ pub fn build_condition_clause(
             let lit = format!("[{}]", parts.join(","));
 
             let threshold = args[2].as_f64().ok_or_else(|| {
-                format!("{}: third argument must be a numeric threshold", op_name)
+                format!(
+                    "{}: third argument must be a numeric threshold",
+                    argument_path(condition_path, 2)
+                )
             })?;
             if !threshold.is_finite() || threshold < 0.0 {
                 return Err(format!(
-                    "{} threshold must be a finite non-negative number, got {}",
-                    op_name, threshold
+                    "{}: {} threshold must be a finite non-negative number, got {}",
+                    argument_path(condition_path, 2),
+                    op_name,
+                    threshold
                 ));
             }
 
@@ -563,38 +963,28 @@ pub fn build_condition_clause(
             Ok((clause, params))
         }
         "MATCH" => {
-            let args = args.ok_or("MATCH operation requires arguments")?;
-            if args.len() != 2 {
-                return Err(
-                    "MATCH operation requires exactly 2 arguments (field, query)".to_string(),
-                );
-            }
-            let raw_field = args[0]
-                .as_str()
-                .ok_or("First argument must be a field name")?;
-            if raw_field.is_empty() {
-                return Err("Field name cannot be empty".to_string());
-            }
-            if !raw_field
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-            {
-                return Err("Field name contains invalid characters".to_string());
-            }
+            let args = required_arguments(condition, condition_path, "MATCH", "field, query")?;
+            validate_argument_count(args, condition_path, "MATCH", 2, "field, query")?;
+            let raw_field = validate_field_name(args, 0, condition_path, "field name")?;
             let field = field_to_sql(raw_field);
 
             // Reject MATCH on anything that isn't a tsvector column.
             let cast = resolve_sql_cast(field, schema);
             if cast != "tsvector" {
                 return Err(format!(
-                    "MATCH requires a tsvector column; '{}' has SQL cast {}",
-                    field, cast
+                    "{}: MATCH requires a tsvector column; '{}' has SQL cast {}",
+                    argument_path(condition_path, 0),
+                    field,
+                    cast
                 ));
             }
 
-            let query = args[1]
-                .as_str()
-                .ok_or("Second argument must be a query string")?;
+            let query = args[1].as_str().ok_or_else(|| {
+                format!(
+                    "{}: second argument must be a query string",
+                    argument_path(condition_path, 1)
+                )
+            })?;
 
             let language = resolve_tsvector_language(field, schema);
             let lang_lit = language.replace('\'', "''");
@@ -606,7 +996,7 @@ pub fn build_condition_clause(
             *param_offset += 1;
             Ok((clause, params))
         }
-        _ => Err(format!("Unsupported operation: {}", op)),
+        _ => Err(format!("{}: Unsupported operation: {}", condition_path, op)),
     }
 }
 
@@ -932,6 +1322,58 @@ mod tests {
         assert_eq!(params.len(), 3);
     }
 
+    #[test]
+    fn test_nested_and_reports_invalid_first_arg_path() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "AND".to_string(),
+            arguments: Some(vec![serde_json::json!({
+                "op": "EQ",
+                "arguments": [123, "value"]
+            })]),
+        };
+
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+
+        assert!(
+            err.contains("condition.arguments[0].arguments[0]"),
+            "{}",
+            err
+        );
+        assert!(
+            err.contains("first argument must be a field name string"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_nested_and_reports_invalid_in_second_arg_path() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "AND".to_string(),
+            arguments: Some(vec![serde_json::json!({
+                "op": "IN",
+                "arguments": ["status", "not_an_array"]
+            })]),
+        };
+
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+
+        assert!(
+            err.contains("condition.arguments[0].arguments[1]"),
+            "{}",
+            err
+        );
+        assert!(
+            err.contains("second argument must be an array of values"),
+            "{}",
+            err
+        );
+    }
+
     // ==================== String Operations ====================
 
     #[test]
@@ -987,6 +1429,109 @@ mod tests {
         assert!(clause.starts_with("NOT"));
         assert!(clause.contains("ANY"));
         assert_eq!(params[0], serde_json::json!(["deleted", "archived"]));
+    }
+
+    #[test]
+    fn test_in_condition_with_subquery() {
+        let schema = make_test_schema();
+        let product_schema = Schema {
+            id: "product-id".to_string(),
+            name: "products".to_string(),
+            description: None,
+            table_name: "product_table".to_string(),
+            columns: vec![
+                ColumnDefinition::new("name", crate::types::ColumnType::String),
+                ColumnDefinition::new("category", crate::types::ColumnType::String),
+            ],
+            indexes: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let subquery_schemas = HashMap::from([("products".to_string(), product_schema)]);
+        let condition = Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!({
+                    "subquery": {
+                        "schema": "products",
+                        "select": "name",
+                        "condition": {
+                            "op": "EQ",
+                            "arguments": ["category", "networking"]
+                        }
+                    }
+                }),
+            ]),
+        };
+
+        let mut offset = 1;
+        let (clause, params) = build_condition_clause_with_subqueries(
+            &condition,
+            &mut offset,
+            &schema,
+            &subquery_schemas,
+        )
+        .unwrap();
+
+        assert_eq!(
+            clause,
+            "\"name\"::text IN (SELECT \"name\"::text FROM \"product_table\" WHERE deleted = FALSE AND (\"category\"::text = $1::text))"
+        );
+        assert_eq!(params, vec![serde_json::json!("networking")]);
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_collect_condition_subquery_schema_names_rejects_nested_subquery() {
+        let condition = Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!({
+                    "subquery": {
+                        "schema": "products",
+                        "select": "name",
+                        "condition": {
+                            "op": "IN",
+                            "arguments": [
+                                "category",
+                                {
+                                    "subquery": {
+                                        "schema": "categories",
+                                        "select": "id"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }),
+            ]),
+        };
+
+        let err = collect_condition_subquery_schema_names(&condition).unwrap_err();
+        assert!(err.contains("nested subqueries are not supported"));
+    }
+
+    #[test]
+    fn test_eq_condition_rejects_subquery_operand() {
+        let schema = make_test_schema();
+        let condition = Condition {
+            op: "EQ".to_string(),
+            arguments: Some(vec![
+                serde_json::json!("name"),
+                serde_json::json!({
+                    "subquery": {
+                        "schema": "products",
+                        "select": "name"
+                    }
+                }),
+            ]),
+        };
+
+        let mut offset = 1;
+        let err = build_condition_clause(&condition, &mut offset, &schema).unwrap_err();
+        assert!(err.contains("only supported as the second argument of IN or NOT_IN"));
     }
 
     // ==================== Nullability Operations ====================

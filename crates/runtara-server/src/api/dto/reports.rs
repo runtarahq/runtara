@@ -452,11 +452,17 @@ impl ReportTableColumn {
     pub fn is_chart(&self) -> bool {
         matches!(self.column_type, Some(ReportTableColumnType::Chart))
     }
+
+    pub fn is_value_lookup(&self) -> bool {
+        matches!(self.column_type, Some(ReportTableColumnType::Value)) && self.source.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ReportTableColumnSource {
     pub schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<String>,
     #[serde(
         default,
         rename = "connectionId",
@@ -488,6 +494,12 @@ pub struct ReportTableColumnJoin {
     pub field: String,
     #[serde(default = "default_filter_op")]
     pub op: String,
+    #[serde(default = "default_column_join_kind")]
+    pub kind: ReportJoinKind,
+}
+
+fn default_column_join_kind() -> ReportJoinKind {
+    ReportJoinKind::Left
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

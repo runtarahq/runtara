@@ -18,8 +18,18 @@ use crate::api::services::object_model::{
     InstanceService, SchemaService, ServiceError as ObjectModelServiceError,
 };
 
+mod query_plan;
+
+use self::query_plan::{
+    JoinResolution, build_alias_index, condition_matches_row, empty_join_result,
+    enrich_aggregate_result, field_alias_prefix, primary_pushdown_condition, sort_rows,
+    split_qualified_condition, strip_alias_from_condition, validate_join_request,
+    value_to_lookup_key,
+};
+
 const MAX_TABLE_PAGE_SIZE: i64 = 500;
 const MAX_AGGREGATE_ROWS: i64 = 1000;
+const MAX_JOIN_POST_FILTER_ROWS: i64 = 50_000;
 /// Cap on rows fetched per join from a dimension schema. Broadcast-hash
 /// join breaks down (round trip + memory) past this; report a validation
 /// error so the caller adds a more selective `<alias>.<field>` condition.
@@ -41,6 +51,14 @@ pub struct ReportService {
     repo: ReportRepository,
     schema_service: SchemaService,
     instance_service: InstanceService,
+}
+
+#[derive(Clone, Copy)]
+struct ReportConditionRuntimeContext<'a> {
+    definition: &'a ReportDefinition,
+    block: &'a ReportBlockDefinition,
+    resolved_filters: &'a HashMap<String, Value>,
+    block_request: Option<&'a ReportBlockDataRequest>,
 }
 
 impl ReportService {
@@ -523,6 +541,7 @@ impl ReportService {
             .to_string();
         let connection_id = option_string(options_config, "connectionId");
         let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let condition_filter_defs = report_filter_definitions_by_id(&report.definition.filters);
         let mut conditions = Vec::new();
 
         if let Some(condition) = options_config.get("condition") {
@@ -532,7 +551,14 @@ impl ReportService {
                     filter.id, err
                 ))
             })?;
-            conditions.push(parsed);
+            if let Some(condition) = resolve_report_condition_values(
+                &parsed,
+                &condition_filter_defs,
+                &resolved_filters,
+                &format!("filter '{}'", filter.id),
+            )? {
+                conditions.push(condition);
+            }
         }
 
         append_option_context_conditions(
@@ -773,6 +799,10 @@ impl ReportService {
             }
             self.validate_filter_options(tenant_id, filter).await?;
         }
+        let report_condition_filter_defs = report_filter_definitions_by_id(&definition.filters);
+        for filter in &definition.filters {
+            validate_filter_option_condition_filter_refs(filter, &report_condition_filter_defs)?;
+        }
 
         let mut dataset_ids = HashSet::new();
         for dataset in &definition.datasets {
@@ -913,11 +943,21 @@ impl ReportService {
                     ReportSourceMode::Aggregate => aggregate_output_fields.contains(field),
                 }
             };
+            let block_condition_filter_defs = block_condition_filter_definitions(definition, block);
 
             if let Some(table) = &block.table {
                 for column in &table.columns {
                     if column.is_chart() {
                         self.validate_table_chart_column(
+                            tenant_id,
+                            block,
+                            &schema_fields,
+                            &aggregate_output_fields,
+                            column,
+                        )
+                        .await?;
+                    } else if column.is_value_lookup() {
+                        self.validate_table_value_column(
                             tenant_id,
                             block,
                             &schema_fields,
@@ -982,6 +1022,37 @@ impl ReportService {
                             "Block '{}' aggregate '{}' references unknown orderBy field '{}'",
                             block.id, aggregate.alias, order_by.field
                         )));
+                    }
+                }
+            }
+
+            validate_report_condition_filter_refs(
+                block.source.condition.as_ref(),
+                &block_condition_filter_defs,
+                &format!("block '{}'", block.id),
+            )?;
+            self.validate_report_condition_subqueries(
+                tenant_id,
+                block.source.condition.as_ref(),
+                block.source.connection_id.as_deref(),
+                &format!("block '{}'", block.id),
+            )
+            .await?;
+            if let Some(table) = &block.table {
+                for column in &table.columns {
+                    if let Some(source) = &column.source {
+                        validate_report_condition_filter_refs(
+                            source.condition.as_ref(),
+                            &block_condition_filter_defs,
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )?;
+                        self.validate_report_condition_subqueries(
+                            tenant_id,
+                            source.condition.as_ref(),
+                            source.connection_id.as_deref(),
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1201,6 +1272,111 @@ impl ReportService {
             }
         }
 
+        if let Some(condition) = options.get("condition") {
+            let condition =
+                serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+                    ReportServiceError::Validation(format!(
+                        "Filter '{}' options.condition is invalid: {}",
+                        filter.id, err
+                    ))
+                })?;
+            self.validate_report_condition_subqueries(
+                tenant_id,
+                Some(&condition),
+                connection_id,
+                &format!("filter '{}'", filter.id),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn validate_report_condition_subqueries(
+        &self,
+        tenant_id: &str,
+        condition: Option<&Condition>,
+        parent_connection_id: Option<&str>,
+        context: &str,
+    ) -> Result<(), ReportServiceError> {
+        let Some(condition) = condition else {
+            return Ok(());
+        };
+        let mut stack = vec![(condition.clone(), false)];
+
+        while let Some((condition, inside_subquery)) = stack.pop() {
+            let Some(arguments) = condition.arguments.as_ref() else {
+                continue;
+            };
+            let op = condition.op.to_ascii_uppercase();
+            for (index, argument) in arguments.iter().enumerate() {
+                if let Some(subquery) = parse_report_condition_subquery_operand(argument)? {
+                    if !matches!(op.as_str(), "IN" | "NOT_IN") || index != 1 {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition subqueries are only supported as the second argument of IN or NOT_IN",
+                            context
+                        )));
+                    }
+                    if inside_subquery {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition contains a nested subquery; nested subqueries are not supported",
+                            context
+                        )));
+                    }
+
+                    let subquery_connection_id = subquery
+                        .get("connectionId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if let Some(subquery_connection_id) = subquery_connection_id
+                        && Some(subquery_connection_id) != parent_connection_id
+                    {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition subquery must use the same Object Store connection as its parent source",
+                            context
+                        )));
+                    }
+
+                    let schema_name = subquery
+                        .get("schema")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    let select_field = subquery
+                        .get("select")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    let schema = self
+                        .schema_service
+                        .get_schema_by_name(schema_name, tenant_id, parent_connection_id)
+                        .await
+                        .map_err(map_object_model_error)?;
+                    let schema_fields: HashSet<_> = schema
+                        .columns
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect();
+                    if !is_schema_field(&schema_fields, select_field) {
+                        return Err(ReportServiceError::Validation(format!(
+                            "{} condition subquery select field '{}' is not a column on '{}'",
+                            context, select_field, schema_name
+                        )));
+                    }
+
+                    if let Some(child) = subquery.get("condition").and_then(condition_from_value) {
+                        stack.push((child, true));
+                    }
+                    continue;
+                }
+
+                if let Some(child) = condition_from_value(argument) {
+                    stack.push((child, inside_subquery));
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1325,6 +1501,102 @@ impl ReportService {
         Ok(())
     }
 
+    async fn validate_table_value_column(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        parent_schema_fields: &HashSet<String>,
+        parent_output_fields: &HashSet<String>,
+        column: &ReportTableColumn,
+    ) -> Result<(), ReportServiceError> {
+        let Some(source) = &column.source else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' must define source",
+                block.id, column.field
+            )));
+        };
+        if source.mode != ReportSourceMode::Filter {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.mode must be filter",
+                block.id, column.field
+            )));
+        }
+        if !source.group_by.is_empty() || !source.aggregates.is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source must not define groupBy or aggregates",
+                block.id, column.field
+            )));
+        }
+        let Some(select) = source
+            .select
+            .as_deref()
+            .filter(|select| !select.trim().is_empty())
+        else {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.select is required",
+                block.id, column.field
+            )));
+        };
+        if source.join.len() != 1 {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' requires exactly one source.join entry",
+                block.id, column.field
+            )));
+        }
+        if source.schema.trim().is_empty() {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' must specify an Object Model schema",
+                block.id, column.field
+            )));
+        }
+
+        let nested_schema = self
+            .schema_service
+            .get_schema_by_name(&source.schema, tenant_id, source.connection_id.as_deref())
+            .await
+            .map_err(map_object_model_error)?;
+        let nested_schema_fields: HashSet<_> = nested_schema
+            .columns
+            .iter()
+            .map(|field| field.name.clone())
+            .collect();
+
+        if !is_schema_field(&nested_schema_fields, select) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' source.select '{}' is not a column on '{}'",
+                block.id, column.field, select, source.schema
+            )));
+        }
+
+        let join = &source.join[0];
+        let parent_field_ok = match block.source.mode {
+            ReportSourceMode::Filter => is_schema_field(parent_schema_fields, &join.parent_field),
+            ReportSourceMode::Aggregate => parent_output_fields.contains(&join.parent_field),
+        };
+        if !parent_field_ok {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' references unknown parent join field '{}'",
+                block.id, column.field, join.parent_field
+            )));
+        }
+        if !is_schema_field(&nested_schema_fields, &join.field) {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' value table column '{}' join field '{}' is not a column on '{}'",
+                block.id, column.field, join.field, source.schema
+            )));
+        }
+        for order_by in &source.order_by {
+            if !is_schema_field(&nested_schema_fields, &order_by.field) {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' value table column '{}' references unknown orderBy field '{}'",
+                    block.id, column.field, order_by.field
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     async fn render_block(
         &self,
         tenant_id: &str,
@@ -1397,6 +1669,17 @@ impl ReportService {
                 )
                 .await;
         }
+        if !block.source.join.is_empty() {
+            return self
+                .render_joined_filter_table_block(
+                    tenant_id,
+                    definition,
+                    block,
+                    resolved_filters,
+                    block_request,
+                )
+                .await;
+        }
 
         let table = block.table.as_ref();
         let page_size = clamp_page_size(
@@ -1427,7 +1710,7 @@ impl ReportService {
         let filter_request = FilterRequest {
             offset,
             limit: page_size,
-            condition: build_block_condition(definition, block, resolved_filters, block_request),
+            condition: build_block_condition(definition, block, resolved_filters, block_request)?,
             sort_by: if sort.is_empty() {
                 None
             } else {
@@ -1458,6 +1741,12 @@ impl ReportService {
             .map_err(map_object_model_error)?;
 
         let rows: Vec<_> = instances.into_iter().map(flatten_instance).collect();
+        let condition_context = ReportConditionRuntimeContext {
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+        };
         let columns = table
             .map(|table| {
                 table
@@ -1474,7 +1763,7 @@ impl ReportService {
             })
             .unwrap_or_default();
         let rows = self
-            .hydrate_table_chart_columns(tenant_id, table, rows)
+            .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
             .await?;
 
         Ok(json!({
@@ -1486,6 +1775,149 @@ impl ReportService {
                 "totalCount": total_count,
                 "hasNextPage": offset + page_size < total_count
             }
+        }))
+    }
+
+    async fn render_joined_filter_table_block(
+        &self,
+        tenant_id: &str,
+        definition: &ReportDefinition,
+        block: &ReportBlockDefinition,
+        resolved_filters: &HashMap<String, Value>,
+        block_request: Option<&ReportBlockDataRequest>,
+    ) -> Result<Value, ReportServiceError> {
+        let table = block.table.as_ref();
+        let page_size = clamp_page_size(
+            block_request
+                .and_then(|request| request.page.as_ref().map(|page| page.size))
+                .or_else(|| {
+                    table
+                        .and_then(|table| table.pagination.as_ref())
+                        .map(|p| p.default_page_size)
+                })
+                .unwrap_or(50),
+        );
+        let offset = block_request
+            .and_then(|request| request.page.as_ref().map(|page| page.offset))
+            .unwrap_or(0)
+            .max(0);
+        let sort = block_request
+            .map(|request| request.sort.clone())
+            .filter(|sort| !sort.is_empty())
+            .or_else(|| {
+                table
+                    .map(|table| table.default_sort.clone())
+                    .filter(|sort| !sort.is_empty())
+            })
+            .unwrap_or_else(|| block.source.order_by.clone());
+
+        let condition = build_block_condition(definition, block, resolved_filters, block_request)?;
+        let alias_to_join = build_alias_index(&block.source.join, &block.id)?;
+        let alias_set: HashSet<&str> = alias_to_join.keys().map(|alias| alias.as_str()).collect();
+        let primary_condition =
+            primary_pushdown_condition(condition.clone(), &alias_set, &block.id)?;
+
+        let filter_request = FilterRequest {
+            offset: 0,
+            limit: MAX_JOIN_POST_FILTER_ROWS,
+            condition: primary_condition,
+            sort_by: None,
+            sort_order: None,
+            score_expression: None,
+            order_by: None,
+        };
+
+        let (instances, total_candidates) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &block.source.schema,
+                filter_request,
+                block.source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        if total_candidates > MAX_JOIN_POST_FILTER_ROWS {
+            return Err(ReportServiceError::Validation(format!(
+                "Block '{}' joined table query matched {} primary rows before post-filtering; cap is {}. Add a more selective primary-schema condition.",
+                block.id, total_candidates, MAX_JOIN_POST_FILTER_ROWS
+            )));
+        }
+
+        let mut rows = instances
+            .into_iter()
+            .filter_map(|instance| match flatten_instance(instance) {
+                Value::Object(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let join_data = self
+            .resolve_filter_join_data(tenant_id, block, &alias_to_join, &rows)
+            .await?;
+        rows = enrich_filter_join_rows(&alias_to_join, &join_data, rows);
+
+        if let Some(condition) = &condition {
+            rows = rows
+                .into_iter()
+                .filter_map(
+                    |row| match condition_matches_row(condition, &row, &block.id) {
+                        Ok(true) => Some(Ok(row)),
+                        Ok(false) => None,
+                        Err(err) => Some(Err(err)),
+                    },
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+
+        sort_rows(&mut rows, &sort);
+        let total_count = rows.len() as i64;
+        let rows = rows
+            .into_iter()
+            .skip(offset as usize)
+            .take(page_size as usize)
+            .map(Value::Object)
+            .collect::<Vec<_>>();
+        let condition_context = ReportConditionRuntimeContext {
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+        };
+        let rows = self
+            .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
+            .await?;
+
+        let columns = table
+            .map(|table| {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        json!({
+                            "key": column.field,
+                            "label": column.label.clone().unwrap_or_else(|| humanize_label(&column.field)),
+                            "format": column.format,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(json!({
+            "columns": columns,
+            "rows": rows,
+            "page": {
+                "offset": offset,
+                "size": page_size,
+                "totalCount": total_count,
+                "hasNextPage": offset + page_size < total_count
+            },
+            "diagnostics": [{
+                "severity": "warning",
+                "code": "JOIN_BROADCAST_POST_FILTER",
+                "message": format!("Block '{}' used bounded broadcast join post-filtering.", block.id)
+            }]
         }))
     }
 
@@ -1536,6 +1968,12 @@ impl ReportService {
             .await?;
 
         let source_columns = result.columns.clone();
+        let condition_context = ReportConditionRuntimeContext {
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+        };
         let mut row_maps = aggregate_rows_to_maps(&source_columns, &result.rows);
         let columns = table_output_columns(table, &source_columns);
         let mut rows = project_aggregate_table_rows(table, &source_columns, result.rows)?;
@@ -1554,7 +1992,12 @@ impl ReportService {
                     };
                     for (column_index, chart_column) in &chart_columns {
                         let cell = self
-                            .render_table_chart_cell(tenant_id, chart_column, row_map)
+                            .render_table_chart_cell(
+                                tenant_id,
+                                condition_context,
+                                chart_column,
+                                row_map,
+                            )
                             .await?;
                         row_map.insert(chart_column.field.clone(), cell.clone());
                         if let Some(slot) = row.get_mut(*column_index) {
@@ -1580,6 +2023,7 @@ impl ReportService {
     async fn hydrate_table_chart_columns(
         &self,
         tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
         table: Option<&ReportTableConfig>,
         rows: Vec<Value>,
     ) -> Result<Vec<Value>, ReportServiceError> {
@@ -1591,38 +2035,243 @@ impl ReportService {
             .iter()
             .filter(|column| column.is_chart())
             .collect();
-        if chart_columns.is_empty() {
+        let value_columns: Vec<_> = table
+            .columns
+            .iter()
+            .filter(|column| column.is_value_lookup())
+            .collect();
+        if chart_columns.is_empty() && value_columns.is_empty() {
             return Ok(rows);
         }
 
-        let mut hydrated_rows = Vec::with_capacity(rows.len());
-        for row in rows {
-            let Value::Object(mut object) = row else {
-                hydrated_rows.push(row);
-                continue;
-            };
+        let mut hydrated_rows = rows
+            .into_iter()
+            .filter_map(|row| match row {
+                Value::Object(object) => Some(object),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        if !value_columns.is_empty() {
+            self.hydrate_table_value_columns(
+                tenant_id,
+                condition_context,
+                &value_columns,
+                &mut hydrated_rows,
+            )
+            .await?;
+        }
+
+        let mut output_rows = Vec::with_capacity(hydrated_rows.len());
+        for mut object in hydrated_rows {
             for column in &chart_columns {
                 let cell = self
-                    .render_table_chart_cell(tenant_id, column, &object)
+                    .render_table_chart_cell(tenant_id, condition_context, column, &object)
                     .await?;
                 object.insert(column.field.clone(), cell);
             }
-            hydrated_rows.push(Value::Object(object));
+            output_rows.push(Value::Object(object));
         }
 
-        Ok(hydrated_rows)
+        Ok(output_rows)
+    }
+
+    async fn hydrate_table_value_columns(
+        &self,
+        tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
+        value_columns: &[&ReportTableColumn],
+        rows: &mut Vec<serde_json::Map<String, Value>>,
+    ) -> Result<(), ReportServiceError> {
+        let condition_filter_defs = block_condition_filter_definitions(
+            condition_context.definition,
+            condition_context.block,
+        );
+        let condition_filter_values = block_condition_filter_values(
+            condition_context.block,
+            condition_context.resolved_filters,
+            condition_context.block_request,
+        );
+        let mut keep_rows = vec![true; rows.len()];
+        for column in value_columns {
+            let Some(source) = &column.source else {
+                continue;
+            };
+            let select = source.select.as_deref().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Value table column '{}' requires source.select",
+                    column.field
+                ))
+            })?;
+            let join = source.join.first().ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "Value table column '{}' requires source.join",
+                    column.field
+                ))
+            })?;
+            let mut seen_keys = HashSet::new();
+            let mut parent_keys = Vec::new();
+            for row in rows.iter() {
+                let Some(value) = row.get(&join.parent_field) else {
+                    continue;
+                };
+                if value_is_empty(value) {
+                    continue;
+                }
+                if seen_keys.insert(value_to_lookup_key(value)) {
+                    parent_keys.push(value.clone());
+                }
+            }
+
+            let source_condition = resolve_optional_report_condition(
+                source.condition.as_ref(),
+                &condition_filter_defs,
+                &condition_filter_values,
+                &format!(
+                    "block '{}' value table column '{}'",
+                    condition_context.block.id, column.field
+                ),
+            )?;
+            let values_by_key = if parent_keys.is_empty() {
+                HashMap::new()
+            } else {
+                self.lookup_table_value_column(
+                    tenant_id,
+                    source,
+                    join,
+                    select,
+                    source_condition,
+                    &parent_keys,
+                )
+                .await?
+            };
+
+            for (index, row) in rows.iter_mut().enumerate() {
+                let value = row
+                    .get(&join.parent_field)
+                    .and_then(|parent_value| values_by_key.get(&value_to_lookup_key(parent_value)))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if value_is_empty(&value) && matches!(join.kind, ReportJoinKind::Inner) {
+                    keep_rows[index] = false;
+                }
+                row.insert(column.field.clone(), value);
+            }
+        }
+
+        let mut index = 0;
+        rows.retain(|_| {
+            let keep = keep_rows[index];
+            index += 1;
+            keep
+        });
+        Ok(())
+    }
+
+    async fn lookup_table_value_column(
+        &self,
+        tenant_id: &str,
+        source: &ReportTableColumnSource,
+        join: &ReportTableColumnJoin,
+        select: &str,
+        source_condition: Option<Condition>,
+        parent_keys: &[Value],
+    ) -> Result<HashMap<String, Value>, ReportServiceError> {
+        let join_condition = Condition {
+            op: "IN".to_string(),
+            arguments: Some(vec![
+                Value::String(join.field.clone()),
+                Value::Array(parent_keys.to_vec()),
+            ]),
+        };
+        let condition = combine_conditions(
+            source_condition
+                .into_iter()
+                .chain(std::iter::once(join_condition))
+                .collect(),
+        );
+        let sort_by = if source.order_by.is_empty() {
+            Some(vec![join.field.clone(), "id".to_string()])
+        } else {
+            Some(
+                source
+                    .order_by
+                    .iter()
+                    .map(|order| order.field.clone())
+                    .collect(),
+            )
+        };
+        let sort_order = if source.order_by.is_empty() {
+            Some(vec!["asc".to_string(), "asc".to_string()])
+        } else {
+            Some(
+                source
+                    .order_by
+                    .iter()
+                    .map(|order| normalize_sort_direction(&order.direction))
+                    .collect(),
+            )
+        };
+        let request = FilterRequest {
+            offset: 0,
+            limit: MAX_BROADCAST_JOIN_DIM_ROWS,
+            condition,
+            sort_by,
+            sort_order,
+            score_expression: None,
+            order_by: None,
+        };
+        let (instances, total) = self
+            .instance_service
+            .filter_instances_by_schema(
+                tenant_id,
+                &source.schema,
+                request,
+                source.connection_id.as_deref(),
+            )
+            .await
+            .map_err(map_object_model_error)?;
+
+        if total > MAX_BROADCAST_JOIN_DIM_ROWS {
+            return Err(ReportServiceError::Validation(format!(
+                "Value table column lookup on '{}' would broadcast {} rows; cap is {}. Add a more selective source.condition.",
+                source.schema, total, MAX_BROADCAST_JOIN_DIM_ROWS
+            )));
+        }
+
+        let mut values_by_key = HashMap::new();
+        for instance in instances {
+            let Value::Object(row) = flatten_instance(instance) else {
+                continue;
+            };
+            let Some(key) = row.get(&join.field) else {
+                continue;
+            };
+            if value_is_empty(key) {
+                continue;
+            }
+            let Some(value) = row.get(select) else {
+                continue;
+            };
+            values_by_key
+                .entry(value_to_lookup_key(key))
+                .or_insert_with(|| value.clone());
+        }
+
+        Ok(values_by_key)
     }
 
     async fn render_table_chart_cell(
         &self,
         tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
         column: &ReportTableColumn,
         row: &serde_json::Map<String, Value>,
     ) -> Result<Value, ReportServiceError> {
         let Some(source) = &column.source else {
             return Ok(Value::Null);
         };
-        let condition = build_table_column_condition(source, row);
+        let condition = build_table_column_condition(condition_context, source, row)?;
         let request = build_column_aggregate_request(source, condition)?;
         let result = self
             .instance_service
@@ -1769,10 +2418,105 @@ impl ReportService {
         Ok(enrich_aggregate_result(
             primary_result,
             &request.group_by,
-            joins,
             &alias_to_join,
             &join_data,
         ))
+    }
+
+    async fn resolve_filter_join_data(
+        &self,
+        tenant_id: &str,
+        block: &ReportBlockDefinition,
+        alias_to_join: &HashMap<String, &ReportSourceJoin>,
+        primary_rows: &[serde_json::Map<String, Value>],
+    ) -> Result<HashMap<String, JoinResolution>, ReportServiceError> {
+        let mut join_data = HashMap::new();
+        for (alias, join) in alias_to_join {
+            let mut seen_keys = HashSet::new();
+            let mut parent_keys = Vec::new();
+            for row in primary_rows {
+                let Some(value) = row.get(&join.parent_field) else {
+                    continue;
+                };
+                if value_is_empty(value) {
+                    continue;
+                }
+                let key = value_to_lookup_key(value);
+                if seen_keys.insert(key) {
+                    parent_keys.push(value.clone());
+                }
+            }
+
+            if parent_keys.is_empty() {
+                join_data.insert(
+                    alias.clone(),
+                    JoinResolution {
+                        parent_keys,
+                        by_key: HashMap::new(),
+                    },
+                );
+                continue;
+            }
+
+            let filter = FilterRequest {
+                offset: 0,
+                limit: MAX_BROADCAST_JOIN_DIM_ROWS,
+                condition: Some(Condition {
+                    op: "IN".to_string(),
+                    arguments: Some(vec![
+                        Value::String(join.field.clone()),
+                        Value::Array(parent_keys.clone()),
+                    ]),
+                }),
+                sort_by: None,
+                sort_order: None,
+                score_expression: None,
+                order_by: None,
+            };
+
+            let (dim_instances, total) = self
+                .instance_service
+                .filter_instances_by_schema(
+                    tenant_id,
+                    &join.schema,
+                    filter,
+                    join.connection_id.as_deref(),
+                )
+                .await
+                .map_err(map_object_model_error)?;
+
+            if total > MAX_BROADCAST_JOIN_DIM_ROWS {
+                return Err(ReportServiceError::Validation(format!(
+                    "Block '{}' join '{}' would broadcast {} rows from '{}'; cap is {}. Add a more selective condition.",
+                    block.id, alias, total, join.schema, MAX_BROADCAST_JOIN_DIM_ROWS
+                )));
+            }
+
+            let by_key = dim_instances
+                .into_iter()
+                .filter_map(|instance| match flatten_instance(instance) {
+                    Value::Object(row) => {
+                        let key = row.get(&join.field).cloned()?;
+                        Some((key, row))
+                    }
+                    _ => None,
+                })
+                .filter(|(key, _)| !value_is_empty(key))
+                .fold(HashMap::new(), |mut by_key, (key, row)| {
+                    by_key.entry(value_to_lookup_key(&key)).or_insert(row);
+                    by_key
+                });
+
+            join_data.insert(
+                alias.clone(),
+                JoinResolution {
+                    parent_keys,
+                    by_key,
+                },
+            );
+        }
+
+        Ok(join_data)
     }
 
     /// Query the dimension schema and build a lookup keyed by the join's `field`.
@@ -2274,6 +3018,526 @@ fn resolve_time_preset(preset: &str) -> (DateTime<Utc>, DateTime<Utc>, String) {
     }
 }
 
+#[derive(Debug)]
+struct ReportConditionFilterRef {
+    filter_id: String,
+    path: String,
+}
+
+fn report_filter_definitions_by_id(
+    filters: &[ReportFilterDefinition],
+) -> HashMap<String, &ReportFilterDefinition> {
+    filters
+        .iter()
+        .map(|filter| (filter.id.clone(), filter))
+        .collect()
+}
+
+fn block_condition_filter_definitions<'a>(
+    definition: &'a ReportDefinition,
+    block: &'a ReportBlockDefinition,
+) -> HashMap<String, &'a ReportFilterDefinition> {
+    let mut filter_defs = report_filter_definitions_by_id(&definition.filters);
+    for filter in &block.filters {
+        filter_defs.insert(filter.id.clone(), filter);
+    }
+    filter_defs
+}
+
+fn block_condition_filter_values(
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+    block_request: Option<&ReportBlockDataRequest>,
+) -> HashMap<String, Value> {
+    let mut values = resolved_filters.clone();
+    for filter in &block.filters {
+        let raw = block_request
+            .and_then(|request| request.block_filters.get(&filter.id).cloned())
+            .or_else(|| filter.default.clone())
+            .unwrap_or(Value::Null);
+        values.insert(filter.id.clone(), resolve_filter_value(filter, raw));
+    }
+    values
+}
+
+fn validate_filter_option_condition_filter_refs(
+    filter: &ReportFilterDefinition,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+) -> Result<(), ReportServiceError> {
+    let Some(condition) = filter
+        .options
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|options| options.get("condition"))
+    else {
+        return Ok(());
+    };
+    let parsed = serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+        ReportServiceError::Validation(format!(
+            "Filter '{}' options.condition is invalid: {}",
+            filter.id, err
+        ))
+    })?;
+    validate_report_condition_filter_refs(
+        Some(&parsed),
+        filter_defs,
+        &format!("filter '{}'", filter.id),
+    )
+}
+
+fn validate_report_condition_filter_refs(
+    condition: Option<&Condition>,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    let Some(condition) = condition else {
+        return Ok(());
+    };
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(());
+    };
+    for argument in arguments {
+        if let Some(reference) = parse_report_condition_filter_ref(argument)? {
+            let filter = filter_defs.get(&reference.filter_id).ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "{} condition references unknown filter '{}'",
+                    context, reference.filter_id
+                ))
+            })?;
+            validate_condition_filter_ref_path(filter, &reference, context)?;
+        }
+        if let Some(subquery) = parse_report_condition_subquery_operand(argument)? {
+            if let Some(condition) = subquery.get("condition") {
+                let child =
+                    serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+                        ReportServiceError::Validation(format!(
+                            "{} condition subquery.condition is invalid: {}",
+                            context, err
+                        ))
+                    })?;
+                validate_report_condition_filter_refs(Some(&child), filter_defs, context)?;
+            }
+            continue;
+        }
+        if let Some(child) = condition_from_value(argument) {
+            validate_report_condition_filter_refs(Some(&child), filter_defs, context)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_report_condition_values(
+    condition: &Condition,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(Some(condition.clone()));
+    };
+    let op = condition.op.to_ascii_uppercase();
+
+    if op == "AND" || op == "OR" {
+        return resolve_logical_report_condition(condition, filter_defs, values, context);
+    }
+
+    if op == "NOT" {
+        let mut resolved_arguments = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let Some(resolved) =
+                resolve_report_condition_argument(argument, filter_defs, values, context)?
+            else {
+                return Ok(None);
+            };
+            resolved_arguments.push(resolved);
+        }
+        return Ok(Some(Condition {
+            op: condition.op.clone(),
+            arguments: Some(resolved_arguments),
+        }));
+    }
+
+    let mut resolved_arguments = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let Some(resolved) =
+            resolve_report_condition_argument(argument, filter_defs, values, context)?
+        else {
+            return Ok(None);
+        };
+        resolved_arguments.push(resolved);
+    }
+
+    if matches!(op.as_str(), "IN" | "NOT_IN")
+        && resolved_arguments.get(1).is_some_and(|argument| {
+            !argument.is_array() && !is_report_condition_subquery_operand(argument)
+        })
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{} condition operator '{}' requires an array value; use a multi_select filter with path 'values'",
+            context, condition.op
+        )));
+    }
+
+    Ok(Some(Condition {
+        op: condition.op.clone(),
+        arguments: Some(resolved_arguments),
+    }))
+}
+
+fn resolve_optional_report_condition(
+    condition: Option<&Condition>,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    condition
+        .map(|condition| resolve_report_condition_values(condition, filter_defs, values, context))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn resolve_logical_report_condition(
+    condition: &Condition,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    let mut resolved_arguments = Vec::new();
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(Some(condition.clone()));
+    };
+
+    for argument in arguments {
+        let Some(resolved) =
+            resolve_report_condition_argument(argument, filter_defs, values, context)?
+        else {
+            continue;
+        };
+        resolved_arguments.push(resolved);
+    }
+
+    match resolved_arguments.len() {
+        0 => Ok(None),
+        1 => {
+            let only = resolved_arguments.remove(0);
+            if let Some(condition) = condition_from_value(&only) {
+                Ok(Some(condition))
+            } else {
+                Ok(Some(Condition {
+                    op: condition.op.clone(),
+                    arguments: Some(vec![only]),
+                }))
+            }
+        }
+        _ => Ok(Some(Condition {
+            op: condition.op.clone(),
+            arguments: Some(resolved_arguments),
+        })),
+    }
+}
+
+fn resolve_report_condition_argument(
+    argument: &Value,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Value>, ReportServiceError> {
+    if let Some(reference) = parse_report_condition_filter_ref(argument)? {
+        return resolve_report_condition_filter_ref(&reference, filter_defs, values, context);
+    }
+
+    if parse_report_condition_subquery_operand(argument)?.is_some() {
+        return resolve_report_condition_subquery_argument(argument, filter_defs, values, context);
+    }
+
+    if let Some(condition) = condition_from_value(argument) {
+        let Some(resolved) =
+            resolve_report_condition_values(&condition, filter_defs, values, context)?
+        else {
+            return Ok(None);
+        };
+        return serde_json::to_value(resolved).map(Some).map_err(|err| {
+            ReportServiceError::Validation(format!(
+                "{} condition could not serialize resolved child condition: {}",
+                context, err
+            ))
+        });
+    }
+
+    Ok(Some(argument.clone()))
+}
+
+fn resolve_report_condition_subquery_argument(
+    argument: &Value,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Value>, ReportServiceError> {
+    let Some(subquery) = parse_report_condition_subquery_operand(argument)? else {
+        return Ok(Some(argument.clone()));
+    };
+    let mut subquery = subquery.clone();
+    if let Some(condition) = subquery.get("condition").cloned() {
+        let condition = serde_json::from_value::<Condition>(condition).map_err(|err| {
+            ReportServiceError::Validation(format!(
+                "{} condition subquery.condition is invalid: {}",
+                context, err
+            ))
+        })?;
+        match resolve_report_condition_values(&condition, filter_defs, values, context)? {
+            Some(resolved) => {
+                let resolved_value = serde_json::to_value(resolved).map_err(|err| {
+                    ReportServiceError::Validation(format!(
+                        "{} condition could not serialize resolved subquery condition: {}",
+                        context, err
+                    ))
+                })?;
+                subquery.insert("condition".to_string(), resolved_value);
+            }
+            None => {
+                subquery.remove("condition");
+            }
+        }
+    }
+
+    Ok(Some(json!({ "subquery": Value::Object(subquery) })))
+}
+
+fn resolve_report_condition_filter_ref(
+    reference: &ReportConditionFilterRef,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Value>, ReportServiceError> {
+    let filter = filter_defs.get(&reference.filter_id).ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "{} condition references unknown filter '{}'",
+            context, reference.filter_id
+        ))
+    })?;
+    validate_condition_filter_ref_path(filter, reference, context)?;
+
+    let raw = values
+        .get(&reference.filter_id)
+        .cloned()
+        .or_else(|| {
+            filter
+                .default
+                .clone()
+                .map(|default| resolve_filter_value(filter, default))
+        })
+        .unwrap_or(Value::Null);
+    let value = extract_condition_filter_ref_value(&raw, &reference.path);
+
+    if value_is_empty(&value) {
+        if filter.required {
+            return Err(ReportServiceError::Validation(format!(
+                "{} condition references required filter '{}' path '{}' but no value was provided",
+                context, reference.filter_id, reference.path
+            )));
+        }
+        return Ok(None);
+    }
+
+    Ok(Some(value))
+}
+
+fn extract_condition_filter_ref_value(value: &Value, path: &str) -> Value {
+    match path {
+        "value" => value
+            .as_object()
+            .and_then(|object| object.get("value"))
+            .cloned()
+            .unwrap_or_else(|| value.clone()),
+        "values" => {
+            if value.is_array() {
+                value.clone()
+            } else {
+                value
+                    .as_object()
+                    .and_then(|object| object.get("values"))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            }
+        }
+        "from" | "to" | "min" | "max" => value
+            .as_object()
+            .and_then(|object| object.get(path))
+            .cloned()
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+fn parse_report_condition_filter_ref(
+    value: &Value,
+) -> Result<Option<ReportConditionFilterRef>, ReportServiceError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(filter_value) = object.get("filter") else {
+        return Ok(None);
+    };
+    let Some(filter_id) = filter_value.as_str().map(str::trim) else {
+        return Err(ReportServiceError::Validation(
+            "Report condition filter refs must include a string filter".to_string(),
+        ));
+    };
+    if filter_id.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report condition filter refs must include a non-empty filter".to_string(),
+        ));
+    }
+    let Some(path) = object.get("path").and_then(Value::as_str).map(str::trim) else {
+        return Err(ReportServiceError::Validation(format!(
+            "Report condition filter ref '{}' must include path",
+            filter_id
+        )));
+    };
+    if !is_known_condition_filter_ref_path(path) {
+        return Err(ReportServiceError::Validation(format!(
+            "Report condition filter ref '{}' uses unsupported path '{}'",
+            filter_id, path
+        )));
+    }
+    Ok(Some(ReportConditionFilterRef {
+        filter_id: filter_id.to_string(),
+        path: path.to_string(),
+    }))
+}
+
+fn parse_report_condition_subquery_operand(
+    value: &Value,
+) -> Result<Option<&serde_json::Map<String, Value>>, ReportServiceError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(subquery_value) = object.get("subquery") else {
+        return Ok(None);
+    };
+    if object.len() != 1 {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery operands must contain only the 'subquery' key".to_string(),
+        ));
+    }
+    let Some(subquery) = subquery_value.as_object() else {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery operands must use an object value".to_string(),
+        ));
+    };
+    for key in subquery.keys() {
+        if !matches!(
+            key.as_str(),
+            "schema" | "select" | "condition" | "connectionId"
+        ) {
+            return Err(ReportServiceError::Validation(format!(
+                "Report condition subquery uses unsupported key '{}'",
+                key
+            )));
+        }
+    }
+    let Some(schema) = subquery
+        .get("schema")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return Err(ReportServiceError::Validation(
+            "Report condition subqueries must include schema".to_string(),
+        ));
+    };
+    if schema.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery schema cannot be empty".to_string(),
+        ));
+    }
+    let Some(select) = subquery
+        .get("select")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return Err(ReportServiceError::Validation(
+            "Report condition subqueries must include select".to_string(),
+        ));
+    };
+    if select.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery select cannot be empty".to_string(),
+        ));
+    }
+    if let Some(condition) = subquery.get("condition")
+        && condition_from_value(condition).is_none()
+    {
+        return Err(ReportServiceError::Validation(
+            "Report condition subquery.condition must be a condition object".to_string(),
+        ));
+    }
+    Ok(Some(subquery))
+}
+
+fn is_report_condition_subquery_operand(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("subquery"))
+}
+
+fn validate_condition_filter_ref_path(
+    filter: &ReportFilterDefinition,
+    reference: &ReportConditionFilterRef,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    let allowed_paths = condition_filter_ref_paths_for_type(&filter.filter_type);
+    if allowed_paths.contains(&reference.path.as_str()) {
+        return Ok(());
+    }
+
+    Err(ReportServiceError::Validation(format!(
+        "{} condition references filter '{}' path '{}' but {} filters support {}",
+        context,
+        reference.filter_id,
+        reference.path,
+        report_filter_type_name(&filter.filter_type),
+        allowed_paths.join(", ")
+    )))
+}
+
+fn condition_filter_ref_paths_for_type(filter_type: &ReportFilterType) -> &'static [&'static str] {
+    match filter_type {
+        ReportFilterType::MultiSelect => &["values"],
+        ReportFilterType::TimeRange => &["from", "to"],
+        ReportFilterType::NumberRange => &["min", "max"],
+        ReportFilterType::Select
+        | ReportFilterType::Radio
+        | ReportFilterType::Checkbox
+        | ReportFilterType::Text
+        | ReportFilterType::Search => &["value"],
+    }
+}
+
+fn report_filter_type_name(filter_type: &ReportFilterType) -> &'static str {
+    match filter_type {
+        ReportFilterType::Select => "select",
+        ReportFilterType::MultiSelect => "multi_select",
+        ReportFilterType::Radio => "radio",
+        ReportFilterType::Checkbox => "checkbox",
+        ReportFilterType::TimeRange => "time_range",
+        ReportFilterType::NumberRange => "number_range",
+        ReportFilterType::Text => "text",
+        ReportFilterType::Search => "search",
+    }
+}
+
+fn is_known_condition_filter_ref_path(path: &str) -> bool {
+    matches!(path, "value" | "values" | "from" | "to" | "min" | "max")
+}
+
+fn condition_from_value(value: &Value) -> Option<Condition> {
+    let object = value.as_object()?;
+    if !(object.contains_key("op") || object.contains_key("arguments")) {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
+}
+
 fn static_filter_options_response(
     filter: &ReportFilterDefinition,
     offset: i64,
@@ -2422,11 +3686,20 @@ fn build_block_condition(
     block: &ReportBlockDefinition,
     resolved_filters: &HashMap<String, Value>,
     block_request: Option<&ReportBlockDataRequest>,
-) -> Option<Condition> {
+) -> Result<Option<Condition>, ReportServiceError> {
     let mut conditions = Vec::new();
+    let condition_filter_defs = block_condition_filter_definitions(definition, block);
+    let condition_filter_values =
+        block_condition_filter_values(block, resolved_filters, block_request);
 
-    if let Some(condition) = &block.source.condition {
-        conditions.push(condition.clone());
+    let context = format!("block '{}'", block.id);
+    if let Some(condition) = resolve_optional_report_condition(
+        block.source.condition.as_ref(),
+        &condition_filter_defs,
+        &condition_filter_values,
+        &context,
+    )? {
+        conditions.push(condition);
     }
 
     append_filter_conditions(
@@ -2452,7 +3725,7 @@ fn build_block_condition(
         append_table_search_condition(&mut conditions, block, block_request);
     }
 
-    combine_conditions(conditions)
+    Ok(combine_conditions(conditions))
 }
 
 fn append_table_search_condition(
@@ -3014,360 +4287,6 @@ fn dataset_dimension_type_name(value: ReportDatasetFieldType) -> &'static str {
     }
 }
 
-/// Resolved dimension data for a single block-level join. Held in memory
-/// during a single aggregate render; sized by `MAX_BROADCAST_JOIN_DIM_ROWS`.
-struct JoinResolution {
-    /// Distinct values of the dim's `field` column. Used to build an
-    /// `IN [...]` filter against the primary's `parent_field`.
-    parent_keys: Vec<Value>,
-    /// Lookup of dim row by stringified `field` value. Each row is a
-    /// flattened instance map (system fields + properties merged).
-    by_key: HashMap<String, serde_json::Map<String, Value>>,
-}
-
-/// `(primary_condition, terms_grouped_by_alias)` returned by
-/// [`split_qualified_condition`].
-type SplitCondition = (Option<Condition>, HashMap<String, Vec<Condition>>);
-
-fn build_alias_index<'a>(
-    joins: &'a [ReportSourceJoin],
-    block_id: &str,
-) -> Result<HashMap<String, &'a ReportSourceJoin>, ReportServiceError> {
-    let mut alias_to_join: HashMap<String, &ReportSourceJoin> = HashMap::new();
-    for join in joins {
-        let alias = join.effective_alias().to_string();
-        if alias.contains('.') || alias.is_empty() {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' join alias '{}' must be a non-empty identifier without '.'",
-                block_id, alias
-            )));
-        }
-        if alias_to_join.insert(alias.clone(), join).is_some() {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' has duplicate join alias '{}'",
-                block_id, alias
-            )));
-        }
-    }
-    Ok(alias_to_join)
-}
-
-/// Reject features that v1 broadcast-hash join does not yet support:
-/// qualified `aggregates[].field`, qualified `orderBy.column`, qualified
-/// `groupBy` entries whose join's `parent_field` isn't also in the
-/// (unqualified) groupBy.
-fn validate_join_request(
-    request: &AggregateRequest,
-    alias_to_join: &HashMap<String, &ReportSourceJoin>,
-    block_id: &str,
-) -> Result<(), ReportServiceError> {
-    for aggregate in &request.aggregates {
-        if let Some(column) = aggregate.column.as_deref()
-            && let Some(alias) = field_alias_prefix(column)
-            && alias_to_join.contains_key(alias)
-        {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' aggregate '{}' references qualified field '{}'; \
-                 qualified refs in aggregate.field are not supported in v1.",
-                block_id, aggregate.alias, column
-            )));
-        }
-    }
-
-    for order in &request.order_by {
-        if let Some(alias) = field_alias_prefix(&order.column)
-            && alias_to_join.contains_key(alias)
-        {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' orderBy '{}' references qualified field; \
-                 qualified refs in orderBy are not supported in v1. Use \
-                 an aggregate alias or an unqualified primary-schema field.",
-                block_id, order.column
-            )));
-        }
-    }
-
-    let unqualified_group_by: HashSet<&str> = request
-        .group_by
-        .iter()
-        .filter_map(|field| {
-            if field_alias_prefix(field).is_none() {
-                Some(field.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut joins_used_in_group_by: HashSet<&str> = HashSet::new();
-    for field in &request.group_by {
-        let Some(alias) = field_alias_prefix(field) else {
-            continue;
-        };
-        let Some(join) = alias_to_join.get(alias) else {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' groupBy field '{}' references unknown alias '{}'",
-                block_id, field, alias
-            )));
-        };
-        if !unqualified_group_by.contains(join.parent_field.as_str()) {
-            return Err(ReportServiceError::Validation(format!(
-                "Block '{}' groupBy uses qualified field '{}' but is missing the \
-                 join's parent field '{}' from groupBy. Add '{}' to groupBy so \
-                 the dimension can be enriched per row.",
-                block_id, field, join.parent_field, join.parent_field
-            )));
-        }
-        joins_used_in_group_by.insert(alias);
-    }
-
-    Ok(())
-}
-
-/// Returns the alias portion of a qualified `<alias>.<field>` reference,
-/// or `None` for unqualified names.
-fn field_alias_prefix(field: &str) -> Option<&str> {
-    field.split_once('.').map(|(alias, _)| alias)
-}
-
-fn split_qualified_condition(
-    condition: Option<Condition>,
-    alias_set: &HashSet<&str>,
-    block_id: &str,
-) -> Result<SplitCondition, ReportServiceError> {
-    let Some(c) = condition else {
-        return Ok((None, HashMap::new()));
-    };
-
-    if c.op.eq_ignore_ascii_case("AND") {
-        let raw_args = c.arguments.clone().unwrap_or_default();
-        let children: Vec<Condition> = raw_args
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
-        let mut primary: Vec<Condition> = Vec::new();
-        let mut by_alias: HashMap<String, Vec<Condition>> = HashMap::new();
-        for child in children {
-            match alias_for_condition(&child, alias_set, block_id)? {
-                Some(alias) => by_alias.entry(alias).or_default().push(child),
-                None => primary.push(child),
-            }
-        }
-        return Ok((combine_conditions(primary), by_alias));
-    }
-
-    match alias_for_condition(&c, alias_set, block_id)? {
-        Some(alias) => {
-            let mut by_alias = HashMap::new();
-            by_alias.insert(alias, vec![c]);
-            Ok((None, by_alias))
-        }
-        None => Ok((Some(c), HashMap::new())),
-    }
-}
-
-/// Identify the join alias used by a single condition term, if any. Rejects
-/// terms that would mix references across a join boundary or against an
-/// unknown alias — both indicate caller error.
-fn alias_for_condition(
-    c: &Condition,
-    alias_set: &HashSet<&str>,
-    block_id: &str,
-) -> Result<Option<String>, ReportServiceError> {
-    let mut found_alias: Option<String> = None;
-    let mut found_unknown: Option<String> = None;
-    walk_condition_field_refs(c, &mut |field| {
-        let Some(alias) = field_alias_prefix(field) else {
-            return;
-        };
-        if alias_set.contains(alias) {
-            if found_alias.as_deref() != Some(alias) {
-                if found_alias.is_some() {
-                    found_alias = Some(format!("__multiple__:{}", alias));
-                } else {
-                    found_alias = Some(alias.to_string());
-                }
-            }
-        } else if found_unknown.is_none() {
-            found_unknown = Some(alias.to_string());
-        }
-    });
-
-    if let Some(alias) = found_unknown {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' condition references unknown join alias '{}'",
-            block_id, alias
-        )));
-    }
-    if let Some(alias) = &found_alias
-        && alias.starts_with("__multiple__:")
-    {
-        return Err(ReportServiceError::Validation(format!(
-            "Block '{}' condition mixes references across joins ({}); v1 \
-             requires each AND'd term to reference at most one schema.",
-            block_id, alias
-        )));
-    }
-    Ok(found_alias)
-}
-
-/// Visit every string-valued field reference in a condition tree.
-/// Field refs in this DSL are always the first argument of a binary op or
-/// the field arg of IN/NOT_IN — checking arg[0] of every node covers them
-/// without rebuilding the operator catalog.
-fn walk_condition_field_refs(c: &Condition, visit: &mut impl FnMut(&str)) {
-    let Some(args) = &c.arguments else {
-        return;
-    };
-    for (index, arg) in args.iter().enumerate() {
-        if index == 0
-            && let Some(s) = arg.as_str()
-        {
-            visit(s);
-        }
-        if let Ok(child) = serde_json::from_value::<Condition>(arg.clone()) {
-            walk_condition_field_refs(&child, visit);
-        }
-    }
-}
-
-fn strip_alias_from_condition(mut c: Condition, alias: &str) -> Condition {
-    let prefix = format!("{}.", alias);
-    if let Some(args) = &mut c.arguments {
-        for (index, arg) in args.iter_mut().enumerate() {
-            if index == 0
-                && let Some(s) = arg.as_str()
-                && let Some(unqualified) = s.strip_prefix(&prefix)
-            {
-                *arg = Value::String(unqualified.to_string());
-            }
-            if let Ok(child) = serde_json::from_value::<Condition>(arg.clone()) {
-                let stripped = strip_alias_from_condition(child, alias);
-                if let Ok(stripped_value) = serde_json::to_value(stripped) {
-                    *arg = stripped_value;
-                }
-            }
-        }
-    }
-    c
-}
-
-/// Stringify a JSON value for use as a HashMap lookup key. Two JSON values
-/// that compare equal under SQL semantics produce the same key.
-fn value_to_lookup_key(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// Build the empty result when an inner join has no matching dimension rows
-/// — preserving the column shape the caller requested so downstream code
-/// (table projection, chart rendering) stays uniform.
-fn empty_join_result(
-    group_by: &[String],
-    aggregates: &[AggregateSpec],
-) -> runtara_object_store::AggregateResult {
-    let mut columns = group_by.to_vec();
-    columns.extend(aggregates.iter().map(|a| a.alias.clone()));
-    runtara_object_store::AggregateResult {
-        columns,
-        rows: Vec::new(),
-        group_count: 0,
-    }
-}
-
-/// Take the primary aggregate result and add columns sourced from the
-/// joined dimensions. Output column order matches the original groupBy
-/// order, with aggregate columns appended at the end.
-fn enrich_aggregate_result(
-    primary: runtara_object_store::AggregateResult,
-    requested_group_by: &[String],
-    joins: &[ReportSourceJoin],
-    alias_to_join: &HashMap<String, &ReportSourceJoin>,
-    join_data: &HashMap<String, JoinResolution>,
-) -> runtara_object_store::AggregateResult {
-    let primary_index: HashMap<&str, usize> = primary
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.as_str(), i))
-        .collect();
-
-    let aggregate_aliases: Vec<&str> = primary
-        .columns
-        .iter()
-        .map(String::as_str)
-        .filter(|c| !requested_group_by.iter().any(|g| g == c))
-        .collect();
-
-    let mut output_columns: Vec<String> = requested_group_by.to_vec();
-    for alias in &aggregate_aliases {
-        output_columns.push(alias.to_string());
-    }
-
-    let mut output_rows: Vec<Vec<Value>> = Vec::with_capacity(primary.rows.len());
-    for row in &primary.rows {
-        let mut new_row: Vec<Value> = Vec::with_capacity(output_columns.len());
-
-        for field in requested_group_by {
-            if let Some(alias) = field_alias_prefix(field) {
-                let Some(join) = alias_to_join.get(alias) else {
-                    new_row.push(Value::Null);
-                    continue;
-                };
-                let Some(parent_index) = primary_index.get(join.parent_field.as_str()) else {
-                    new_row.push(Value::Null);
-                    continue;
-                };
-                let Some(parent_value) = row.get(*parent_index) else {
-                    new_row.push(Value::Null);
-                    continue;
-                };
-                let key = value_to_lookup_key(parent_value);
-                let dim_field = field
-                    .strip_prefix(&format!("{}.", alias))
-                    .unwrap_or(field.as_str());
-                let dim_row = join_data.get(alias).and_then(|data| data.by_key.get(&key));
-                let cell = dim_row
-                    .and_then(|row_map| row_map.get(dim_field))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                new_row.push(cell);
-            } else {
-                let value = primary_index
-                    .get(field.as_str())
-                    .and_then(|i| row.get(*i))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                new_row.push(value);
-            }
-        }
-
-        for alias in &aggregate_aliases {
-            let value = primary_index
-                .get(alias)
-                .and_then(|i| row.get(*i))
-                .cloned()
-                .unwrap_or(Value::Null);
-            new_row.push(value);
-        }
-
-        output_rows.push(new_row);
-    }
-
-    let _ = joins;
-    let group_count = primary.group_count;
-    runtara_object_store::AggregateResult {
-        columns: output_columns,
-        rows: output_rows,
-        group_count,
-    }
-}
-
 fn build_aggregate_request(
     definition: &ReportDefinition,
     block: &ReportBlockDefinition,
@@ -3386,7 +4305,7 @@ fn build_aggregate_request(
                 .min(MAX_AGGREGATE_ROWS),
         ),
         Some(0),
-        build_block_condition(definition, block, resolved_filters, None),
+        build_block_condition(definition, block, resolved_filters, None)?,
     )
 }
 
@@ -3406,7 +4325,7 @@ fn build_table_aggregate_request(
         sort,
         Some(page_size),
         Some(offset),
-        build_block_condition(definition, block, resolved_filters, block_request),
+        build_block_condition(definition, block, resolved_filters, block_request)?,
     )
 }
 
@@ -3565,13 +4484,60 @@ fn aggregate_rows_to_maps(
         .collect()
 }
 
+fn enrich_filter_join_rows(
+    alias_to_join: &HashMap<String, &ReportSourceJoin>,
+    join_data: &HashMap<String, JoinResolution>,
+    rows: Vec<serde_json::Map<String, Value>>,
+) -> Vec<serde_json::Map<String, Value>> {
+    rows.into_iter()
+        .filter_map(|mut row| {
+            for (alias, join) in alias_to_join {
+                let dim_row = row
+                    .get(&join.parent_field)
+                    .filter(|value| !value_is_empty(value))
+                    .and_then(|value| {
+                        join_data
+                            .get(alias)
+                            .and_then(|data| data.by_key.get(&value_to_lookup_key(value)))
+                    });
+
+                let Some(dim_row) = dim_row else {
+                    if matches!(join.kind, ReportJoinKind::Inner) {
+                        return None;
+                    }
+                    continue;
+                };
+
+                for (field, value) in dim_row {
+                    row.insert(format!("{}.{}", alias, field), value.clone());
+                }
+            }
+            Some(row)
+        })
+        .collect()
+}
+
 fn build_table_column_condition(
+    condition_context: ReportConditionRuntimeContext<'_>,
     source: &ReportTableColumnSource,
     row: &serde_json::Map<String, Value>,
-) -> Option<Condition> {
+) -> Result<Option<Condition>, ReportServiceError> {
     let mut conditions = Vec::new();
-    if let Some(condition) = &source.condition {
-        conditions.push(condition.clone());
+    let condition_filter_defs =
+        block_condition_filter_definitions(condition_context.definition, condition_context.block);
+    let condition_filter_values = block_condition_filter_values(
+        condition_context.block,
+        condition_context.resolved_filters,
+        condition_context.block_request,
+    );
+    let context = format!("block '{}' table column source", condition_context.block.id);
+    if let Some(condition) = resolve_optional_report_condition(
+        source.condition.as_ref(),
+        &condition_filter_defs,
+        &condition_filter_values,
+        &context,
+    )? {
+        conditions.push(condition);
     }
     for join in &source.join {
         let Some(value) = row.get(&join.parent_field) else {
@@ -3581,7 +4547,7 @@ fn build_table_column_condition(
             conditions.push(condition);
         }
     }
-    combine_conditions(conditions)
+    Ok(combine_conditions(conditions))
 }
 
 fn condition_from_table_column_join(
@@ -4432,6 +5398,25 @@ mod tests {
     }
 
     #[test]
+    fn value_table_column_source_deserializes_select_and_default_join_kind() {
+        let column: ReportTableColumn = serde_json::from_value(json!({
+            "field": "part_number",
+            "type": "value",
+            "source": {
+                "schema": "TDProduct",
+                "mode": "filter",
+                "select": "part_number",
+                "join": [{"parentField": "sku", "field": "sku"}]
+            }
+        }))
+        .unwrap();
+
+        let source = column.source.unwrap();
+        assert_eq!(source.select.as_deref(), Some("part_number"));
+        assert_eq!(source.join[0].kind, ReportJoinKind::Left);
+    }
+
+    #[test]
     fn dataset_query_compiles_to_aggregate_source() {
         let dataset = test_dataset();
         let compiled = compile_dataset_query(
@@ -4769,6 +5754,271 @@ mod tests {
         }
     }
 
+    fn report_filter(
+        id: &str,
+        filter_type: ReportFilterType,
+        required: bool,
+    ) -> ReportFilterDefinition {
+        ReportFilterDefinition {
+            id: id.to_string(),
+            label: humanize_label(id),
+            filter_type,
+            default: None,
+            required,
+            options: None,
+            applies_to: vec![],
+        }
+    }
+
+    fn filter_ref(filter_id: &str, path: &str) -> Value {
+        json!({
+            "filter": filter_id,
+            "path": path,
+        })
+    }
+
+    #[test]
+    fn report_condition_resolves_scalar_filter_ref() {
+        let filters = vec![report_filter("status", ReportFilterType::Select, true)];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("status".to_string(), json!("open"))]);
+
+        let resolved = resolve_report_condition_values(
+            &cond("EQ", vec![json!("status"), filter_ref("status", "value")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.arguments.unwrap(),
+            vec![json!("status"), json!("open")]
+        );
+    }
+
+    #[test]
+    fn report_condition_resolves_multi_select_filter_ref() {
+        let filters = vec![report_filter(
+            "vendors",
+            ReportFilterType::MultiSelect,
+            false,
+        )];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("vendors".to_string(), json!(["HPE", "Cisco"]))]);
+
+        let resolved = resolve_report_condition_values(
+            &cond("IN", vec![json!("vendor"), filter_ref("vendors", "values")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.arguments.unwrap(),
+            vec![json!("vendor"), json!(["HPE", "Cisco"])]
+        );
+    }
+
+    #[test]
+    fn report_condition_resolves_filter_ref_inside_subquery() {
+        let filters = vec![report_filter(
+            "category",
+            ReportFilterType::MultiSelect,
+            true,
+        )];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("category".to_string(), json!(["leaf-a", "leaf-b"]))]);
+
+        let resolved = resolve_report_condition_values(
+            &cond(
+                "IN",
+                vec![
+                    json!("sku"),
+                    json!({
+                        "subquery": {
+                            "schema": "TDProduct",
+                            "select": "sku",
+                            "condition": {
+                                "op": "IN",
+                                "arguments": [
+                                    "category_leaf_id",
+                                    filter_ref("category", "values")
+                                ]
+                            }
+                        }
+                    }),
+                ],
+            ),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        let arguments = resolved.arguments.unwrap();
+        assert_eq!(arguments[0], json!("sku"));
+        assert_eq!(
+            arguments[1]["subquery"]["condition"]["arguments"][1],
+            json!(["leaf-a", "leaf-b"])
+        );
+    }
+
+    #[test]
+    fn report_condition_resolves_time_and_number_range_filter_refs() {
+        let filters = vec![
+            report_filter("period", ReportFilterType::TimeRange, true),
+            report_filter("quantity", ReportFilterType::NumberRange, true),
+        ];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([
+            (
+                "period".to_string(),
+                json!({"from": "2026-01-01T00:00:00Z", "to": "2026-02-01T00:00:00Z"}),
+            ),
+            ("quantity".to_string(), json!({"min": 10, "max": 50})),
+        ]);
+
+        let from = resolve_report_condition_values(
+            &cond(
+                "GTE",
+                vec![json!("created_at"), filter_ref("period", "from")],
+            ),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+        let max = resolve_report_condition_values(
+            &cond("LTE", vec![json!("qty"), filter_ref("quantity", "max")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            from.arguments.unwrap(),
+            vec![json!("created_at"), json!("2026-01-01T00:00:00Z")]
+        );
+        assert_eq!(max.arguments.unwrap(), vec![json!("qty"), json!(50)]);
+    }
+
+    #[test]
+    fn report_condition_rejects_in_operator_with_scalar_filter_ref() {
+        let filters = vec![report_filter("status", ReportFilterType::Select, true)];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("status".to_string(), json!("open"))]);
+
+        let error = resolve_report_condition_values(
+            &cond("IN", vec![json!("status"), filter_ref("status", "value")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires an array value"));
+    }
+
+    #[test]
+    fn report_condition_rejects_unknown_filter_ref() {
+        let filter_defs = HashMap::new();
+
+        let error = resolve_report_condition_values(
+            &cond("EQ", vec![json!("status"), filter_ref("missing", "value")]),
+            &filter_defs,
+            &HashMap::new(),
+            "test",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown filter 'missing'"));
+    }
+
+    #[test]
+    fn report_condition_prunes_optional_empty_filter_ref() {
+        let filters = vec![report_filter("status", ReportFilterType::Select, false)];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+
+        let resolved = resolve_report_condition_values(
+            &cond("EQ", vec![json!("status"), filter_ref("status", "value")]),
+            &filter_defs,
+            &HashMap::new(),
+            "test",
+        )
+        .unwrap();
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn filter_join_enrichment_adds_qualified_dimension_fields() {
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Left,
+        };
+        let alias_to_join = HashMap::from([("p".to_string(), &join)]);
+        let mut dim_row = serde_json::Map::new();
+        dim_row.insert("sku".to_string(), json!("ABC-1"));
+        dim_row.insert("part_number".to_string(), json!("PN-1"));
+        let join_data = HashMap::from([(
+            "p".to_string(),
+            JoinResolution {
+                parent_keys: vec![json!("ABC-1")],
+                by_key: HashMap::from([("ABC-1".to_string(), dim_row)]),
+            },
+        )]);
+        let rows = vec![serde_json::Map::from_iter([(
+            "sku".to_string(),
+            json!("ABC-1"),
+        )])];
+
+        let enriched = enrich_filter_join_rows(&alias_to_join, &join_data, rows);
+
+        assert_eq!(enriched[0].get("p.part_number"), Some(&json!("PN-1")));
+    }
+
+    #[test]
+    fn filter_join_enrichment_drops_missing_inner_rows() {
+        let join = ReportSourceJoin {
+            schema: "TDProduct".to_string(),
+            alias: Some("p".to_string()),
+            connection_id: None,
+            field: "sku".to_string(),
+            parent_field: "sku".to_string(),
+            op: "eq".to_string(),
+            kind: ReportJoinKind::Inner,
+        };
+        let alias_to_join = HashMap::from([("p".to_string(), &join)]);
+        let join_data = HashMap::from([(
+            "p".to_string(),
+            JoinResolution {
+                parent_keys: vec![json!("ABC-1")],
+                by_key: HashMap::new(),
+            },
+        )]);
+        let rows = vec![serde_json::Map::from_iter([(
+            "sku".to_string(),
+            json!("ABC-1"),
+        )])];
+
+        let enriched = enrich_filter_join_rows(&alias_to_join, &join_data, rows);
+
+        assert!(enriched.is_empty());
+    }
+
     #[test]
     fn split_qualified_condition_separates_aliased_from_primary_terms() {
         let aliases: HashSet<&str> = ["p"].into_iter().collect();
@@ -4867,13 +6117,8 @@ mod tests {
             "p.vendor".to_string(),
         ];
 
-        let enriched = enrich_aggregate_result(
-            primary,
-            &requested_group_by,
-            &joins,
-            &alias_to_join,
-            &join_data,
-        );
+        let enriched =
+            enrich_aggregate_result(primary, &requested_group_by, &alias_to_join, &join_data);
 
         assert_eq!(
             enriched.columns,

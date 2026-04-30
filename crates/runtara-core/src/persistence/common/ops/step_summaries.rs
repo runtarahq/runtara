@@ -46,7 +46,9 @@ macro_rules! impl_step_summary_ops {
                 use $crate::persistence::common::filters::{
                     sort_direction_sql, step_status_filter_str,
                 };
-                use $crate::persistence::common::row::{decode_json_text, parse_step_status};
+                use $crate::persistence::common::row::{
+                    decode_json_text, error_from_output_envelope, parse_step_status,
+                };
                 use $crate::persistence::dialect::Dialect;
 
                 let order_direction = sort_direction_sql(filter.sort_order);
@@ -70,6 +72,10 @@ macro_rules! impl_step_summary_ops {
                 for row in rows {
                     let status_str: &str = row.get("status");
                     let status = parse_step_status(status_str);
+                    let outputs = decode_json_text(row.get("outputs"));
+                    let error = decode_json_text(row.get("error"))
+                        .or_else(|| error_from_output_envelope(outputs.as_ref()));
+
                     records.push($crate::persistence::StepSummaryRecord {
                         step_id: row.get("step_id"),
                         step_name: row.get("step_name"),
@@ -81,8 +87,8 @@ macro_rules! impl_step_summary_ops {
                         completed_at: row.get("completed_at"),
                         duration_ms: row.get("duration_ms"),
                         inputs: decode_json_text(row.get("inputs")),
-                        outputs: decode_json_text(row.get("outputs")),
-                        error: decode_json_text(row.get("error")),
+                        outputs,
+                        error,
                         scope_id: row.get("scope_id"),
                         parent_scope_id: row.get("parent_scope_id"),
                     });

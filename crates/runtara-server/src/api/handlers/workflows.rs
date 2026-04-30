@@ -111,6 +111,13 @@ pub struct ExecuteWorkflowQuery {
     pub version: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CompileWorkflowQuery {
+    /// Force deleting any existing compiled artifact before compiling.
+    #[serde(default, rename = "forceRecompile")]
+    pub force_recompile: Option<bool>,
+}
+
 // ============================================================================
 // HTTP Handlers
 // ============================================================================
@@ -626,6 +633,7 @@ pub async fn compile_workflow_handler(
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     Path((workflow_id, version)): Path<(String, String)>,
+    Query(query): Query<CompileWorkflowQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Validate version is a positive integer
     let version_num = match version.parse::<i32>() {
@@ -641,6 +649,24 @@ pub async fn compile_workflow_handler(
         }
         Ok(v) => v,
     };
+
+    let force_recompile = query.force_recompile.unwrap_or(false);
+    if force_recompile {
+        let repository = WorkflowRepository::new(pool.clone());
+        if let Err(e) = repository
+            .invalidate_compilation(&tenant_id, &workflow_id, version_num)
+            .await
+        {
+            let error_response = json!({
+                "success": false,
+                "error": "Compilation invalidation failed",
+                "message": format!("Failed to invalidate existing compiled artifact: {}", e),
+                "workflowId": workflow_id,
+                "version": version
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
+        }
+    }
 
     // Route compilation through the queue if Valkey is available.
     // This ensures all compilations are serialized through the compilation worker,
@@ -662,6 +688,7 @@ pub async fn compile_workflow_handler(
                     "version": version,
                     "imageId": image_id,
                     "registered": true,
+                    "recompiled": false,
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 });
                 return (StatusCode::OK, Json(response));
@@ -736,6 +763,7 @@ pub async fn compile_workflow_handler(
                         "message": "Workflow compiled successfully",
                         "workflowId": workflow_id,
                         "version": version,
+                        "recompiled": true,
                         "timestamp": chrono::Utc::now().to_rfc3339()
                     });
                     if let Some(image_id) = result.image_id {
@@ -793,6 +821,7 @@ pub async fn compile_workflow_handler(
                 "buildDir": result.build_dir,
                 "binarySize": result.binary_size,
                 "binaryChecksum": result.binary_checksum,
+                "recompiled": true,
                 "timestamp": chrono::Utc::now().to_rfc3339()
             });
             if let Some(image_id) = result.image_id {

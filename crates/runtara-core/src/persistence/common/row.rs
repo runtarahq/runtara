@@ -43,6 +43,22 @@ pub fn decode_json_text(text: Option<String>) -> Option<serde_json::Value> {
     text.and_then(|s| serde_json::from_str(&s).ok())
 }
 
+/// Extract a structured error from a step output envelope produced by
+/// generated agent/capability error paths.
+pub fn error_from_output_envelope(output: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let output = output?;
+    if output.get("_error").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+
+    Some(
+        output
+            .get("error")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!("Step output reported _error=true")),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +74,26 @@ mod tests {
     fn unknown_status_falls_back_to_completed() {
         assert_eq!(parse_step_status("weird"), StepStatus::Completed);
         assert_eq!(parse_step_status(""), StepStatus::Completed);
+    }
+
+    #[test]
+    fn extracts_error_from_output_envelope() {
+        let output = serde_json::json!({
+            "_error": true,
+            "error": {"message": "capability failed"}
+        });
+
+        assert_eq!(
+            error_from_output_envelope(Some(&output)),
+            Some(serde_json::json!({"message": "capability failed"}))
+        );
+    }
+
+    #[test]
+    fn ignores_non_error_output_envelope() {
+        let output = serde_json::json!({"_error": false, "error": "ignored"});
+
+        assert_eq!(error_from_output_envelope(Some(&output)), None);
+        assert_eq!(error_from_output_envelope(None), None);
     }
 }

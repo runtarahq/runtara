@@ -97,6 +97,38 @@ pub struct StepSummaryResponse {
     pub parent_scope_id: Option<String>,
 }
 
+fn error_from_output_envelope(outputs: Option<&Value>) -> Option<Value> {
+    let outputs = outputs?;
+    if outputs.get("_error").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+
+    Some(
+        outputs
+            .get("error")
+            .cloned()
+            .unwrap_or_else(|| json!("Step output reported _error=true")),
+    )
+}
+
+fn step_status_and_error(
+    status: StepStatus,
+    terminal_state: Option<&str>,
+    outputs: Option<&Value>,
+    error: Option<Value>,
+) -> (String, Option<Value>) {
+    let output_error = error_from_output_envelope(outputs);
+    let error = error.or(output_error);
+    let status = match status {
+        StepStatus::Running => terminal_state.unwrap_or("running").to_string(),
+        StepStatus::Completed if error.is_some() => "failed".to_string(),
+        StepStatus::Completed => "completed".to_string(),
+        StepStatus::Failed => "failed".to_string(),
+    };
+
+    (status, error)
+}
+
 /// Handler to get step summaries for a workflow execution
 ///
 /// GET /api/runtime/workflows/{workflow_id}/instances/{instance_id}/steps
@@ -240,14 +272,12 @@ pub async fn get_step_summaries(
                 .into_iter()
                 .map(|step| {
                     // If instance is terminal but step is not, step inherits instance state
-                    let status = match step.status {
-                        StepStatus::Running => {
-                            // Step is non-terminal, inherit instance state if instance is terminal
-                            instance_terminal_state.unwrap_or("running").to_string()
-                        }
-                        StepStatus::Completed => "completed".to_string(),
-                        StepStatus::Failed => "failed".to_string(),
-                    };
+                    let (status, error) = step_status_and_error(
+                        step.status,
+                        instance_terminal_state,
+                        step.outputs.as_ref(),
+                        step.error,
+                    );
 
                     StepSummaryResponse {
                         step_id: step.step_id,
@@ -259,7 +289,7 @@ pub async fn get_step_summaries(
                         duration_ms: step.duration_ms,
                         inputs: step.inputs,
                         outputs: step.outputs,
-                        error: step.error,
+                        error,
                         scope_id: step.scope_id,
                         parent_scope_id: step.parent_scope_id,
                     }
@@ -304,5 +334,35 @@ pub async fn get_step_summaries(
             });
             (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_step_with_output_error_is_reported_failed() {
+        let outputs = json!({
+            "_error": true,
+            "error": {"message": "Capability failed"}
+        });
+
+        let (status, error) =
+            step_status_and_error(StepStatus::Completed, None, Some(&outputs), None);
+
+        assert_eq!(status, "failed");
+        assert_eq!(error, Some(json!({"message": "Capability failed"})));
+    }
+
+    #[test]
+    fn completed_step_without_output_error_stays_completed() {
+        let outputs = json!({"ok": true});
+
+        let (status, error) =
+            step_status_and_error(StepStatus::Completed, None, Some(&outputs), None);
+
+        assert_eq!(status, "completed");
+        assert_eq!(error, None);
     }
 }

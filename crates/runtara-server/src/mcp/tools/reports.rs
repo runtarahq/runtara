@@ -1229,7 +1229,7 @@ fn report_authoring_schema() -> Value {
                 "columns": [{"field": "sku", "label": "SKU", "format": "optional formatter"}, {"field": "stock_trend", "label": "Trend", "type": "chart", "chart": {"kind": "line", "x": "snapshot_date", "series": [{"field": "qty", "label": "Qty"}]}, "source": {"schema": "StockSnapshot", "mode": "aggregate", "groupBy": ["snapshot_date"], "aggregates": [{"alias": "qty", "op": "sum", "field": "qty"}], "join": [{"parentField": "sku", "field": "sku"}]}}],
                 "defaultSort": [{"field": "sku", "direction": "asc"}],
                 "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]},
-                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' with its own aggregate source joined to the parent row."
+                "note": "Tables support source.mode='filter' for row data and source.mode='aggregate' for grouped aggregate result sets. Configure visible/searchable/sortable fields in table.columns. A table column may use type='chart' for inline aggregate charts or type='value' with source.select for scalar joined lookups."
             },
             "chart": {
                 "type": "chart",
@@ -1250,14 +1250,16 @@ fn report_authoring_schema() -> Value {
         },
         "sourceShape": {
             "schema": "Object Model schema name. Use get_object_schema to inspect valid fields.",
+            "select": "Table value-column source only: scalar field to copy from the joined schema.",
             "connectionId": "Optional connection id for connection-scoped schemas.",
             "mode": "filter | aggregate",
-            "condition": "Optional Object Model condition DSL.",
+            "condition": "Optional Object Model condition DSL. IN/NOT_IN may use same-store subquery operands: {\"subquery\":{\"schema\":\"TDProduct\",\"select\":\"sku\",\"condition\":{...}}}.",
             "filterMappings": "Optional mappings from global filter ids to source fields.",
             "groupBy": "Aggregate output grouping fields.",
             "aggregates": "Aggregate specs. Report aggregate specs use {alias, op, field?, distinct?, orderBy?, expression?}. Use op/field here, not fn/column.",
             "orderBy": "Sort array using {field, direction}. Field must be a row field, groupBy field, or aggregate alias depending on source mode.",
-            "limit": "Optional row/group cap."
+            "limit": "Optional row/group cap.",
+            "join": "Optional single-hop Object Model joins. Use [{schema, alias?, connectionId?, parentField, field, op?, kind?}] and qualify joined fields as <alias>.<field>."
         },
         "datasetShape": {
             "id": "Stable dataset id, unique within definition.datasets.",
@@ -1296,9 +1298,11 @@ fn report_authoring_schema() -> Value {
             "For table.columns, use Object Model row fields when source.mode='filter'.",
             "For aggregate table.columns, use source.groupBy fields and source.aggregates aliases, including expr aliases.",
             "For chart table columns, field is a synthetic cell key; configure column.chart and column.source.join.",
+            "For scalar value table columns, use type='value' plus column.source.select and one column.source.join entry.",
             "For chart.x, use an aggregate output field, usually a source.groupBy field.",
             "For chart.series[].field and metric.valueField, use aggregate aliases from source.aggregates.",
             "For source.orderBy and table.defaultSort, use field, not column.",
+            "For large category/product filters, prefer IN with a same-store subquery instead of materializing large value arrays.",
             "For dataset-backed blocks, table columns/chart fields/metric valueField use selected block.dataset dimensions and measures."
         ],
         "commonMistakes": [
@@ -1359,6 +1363,37 @@ fn report_authoring_schema() -> Value {
                     ],
                     "defaultSort": [{"field": "sku", "direction": "asc"}],
                     "pagination": {"defaultPageSize": 50, "allowedPageSizes": [25, 50, 100]}
+                }
+            },
+            "joinedTable": {
+                "id": "stock_with_product",
+                "type": "table",
+                "title": "Stock with product details",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "join": [{"schema": "TDProduct", "alias": "product", "parentField": "sku", "field": "sku", "kind": "left"}],
+                    "condition": {"op": "EQ", "arguments": ["product.category_leaf_id", {"filter": "category", "path": "value"}]}
+                },
+                "table": {
+                    "columns": [
+                        {"field": "sku", "label": "SKU"},
+                        {"field": "qty", "label": "Qty"},
+                        {
+                            "field": "part_number_lookup",
+                            "label": "Part Number",
+                            "type": "value",
+                            "source": {
+                                "schema": "TDProduct",
+                                "mode": "filter",
+                                "select": "part_number",
+                                "join": [{"parentField": "sku", "field": "sku", "kind": "left"}],
+                                "orderBy": [{"field": "createdAt", "direction": "asc"}]
+                            }
+                        },
+                        {"field": "product.part_number", "label": "Part Number"}
+                    ],
+                    "defaultSort": [{"field": "product.part_number", "direction": "asc"}]
                 }
             },
             "chart": {
@@ -1445,6 +1480,25 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
         }
     }
 
+    if let Some(filters) = definition.get("filters") {
+        match filters.as_array() {
+            Some(filters) => {
+                for (index, filter) in filters.iter().enumerate() {
+                    collect_report_filter_authoring_issues(
+                        &format!("$.filters[{index}]"),
+                        filter,
+                        &mut issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                "$.filters",
+                "INVALID_FILTERS",
+                "Report definition filters must be an array.",
+            )),
+        }
+    }
+
     if let Some(blocks) = definition.get("blocks") {
         match blocks.as_array() {
             Some(blocks) => {
@@ -1464,6 +1518,8 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
             )),
         }
     }
+
+    collect_dynamic_condition_filter_ref_authoring_issues(definition, &mut issues);
 
     issues
 }
@@ -1935,22 +1991,21 @@ fn collect_report_block_authoring_issues(
         return;
     };
 
+    let allowed_block_keys = [
+        "id",
+        "type",
+        "title",
+        "lazy",
+        "dataset",
+        "source",
+        "table",
+        "chart",
+        "metric",
+        "filters",
+        "interactions",
+    ];
     for key in block_object.keys() {
-        if [
-            "id",
-            "type",
-            "title",
-            "lazy",
-            "dataset",
-            "source",
-            "table",
-            "chart",
-            "metric",
-            "filters",
-            "interactions",
-        ]
-        .contains(&key.as_str())
-        {
+        if allowed_block_keys.contains(&key.as_str()) {
             continue;
         }
 
@@ -1974,7 +2029,12 @@ fn collect_report_block_authoring_issues(
             _ => issues.push(error(
                 &key_path,
                 "UNKNOWN_REPORT_BLOCK_FIELD",
-                format!("Unknown report block field '{key}'. The report API ignores unknown block fields; use get_report_authoring_schema for the canonical shape."),
+                format!(
+                    "Unknown report block field '{key}'.{} The report API ignores unknown block fields; use get_report_authoring_schema for the canonical shape.",
+                    similar_key_hint(key, &allowed_block_keys)
+                        .map(|known| format!(" Did you mean '{known}'?"))
+                        .unwrap_or_default()
+                ),
             )),
         }
     }
@@ -2037,6 +2097,42 @@ fn collect_report_block_authoring_issues(
     }
     if let Some(metric) = block.get("metric") {
         collect_metric_issues(&format!("{path}.metric"), metric, issues);
+    }
+    if let Some(filters) = block.get("filters") {
+        match filters.as_array() {
+            Some(filters) => {
+                for (index, filter) in filters.iter().enumerate() {
+                    collect_report_filter_authoring_issues(
+                        &format!("{path}.filters[{index}]"),
+                        filter,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.filters"),
+                "INVALID_BLOCK_FILTERS",
+                "Report block filters must be an array.",
+            )),
+        }
+    }
+    if let Some(interactions) = block.get("interactions") {
+        match interactions.as_array() {
+            Some(interactions) => {
+                for (index, interaction) in interactions.iter().enumerate() {
+                    collect_interaction_issues(
+                        &format!("{path}.interactions[{index}]"),
+                        interaction,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.interactions"),
+                "INVALID_BLOCK_INTERACTIONS",
+                "Report block interactions must be an array.",
+            )),
+        }
     }
 
     if !full_block {
@@ -2133,7 +2229,14 @@ fn collect_block_dataset_issues(path: &str, dataset: &Value, issues: &mut Vec<Au
     collect_unknown_keys(
         path,
         dataset,
-        &["id", "dimensions", "measures", "orderBy", "limit"],
+        &[
+            "id",
+            "dimensions",
+            "measures",
+            "orderBy",
+            "datasetFilters",
+            "limit",
+        ],
         issues,
     );
     if dataset
@@ -2174,6 +2277,16 @@ fn collect_block_dataset_issues(path: &str, dataset: &Value, issues: &mut Vec<Au
             collect_order_by_issues(&format!("{path}.orderBy[{index}]"), order, issues);
         }
     }
+    if let Some(dataset_filters) = dataset.get("datasetFilters").and_then(Value::as_array) {
+        for (index, filter) in dataset_filters.iter().enumerate() {
+            collect_unknown_keys(
+                &format!("{path}.datasetFilters[{index}]"),
+                filter,
+                &["field", "op", "value"],
+                issues,
+            );
+        }
+    }
 }
 
 fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringIssue>) {
@@ -2203,6 +2316,20 @@ fn collect_source_issues(path: &str, source: &Value, issues: &mut Vec<AuthoringI
         },
         issues,
     );
+
+    if let Some(condition) = source.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+
+    if let Some(filter_mappings) = source.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
 
     if let Some(aggregates) = source.get("aggregates").and_then(Value::as_array) {
         for (index, aggregate) in aggregates.iter().enumerate() {
@@ -2326,7 +2453,8 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     "Each table column must include field.",
                 ));
             }
-            if column.get("type").and_then(Value::as_str) == Some("chart") {
+            let column_type = column.get("type").and_then(Value::as_str);
+            if column_type == Some("chart") {
                 if let Some(chart) = column.get("chart") {
                     collect_chart_issues(&format!("{path}.columns[{index}].chart"), chart, issues);
                 } else {
@@ -2340,6 +2468,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                     collect_table_column_source_issues(
                         &format!("{path}.columns[{index}].source"),
                         source,
+                        "chart",
                         issues,
                     );
                 } else {
@@ -2349,6 +2478,15 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
                         "Chart table columns must include an aggregate source joined to the parent row.",
                     ));
                 }
+            } else if column_type == Some("value")
+                && let Some(source) = column.get("source")
+            {
+                collect_table_column_source_issues(
+                    &format!("{path}.columns[{index}].source"),
+                    source,
+                    "value",
+                    issues,
+                );
             }
         }
     }
@@ -2372,6 +2510,7 @@ fn collect_table_issues(path: &str, table: &Value, issues: &mut Vec<AuthoringIss
 fn collect_table_column_source_issues(
     path: &str,
     source: &Value,
+    column_type: &str,
     issues: &mut Vec<AuthoringIssue>,
 ) {
     collect_unknown_keys_with_messages(
@@ -2379,6 +2518,7 @@ fn collect_table_column_source_issues(
         source,
         &[
             "schema",
+            "select",
             "connectionId",
             "mode",
             "condition",
@@ -2401,12 +2541,51 @@ fn collect_table_column_source_issues(
         issues,
     );
 
-    if source.get("mode").and_then(Value::as_str) != Some("aggregate") {
+    if let Some(condition) = source.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+
+    if let Some(filter_mappings) = source.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
+
+    if column_type == "chart" && source.get("mode").and_then(Value::as_str) != Some("aggregate") {
         issues.push(error(
             format!("{path}.mode"),
             "INVALID_TABLE_COLUMN_SOURCE_MODE",
             "Chart table column sources must use mode='aggregate'.",
         ));
+    }
+    if column_type == "value" {
+        if source
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("filter")
+            != "filter"
+        {
+            issues.push(error(
+                format!("{path}.mode"),
+                "INVALID_TABLE_COLUMN_SOURCE_MODE",
+                "Value table column sources must use mode='filter'.",
+            ));
+        }
+        if source
+            .get("select")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            issues.push(error(
+                format!("{path}.select"),
+                "MISSING_TABLE_VALUE_SELECT",
+                "Value table column sources must include select.",
+            ));
+        }
     }
     if let Some(aggregates) = source.get("aggregates").and_then(Value::as_array) {
         for (index, aggregate) in aggregates.iter().enumerate() {
@@ -2423,7 +2602,7 @@ fn collect_table_column_source_issues(
             collect_unknown_keys(
                 &format!("{path}.join[{index}]"),
                 join_entry,
-                &["parentField", "field", "op"],
+                &["parentField", "field", "op", "kind"],
                 issues,
             );
         }
@@ -2484,6 +2663,600 @@ fn collect_metric_issues(path: &str, metric: &Value, issues: &mut Vec<AuthoringI
     );
 }
 
+fn collect_report_filter_authoring_issues(
+    path: &str,
+    filter: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    collect_unknown_keys(
+        path,
+        filter,
+        &[
+            "id",
+            "label",
+            "type",
+            "default",
+            "required",
+            "options",
+            "appliesTo",
+        ],
+        issues,
+    );
+    for key in ["id", "label", "type"] {
+        if filter
+            .get(key)
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            issues.push(error(
+                format!("{path}.{key}"),
+                "MISSING_REPORT_FILTER_FIELD",
+                "Report filters must include id, label, and type.",
+            ));
+        }
+    }
+    if let Some(options) = filter.get("options") {
+        collect_filter_options_issues(&format!("{path}.options"), options, issues);
+    }
+    if let Some(applies_to) = filter.get("appliesTo") {
+        match applies_to.as_array() {
+            Some(targets) => {
+                for (index, target) in targets.iter().enumerate() {
+                    collect_filter_target_issues(
+                        &format!("{path}.appliesTo[{index}]"),
+                        target,
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.appliesTo"),
+                "INVALID_FILTER_TARGETS",
+                "Report filter appliesTo must be an array.",
+            )),
+        }
+    }
+}
+
+fn collect_filter_options_issues(path: &str, options: &Value, issues: &mut Vec<AuthoringIssue>) {
+    let Some(object) = options.as_object() else {
+        issues.push(error(
+            path,
+            "INVALID_FILTER_OPTIONS",
+            "Report filter options must be an object.",
+        ));
+        return;
+    };
+
+    let source = object.get("source").and_then(Value::as_str);
+    let allowed = match source {
+        Some("static") => &["source", "values"][..],
+        Some("object_model") => &[
+            "source",
+            "schema",
+            "connectionId",
+            "field",
+            "valueField",
+            "labelField",
+            "search",
+            "dependsOn",
+            "filterMappings",
+            "condition",
+        ][..],
+        _ => &[
+            "source",
+            "values",
+            "schema",
+            "connectionId",
+            "field",
+            "valueField",
+            "labelField",
+            "search",
+            "dependsOn",
+            "filterMappings",
+            "condition",
+        ][..],
+    };
+    collect_unknown_keys(path, options, allowed, issues);
+
+    if let Some(values) = options.get("values")
+        && !values.is_array()
+    {
+        issues.push(error(
+            format!("{path}.values"),
+            "INVALID_STATIC_FILTER_OPTIONS",
+            "Static filter options values must be an array.",
+        ));
+    }
+    if let Some(filter_mappings) = options.get("filterMappings").and_then(Value::as_array) {
+        for (index, mapping) in filter_mappings.iter().enumerate() {
+            collect_filter_target_issues(
+                &format!("{path}.filterMappings[{index}]"),
+                mapping,
+                issues,
+            );
+        }
+    }
+    if let Some(condition) = options.get("condition") {
+        collect_condition_issues(&format!("{path}.condition"), condition, issues);
+    }
+}
+
+fn collect_filter_target_issues(path: &str, target: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(
+        path,
+        target,
+        &["filterId", "blockId", "field", "op"],
+        issues,
+    );
+    if target.get("field").and_then(Value::as_str).is_none() {
+        issues.push(error(
+            format!("{path}.field"),
+            "MISSING_FILTER_TARGET_FIELD",
+            "Report filter targets must include field.",
+        ));
+    }
+}
+
+fn collect_interaction_issues(path: &str, interaction: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_unknown_keys(path, interaction, &["id", "trigger", "actions"], issues);
+    if interaction
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        issues.push(error(
+            format!("{path}.id"),
+            "MISSING_INTERACTION_ID",
+            "Report interactions must include a stable id.",
+        ));
+    }
+    if let Some(trigger) = interaction.get("trigger") {
+        collect_unknown_keys(
+            &format!("{path}.trigger"),
+            trigger,
+            &["event", "field"],
+            issues,
+        );
+    }
+    if let Some(actions) = interaction.get("actions") {
+        match actions.as_array() {
+            Some(actions) => {
+                for (index, action) in actions.iter().enumerate() {
+                    collect_unknown_keys(
+                        &format!("{path}.actions[{index}]"),
+                        action,
+                        &["type", "filterId", "valueFrom", "value"],
+                        issues,
+                    );
+                }
+            }
+            None => issues.push(error(
+                format!("{path}.actions"),
+                "INVALID_INTERACTION_ACTIONS",
+                "Report interaction actions must be an array.",
+            )),
+        }
+    }
+}
+
+fn collect_dynamic_condition_filter_ref_authoring_issues(
+    definition: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let report_filters = collect_condition_filter_metadata(
+        definition
+            .get("filters")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+    );
+
+    if let Some(filters) = definition.get("filters").and_then(Value::as_array) {
+        for (index, filter) in filters.iter().enumerate() {
+            if let Some(condition) = filter
+                .get("options")
+                .and_then(Value::as_object)
+                .and_then(|options| options.get("condition"))
+            {
+                collect_condition_filter_ref_issues(
+                    &format!("$.filters[{index}].options.condition"),
+                    condition,
+                    &report_filters,
+                    issues,
+                );
+            }
+        }
+    }
+
+    let Some(blocks) = definition.get("blocks").and_then(Value::as_array) else {
+        return;
+    };
+    for (block_index, block) in blocks.iter().enumerate() {
+        let mut block_filters = report_filters.clone();
+        block_filters.extend(collect_condition_filter_metadata(
+            block
+                .get("filters")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+        ));
+
+        if let Some(condition) = block
+            .get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("condition"))
+        {
+            collect_condition_filter_ref_issues(
+                &format!("$.blocks[{block_index}].source.condition"),
+                condition,
+                &block_filters,
+                issues,
+            );
+        }
+
+        let Some(columns) = block
+            .get("table")
+            .and_then(Value::as_object)
+            .and_then(|table| table.get("columns"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for (column_index, column) in columns.iter().enumerate() {
+            if let Some(condition) = column
+                .get("source")
+                .and_then(Value::as_object)
+                .and_then(|source| source.get("condition"))
+            {
+                collect_condition_filter_ref_issues(
+                    &format!(
+                        "$.blocks[{block_index}].table.columns[{column_index}].source.condition"
+                    ),
+                    condition,
+                    &block_filters,
+                    issues,
+                );
+            }
+        }
+    }
+}
+
+fn collect_condition_filter_metadata(filters: Option<&[Value]>) -> HashMap<String, Option<String>> {
+    filters
+        .into_iter()
+        .flatten()
+        .filter_map(|filter| {
+            let id = filter.get("id").and_then(Value::as_str)?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some((
+                id.to_string(),
+                filter
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ))
+        })
+        .collect()
+}
+
+fn collect_condition_filter_ref_issues(
+    path: &str,
+    condition: &Value,
+    filter_metadata: &HashMap<String, Option<String>>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(arguments) = condition.get("arguments").and_then(Value::as_array) else {
+        return;
+    };
+
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument_path = format!("{path}.arguments[{index}]");
+        if let Some(reference) = parse_condition_filter_ref(argument, &argument_path, issues) {
+            match filter_metadata.get(&reference.filter_id) {
+                Some(filter_type) => {
+                    collect_condition_filter_ref_path_issues(
+                        &argument_path,
+                        &reference,
+                        filter_type.as_deref(),
+                        issues,
+                    );
+                }
+                None => issues.push(error(
+                    format!("{argument_path}.filter"),
+                    "UNKNOWN_CONDITION_FILTER_REF",
+                    format!(
+                        "Report source condition references unknown filter '{}'.",
+                        reference.filter_id
+                    ),
+                )),
+            }
+        }
+        if let Some(condition) = condition_subquery_condition(argument) {
+            collect_condition_filter_ref_issues(
+                &format!("{argument_path}.subquery.condition"),
+                condition,
+                filter_metadata,
+                issues,
+            );
+            continue;
+        }
+        if is_condition_object(argument) {
+            collect_condition_filter_ref_issues(&argument_path, argument, filter_metadata, issues);
+        }
+    }
+}
+
+struct ConditionFilterRef {
+    filter_id: String,
+    path: String,
+}
+
+fn parse_condition_filter_ref(
+    argument: &Value,
+    path: &str,
+    issues: &mut Vec<AuthoringIssue>,
+) -> Option<ConditionFilterRef> {
+    let object = argument.as_object()?;
+    if !object.contains_key("filter") {
+        return None;
+    }
+    let Some(filter_id) = object.get("filter").and_then(Value::as_str).map(str::trim) else {
+        issues.push(error(
+            format!("{path}.filter"),
+            "INVALID_CONDITION_FILTER_REF",
+            "Report source condition filter refs must include a string filter.",
+        ));
+        return None;
+    };
+    if filter_id.is_empty() {
+        issues.push(error(
+            format!("{path}.filter"),
+            "INVALID_CONDITION_FILTER_REF",
+            "Report source condition filter refs must include a non-empty filter.",
+        ));
+        return None;
+    }
+    let Some(path_value) = object.get("path").and_then(Value::as_str).map(str::trim) else {
+        issues.push(error(
+            format!("{path}.path"),
+            "INVALID_CONDITION_FILTER_REF_PATH",
+            "Report source condition filter refs must include path.",
+        ));
+        return None;
+    };
+    Some(ConditionFilterRef {
+        filter_id: filter_id.to_string(),
+        path: path_value.to_string(),
+    })
+}
+
+fn collect_condition_filter_ref_path_issues(
+    path: &str,
+    reference: &ConditionFilterRef,
+    filter_type: Option<&str>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    if !is_known_condition_filter_ref_path(&reference.path) {
+        issues.push(error(
+            format!("{path}.path"),
+            "INVALID_CONDITION_FILTER_REF_PATH",
+            format!(
+                "Report source condition filter ref path '{}' is not supported. Use one of: value, values, from, to, min, max.",
+                reference.path
+            ),
+        ));
+        return;
+    }
+
+    let Some(filter_type) = filter_type else {
+        return;
+    };
+    let allowed_paths = condition_filter_ref_paths_for_type(filter_type);
+    if allowed_paths.contains(&reference.path.as_str()) {
+        return;
+    }
+    issues.push(error(
+        format!("{path}.path"),
+        "INVALID_CONDITION_FILTER_REF_PATH",
+        format!(
+            "Filter '{}' has type '{}' and supports condition paths: {}.",
+            reference.filter_id,
+            filter_type,
+            allowed_paths.join(", ")
+        ),
+    ));
+}
+
+fn condition_filter_ref_paths_for_type(filter_type: &str) -> &'static [&'static str] {
+    match filter_type {
+        "multi_select" => &["values"],
+        "time_range" => &["from", "to"],
+        "number_range" => &["min", "max"],
+        "select" | "radio" | "checkbox" | "text" | "search" => &["value"],
+        _ => &["value", "values", "from", "to", "min", "max"],
+    }
+}
+
+fn is_known_condition_filter_ref_path(path: &str) -> bool {
+    matches!(path, "value" | "values" | "from" | "to" | "min" | "max")
+}
+
+fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<AuthoringIssue>) {
+    collect_condition_issues_at(path, condition, issues, false);
+}
+
+fn collect_condition_issues_at(
+    path: &str,
+    condition: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+    inside_subquery: bool,
+) {
+    collect_unknown_keys(path, condition, &["op", "arguments"], issues);
+    if condition.get("op").and_then(Value::as_str).is_none() {
+        issues.push(error(
+            format!("{path}.op"),
+            "MISSING_CONDITION_OP",
+            "Report source conditions must include op.",
+        ));
+    }
+
+    let Some(arguments) = condition.get("arguments") else {
+        return;
+    };
+    let Some(arguments) = arguments.as_array() else {
+        issues.push(error(
+            format!("{path}.arguments"),
+            "INVALID_CONDITION_ARGUMENTS",
+            "Report source condition arguments must be an array.",
+        ));
+        return;
+    };
+    let op = condition
+        .get("op")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument_path = format!("{path}.arguments[{index}]");
+        if is_mapping_value_object(argument) {
+            issues.push(error(
+                argument_path,
+                "UNSUPPORTED_CONDITION_MAPPING_VALUE",
+                "Report source conditions do not evaluate workflow MappingValue reference/template objects. Use filterMappings, appliesTo, {\"filter\":\"...\",\"path\":\"...\"}, or literal Object Model condition arguments.",
+            ));
+        } else if collect_condition_subquery_issues(
+            &argument_path,
+            argument,
+            issues,
+            inside_subquery,
+            &op,
+            index,
+        ) {
+            // handled by collect_condition_subquery_issues
+        } else if is_condition_object(argument) {
+            collect_condition_issues_at(&argument_path, argument, issues, inside_subquery);
+        }
+    }
+}
+
+fn collect_condition_subquery_issues(
+    path: &str,
+    argument: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+    inside_subquery: bool,
+    op: &str,
+    argument_index: usize,
+) -> bool {
+    let Some(object) = argument.as_object() else {
+        return false;
+    };
+    let Some(subquery_value) = object.get("subquery") else {
+        return false;
+    };
+    if inside_subquery {
+        issues.push(error(
+            format!("{path}.subquery"),
+            "NESTED_CONDITION_SUBQUERY",
+            "Report source condition subqueries cannot contain nested subqueries.",
+        ));
+    }
+    if !matches!(op, "IN" | "NOT_IN") || argument_index != 1 {
+        issues.push(error(
+            format!("{path}.subquery"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subqueries are only supported as the second argument of IN or NOT_IN.",
+        ));
+    }
+    if object.len() != 1 {
+        issues.push(error(
+            path.to_string(),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subquery operands must contain only the subquery key.",
+        ));
+    }
+    let Some(subquery) = subquery_value.as_object() else {
+        issues.push(error(
+            format!("{path}.subquery"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subquery must be an object.",
+        ));
+        return true;
+    };
+    collect_unknown_keys(
+        &format!("{path}.subquery"),
+        subquery_value,
+        &["schema", "select", "condition", "connectionId"],
+        issues,
+    );
+    if subquery
+        .get("schema")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        issues.push(error(
+            format!("{path}.subquery.schema"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subqueries must include schema.",
+        ));
+    }
+    if subquery
+        .get("select")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        issues.push(error(
+            format!("{path}.subquery.select"),
+            "INVALID_CONDITION_SUBQUERY",
+            "Report source condition subqueries must include select.",
+        ));
+    }
+    if let Some(condition) = subquery.get("condition") {
+        if is_condition_object(condition) {
+            collect_condition_issues_at(
+                &format!("{path}.subquery.condition"),
+                condition,
+                issues,
+                true,
+            );
+        } else {
+            issues.push(error(
+                format!("{path}.subquery.condition"),
+                "INVALID_CONDITION_SUBQUERY",
+                "Report source condition subquery.condition must be a condition object.",
+            ));
+        }
+    }
+    true
+}
+
+fn condition_subquery_condition(argument: &Value) -> Option<&Value> {
+    argument
+        .as_object()?
+        .get("subquery")?
+        .as_object()?
+        .get("condition")
+}
+
+fn is_condition_object(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("op") || object.contains_key("arguments"))
+}
+
+fn is_mapping_value_object(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("valueType"))
+        .and_then(Value::as_str)
+        .is_some_and(|value_type| {
+            matches!(
+                value_type,
+                "reference" | "immediate" | "template" | "composite"
+            )
+        })
+}
+
 fn collect_order_by_issues(path: &str, order_by: &Value, issues: &mut Vec<AuthoringIssue>) {
     collect_unknown_keys_with_messages(
         path,
@@ -2531,13 +3304,49 @@ fn collect_unknown_keys_with_messages<F>(
         if let Some((code, message)) = message_for_key(key) {
             issues.push(error(&key_path, code, message));
         } else {
+            let suggestion = similar_key_hint(key, allowed)
+                .map(|known| format!(" Did you mean '{known}'?"))
+                .unwrap_or_default();
             issues.push(error(
                 &key_path,
                 "UNKNOWN_REPORT_FIELD",
-                format!("Unknown report field '{key}'. Use get_report_authoring_schema for the canonical shape."),
+                format!("Unknown report field '{key}'.{suggestion} Use get_report_authoring_schema for the canonical shape."),
             ));
         }
     }
+}
+
+fn similar_key_hint<'a>(key: &str, allowed: &'a [&str]) -> Option<&'a str> {
+    let key_lower = key.to_ascii_lowercase();
+    allowed
+        .iter()
+        .copied()
+        .filter_map(|allowed_key| {
+            let allowed_lower = allowed_key.to_ascii_lowercase();
+            let distance = levenshtein(&key_lower, &allowed_lower);
+            let threshold = if allowed_lower.len() <= 4 { 1 } else { 3 };
+            (distance <= threshold).then_some((distance, allowed_key))
+        })
+        .min_by_key(|(distance, allowed_key)| (*distance, allowed_key.len()))
+        .map(|(_, allowed_key)| allowed_key)
+}
+
+fn levenshtein(left: &str, right: &str) -> usize {
+    let mut costs = (0..=right.chars().count()).collect::<Vec<_>>();
+    for (left_index, left_char) in left.chars().enumerate() {
+        let mut previous = costs[0];
+        costs[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let current = costs[right_index + 1];
+            costs[right_index + 1] = if left_char == right_char {
+                previous
+            } else {
+                1 + previous.min(current).min(costs[right_index])
+            };
+            previous = current;
+        }
+    }
+    costs[right.chars().count()]
 }
 
 fn authoring_errors(issues: &[AuthoringIssue]) -> impl Iterator<Item = &AuthoringIssue> {
@@ -2825,6 +3634,355 @@ mod tests {
         let codes = issue_codes(&issues);
 
         assert!(codes.contains(&"UNKNOWN_LAYOUT_BLOCK_REFERENCE"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_keys_with_similar_key_hint() {
+        let definition = json!({
+            "definitionVerison": 1,
+            "markdown": "# Report",
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "titel": "Products",
+                "source": {"schema": "TDProduct", "mode": "filter"},
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let response =
+            authoring_validation_response(collect_report_definition_authoring_issues(&definition));
+        let errors = response["errors"].as_array().unwrap();
+
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.definitionVerison")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Did you mean 'definitionVersion'?"))
+        }));
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.blocks[0].titel")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Did you mean 'title'?"))
+        }));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_filter_option_keys() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "# Report",
+            "filters": [{
+                "id": "vendor",
+                "label": "Vendor",
+                "type": "select",
+                "options": {
+                    "source": "object_model",
+                    "schema": "StockSnapshot",
+                    "filed": "vendor"
+                },
+                "appliesTo": [{"field": "vendor"}]
+            }],
+            "blocks": []
+        });
+
+        let response =
+            authoring_validation_response(collect_report_definition_authoring_issues(&definition));
+        let errors = response["errors"].as_array().unwrap();
+
+        assert!(errors.iter().any(|error| {
+            error["path"] == json!("$.filters[0].options.filed")
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Did you mean 'field'?"))
+        }));
+    }
+
+    #[test]
+    fn report_authoring_rejects_mapping_value_in_source_condition() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "TDProduct",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": [
+                            "sku",
+                            {"valueType": "template", "value": "{{ filters.sku }}"}
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"UNSUPPORTED_CONDITION_MAPPING_VALUE"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_condition_filter_ref() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "filters": [{
+                "id": "vendor_filter",
+                "label": "Vendor",
+                "type": "select"
+            }],
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "TDProduct",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": [
+                            "vendor",
+                            {"filter": "vendor_filter", "path": "value"}
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+        assert!(!codes.contains(&"INVALID_CONDITION_FILTER_REF_PATH"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_condition_filter_ref_inside_subquery() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "filters": [{
+                "id": "category",
+                "label": "Category",
+                "type": "multi_select"
+            }],
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "IN",
+                        "arguments": [
+                            "sku",
+                            {
+                                "subquery": {
+                                    "schema": "TDProduct",
+                                    "select": "sku",
+                                    "condition": {
+                                        "op": "IN",
+                                        "arguments": [
+                                            "category_leaf_id",
+                                            {"filter": "category", "path": "values"}
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+        assert!(!codes.contains(&"INVALID_CONDITION_FILTER_REF_PATH"));
+        assert!(!codes.contains(&"INVALID_CONDITION_SUBQUERY"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_nested_condition_subquery() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "IN",
+                        "arguments": [
+                            "sku",
+                            {
+                                "subquery": {
+                                    "schema": "TDProduct",
+                                    "select": "sku",
+                                    "condition": {
+                                        "op": "IN",
+                                        "arguments": [
+                                            "category_leaf_id",
+                                            {"subquery": {"schema": "Category", "select": "id"}}
+                                        ]
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"NESTED_CONDITION_SUBQUERY"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_condition_filter_ref() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "filters": [{
+                "id": "vendor_filter",
+                "label": "Vendor",
+                "type": "select"
+            }],
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "TDProduct",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": [
+                            "vendor",
+                            {"filter": "missing_filter", "path": "value"}
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_block_source_join_shape() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {
+                    "schema": "StockSnapshot",
+                    "mode": "filter",
+                    "join": [{
+                        "schema": "TDProduct",
+                        "alias": "product",
+                        "parentField": "sku",
+                        "field": "sku",
+                        "kind": "left"
+                    }],
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": ["product.category_leaf_id", "leaf-1"]
+                    }
+                },
+                "table": {
+                    "columns": [
+                        {"field": "sku"},
+                        {"field": "product.part_number"}
+                    ]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"MISSING_JOIN_SCHEMA"));
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_value_column_source_select() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {"schema": "StockSnapshot", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "part_number",
+                        "type": "value",
+                        "source": {
+                            "schema": "TDProduct",
+                            "mode": "filter",
+                            "select": "part_number",
+                            "join": [{"parentField": "sku", "field": "sku", "kind": "left"}]
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
+        assert!(!codes.contains(&"UNKNOWN_KEY"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_value_column_source_without_select() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.stock }}",
+            "blocks": [{
+                "id": "stock",
+                "type": "table",
+                "source": {"schema": "StockSnapshot", "mode": "filter"},
+                "table": {
+                    "columns": [{
+                        "field": "part_number",
+                        "type": "value",
+                        "source": {
+                            "schema": "TDProduct",
+                            "mode": "filter",
+                            "join": [{"parentField": "sku", "field": "sku"}]
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"MISSING_TABLE_VALUE_SELECT"));
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {

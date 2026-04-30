@@ -67,6 +67,16 @@ impl SmoMcpServer {
         tools::workflows::get_workflow(self, params.0).await
     }
 
+    #[tool(
+        description = "Get the canonical workflow authoring schema for MCP agents, including mapping values, condition expressions, object_model bulk-update examples, and validation/deploy hints."
+    )]
+    async fn get_workflow_authoring_schema(
+        &self,
+        params: Parameters<tools::workflows::GetWorkflowAuthoringSchemaParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::get_workflow_authoring_schema(self, params.0).await
+    }
+
     #[tool(description = "Create a new empty workflow with a name and description.")]
     async fn create_workflow(
         &self,
@@ -934,7 +944,7 @@ impl ServerHandler for SmoMcpServer {
             .with_instructions(
                 "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
-                **Workflows**: list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_workflow_versions, validate_graph, validate_mappings\n\
+                **Workflows**: get_workflow_authoring_schema, list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_workflow_versions, validate_graph, validate_mappings — call get_workflow_authoring_schema before authoring raw workflow JSON\n\
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, create_object_instance, update_object_instance\n\

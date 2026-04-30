@@ -4,6 +4,7 @@
 //! and their instances in a PostgreSQL database.
 
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 
 use crate::config::{DEFAULT_AGGREGATE_RESULT_ROW_LIMIT, StoreConfig};
 use crate::error::{ObjectStoreError, Result};
@@ -11,8 +12,13 @@ use crate::instance::{
     Condition, FilterRequest, Instance, OrderByEntry, OrderByTarget, SimpleFilter,
 };
 use crate::schema::{CreateSchemaRequest, Schema, UpdateSchemaRequest};
-use crate::sql::aggregate::{AggregateRequest, AggregateResult, build_aggregate_query};
-use crate::sql::condition::{build_condition_clause, build_order_by_clause, field_to_sql};
+use crate::sql::aggregate::{
+    AggregateRequest, AggregateResult, build_aggregate_query_with_subqueries,
+};
+use crate::sql::condition::{
+    build_condition_clause_with_subqueries, build_order_by_clause,
+    collect_condition_subquery_schema_names, field_to_sql,
+};
 use crate::sql::ddl::DdlGenerator;
 use crate::sql::expr::{ExprNode, render_row_expression, validate_row_expression};
 use crate::sql::sanitize::quote_identifier;
@@ -132,24 +138,45 @@ impl ObjectStore {
     /// 2. Create the data table with the specified columns
     /// 3. Create any specified indexes
     pub async fn create_schema(&self, request: CreateSchemaRequest) -> Result<Schema> {
-        // Check if schema name already exists
-        if self.get_schema(&request.name).await?.is_some() {
+        let metadata_table = quote_identifier(&self.config.metadata_table);
+        let mut tx = self.pool.begin().await?;
+
+        let active_schema_sql = format!(
+            "SELECT 1 FROM {} WHERE name = $1 AND deleted = FALSE",
+            metadata_table
+        );
+        if sqlx::query(&active_schema_sql)
+            .bind(&request.name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
+        {
             return Err(ObjectStoreError::conflict(format!(
                 "Schema '{}' already exists",
                 request.name
             )));
         }
 
-        // Check if table name already exists
-        if self.schema_by_table(&request.table_name).await?.is_some() {
+        let active_table_sql = format!(
+            "SELECT 1 FROM {} WHERE table_name = $1 AND deleted = FALSE",
+            metadata_table
+        );
+        if sqlx::query(&active_table_sql)
+            .bind(&request.table_name)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
+        {
             return Err(ObjectStoreError::conflict(format!(
                 "Table '{}' already exists",
                 request.table_name
             )));
         }
 
+        self.tombstone_deleted_schema_rows(&mut tx, &request.name, &request.table_name)
+            .await?;
+
         let schema_id = uuid::Uuid::new_v4().to_string();
-        let metadata_table = quote_identifier(&self.config.metadata_table);
 
         // Insert metadata
         let columns_json = serde_json::to_value(&request.columns)?;
@@ -175,7 +202,7 @@ impl ObjectStore {
             .bind(&request.table_name)
             .bind(&columns_json)
             .bind(&indexes_json)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await?;
 
         let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
@@ -184,39 +211,41 @@ impl ObjectStore {
         // Create the data table
         let ddl = DdlGenerator::new(&self.config);
         let create_table_sql = ddl.generate_create_table(&request.table_name, &request.columns);
-        sqlx::query(&create_table_sql).execute(&self.pool).await?;
+        sqlx::query(&create_table_sql).execute(&mut *tx).await?;
 
         // Create default index
         let default_index_sql = ddl.generate_default_index(&request.table_name);
-        sqlx::query(&default_index_sql).execute(&self.pool).await?;
+        sqlx::query(&default_index_sql).execute(&mut *tx).await?;
 
         // Create trigram (`gin_trgm_ops`) indexes for any column that wants
         // them. Empty if no column has `text_index = trigram`.
         for trigram_sql in ddl.generate_trigram_indexes(&request.table_name, &request.columns) {
-            sqlx::query(&trigram_sql).execute(&self.pool).await?;
+            sqlx::query(&trigram_sql).execute(&mut *tx).await?;
         }
 
         // Create GIN indexes for any tsvector-typed columns. Tsvector
         // columns are useless without a GIN index — full-text queries fall
         // back to seq scans otherwise.
         for tsv_sql in ddl.generate_tsvector_indexes(&request.table_name, &request.columns) {
-            sqlx::query(&tsv_sql).execute(&self.pool).await?;
+            sqlx::query(&tsv_sql).execute(&mut *tx).await?;
         }
 
         // Create HNSW / IVFFlat indexes for any vector-typed columns whose
         // declaration opts in to an index method. Without an index, KNN
         // queries fall back to a seq scan with exact distance computation.
         for vec_sql in ddl.generate_vector_indexes(&request.table_name, &request.columns) {
-            sqlx::query(&vec_sql).execute(&self.pool).await?;
+            sqlx::query(&vec_sql).execute(&mut *tx).await?;
         }
 
         // Create any specified indexes
         if let Some(indexes) = &request.indexes {
             for index in indexes {
                 let index_sql = ddl.generate_create_index(&request.table_name, index);
-                sqlx::query(&index_sql).execute(&self.pool).await?;
+                sqlx::query(&index_sql).execute(&mut *tx).await?;
             }
         }
+
+        tx.commit().await?;
 
         Ok(Schema {
             id: schema_id,
@@ -269,30 +298,6 @@ impl ObjectStore {
 
         let result = sqlx::query(&select_sql)
             .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        match result {
-            Some(row) => Ok(Some(self.row_to_schema(&row)?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Get schema by table name
-    async fn schema_by_table(&self, table_name: &str) -> Result<Option<Schema>> {
-        let metadata_table = quote_identifier(&self.config.metadata_table);
-
-        let select_sql = format!(
-            r#"
-            SELECT id, created_at, updated_at, name, description, table_name, columns, indexes
-            FROM {}
-            WHERE table_name = $1 AND deleted = FALSE
-            "#,
-            metadata_table
-        );
-
-        let result = sqlx::query(&select_sql)
-            .bind(table_name)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -380,8 +385,7 @@ impl ObjectStore {
             query = query.bind(indexes_json);
         }
 
-        let row = query.fetch_one(&self.pool).await?;
-        let schema = self.row_to_schema(&row)?;
+        let mut tx = self.pool.begin().await?;
 
         // Alter table if columns changed
         if let Some(new_columns) = &request.columns {
@@ -390,9 +394,19 @@ impl ObjectStore {
                 ddl.generate_alter_table(&existing.table_name, &existing.columns, new_columns);
 
             for statement in alter_statements {
-                sqlx::query(&statement).execute(&self.pool).await?;
+                sqlx::query(&statement).execute(&mut *tx).await?;
             }
         }
+
+        let row = query.fetch_one(&mut *tx).await?;
+        let schema = self.row_to_schema(&row)?;
+
+        if request.columns.is_some() {
+            self.verify_table_has_expected_columns(&mut tx, &schema.table_name, &schema.columns)
+                .await?;
+        }
+
+        tx.commit().await?;
 
         Ok(schema)
     }
@@ -622,8 +636,11 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
-        let sql =
-            build_aggregate_query(&schema, &request).map_err(ObjectStoreError::InvalidCondition)?;
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(request.condition.as_ref())
+            .await?;
+        let sql = build_aggregate_query_with_subqueries(&schema, &request, &subquery_schemas)
+            .map_err(ObjectStoreError::InvalidCondition)?;
 
         // Effective LIMIT / OFFSET.
         let cap = DEFAULT_AGGREGATE_RESULT_ROW_LIMIT as i64;
@@ -895,10 +912,18 @@ impl ObjectStore {
             return Ok(0); // Nothing to update
         }
 
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(Some(&condition))
+            .await?;
+
         // Build WHERE clause from condition
-        let (where_clause, condition_params) =
-            build_condition_clause(&condition, &mut param_idx, &schema)
-                .map_err(ObjectStoreError::InvalidCondition)?;
+        let (where_clause, condition_params) = build_condition_clause_with_subqueries(
+            &condition,
+            &mut param_idx,
+            &schema,
+            &subquery_schemas,
+        )
+        .map_err(ObjectStoreError::InvalidCondition)?;
 
         let base_where = format!("deleted = FALSE AND ({})", where_clause);
 
@@ -955,11 +980,19 @@ impl ObjectStore {
             .await?
             .ok_or_else(|| ObjectStoreError::schema_not_found(schema_name))?;
 
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(Some(&condition))
+            .await?;
+
         // Build WHERE clause from condition
         let mut param_offset = 1i32;
-        let (where_clause, condition_params) =
-            build_condition_clause(&condition, &mut param_offset, &schema)
-                .map_err(ObjectStoreError::InvalidCondition)?;
+        let (where_clause, condition_params) = build_condition_clause_with_subqueries(
+            &condition,
+            &mut param_offset,
+            &schema,
+            &subquery_schemas,
+        )
+        .map_err(ObjectStoreError::InvalidCondition)?;
 
         let mut tx = self.pool.begin().await?;
 
@@ -1725,6 +1758,138 @@ impl ObjectStore {
     // Internal Helpers
     // =========================================================================
 
+    async fn tombstone_deleted_schema_rows(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        name: &str,
+        table_name: &str,
+    ) -> Result<()> {
+        let metadata_table = quote_identifier(&self.config.metadata_table);
+        let select_sql = format!(
+            r#"
+            SELECT id, table_name
+            FROM {}
+            WHERE deleted = TRUE AND (name = $1 OR table_name = $2)
+            FOR UPDATE
+            "#,
+            metadata_table
+        );
+
+        let rows = sqlx::query(&select_sql)
+            .bind(name)
+            .bind(table_name)
+            .fetch_all(&mut **tx)
+            .await?;
+
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let old_table_name: String = row.try_get("table_name")?;
+            let tombstone_name = Self::tombstone_name("schema");
+            let tombstone_table_name = Self::tombstone_name("table");
+
+            if Self::table_exists(tx, &old_table_name).await? {
+                let rename_sql = format!(
+                    "ALTER TABLE {} RENAME TO {}",
+                    quote_identifier(&old_table_name),
+                    quote_identifier(&tombstone_table_name)
+                );
+                sqlx::query(&rename_sql).execute(&mut **tx).await?;
+            }
+
+            let update_sql = format!(
+                r#"
+                UPDATE {}
+                SET name = $2,
+                    table_name = $3,
+                    updated_at = NOW()
+                WHERE id = $1
+                "#,
+                metadata_table
+            );
+
+            sqlx::query(&update_sql)
+                .bind(id)
+                .bind(tombstone_name)
+                .bind(tombstone_table_name)
+                .execute(&mut **tx)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    fn tombstone_name(kind: &str) -> String {
+        format!("__deleted_{}_{}", kind, uuid::Uuid::new_v4().simple())
+    }
+
+    async fn table_exists(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        table_name: &str,
+    ) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = $1
+                  AND table_type = 'BASE TABLE'
+            )
+            "#,
+        )
+        .bind(table_name)
+        .fetch_one(&mut **tx)
+        .await?;
+
+        Ok(exists)
+    }
+
+    async fn verify_table_has_expected_columns(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        table_name: &str,
+        columns: &[ColumnDefinition],
+    ) -> Result<()> {
+        let expected: std::collections::BTreeSet<String> = columns
+            .iter()
+            .filter(|col| !col.column_type.is_generated())
+            .map(|col| col.name.clone())
+            .collect();
+
+        if expected.is_empty() {
+            return Ok(());
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = $1
+              AND is_generated = 'NEVER'
+            "#,
+        )
+        .bind(table_name)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let actual: std::collections::BTreeSet<String> = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("column_name"))
+            .collect::<std::result::Result<_, _>>()?;
+
+        let missing: Vec<String> = expected.difference(&actual).cloned().collect();
+        if !missing.is_empty() {
+            return Err(ObjectStoreError::database(format!(
+                "schema update verification failed for table '{}': missing expected columns: {}",
+                table_name,
+                missing.join(", ")
+            )));
+        }
+
+        Ok(())
+    }
+
     fn row_to_schema(&self, row: &sqlx::postgres::PgRow) -> Result<Schema> {
         let id: String = row.try_get("id")?;
         let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
@@ -1747,11 +1912,37 @@ impl ObjectStore {
         })
     }
 
+    async fn resolve_condition_subquery_schemas(
+        &self,
+        condition: Option<&Condition>,
+    ) -> Result<HashMap<String, Schema>> {
+        let Some(condition) = condition else {
+            return Ok(HashMap::new());
+        };
+
+        let names = collect_condition_subquery_schema_names(condition)
+            .map_err(ObjectStoreError::InvalidCondition)?;
+        let mut schemas = HashMap::with_capacity(names.len());
+        for name in names {
+            let schema = self
+                .get_schema(&name)
+                .await?
+                .ok_or_else(|| ObjectStoreError::schema_not_found(&name))?;
+            schemas.insert(name, schema);
+        }
+
+        Ok(schemas)
+    }
+
     async fn filter_instances_internal(
         &self,
         schema: &Schema,
         filter: FilterRequest,
     ) -> Result<(Vec<Instance>, i64)> {
+        let subquery_schemas = self
+            .resolve_condition_subquery_schemas(filter.condition.as_ref())
+            .await?;
+
         // Build column list
         let mut select_columns = Vec::new();
 
@@ -1775,8 +1966,13 @@ impl ObjectStore {
         // Build WHERE clause from condition (params: $1..$N1)
         let (where_clause, where_params) = if let Some(condition) = filter.condition {
             let mut param_offset = 1;
-            build_condition_clause(&condition, &mut param_offset, schema)
-                .map_err(ObjectStoreError::InvalidCondition)?
+            build_condition_clause_with_subqueries(
+                &condition,
+                &mut param_offset,
+                schema,
+                &subquery_schemas,
+            )
+            .map_err(ObjectStoreError::InvalidCondition)?
         } else {
             ("TRUE".to_string(), Vec::new())
         };
