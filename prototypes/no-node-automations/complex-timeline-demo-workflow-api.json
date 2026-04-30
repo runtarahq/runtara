@@ -1,0 +1,1096 @@
+{
+  "name": "Timeline Stress Test - Fulfillment Orchestration",
+  "description": "Complex sample workflow for validating the timeline renderer with branches, splits, nested scopes, switches, loops, and embedded workflow calls.",
+  "executionGraph": {
+    "name": "Timeline Stress Test - Fulfillment Orchestration",
+    "description": "Complex sample workflow for validating the timeline renderer with branches, splits, nested scopes, switches, loops, and embedded workflow calls.",
+    "entryPoint": "ingest_orders",
+    "executionTimeoutSeconds": 1800,
+    "variables": {
+      "tenantId": {
+        "type": "string",
+        "value": "demo-tenant"
+      },
+      "warehouseRegion": {
+        "type": "string",
+        "value": "eu-central"
+      },
+      "dryRun": {
+        "type": "boolean",
+        "value": false
+      }
+    },
+    "inputSchema": {
+      "batchId": {
+        "type": "string",
+        "description": "Fulfillment batch to reconcile"
+      },
+      "priorityCutoff": {
+        "type": "number",
+        "description": "Priority score that separates standard and express handling"
+      }
+    },
+    "outputSchema": {
+      "processedOrders": {
+        "type": "integer",
+        "description": "Number of orders processed"
+      },
+      "backorderedOrders": {
+        "type": "integer",
+        "description": "Number of orders that could not be fulfilled immediately"
+      },
+      "syncStatus": {
+        "type": "string",
+        "description": "External system synchronization status"
+      }
+    },
+    "steps": {
+      "ingest_orders": {
+        "name": "Ingest open orders",
+        "stepType": "Agent",
+        "agentId": "utils",
+        "capabilityId": "return-input",
+        "inputMapping": {
+          "value": {
+            "valueType": "composite",
+            "value": {
+              "batchId": {
+                "valueType": "reference",
+                "value": "input.batchId",
+                "type": "string"
+              },
+              "tenantId": {
+                "valueType": "reference",
+                "value": "variables.tenantId",
+                "type": "string"
+              }
+            }
+          }
+        },
+        "id": "ingest_orders"
+      },
+      "normalize_orders": {
+        "name": "Normalize order payloads",
+        "stepType": "Agent",
+        "agentId": "utils",
+        "capabilityId": "return-input",
+        "inputMapping": {
+          "value": {
+            "valueType": "composite",
+            "value": {
+              "orders": {
+                "valueType": "reference",
+                "value": "steps.ingest_orders.output.orders",
+                "type": "json"
+              }
+            }
+          }
+        },
+        "id": "normalize_orders"
+      },
+      "screen_fraud": {
+        "name": "Screen fraud risk",
+        "stepType": "Conditional",
+        "condition": {
+          "type": "operation",
+          "op": "GT",
+          "arguments": [
+            {
+              "valueType": "reference",
+              "value": "steps.normalize_orders.output.maxRiskScore"
+            },
+            {
+              "valueType": "immediate",
+              "value": 80
+            }
+          ]
+        },
+        "id": "screen_fraud"
+      },
+      "fraud_review_workflow": {
+        "name": "Call fraud review workflow",
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": "e41e668b-7e14-4212-97af-b331b9fd31a1",
+        "childVersion": "latest",
+        "inputMapping": {
+          "value": {
+            "valueType": "composite",
+            "value": {
+              "orders": {
+                "valueType": "reference",
+                "value": "steps.normalize_orders.output.flaggedOrders",
+                "type": "json"
+              }
+            }
+          }
+        },
+        "id": "fraud_review_workflow"
+      },
+      "fraud_review_approved": {
+        "name": "Fraud review approved?",
+        "stepType": "Conditional",
+        "condition": {
+          "type": "operation",
+          "op": "EQ",
+          "arguments": [
+            {
+              "valueType": "reference",
+              "value": "steps.fraud_review_workflow.output.status"
+            },
+            {
+              "valueType": "immediate",
+              "value": "approved"
+            }
+          ]
+        },
+        "id": "fraud_review_approved"
+      },
+      "reject_risky_batch": {
+        "name": "Reject risky batch",
+        "stepType": "Finish",
+        "inputMapping": {
+          "status": {
+            "valueType": "immediate",
+            "value": "rejected"
+          },
+          "reason": {
+            "valueType": "reference",
+            "value": "steps.fraud_review_workflow.output.reason",
+            "type": "string"
+          }
+        },
+        "id": "reject_risky_batch"
+      },
+      "split_orders": {
+        "name": "Split by order",
+        "stepType": "Split",
+        "config": {
+          "value": {
+            "valueType": "reference",
+            "value": "steps.normalize_orders.output.orders",
+            "type": "json"
+          },
+          "parallelism": 6,
+          "dontStopOnFailed": true,
+          "variables": {
+            "order": {
+              "valueType": "reference",
+              "value": "item",
+              "type": "json"
+            },
+            "region": {
+              "valueType": "reference",
+              "value": "variables.warehouseRegion",
+              "type": "string"
+            }
+          }
+        },
+        "inputSchema": {
+          "order": {
+            "type": "object",
+            "description": "Single normalized order"
+          }
+        },
+        "outputSchema": {
+          "orderId": {
+            "type": "string"
+          },
+          "fulfillmentStatus": {
+            "type": "string"
+          },
+          "trackingNumber": {
+            "type": "string"
+          }
+        },
+        "subgraph": {
+          "entryPoint": "classify_order",
+          "steps": {
+            "classify_order": {
+              "name": "Classify order route",
+              "stepType": "Switch",
+              "config": {
+                "value": {
+                  "valueType": "reference",
+                  "value": "variables.order.type",
+                  "type": "string"
+                },
+                "cases": [
+                  {
+                    "match": "digital",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "digital"
+                    },
+                    "route": "digital"
+                  },
+                  {
+                    "match": "wholesale",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "wholesale"
+                    },
+                    "route": "wholesale"
+                  },
+                  {
+                    "match": "fragile",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "fragile"
+                    },
+                    "route": "fragile"
+                  }
+                ],
+                "default": {
+                  "lane": "standard"
+                }
+              },
+              "id": "classify_order"
+            },
+            "deliver_digital": {
+              "name": "Deliver digital entitlement",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "order": {
+                      "valueType": "reference",
+                      "value": "variables.order",
+                      "type": "json"
+                    }
+                  }
+                }
+              },
+              "id": "deliver_digital"
+            },
+            "wholesale_subflow": {
+              "name": "Call wholesale approval",
+              "stepType": "EmbedWorkflow",
+              "childWorkflowId": "38708368-93e2-4f44-89bc-3cfb452b735f",
+              "childVersion": "latest",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "order": {
+                      "valueType": "reference",
+                      "value": "variables.order",
+                      "type": "json"
+                    }
+                  }
+                }
+              },
+              "id": "wholesale_subflow"
+            },
+            "apply_fragile_packaging": {
+              "name": "Apply fragile packaging",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "order": {
+                      "valueType": "reference",
+                      "value": "variables.order",
+                      "type": "json"
+                    }
+                  }
+                }
+              },
+              "id": "apply_fragile_packaging"
+            },
+            "lookup_inventory": {
+              "name": "Lookup available inventory",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "skuLines": {
+                      "valueType": "reference",
+                      "value": "variables.order.lines",
+                      "type": "json"
+                    },
+                    "region": {
+                      "valueType": "reference",
+                      "value": "variables.region",
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "id": "lookup_inventory"
+            },
+            "inventory_available": {
+              "name": "Inventory available?",
+              "stepType": "Conditional",
+              "condition": {
+                "type": "operation",
+                "op": "EQ",
+                "arguments": [
+                  {
+                    "valueType": "reference",
+                    "value": "steps.lookup_inventory.output.available"
+                  },
+                  {
+                    "valueType": "immediate",
+                    "value": true
+                  }
+                ]
+              },
+              "id": "inventory_available"
+            },
+            "reserve_stock": {
+              "name": "Reserve stock",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "reservation": {
+                      "valueType": "composite",
+                      "value": {
+                        "orderId": {
+                          "valueType": "reference",
+                          "value": "variables.order.id",
+                          "type": "string"
+                        },
+                        "lines": {
+                          "valueType": "reference",
+                          "value": "variables.order.lines",
+                          "type": "json"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "id": "reserve_stock"
+            },
+            "quote_carriers": {
+              "name": "Quote carriers",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "address": {
+                      "valueType": "reference",
+                      "value": "variables.order.shippingAddress",
+                      "type": "json"
+                    },
+                    "priority": {
+                      "valueType": "reference",
+                      "value": "variables.order.priority",
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "id": "quote_carriers"
+            },
+            "choose_carrier_lane": {
+              "name": "Choose carrier lane",
+              "stepType": "Switch",
+              "config": {
+                "value": {
+                  "valueType": "reference",
+                  "value": "steps.quote_carriers.output.recommendedLane",
+                  "type": "string"
+                },
+                "cases": [
+                  {
+                    "match": "express",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "express"
+                    },
+                    "route": "express"
+                  },
+                  {
+                    "match": "economy",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "economy"
+                    },
+                    "route": "economy"
+                  },
+                  {
+                    "match": "international",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "international"
+                    },
+                    "route": "international"
+                  }
+                ],
+                "default": {
+                  "lane": "manual"
+                }
+              },
+              "id": "choose_carrier_lane"
+            },
+            "book_express": {
+              "name": "Book express shipment",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "book_express",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "book_express",
+                    "name": "Book express shipment"
+                  }
+                }
+              }
+            },
+            "book_economy": {
+              "name": "Book economy shipment",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "book_economy",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "book_economy",
+                    "name": "Book economy shipment"
+                  }
+                }
+              }
+            },
+            "book_international": {
+              "name": "Book international shipment",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "book_international",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "book_international",
+                    "name": "Book international shipment"
+                  }
+                }
+              }
+            },
+            "manual_freight_review": {
+              "name": "Call manual freight review",
+              "stepType": "EmbedWorkflow",
+              "childWorkflowId": "45da311f-ef07-4104-8bfe-a91984d42d83",
+              "childVersion": "latest",
+              "id": "manual_freight_review",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "manual_freight_review",
+                    "name": "Call manual freight review"
+                  }
+                }
+              }
+            },
+            "wait_pick_confirm": {
+              "name": "Wait for pick confirmation",
+              "stepType": "WaitForSignal",
+              "responseSchema": {
+                "pickedAt": {
+                  "type": "string"
+                },
+                "pickerId": {
+                  "type": "string"
+                }
+              },
+              "timeoutMs": {
+                "valueType": "immediate",
+                "value": 900000
+              },
+              "pollIntervalMs": 5000,
+              "id": "wait_pick_confirm"
+            },
+            "create_backorder": {
+              "name": "Create backorder",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "inputMapping": {
+                "value": {
+                  "valueType": "composite",
+                  "value": {
+                    "order": {
+                      "valueType": "reference",
+                      "value": "variables.order",
+                      "type": "json"
+                    }
+                  }
+                }
+              },
+              "id": "create_backorder"
+            },
+            "notify_customer_backorder": {
+              "name": "Notify customer about backorder",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "notify_customer_backorder",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "notify_customer_backorder",
+                    "name": "Notify customer about backorder"
+                  }
+                }
+              }
+            },
+            "finish_order_iteration": {
+              "name": "Finish order iteration",
+              "stepType": "Finish",
+              "id": "finish_order_iteration"
+            }
+          },
+          "executionPlan": [
+            {
+              "fromStep": "classify_order",
+              "toStep": "deliver_digital",
+              "label": "digital"
+            },
+            {
+              "fromStep": "classify_order",
+              "toStep": "wholesale_subflow",
+              "label": "wholesale"
+            },
+            {
+              "fromStep": "classify_order",
+              "toStep": "apply_fragile_packaging",
+              "label": "fragile"
+            },
+            {
+              "fromStep": "classify_order",
+              "toStep": "lookup_inventory",
+              "label": "default"
+            },
+            {
+              "fromStep": "apply_fragile_packaging",
+              "toStep": "lookup_inventory",
+              "label": "next"
+            },
+            {
+              "fromStep": "wholesale_subflow",
+              "toStep": "lookup_inventory",
+              "label": "next"
+            },
+            {
+              "fromStep": "deliver_digital",
+              "toStep": "finish_order_iteration",
+              "label": "next"
+            },
+            {
+              "fromStep": "lookup_inventory",
+              "toStep": "inventory_available",
+              "label": "next"
+            },
+            {
+              "fromStep": "inventory_available",
+              "toStep": "reserve_stock",
+              "label": "true"
+            },
+            {
+              "fromStep": "inventory_available",
+              "toStep": "create_backorder",
+              "label": "false"
+            },
+            {
+              "fromStep": "reserve_stock",
+              "toStep": "quote_carriers",
+              "label": "next"
+            },
+            {
+              "fromStep": "quote_carriers",
+              "toStep": "choose_carrier_lane",
+              "label": "next"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "book_express",
+              "label": "express"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "book_economy",
+              "label": "economy"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "book_international",
+              "label": "international"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "manual_freight_review",
+              "label": "default"
+            },
+            {
+              "fromStep": "book_express",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "book_economy",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "book_international",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "manual_freight_review",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "wait_pick_confirm",
+              "toStep": "finish_order_iteration",
+              "label": "next"
+            },
+            {
+              "fromStep": "create_backorder",
+              "toStep": "notify_customer_backorder",
+              "label": "next"
+            },
+            {
+              "fromStep": "notify_customer_backorder",
+              "toStep": "finish_order_iteration",
+              "label": "next"
+            }
+          ]
+        },
+        "id": "split_orders"
+      },
+      "aggregate_results": {
+        "name": "Aggregate fulfillment results",
+        "stepType": "Agent",
+        "agentId": "utils",
+        "capabilityId": "return-input",
+        "inputMapping": {
+          "value": {
+            "valueType": "composite",
+            "value": {
+              "results": {
+                "valueType": "reference",
+                "value": "steps.split_orders.output",
+                "type": "json"
+              }
+            }
+          }
+        },
+        "id": "aggregate_results"
+      },
+      "has_backorders": {
+        "name": "Any backorders?",
+        "stepType": "Conditional",
+        "condition": {
+          "type": "operation",
+          "op": "GT",
+          "arguments": [
+            {
+              "valueType": "reference",
+              "value": "steps.aggregate_results.output.backorderedOrders"
+            },
+            {
+              "valueType": "immediate",
+              "value": 0
+            }
+          ]
+        },
+        "id": "has_backorders"
+      },
+      "notify_backorders": {
+        "name": "Notify operations about backorders",
+        "stepType": "Agent",
+        "agentId": "utils",
+        "capabilityId": "return-input",
+        "inputMapping": {
+          "value": {
+            "valueType": "composite",
+            "value": {
+              "summary": {
+                "valueType": "reference",
+                "value": "steps.aggregate_results.output",
+                "type": "json"
+              }
+            }
+          }
+        },
+        "id": "notify_backorders"
+      },
+      "sync_external_systems": {
+        "name": "Split external system syncs",
+        "stepType": "Split",
+        "config": {
+          "value": {
+            "valueType": "immediate",
+            "value": [
+              "shopify",
+              "erp",
+              "warehouse",
+              "email"
+            ]
+          },
+          "parallelism": 4,
+          "variables": {
+            "system": {
+              "valueType": "reference",
+              "value": "item",
+              "type": "string"
+            }
+          }
+        },
+        "subgraph": {
+          "entryPoint": "choose_sync_target",
+          "steps": {
+            "choose_sync_target": {
+              "name": "Choose sync target",
+              "stepType": "Switch",
+              "config": {
+                "value": {
+                  "valueType": "reference",
+                  "value": "variables.system",
+                  "type": "string"
+                },
+                "cases": [
+                  {
+                    "match": "shopify",
+                    "matchType": "EQ",
+                    "output": {
+                      "target": "shopify"
+                    },
+                    "route": "shopify"
+                  },
+                  {
+                    "match": "erp",
+                    "matchType": "EQ",
+                    "output": {
+                      "target": "erp"
+                    },
+                    "route": "erp"
+                  },
+                  {
+                    "match": "warehouse",
+                    "matchType": "EQ",
+                    "output": {
+                      "target": "warehouse"
+                    },
+                    "route": "warehouse"
+                  }
+                ],
+                "default": {
+                  "target": "email"
+                }
+              },
+              "id": "choose_sync_target"
+            },
+            "sync_shopify": {
+              "name": "Sync Shopify",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "sync_shopify",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "sync_shopify",
+                    "name": "Sync Shopify"
+                  }
+                }
+              }
+            },
+            "sync_erp": {
+              "name": "Sync ERP",
+              "stepType": "EmbedWorkflow",
+              "childWorkflowId": "e41e668b-7e14-4212-97af-b331b9fd31a1",
+              "childVersion": "latest",
+              "id": "sync_erp",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "sync_erp",
+                    "name": "Sync ERP"
+                  }
+                }
+              }
+            },
+            "sync_warehouse": {
+              "name": "Sync warehouse dashboard",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "sync_warehouse",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "sync_warehouse",
+                    "name": "Sync warehouse dashboard"
+                  }
+                }
+              }
+            },
+            "send_summary_email": {
+              "name": "Send summary email",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "send_summary_email",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "send_summary_email",
+                    "name": "Send summary email"
+                  }
+                }
+              }
+            },
+            "sync_completed": {
+              "name": "Sync target complete",
+              "stepType": "Finish",
+              "id": "sync_completed"
+            }
+          },
+          "executionPlan": [
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "sync_shopify",
+              "label": "shopify"
+            },
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "sync_erp",
+              "label": "erp"
+            },
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "sync_warehouse",
+              "label": "warehouse"
+            },
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "send_summary_email",
+              "label": "default"
+            },
+            {
+              "fromStep": "sync_shopify",
+              "toStep": "sync_completed",
+              "label": "next"
+            },
+            {
+              "fromStep": "sync_erp",
+              "toStep": "sync_completed",
+              "label": "next"
+            },
+            {
+              "fromStep": "sync_warehouse",
+              "toStep": "sync_completed",
+              "label": "next"
+            },
+            {
+              "fromStep": "send_summary_email",
+              "toStep": "sync_completed",
+              "label": "next"
+            }
+          ]
+        },
+        "id": "sync_external_systems"
+      },
+      "reconcile_until_clean": {
+        "name": "While reconciliation pending",
+        "stepType": "While",
+        "condition": {
+          "type": "operation",
+          "op": "GT",
+          "arguments": [
+            {
+              "valueType": "reference",
+              "value": "steps.poll_reconciliation.output.pendingCount"
+            },
+            {
+              "valueType": "immediate",
+              "value": 0
+            }
+          ]
+        },
+        "config": {
+          "maxIterations": 5,
+          "timeout": 600000
+        },
+        "subgraph": {
+          "entryPoint": "poll_reconciliation",
+          "steps": {
+            "poll_reconciliation": {
+              "name": "Poll reconciliation state",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "poll_reconciliation",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "poll_reconciliation",
+                    "name": "Poll reconciliation state"
+                  }
+                }
+              }
+            },
+            "repair_drift": {
+              "name": "Repair detected drift",
+              "stepType": "Agent",
+              "agentId": "utils",
+              "capabilityId": "return-input",
+              "id": "repair_drift",
+              "inputMapping": {
+                "value": {
+                  "valueType": "immediate",
+                  "value": {
+                    "stepId": "repair_drift",
+                    "name": "Repair detected drift"
+                  }
+                }
+              }
+            },
+            "loop_iteration_done": {
+              "name": "Loop iteration done",
+              "stepType": "Finish",
+              "id": "loop_iteration_done"
+            }
+          },
+          "executionPlan": [
+            {
+              "fromStep": "poll_reconciliation",
+              "toStep": "repair_drift",
+              "label": "next"
+            },
+            {
+              "fromStep": "repair_drift",
+              "toStep": "loop_iteration_done",
+              "label": "next"
+            }
+          ]
+        },
+        "id": "reconcile_until_clean"
+      },
+      "final_summary": {
+        "name": "Return final summary",
+        "stepType": "Finish",
+        "inputMapping": {
+          "processedOrders": {
+            "valueType": "reference",
+            "value": "steps.aggregate_results.output.processedOrders",
+            "type": "integer"
+          },
+          "backorderedOrders": {
+            "valueType": "reference",
+            "value": "steps.aggregate_results.output.backorderedOrders",
+            "type": "integer"
+          },
+          "syncStatus": {
+            "valueType": "immediate",
+            "value": "complete"
+          }
+        },
+        "id": "final_summary"
+      }
+    },
+    "executionPlan": [
+      {
+        "fromStep": "ingest_orders",
+        "toStep": "normalize_orders",
+        "label": "next"
+      },
+      {
+        "fromStep": "normalize_orders",
+        "toStep": "screen_fraud",
+        "label": "next"
+      },
+      {
+        "fromStep": "screen_fraud",
+        "toStep": "fraud_review_workflow",
+        "label": "true"
+      },
+      {
+        "fromStep": "screen_fraud",
+        "toStep": "split_orders",
+        "label": "false"
+      },
+      {
+        "fromStep": "fraud_review_workflow",
+        "toStep": "fraud_review_approved",
+        "label": "next"
+      },
+      {
+        "fromStep": "fraud_review_approved",
+        "toStep": "split_orders",
+        "label": "true"
+      },
+      {
+        "fromStep": "fraud_review_approved",
+        "toStep": "reject_risky_batch",
+        "label": "false"
+      },
+      {
+        "fromStep": "split_orders",
+        "toStep": "aggregate_results",
+        "label": "next"
+      },
+      {
+        "fromStep": "aggregate_results",
+        "toStep": "has_backorders",
+        "label": "next"
+      },
+      {
+        "fromStep": "has_backorders",
+        "toStep": "notify_backorders",
+        "label": "true"
+      },
+      {
+        "fromStep": "has_backorders",
+        "toStep": "sync_external_systems",
+        "label": "false"
+      },
+      {
+        "fromStep": "notify_backorders",
+        "toStep": "sync_external_systems",
+        "label": "next"
+      },
+      {
+        "fromStep": "sync_external_systems",
+        "toStep": "reconcile_until_clean",
+        "label": "next"
+      },
+      {
+        "fromStep": "reconcile_until_clean",
+        "toStep": "final_summary",
+        "label": "next"
+      }
+    ]
+  }
+}

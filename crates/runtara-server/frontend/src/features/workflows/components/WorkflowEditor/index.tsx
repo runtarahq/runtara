@@ -18,9 +18,17 @@ import {
   useReactFlow,
   OnConnectEnd,
 } from '@xyflow/react';
+import { ListTree, Network } from 'lucide-react';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { toast } from '@/shared/hooks/useToast';
+import { cn } from '@/lib/utils.ts';
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '@/shared/components/ui/tabs';
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
@@ -61,6 +69,7 @@ import { NodeConfigDialog } from './NodeConfigDialog';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from './NodeForm/StepPickerModal';
 import { NodeConfigProvider } from './NodeConfigContext';
+import { WorkflowTimelineView } from './TimelineView';
 
 // Re-export CreateStepContext type for external use
 export interface CreateStepContext {
@@ -155,6 +164,8 @@ type WorkflowEditorProps = {
   onResetNodeChanges?: (nodeId: string) => void;
 };
 
+type WorkflowEditorView = 'canvas' | 'timeline';
+
 export function WorkflowEditor({
   nodes: initialNodes,
   edges: initialEdges,
@@ -175,6 +186,7 @@ export function WorkflowEditor({
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showStepPicker, setShowStepPicker] = useState(false);
+  const [editorView, setEditorView] = useState<WorkflowEditorView>('canvas');
 
   // Callback for child node components to open config dialogs (including hidden nodes)
   const openNodeConfig = useCallback(
@@ -1180,115 +1192,152 @@ export function WorkflowEditor({
 
   return (
     <>
-      {/* Full width container - no sidebar */}
-      <div className="relative w-full h-full">
-        {/* ReactFlow Canvas */}
-        <NodeConfigProvider value={nodeConfigContextValue}>
-          <EdgeContextProvider
-            onInsertClick={handleEdgeInsertClick}
-            allEdges={edges}
+      <div className="relative h-full w-full">
+        <Tabs
+          value={editorView}
+          onValueChange={(value) => setEditorView(value as WorkflowEditorView)}
+          className="h-full"
+        >
+          <div className="pointer-events-none absolute left-4 top-4 z-20">
+            <TabsList className="pointer-events-auto shadow-sm">
+              <TabsTrigger value="canvas" className="gap-2">
+                <Network className="size-4" aria-hidden="true" />
+                Canvas
+              </TabsTrigger>
+              <TabsTrigger value="timeline" className="gap-2">
+                <ListTree className="size-4" aria-hidden="true" />
+                Timeline
+              </TabsTrigger>
+            </TabsList>
+          </div>
+
+          <TabsContent
+            forceMount
+            value="canvas"
+            className={cn('m-0 h-full', editorView !== 'canvas' && 'hidden')}
           >
-            <ReactFlow
-              ref={ref}
-              nodes={nodesWithStartIndicator}
-              edges={edgesWithStartIndicator}
-              edgeTypes={edgeTypes}
-              nodeTypes={nodeTypes}
-              onNodesChange={handleNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={readOnly ? undefined : onConnect}
-              onConnectEnd={readOnly ? undefined : onConnectEnd}
-              isValidConnection={readOnly ? undefined : isValidConnection}
-              proOptions={{ hideAttribution: true }}
-              defaultEdgeOptions={{ zIndex: 1 }}
-              onNodeDragStart={readOnly ? undefined : onNodeDragStart}
-              onNodeDrag={readOnly ? undefined : onNodeDrag}
-              onNodeDragStop={readOnly ? undefined : onNodeDragStop}
-              onNodeDoubleClick={(_event, node) => {
-                // Don't open dialog for special nodes
-                if (
-                  node.type === NODE_TYPES.CreateNode ||
-                  node.type === NODE_TYPES.NoteNode ||
-                  node.type === NODE_TYPES.StartIndicatorNode
-                ) {
-                  return;
-                }
-                // Open dialog for editing on double-click
-                if (workflow && !readOnly) {
-                  setEditingNodeId(node.id);
-                }
-              }}
-              onNodeClick={(event, node) => {
-                // Don't select special nodes
-                if (
-                  node.type === NODE_TYPES.CreateNode ||
-                  node.type === NODE_TYPES.NoteNode ||
-                  node.type === NODE_TYPES.StartIndicatorNode
-                ) {
-                  setSelectedNodeId(null);
-                  setSelectedEdgeId(null);
-                  return;
-                }
-                // Don't select if clicking on a button
-                const target = event.target as HTMLElement;
-                if (target.closest('button')) {
-                  return;
-                }
-                // In debug inspect mode, allow selecting executed nodes only
-                if (debugInspectMode) {
-                  const nodeStatus = useExecutionStore
-                    .getState()
-                    .nodeExecutionStatus.get(node.id);
-                  if (nodeStatus) {
-                    setSelectedNodeId(node.id);
-                    setSelectedEdgeId(null);
-                  }
-                  return;
-                }
-                // Select node on single click (for moving, keyboard delete, etc.)
-                if (workflow && !readOnly) {
-                  setSelectedNodeId(node.id);
-                  setSelectedEdgeId(null);
-                }
-              }}
-              onEdgeClick={(_event, edge) => {
-                setSelectedEdgeId(edge.id);
-                setSelectedNodeId(null);
-              }}
-              onPaneClick={() => {
-                const { selectedNodeId: currentSelectedNodeId } =
-                  useWorkflowStore.getState();
-                if (currentSelectedNodeId) {
-                  setSelectedNodeId(null);
-                }
-                if (selectedEdgeId) {
-                  setSelectedEdgeId(null);
-                }
-              }}
-              snapToGrid={true}
-              snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
-              elevateEdgesOnSelect={true}
-              edgesReconnectable={false}
-              disableKeyboardA11y={true}
-              elementsSelectable={!readOnly || debugInspectMode}
-              nodesDraggable={!readOnly}
-              nodesConnectable={!readOnly}
-              nodesFocusable={!readOnly}
-              edgesFocusable={!readOnly}
-            >
-              <Controls />
-              <Background
-                gap={SNAP_GRID_SIZE}
-                size={1}
-                color={
-                  document.documentElement.classList.contains('dark')
-                    ? '#262626'
-                    : undefined
-                }
+            <NodeConfigProvider value={nodeConfigContextValue}>
+              <EdgeContextProvider
+                onInsertClick={handleEdgeInsertClick}
+                allEdges={edges}
+              >
+                <ReactFlow
+                  ref={ref}
+                  nodes={nodesWithStartIndicator}
+                  edges={edgesWithStartIndicator}
+                  edgeTypes={edgeTypes}
+                  nodeTypes={nodeTypes}
+                  onNodesChange={handleNodesChange}
+                  onEdgesChange={onEdgesChange}
+                  onConnect={readOnly ? undefined : onConnect}
+                  onConnectEnd={readOnly ? undefined : onConnectEnd}
+                  isValidConnection={readOnly ? undefined : isValidConnection}
+                  proOptions={{ hideAttribution: true }}
+                  defaultEdgeOptions={{ zIndex: 1 }}
+                  onNodeDragStart={readOnly ? undefined : onNodeDragStart}
+                  onNodeDrag={readOnly ? undefined : onNodeDrag}
+                  onNodeDragStop={readOnly ? undefined : onNodeDragStop}
+                  onNodeDoubleClick={(_event, node) => {
+                    // Don't open dialog for special nodes
+                    if (
+                      node.type === NODE_TYPES.CreateNode ||
+                      node.type === NODE_TYPES.NoteNode ||
+                      node.type === NODE_TYPES.StartIndicatorNode
+                    ) {
+                      return;
+                    }
+                    // Open dialog for editing on double-click
+                    if (workflow && !readOnly) {
+                      setEditingNodeId(node.id);
+                    }
+                  }}
+                  onNodeClick={(event, node) => {
+                    // Don't select special nodes
+                    if (
+                      node.type === NODE_TYPES.CreateNode ||
+                      node.type === NODE_TYPES.NoteNode ||
+                      node.type === NODE_TYPES.StartIndicatorNode
+                    ) {
+                      setSelectedNodeId(null);
+                      setSelectedEdgeId(null);
+                      return;
+                    }
+                    // Don't select if clicking on a button
+                    const target = event.target as HTMLElement;
+                    if (target.closest('button')) {
+                      return;
+                    }
+                    // In debug inspect mode, allow selecting executed nodes only
+                    if (debugInspectMode) {
+                      const nodeStatus = useExecutionStore
+                        .getState()
+                        .nodeExecutionStatus.get(node.id);
+                      if (nodeStatus) {
+                        setSelectedNodeId(node.id);
+                        setSelectedEdgeId(null);
+                      }
+                      return;
+                    }
+                    // Select node on single click (for moving, keyboard delete, etc.)
+                    if (workflow && !readOnly) {
+                      setSelectedNodeId(node.id);
+                      setSelectedEdgeId(null);
+                    }
+                  }}
+                  onEdgeClick={(_event, edge) => {
+                    setSelectedEdgeId(edge.id);
+                    setSelectedNodeId(null);
+                  }}
+                  onPaneClick={() => {
+                    const { selectedNodeId: currentSelectedNodeId } =
+                      useWorkflowStore.getState();
+                    if (currentSelectedNodeId) {
+                      setSelectedNodeId(null);
+                    }
+                    if (selectedEdgeId) {
+                      setSelectedEdgeId(null);
+                    }
+                  }}
+                  snapToGrid={true}
+                  snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
+                  elevateEdgesOnSelect={true}
+                  edgesReconnectable={false}
+                  disableKeyboardA11y={true}
+                  elementsSelectable={!readOnly || debugInspectMode}
+                  nodesDraggable={!readOnly}
+                  nodesConnectable={!readOnly}
+                  nodesFocusable={!readOnly}
+                  edgesFocusable={!readOnly}
+                >
+                  <Controls />
+                  <Background
+                    gap={SNAP_GRID_SIZE}
+                    size={1}
+                    color={
+                      document.documentElement.classList.contains('dark')
+                        ? '#262626'
+                        : undefined
+                    }
+                  />
+                </ReactFlow>
+              </EdgeContextProvider>
+            </NodeConfigProvider>
+          </TabsContent>
+
+          <TabsContent
+            forceMount
+            value="timeline"
+            className={cn('m-0 h-full', editorView !== 'timeline' && 'hidden')}
+          >
+            <NodeConfigProvider value={nodeConfigContextValue}>
+              <WorkflowTimelineView
+                readOnly={readOnly}
+                debugInspectMode={debugInspectMode}
+                onEditNode={openNodeConfig}
               />
-            </ReactFlow>
-          </EdgeContextProvider>
-        </NodeConfigProvider>
+            </NodeConfigProvider>
+          </TabsContent>
+        </Tabs>
       </div>
 
       {/* Step Picker Modal */}

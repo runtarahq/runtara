@@ -114,12 +114,10 @@ export function WorkflowActionsForm(props: Props) {
 
   return (
     <div className="flex flex-col items-center">
-      {/* Workflow name as separate h1 */}
       <h1 className="mt-3 mb-2 text-lg font-semibold text-slate-900/90 drop-shadow-sm">
         {workflowName || 'Untitled Workflow'}
       </h1>
 
-      {/* Floating toolbar */}
       <NextForm
         className="inline-flex items-center gap-1 rounded-lg border border-border/60 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur supports-[backdrop-filter]:backdrop-blur"
         form={form}

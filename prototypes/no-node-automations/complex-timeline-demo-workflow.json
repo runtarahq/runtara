@@ -1,0 +1,1059 @@
+{
+  "name": "Timeline Stress Test - Fulfillment Orchestration",
+  "description": "Complex sample workflow for validating the timeline renderer with branches, splits, nested scopes, switches, loops, and embedded workflow calls.",
+  "executionGraph": {
+    "name": "Timeline Stress Test - Fulfillment Orchestration",
+    "description": "Complex sample workflow for validating the timeline renderer with branches, splits, nested scopes, switches, loops, and embedded workflow calls.",
+    "entryPoint": "ingest_orders",
+    "executionTimeoutSeconds": 1800,
+    "variables": {
+      "tenantId": {
+        "type": "string",
+        "value": "demo-tenant"
+      },
+      "warehouseRegion": {
+        "type": "string",
+        "value": "eu-central"
+      },
+      "dryRun": {
+        "type": "boolean",
+        "value": false
+      }
+    },
+    "inputSchema": {
+      "batchId": {
+        "type": "string",
+        "description": "Fulfillment batch to reconcile"
+      },
+      "priorityCutoff": {
+        "type": "number",
+        "description": "Priority score that separates standard and express handling"
+      }
+    },
+    "outputSchema": {
+      "processedOrders": {
+        "type": "integer",
+        "description": "Number of orders processed"
+      },
+      "backorderedOrders": {
+        "type": "integer",
+        "description": "Number of orders that could not be fulfilled immediately"
+      },
+      "syncStatus": {
+        "type": "string",
+        "description": "External system synchronization status"
+      }
+    },
+    "steps": {
+      "ingest_orders": {
+        "name": "Ingest open orders",
+        "description": "Load all open orders for the requested batch.",
+        "stepType": "Agent",
+        "agentId": "orders-api",
+        "capabilityId": "list-open-orders",
+        "inputMapping": {
+          "batchId": {
+            "valueType": "reference",
+            "value": "{{ input.batchId }}",
+            "type": "string"
+          },
+          "tenantId": {
+            "valueType": "reference",
+            "value": "{{ variables.tenantId }}",
+            "type": "string"
+          }
+        },
+        "renderingParameters": {
+          "x": 0,
+          "y": 96
+        }
+      },
+      "normalize_orders": {
+        "name": "Normalize order payloads",
+        "description": "Flatten customer, line item, shipping, and payment fields.",
+        "stepType": "Agent",
+        "agentId": "orders-api",
+        "capabilityId": "normalize-orders",
+        "inputMapping": {
+          "orders": {
+            "valueType": "reference",
+            "value": "{{ steps.ingest_orders.output.orders }}",
+            "type": "json"
+          }
+        },
+        "renderingParameters": {
+          "x": 204,
+          "y": 96
+        }
+      },
+      "screen_fraud": {
+        "name": "Screen fraud risk",
+        "description": "Branch the batch when any order has high fraud or payment risk.",
+        "stepType": "Conditional",
+        "condition": {
+          "operator": "gt",
+          "left": "{{ steps.normalize_orders.output.maxRiskScore }}",
+          "right": 80
+        },
+        "renderingParameters": {
+          "x": 408,
+          "y": 96
+        }
+      },
+      "fraud_review_workflow": {
+        "name": "Call fraud review workflow",
+        "description": "Run the existing manual fraud review scenario before fulfillment.",
+        "stepType": "EmbedWorkflow",
+        "childWorkflowId": "fraud-review-v2",
+        "childVersion": "latest",
+        "inputMapping": {
+          "orders": {
+            "valueType": "reference",
+            "value": "{{ steps.normalize_orders.output.flaggedOrders }}",
+            "type": "json"
+          }
+        },
+        "renderingParameters": {
+          "x": 612,
+          "y": -36
+        }
+      },
+      "fraud_review_approved": {
+        "name": "Fraud review approved?",
+        "description": "Continue only if the embedded review scenario clears the orders.",
+        "stepType": "Conditional",
+        "condition": {
+          "operator": "eq",
+          "left": "{{ steps.fraud_review_workflow.output.status }}",
+          "right": "approved"
+        },
+        "renderingParameters": {
+          "x": 816,
+          "y": -36
+        }
+      },
+      "reject_risky_batch": {
+        "name": "Reject risky batch",
+        "description": "Stop fulfillment and return the review reason.",
+        "stepType": "Finish",
+        "inputMapping": {
+          "status": {
+            "valueType": "immediate",
+            "value": "rejected",
+            "type": "string"
+          },
+          "reason": {
+            "valueType": "reference",
+            "value": "{{ steps.fraud_review_workflow.output.reason }}",
+            "type": "string"
+          }
+        },
+        "renderingParameters": {
+          "x": 1020,
+          "y": -144
+        }
+      },
+      "split_orders": {
+        "name": "Split by order",
+        "description": "Fulfill every normalized order with per-order routing and branch handling.",
+        "stepType": "Split",
+        "config": {
+          "value": {
+            "valueType": "reference",
+            "value": "{{ steps.normalize_orders.output.orders }}",
+            "type": "json"
+          },
+          "parallelism": 6,
+          "dontStopOnFailed": true,
+          "variables": {
+            "order": {
+              "valueType": "reference",
+              "value": "{{ item }}",
+              "type": "json"
+            },
+            "region": {
+              "valueType": "reference",
+              "value": "{{ variables.warehouseRegion }}",
+              "type": "string"
+            }
+          }
+        },
+        "inputSchema": {
+          "order": {
+            "type": "object",
+            "description": "Single normalized order"
+          }
+        },
+        "outputSchema": {
+          "orderId": {
+            "type": "string"
+          },
+          "fulfillmentStatus": {
+            "type": "string"
+          },
+          "trackingNumber": {
+            "type": "string"
+          }
+        },
+        "subgraph": {
+          "entryPoint": "classify_order",
+          "steps": {
+            "classify_order": {
+              "name": "Classify order route",
+              "description": "Route digital, wholesale, fragile, and standard orders.",
+              "stepType": "Switch",
+              "config": {
+                "value": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order.type }}",
+                  "type": "string"
+                },
+                "cases": [
+                  {
+                    "match": "digital",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "digital"
+                    },
+                    "route": "digital"
+                  },
+                  {
+                    "match": "wholesale",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "wholesale"
+                    },
+                    "route": "wholesale"
+                  },
+                  {
+                    "match": "fragile",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "fragile"
+                    },
+                    "route": "fragile"
+                  }
+                ],
+                "default": {
+                  "lane": "standard"
+                }
+              },
+              "renderingParameters": {
+                "x": 36,
+                "y": 120
+              }
+            },
+            "deliver_digital": {
+              "name": "Deliver digital entitlement",
+              "description": "Provision license or download access for digital orders.",
+              "stepType": "Agent",
+              "agentId": "digital-delivery",
+              "capabilityId": "provision-entitlement",
+              "inputMapping": {
+                "order": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order }}",
+                  "type": "json"
+                }
+              },
+              "renderingParameters": {
+                "x": 252,
+                "y": 0
+              }
+            },
+            "wholesale_subflow": {
+              "name": "Call wholesale approval",
+              "description": "Delegate wholesale orders to the contract pricing workflow.",
+              "stepType": "EmbedWorkflow",
+              "childWorkflowId": "wholesale-approval-v3",
+              "childVersion": "current",
+              "inputMapping": {
+                "order": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order }}",
+                  "type": "json"
+                }
+              },
+              "renderingParameters": {
+                "x": 252,
+                "y": 108
+              }
+            },
+            "apply_fragile_packaging": {
+              "name": "Apply fragile packaging",
+              "description": "Add protective packing material and handling instructions.",
+              "stepType": "Agent",
+              "agentId": "warehouse",
+              "capabilityId": "prepare-fragile-pack",
+              "inputMapping": {
+                "order": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order }}",
+                  "type": "json"
+                }
+              },
+              "renderingParameters": {
+                "x": 252,
+                "y": 216
+              }
+            },
+            "lookup_inventory": {
+              "name": "Lookup available inventory",
+              "description": "Find stock for the line items in the selected region.",
+              "stepType": "Agent",
+              "agentId": "inventory",
+              "capabilityId": "lookup-availability",
+              "inputMapping": {
+                "skuLines": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order.lines }}",
+                  "type": "json"
+                },
+                "region": {
+                  "valueType": "reference",
+                  "value": "{{ variables.region }}",
+                  "type": "string"
+                }
+              },
+              "renderingParameters": {
+                "x": 468,
+                "y": 120
+              }
+            },
+            "inventory_available": {
+              "name": "Inventory available?",
+              "description": "Branch fulfilled orders from backorders.",
+              "stepType": "Conditional",
+              "condition": {
+                "operator": "eq",
+                "left": "{{ steps.lookup_inventory.output.available }}",
+                "right": true
+              },
+              "renderingParameters": {
+                "x": 684,
+                "y": 120
+              }
+            },
+            "reserve_stock": {
+              "name": "Reserve stock",
+              "description": "Reserve available units in the fulfillment warehouse.",
+              "stepType": "Agent",
+              "agentId": "inventory",
+              "capabilityId": "reserve-stock",
+              "inputMapping": {
+                "reservation": {
+                  "valueType": "composite",
+                  "type": "json",
+                  "value": {
+                    "orderId": {
+                      "valueType": "reference",
+                      "value": "{{ variables.order.id }}",
+                      "type": "string"
+                    },
+                    "lines": {
+                      "valueType": "reference",
+                      "value": "{{ variables.order.lines }}",
+                      "type": "json"
+                    }
+                  }
+                }
+              },
+              "renderingParameters": {
+                "x": 900,
+                "y": 24
+              }
+            },
+            "quote_carriers": {
+              "name": "Quote carriers",
+              "description": "Retrieve shipping options for the package.",
+              "stepType": "Agent",
+              "agentId": "shipping",
+              "capabilityId": "quote-carriers",
+              "inputMapping": {
+                "address": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order.shippingAddress }}",
+                  "type": "json"
+                },
+                "priority": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order.priority }}",
+                  "type": "string"
+                }
+              },
+              "renderingParameters": {
+                "x": 1116,
+                "y": 24
+              }
+            },
+            "choose_carrier_lane": {
+              "name": "Choose carrier lane",
+              "description": "Switch between express, economy, international, and manual freight lanes.",
+              "stepType": "Switch",
+              "config": {
+                "value": {
+                  "valueType": "reference",
+                  "value": "{{ steps.quote_carriers.output.recommendedLane }}",
+                  "type": "string"
+                },
+                "cases": [
+                  {
+                    "match": "express",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "express"
+                    },
+                    "route": "express"
+                  },
+                  {
+                    "match": "economy",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "economy"
+                    },
+                    "route": "economy"
+                  },
+                  {
+                    "match": "international",
+                    "matchType": "EQ",
+                    "output": {
+                      "lane": "international"
+                    },
+                    "route": "international"
+                  }
+                ],
+                "default": {
+                  "lane": "manual"
+                }
+              },
+              "renderingParameters": {
+                "x": 1332,
+                "y": 24
+              }
+            },
+            "book_express": {
+              "name": "Book express shipment",
+              "stepType": "Agent",
+              "agentId": "shipping",
+              "capabilityId": "book-express",
+              "renderingParameters": {
+                "x": 1548,
+                "y": -72
+              }
+            },
+            "book_economy": {
+              "name": "Book economy shipment",
+              "stepType": "Agent",
+              "agentId": "shipping",
+              "capabilityId": "book-economy",
+              "renderingParameters": {
+                "x": 1548,
+                "y": 24
+              }
+            },
+            "book_international": {
+              "name": "Book international shipment",
+              "stepType": "Agent",
+              "agentId": "shipping",
+              "capabilityId": "book-international",
+              "renderingParameters": {
+                "x": 1548,
+                "y": 120
+              }
+            },
+            "manual_freight_review": {
+              "name": "Call manual freight review",
+              "description": "Escalate unusual dimensions or missing carrier quotes.",
+              "stepType": "EmbedWorkflow",
+              "childWorkflowId": "manual-freight-review",
+              "childVersion": 4,
+              "renderingParameters": {
+                "x": 1548,
+                "y": 216
+              }
+            },
+            "wait_pick_confirm": {
+              "name": "Wait for pick confirmation",
+              "description": "Pause this order until warehouse confirms the pick ticket.",
+              "stepType": "WaitForSignal",
+              "responseSchema": {
+                "pickedAt": {
+                  "type": "string"
+                },
+                "pickerId": {
+                  "type": "string"
+                }
+              },
+              "timeoutMs": {
+                "valueType": "immediate",
+                "value": 900000,
+                "type": "number"
+              },
+              "pollIntervalMs": 5000,
+              "renderingParameters": {
+                "x": 1764,
+                "y": 24
+              }
+            },
+            "create_backorder": {
+              "name": "Create backorder",
+              "description": "Create a backorder when stock is not currently available.",
+              "stepType": "Agent",
+              "agentId": "inventory",
+              "capabilityId": "create-backorder",
+              "inputMapping": {
+                "order": {
+                  "valueType": "reference",
+                  "value": "{{ variables.order }}",
+                  "type": "json"
+                }
+              },
+              "renderingParameters": {
+                "x": 900,
+                "y": 252
+              }
+            },
+            "notify_customer_backorder": {
+              "name": "Notify customer about backorder",
+              "stepType": "Agent",
+              "agentId": "messaging",
+              "capabilityId": "send-backorder-email",
+              "renderingParameters": {
+                "x": 1116,
+                "y": 252
+              }
+            },
+            "finish_order_iteration": {
+              "name": "Finish order iteration",
+              "description": "Return the fulfillment result for this order.",
+              "stepType": "Finish",
+              "renderingParameters": {
+                "x": 1980,
+                "y": 120
+              }
+            }
+          },
+          "executionPlan": [
+            {
+              "fromStep": "classify_order",
+              "toStep": "deliver_digital",
+              "label": "digital"
+            },
+            {
+              "fromStep": "classify_order",
+              "toStep": "wholesale_subflow",
+              "label": "wholesale"
+            },
+            {
+              "fromStep": "classify_order",
+              "toStep": "apply_fragile_packaging",
+              "label": "fragile"
+            },
+            {
+              "fromStep": "classify_order",
+              "toStep": "lookup_inventory",
+              "label": "default"
+            },
+            {
+              "fromStep": "apply_fragile_packaging",
+              "toStep": "lookup_inventory",
+              "label": "next"
+            },
+            {
+              "fromStep": "wholesale_subflow",
+              "toStep": "lookup_inventory",
+              "label": "next"
+            },
+            {
+              "fromStep": "deliver_digital",
+              "toStep": "finish_order_iteration",
+              "label": "next"
+            },
+            {
+              "fromStep": "lookup_inventory",
+              "toStep": "inventory_available",
+              "label": "next"
+            },
+            {
+              "fromStep": "inventory_available",
+              "toStep": "reserve_stock",
+              "label": "true"
+            },
+            {
+              "fromStep": "inventory_available",
+              "toStep": "create_backorder",
+              "label": "false"
+            },
+            {
+              "fromStep": "reserve_stock",
+              "toStep": "quote_carriers",
+              "label": "next"
+            },
+            {
+              "fromStep": "quote_carriers",
+              "toStep": "choose_carrier_lane",
+              "label": "next"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "book_express",
+              "label": "express"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "book_economy",
+              "label": "economy"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "book_international",
+              "label": "international"
+            },
+            {
+              "fromStep": "choose_carrier_lane",
+              "toStep": "manual_freight_review",
+              "label": "default"
+            },
+            {
+              "fromStep": "book_express",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "book_economy",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "book_international",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "manual_freight_review",
+              "toStep": "wait_pick_confirm",
+              "label": "next"
+            },
+            {
+              "fromStep": "wait_pick_confirm",
+              "toStep": "finish_order_iteration",
+              "label": "next"
+            },
+            {
+              "fromStep": "create_backorder",
+              "toStep": "notify_customer_backorder",
+              "label": "next"
+            },
+            {
+              "fromStep": "notify_customer_backorder",
+              "toStep": "finish_order_iteration",
+              "label": "next"
+            }
+          ]
+        },
+        "renderingParameters": {
+          "x": 1020,
+          "y": 96,
+          "width": 2244,
+          "height": 612
+        }
+      },
+      "aggregate_results": {
+        "name": "Aggregate fulfillment results",
+        "description": "Combine all split iteration results into a batch summary.",
+        "stepType": "Agent",
+        "agentId": "fulfillment",
+        "capabilityId": "aggregate-results",
+        "inputMapping": {
+          "results": {
+            "valueType": "reference",
+            "value": "{{ steps.split_orders.output }}",
+            "type": "json"
+          }
+        },
+        "renderingParameters": {
+          "x": 3336,
+          "y": 96
+        }
+      },
+      "has_backorders": {
+        "name": "Any backorders?",
+        "description": "Branch notifications and reconciliation when stock was missing.",
+        "stepType": "Conditional",
+        "condition": {
+          "operator": "gt",
+          "left": "{{ steps.aggregate_results.output.backorderedOrders }}",
+          "right": 0
+        },
+        "renderingParameters": {
+          "x": 3540,
+          "y": 96
+        }
+      },
+      "notify_backorders": {
+        "name": "Notify operations about backorders",
+        "stepType": "Agent",
+        "agentId": "messaging",
+        "capabilityId": "send-ops-alert",
+        "inputMapping": {
+          "summary": {
+            "valueType": "reference",
+            "value": "{{ steps.aggregate_results.output }}",
+            "type": "json"
+          }
+        },
+        "renderingParameters": {
+          "x": 3744,
+          "y": -24
+        }
+      },
+      "sync_external_systems": {
+        "name": "Split external system syncs",
+        "description": "Push the final batch state to Shopify, ERP, warehouse, and email systems.",
+        "stepType": "Split",
+        "config": {
+          "value": {
+            "valueType": "immediate",
+            "value": [
+              "shopify",
+              "erp",
+              "warehouse",
+              "email"
+            ],
+            "type": "json"
+          },
+          "parallelism": 4,
+          "variables": {
+            "system": {
+              "valueType": "reference",
+              "value": "{{ item }}",
+              "type": "string"
+            }
+          }
+        },
+        "subgraph": {
+          "entryPoint": "choose_sync_target",
+          "steps": {
+            "choose_sync_target": {
+              "name": "Choose sync target",
+              "stepType": "Switch",
+              "config": {
+                "value": {
+                  "valueType": "reference",
+                  "value": "{{ variables.system }}",
+                  "type": "string"
+                },
+                "cases": [
+                  {
+                    "match": "shopify",
+                    "matchType": "EQ",
+                    "output": {
+                      "target": "shopify"
+                    },
+                    "route": "shopify"
+                  },
+                  {
+                    "match": "erp",
+                    "matchType": "EQ",
+                    "output": {
+                      "target": "erp"
+                    },
+                    "route": "erp"
+                  },
+                  {
+                    "match": "warehouse",
+                    "matchType": "EQ",
+                    "output": {
+                      "target": "warehouse"
+                    },
+                    "route": "warehouse"
+                  }
+                ],
+                "default": {
+                  "target": "email"
+                }
+              },
+              "renderingParameters": {
+                "x": 36,
+                "y": 120
+              }
+            },
+            "sync_shopify": {
+              "name": "Sync Shopify",
+              "stepType": "Agent",
+              "agentId": "shopify",
+              "capabilityId": "update-fulfillment",
+              "renderingParameters": {
+                "x": 252,
+                "y": 0
+              }
+            },
+            "sync_erp": {
+              "name": "Sync ERP",
+              "stepType": "EmbedWorkflow",
+              "childWorkflowId": "erp-fulfillment-sync",
+              "childVersion": "latest",
+              "renderingParameters": {
+                "x": 252,
+                "y": 108
+              }
+            },
+            "sync_warehouse": {
+              "name": "Sync warehouse dashboard",
+              "stepType": "Agent",
+              "agentId": "warehouse",
+              "capabilityId": "update-dashboard",
+              "renderingParameters": {
+                "x": 252,
+                "y": 216
+              }
+            },
+            "send_summary_email": {
+              "name": "Send summary email",
+              "stepType": "Agent",
+              "agentId": "messaging",
+              "capabilityId": "send-summary-email",
+              "renderingParameters": {
+                "x": 252,
+                "y": 324
+              }
+            },
+            "sync_completed": {
+              "name": "Sync target complete",
+              "stepType": "Finish",
+              "renderingParameters": {
+                "x": 504,
+                "y": 162
+              }
+            }
+          },
+          "executionPlan": [
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "sync_shopify",
+              "label": "shopify"
+            },
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "sync_erp",
+              "label": "erp"
+            },
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "sync_warehouse",
+              "label": "warehouse"
+            },
+            {
+              "fromStep": "choose_sync_target",
+              "toStep": "send_summary_email",
+              "label": "default"
+            },
+            {
+              "fromStep": "sync_shopify",
+              "toStep": "sync_completed",
+              "label": "next"
+            },
+            {
+              "fromStep": "sync_erp",
+              "toStep": "sync_completed",
+              "label": "next"
+            },
+            {
+              "fromStep": "sync_warehouse",
+              "toStep": "sync_completed",
+              "label": "next"
+            },
+            {
+              "fromStep": "send_summary_email",
+              "toStep": "sync_completed",
+              "label": "next"
+            }
+          ]
+        },
+        "renderingParameters": {
+          "x": 3948,
+          "y": 96,
+          "width": 732,
+          "height": 576
+        }
+      },
+      "reconcile_until_clean": {
+        "name": "While reconciliation pending",
+        "description": "Poll external systems until outstanding reconciliation issues clear.",
+        "stepType": "While",
+        "condition": {
+          "operator": "gt",
+          "left": "{{ steps.poll_reconciliation.output.pendingCount }}",
+          "right": 0
+        },
+        "config": {
+          "maxIterations": 5,
+          "timeout": 600000
+        },
+        "subgraph": {
+          "entryPoint": "poll_reconciliation",
+          "steps": {
+            "poll_reconciliation": {
+              "name": "Poll reconciliation state",
+              "stepType": "Agent",
+              "agentId": "fulfillment",
+              "capabilityId": "poll-reconciliation",
+              "renderingParameters": {
+                "x": 36,
+                "y": 120
+              }
+            },
+            "repair_drift": {
+              "name": "Repair detected drift",
+              "stepType": "Agent",
+              "agentId": "fulfillment",
+              "capabilityId": "repair-drift",
+              "renderingParameters": {
+                "x": 252,
+                "y": 120
+              }
+            },
+            "loop_iteration_done": {
+              "name": "Loop iteration done",
+              "stepType": "Finish",
+              "renderingParameters": {
+                "x": 468,
+                "y": 120
+              }
+            }
+          },
+          "executionPlan": [
+            {
+              "fromStep": "poll_reconciliation",
+              "toStep": "repair_drift",
+              "label": "next"
+            },
+            {
+              "fromStep": "repair_drift",
+              "toStep": "loop_iteration_done",
+              "label": "next"
+            }
+          ]
+        },
+        "renderingParameters": {
+          "x": 4824,
+          "y": 96,
+          "width": 696,
+          "height": 312
+        }
+      },
+      "final_summary": {
+        "name": "Return final summary",
+        "description": "Finish the batch with aggregate counters and sync result.",
+        "stepType": "Finish",
+        "inputMapping": {
+          "processedOrders": {
+            "valueType": "reference",
+            "value": "{{ steps.aggregate_results.output.processedOrders }}",
+            "type": "integer"
+          },
+          "backorderedOrders": {
+            "valueType": "reference",
+            "value": "{{ steps.aggregate_results.output.backorderedOrders }}",
+            "type": "integer"
+          },
+          "syncStatus": {
+            "valueType": "immediate",
+            "value": "complete",
+            "type": "string"
+          }
+        },
+        "renderingParameters": {
+          "x": 5664,
+          "y": 96
+        }
+      }
+    },
+    "executionPlan": [
+      {
+        "fromStep": "ingest_orders",
+        "toStep": "normalize_orders",
+        "label": "next"
+      },
+      {
+        "fromStep": "normalize_orders",
+        "toStep": "screen_fraud",
+        "label": "next"
+      },
+      {
+        "fromStep": "screen_fraud",
+        "toStep": "fraud_review_workflow",
+        "label": "true"
+      },
+      {
+        "fromStep": "screen_fraud",
+        "toStep": "split_orders",
+        "label": "false"
+      },
+      {
+        "fromStep": "fraud_review_workflow",
+        "toStep": "fraud_review_approved",
+        "label": "next"
+      },
+      {
+        "fromStep": "fraud_review_approved",
+        "toStep": "split_orders",
+        "label": "true"
+      },
+      {
+        "fromStep": "fraud_review_approved",
+        "toStep": "reject_risky_batch",
+        "label": "false"
+      },
+      {
+        "fromStep": "split_orders",
+        "toStep": "aggregate_results",
+        "label": "next"
+      },
+      {
+        "fromStep": "aggregate_results",
+        "toStep": "has_backorders",
+        "label": "next"
+      },
+      {
+        "fromStep": "has_backorders",
+        "toStep": "notify_backorders",
+        "label": "true"
+      },
+      {
+        "fromStep": "has_backorders",
+        "toStep": "sync_external_systems",
+        "label": "false"
+      },
+      {
+        "fromStep": "notify_backorders",
+        "toStep": "sync_external_systems",
+        "label": "next"
+      },
+      {
+        "fromStep": "sync_external_systems",
+        "toStep": "reconcile_until_clean",
+        "label": "next"
+      },
+      {
+        "fromStep": "reconcile_until_clean",
+        "toStep": "final_summary",
+        "label": "next"
+      }
+    ],
+    "notes": [
+      {
+        "id": "timeline_demo_note",
+        "text": "Timeline demo: root conditionals, two split scopes, switch-case branches, embedded workflow calls, a wait step, and a while loop.",
+        "position": {
+          "x": 360,
+          "y": -192
+        },
+        "metadata": {
+          "width": 336,
+          "height": 120
+        }
+      }
+    ]
+  }
+}
