@@ -51,6 +51,14 @@ pub struct ReportService {
     instance_service: InstanceService,
 }
 
+#[derive(Clone, Copy)]
+struct ReportConditionRuntimeContext<'a> {
+    definition: &'a ReportDefinition,
+    block: &'a ReportBlockDefinition,
+    resolved_filters: &'a HashMap<String, Value>,
+    block_request: Option<&'a ReportBlockDataRequest>,
+}
+
 impl ReportService {
     pub fn new(
         pool: PgPool,
@@ -531,6 +539,7 @@ impl ReportService {
             .to_string();
         let connection_id = option_string(options_config, "connectionId");
         let resolved_filters = resolve_filters(&report.definition, &request.filters);
+        let condition_filter_defs = report_filter_definitions_by_id(&report.definition.filters);
         let mut conditions = Vec::new();
 
         if let Some(condition) = options_config.get("condition") {
@@ -540,7 +549,14 @@ impl ReportService {
                     filter.id, err
                 ))
             })?;
-            conditions.push(parsed);
+            if let Some(condition) = resolve_report_condition_values(
+                &parsed,
+                &condition_filter_defs,
+                &resolved_filters,
+                &format!("filter '{}'", filter.id),
+            )? {
+                conditions.push(condition);
+            }
         }
 
         append_option_context_conditions(
@@ -781,6 +797,10 @@ impl ReportService {
             }
             self.validate_filter_options(tenant_id, filter).await?;
         }
+        let report_condition_filter_defs = report_filter_definitions_by_id(&definition.filters);
+        for filter in &definition.filters {
+            validate_filter_option_condition_filter_refs(filter, &report_condition_filter_defs)?;
+        }
 
         let mut dataset_ids = HashSet::new();
         for dataset in &definition.datasets {
@@ -921,6 +941,7 @@ impl ReportService {
                     ReportSourceMode::Aggregate => aggregate_output_fields.contains(field),
                 }
             };
+            let block_condition_filter_defs = block_condition_filter_definitions(definition, block);
 
             if let Some(table) = &block.table {
                 for column in &table.columns {
@@ -990,6 +1011,23 @@ impl ReportService {
                             "Block '{}' aggregate '{}' references unknown orderBy field '{}'",
                             block.id, aggregate.alias, order_by.field
                         )));
+                    }
+                }
+            }
+
+            validate_report_condition_filter_refs(
+                block.source.condition.as_ref(),
+                &block_condition_filter_defs,
+                &format!("block '{}'", block.id),
+            )?;
+            if let Some(table) = &block.table {
+                for column in &table.columns {
+                    if let Some(source) = &column.source {
+                        validate_report_condition_filter_refs(
+                            source.condition.as_ref(),
+                            &block_condition_filter_defs,
+                            &format!("block '{}' table column '{}'", block.id, column.field),
+                        )?;
                     }
                 }
             }
@@ -1435,7 +1473,7 @@ impl ReportService {
         let filter_request = FilterRequest {
             offset,
             limit: page_size,
-            condition: build_block_condition(definition, block, resolved_filters, block_request),
+            condition: build_block_condition(definition, block, resolved_filters, block_request)?,
             sort_by: if sort.is_empty() {
                 None
             } else {
@@ -1466,6 +1504,12 @@ impl ReportService {
             .map_err(map_object_model_error)?;
 
         let rows: Vec<_> = instances.into_iter().map(flatten_instance).collect();
+        let condition_context = ReportConditionRuntimeContext {
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+        };
         let columns = table
             .map(|table| {
                 table
@@ -1482,7 +1526,7 @@ impl ReportService {
             })
             .unwrap_or_default();
         let rows = self
-            .hydrate_table_chart_columns(tenant_id, table, rows)
+            .hydrate_table_chart_columns(tenant_id, condition_context, table, rows)
             .await?;
 
         Ok(json!({
@@ -1544,6 +1588,12 @@ impl ReportService {
             .await?;
 
         let source_columns = result.columns.clone();
+        let condition_context = ReportConditionRuntimeContext {
+            definition,
+            block,
+            resolved_filters,
+            block_request,
+        };
         let mut row_maps = aggregate_rows_to_maps(&source_columns, &result.rows);
         let columns = table_output_columns(table, &source_columns);
         let mut rows = project_aggregate_table_rows(table, &source_columns, result.rows)?;
@@ -1562,7 +1612,12 @@ impl ReportService {
                     };
                     for (column_index, chart_column) in &chart_columns {
                         let cell = self
-                            .render_table_chart_cell(tenant_id, chart_column, row_map)
+                            .render_table_chart_cell(
+                                tenant_id,
+                                condition_context,
+                                chart_column,
+                                row_map,
+                            )
                             .await?;
                         row_map.insert(chart_column.field.clone(), cell.clone());
                         if let Some(slot) = row.get_mut(*column_index) {
@@ -1588,6 +1643,7 @@ impl ReportService {
     async fn hydrate_table_chart_columns(
         &self,
         tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
         table: Option<&ReportTableConfig>,
         rows: Vec<Value>,
     ) -> Result<Vec<Value>, ReportServiceError> {
@@ -1611,7 +1667,7 @@ impl ReportService {
             };
             for column in &chart_columns {
                 let cell = self
-                    .render_table_chart_cell(tenant_id, column, &object)
+                    .render_table_chart_cell(tenant_id, condition_context, column, &object)
                     .await?;
                 object.insert(column.field.clone(), cell);
             }
@@ -1624,13 +1680,14 @@ impl ReportService {
     async fn render_table_chart_cell(
         &self,
         tenant_id: &str,
+        condition_context: ReportConditionRuntimeContext<'_>,
         column: &ReportTableColumn,
         row: &serde_json::Map<String, Value>,
     ) -> Result<Value, ReportServiceError> {
         let Some(source) = &column.source else {
             return Ok(Value::Null);
         };
-        let condition = build_table_column_condition(source, row);
+        let condition = build_table_column_condition(condition_context, source, row)?;
         let request = build_column_aggregate_request(source, condition)?;
         let result = self
             .instance_service
@@ -2281,6 +2338,399 @@ fn resolve_time_preset(preset: &str) -> (DateTime<Utc>, DateTime<Utc>, String) {
     }
 }
 
+#[derive(Debug)]
+struct ReportConditionFilterRef {
+    filter_id: String,
+    path: String,
+}
+
+fn report_filter_definitions_by_id(
+    filters: &[ReportFilterDefinition],
+) -> HashMap<String, &ReportFilterDefinition> {
+    filters
+        .iter()
+        .map(|filter| (filter.id.clone(), filter))
+        .collect()
+}
+
+fn block_condition_filter_definitions<'a>(
+    definition: &'a ReportDefinition,
+    block: &'a ReportBlockDefinition,
+) -> HashMap<String, &'a ReportFilterDefinition> {
+    let mut filter_defs = report_filter_definitions_by_id(&definition.filters);
+    for filter in &block.filters {
+        filter_defs.insert(filter.id.clone(), filter);
+    }
+    filter_defs
+}
+
+fn block_condition_filter_values(
+    block: &ReportBlockDefinition,
+    resolved_filters: &HashMap<String, Value>,
+    block_request: Option<&ReportBlockDataRequest>,
+) -> HashMap<String, Value> {
+    let mut values = resolved_filters.clone();
+    for filter in &block.filters {
+        let raw = block_request
+            .and_then(|request| request.block_filters.get(&filter.id).cloned())
+            .or_else(|| filter.default.clone())
+            .unwrap_or(Value::Null);
+        values.insert(filter.id.clone(), resolve_filter_value(filter, raw));
+    }
+    values
+}
+
+fn validate_filter_option_condition_filter_refs(
+    filter: &ReportFilterDefinition,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+) -> Result<(), ReportServiceError> {
+    let Some(condition) = filter
+        .options
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|options| options.get("condition"))
+    else {
+        return Ok(());
+    };
+    let parsed = serde_json::from_value::<Condition>(condition.clone()).map_err(|err| {
+        ReportServiceError::Validation(format!(
+            "Filter '{}' options.condition is invalid: {}",
+            filter.id, err
+        ))
+    })?;
+    validate_report_condition_filter_refs(
+        Some(&parsed),
+        filter_defs,
+        &format!("filter '{}'", filter.id),
+    )
+}
+
+fn validate_report_condition_filter_refs(
+    condition: Option<&Condition>,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    let Some(condition) = condition else {
+        return Ok(());
+    };
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(());
+    };
+    for argument in arguments {
+        if let Some(reference) = parse_report_condition_filter_ref(argument)? {
+            let filter = filter_defs.get(&reference.filter_id).ok_or_else(|| {
+                ReportServiceError::Validation(format!(
+                    "{} condition references unknown filter '{}'",
+                    context, reference.filter_id
+                ))
+            })?;
+            validate_condition_filter_ref_path(filter, &reference, context)?;
+        }
+        if let Some(child) = condition_from_value(argument) {
+            validate_report_condition_filter_refs(Some(&child), filter_defs, context)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_report_condition_values(
+    condition: &Condition,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(Some(condition.clone()));
+    };
+    let op = condition.op.to_ascii_uppercase();
+
+    if op == "AND" || op == "OR" {
+        return resolve_logical_report_condition(condition, filter_defs, values, context);
+    }
+
+    if op == "NOT" {
+        let mut resolved_arguments = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let Some(resolved) =
+                resolve_report_condition_argument(argument, filter_defs, values, context)?
+            else {
+                return Ok(None);
+            };
+            resolved_arguments.push(resolved);
+        }
+        return Ok(Some(Condition {
+            op: condition.op.clone(),
+            arguments: Some(resolved_arguments),
+        }));
+    }
+
+    let mut resolved_arguments = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let Some(resolved) =
+            resolve_report_condition_argument(argument, filter_defs, values, context)?
+        else {
+            return Ok(None);
+        };
+        resolved_arguments.push(resolved);
+    }
+
+    if matches!(op.as_str(), "IN" | "NOT_IN")
+        && resolved_arguments
+            .get(1)
+            .is_some_and(|argument| !argument.is_array())
+    {
+        return Err(ReportServiceError::Validation(format!(
+            "{} condition operator '{}' requires an array value; use a multi_select filter with path 'values'",
+            context, condition.op
+        )));
+    }
+
+    Ok(Some(Condition {
+        op: condition.op.clone(),
+        arguments: Some(resolved_arguments),
+    }))
+}
+
+fn resolve_optional_report_condition(
+    condition: Option<&Condition>,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    condition
+        .map(|condition| resolve_report_condition_values(condition, filter_defs, values, context))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn resolve_logical_report_condition(
+    condition: &Condition,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Condition>, ReportServiceError> {
+    let mut resolved_arguments = Vec::new();
+    let Some(arguments) = condition.arguments.as_ref() else {
+        return Ok(Some(condition.clone()));
+    };
+
+    for argument in arguments {
+        let Some(resolved) =
+            resolve_report_condition_argument(argument, filter_defs, values, context)?
+        else {
+            continue;
+        };
+        resolved_arguments.push(resolved);
+    }
+
+    match resolved_arguments.len() {
+        0 => Ok(None),
+        1 => {
+            let only = resolved_arguments.remove(0);
+            if let Some(condition) = condition_from_value(&only) {
+                Ok(Some(condition))
+            } else {
+                Ok(Some(Condition {
+                    op: condition.op.clone(),
+                    arguments: Some(vec![only]),
+                }))
+            }
+        }
+        _ => Ok(Some(Condition {
+            op: condition.op.clone(),
+            arguments: Some(resolved_arguments),
+        })),
+    }
+}
+
+fn resolve_report_condition_argument(
+    argument: &Value,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Value>, ReportServiceError> {
+    if let Some(reference) = parse_report_condition_filter_ref(argument)? {
+        return resolve_report_condition_filter_ref(&reference, filter_defs, values, context);
+    }
+
+    if let Some(condition) = condition_from_value(argument) {
+        let Some(resolved) =
+            resolve_report_condition_values(&condition, filter_defs, values, context)?
+        else {
+            return Ok(None);
+        };
+        return serde_json::to_value(resolved).map(Some).map_err(|err| {
+            ReportServiceError::Validation(format!(
+                "{} condition could not serialize resolved child condition: {}",
+                context, err
+            ))
+        });
+    }
+
+    Ok(Some(argument.clone()))
+}
+
+fn resolve_report_condition_filter_ref(
+    reference: &ReportConditionFilterRef,
+    filter_defs: &HashMap<String, &ReportFilterDefinition>,
+    values: &HashMap<String, Value>,
+    context: &str,
+) -> Result<Option<Value>, ReportServiceError> {
+    let filter = filter_defs.get(&reference.filter_id).ok_or_else(|| {
+        ReportServiceError::Validation(format!(
+            "{} condition references unknown filter '{}'",
+            context, reference.filter_id
+        ))
+    })?;
+    validate_condition_filter_ref_path(filter, reference, context)?;
+
+    let raw = values
+        .get(&reference.filter_id)
+        .cloned()
+        .or_else(|| {
+            filter
+                .default
+                .clone()
+                .map(|default| resolve_filter_value(filter, default))
+        })
+        .unwrap_or(Value::Null);
+    let value = extract_condition_filter_ref_value(&raw, &reference.path);
+
+    if value_is_empty(&value) {
+        if filter.required {
+            return Err(ReportServiceError::Validation(format!(
+                "{} condition references required filter '{}' path '{}' but no value was provided",
+                context, reference.filter_id, reference.path
+            )));
+        }
+        return Ok(None);
+    }
+
+    Ok(Some(value))
+}
+
+fn extract_condition_filter_ref_value(value: &Value, path: &str) -> Value {
+    match path {
+        "value" => value
+            .as_object()
+            .and_then(|object| object.get("value"))
+            .cloned()
+            .unwrap_or_else(|| value.clone()),
+        "values" => {
+            if value.is_array() {
+                value.clone()
+            } else {
+                value
+                    .as_object()
+                    .and_then(|object| object.get("values"))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            }
+        }
+        "from" | "to" | "min" | "max" => value
+            .as_object()
+            .and_then(|object| object.get(path))
+            .cloned()
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+fn parse_report_condition_filter_ref(
+    value: &Value,
+) -> Result<Option<ReportConditionFilterRef>, ReportServiceError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(filter_value) = object.get("filter") else {
+        return Ok(None);
+    };
+    let Some(filter_id) = filter_value.as_str().map(str::trim) else {
+        return Err(ReportServiceError::Validation(
+            "Report condition filter refs must include a string filter".to_string(),
+        ));
+    };
+    if filter_id.is_empty() {
+        return Err(ReportServiceError::Validation(
+            "Report condition filter refs must include a non-empty filter".to_string(),
+        ));
+    }
+    let Some(path) = object.get("path").and_then(Value::as_str).map(str::trim) else {
+        return Err(ReportServiceError::Validation(format!(
+            "Report condition filter ref '{}' must include path",
+            filter_id
+        )));
+    };
+    if !is_known_condition_filter_ref_path(path) {
+        return Err(ReportServiceError::Validation(format!(
+            "Report condition filter ref '{}' uses unsupported path '{}'",
+            filter_id, path
+        )));
+    }
+    Ok(Some(ReportConditionFilterRef {
+        filter_id: filter_id.to_string(),
+        path: path.to_string(),
+    }))
+}
+
+fn validate_condition_filter_ref_path(
+    filter: &ReportFilterDefinition,
+    reference: &ReportConditionFilterRef,
+    context: &str,
+) -> Result<(), ReportServiceError> {
+    let allowed_paths = condition_filter_ref_paths_for_type(&filter.filter_type);
+    if allowed_paths.contains(&reference.path.as_str()) {
+        return Ok(());
+    }
+
+    Err(ReportServiceError::Validation(format!(
+        "{} condition references filter '{}' path '{}' but {} filters support {}",
+        context,
+        reference.filter_id,
+        reference.path,
+        report_filter_type_name(&filter.filter_type),
+        allowed_paths.join(", ")
+    )))
+}
+
+fn condition_filter_ref_paths_for_type(filter_type: &ReportFilterType) -> &'static [&'static str] {
+    match filter_type {
+        ReportFilterType::MultiSelect => &["values"],
+        ReportFilterType::TimeRange => &["from", "to"],
+        ReportFilterType::NumberRange => &["min", "max"],
+        ReportFilterType::Select
+        | ReportFilterType::Radio
+        | ReportFilterType::Checkbox
+        | ReportFilterType::Text
+        | ReportFilterType::Search => &["value"],
+    }
+}
+
+fn report_filter_type_name(filter_type: &ReportFilterType) -> &'static str {
+    match filter_type {
+        ReportFilterType::Select => "select",
+        ReportFilterType::MultiSelect => "multi_select",
+        ReportFilterType::Radio => "radio",
+        ReportFilterType::Checkbox => "checkbox",
+        ReportFilterType::TimeRange => "time_range",
+        ReportFilterType::NumberRange => "number_range",
+        ReportFilterType::Text => "text",
+        ReportFilterType::Search => "search",
+    }
+}
+
+fn is_known_condition_filter_ref_path(path: &str) -> bool {
+    matches!(path, "value" | "values" | "from" | "to" | "min" | "max")
+}
+
+fn condition_from_value(value: &Value) -> Option<Condition> {
+    let object = value.as_object()?;
+    if !(object.contains_key("op") || object.contains_key("arguments")) {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
+}
+
 fn static_filter_options_response(
     filter: &ReportFilterDefinition,
     offset: i64,
@@ -2429,11 +2879,20 @@ fn build_block_condition(
     block: &ReportBlockDefinition,
     resolved_filters: &HashMap<String, Value>,
     block_request: Option<&ReportBlockDataRequest>,
-) -> Option<Condition> {
+) -> Result<Option<Condition>, ReportServiceError> {
     let mut conditions = Vec::new();
+    let condition_filter_defs = block_condition_filter_definitions(definition, block);
+    let condition_filter_values =
+        block_condition_filter_values(block, resolved_filters, block_request);
 
-    if let Some(condition) = &block.source.condition {
-        conditions.push(condition.clone());
+    let context = format!("block '{}'", block.id);
+    if let Some(condition) = resolve_optional_report_condition(
+        block.source.condition.as_ref(),
+        &condition_filter_defs,
+        &condition_filter_values,
+        &context,
+    )? {
+        conditions.push(condition);
     }
 
     append_filter_conditions(
@@ -2459,7 +2918,7 @@ fn build_block_condition(
         append_table_search_condition(&mut conditions, block, block_request);
     }
 
-    combine_conditions(conditions)
+    Ok(combine_conditions(conditions))
 }
 
 fn append_table_search_condition(
@@ -3039,7 +3498,7 @@ fn build_aggregate_request(
                 .min(MAX_AGGREGATE_ROWS),
         ),
         Some(0),
-        build_block_condition(definition, block, resolved_filters, None),
+        build_block_condition(definition, block, resolved_filters, None)?,
     )
 }
 
@@ -3059,7 +3518,7 @@ fn build_table_aggregate_request(
         sort,
         Some(page_size),
         Some(offset),
-        build_block_condition(definition, block, resolved_filters, block_request),
+        build_block_condition(definition, block, resolved_filters, block_request)?,
     )
 }
 
@@ -3219,12 +3678,26 @@ fn aggregate_rows_to_maps(
 }
 
 fn build_table_column_condition(
+    condition_context: ReportConditionRuntimeContext<'_>,
     source: &ReportTableColumnSource,
     row: &serde_json::Map<String, Value>,
-) -> Option<Condition> {
+) -> Result<Option<Condition>, ReportServiceError> {
     let mut conditions = Vec::new();
-    if let Some(condition) = &source.condition {
-        conditions.push(condition.clone());
+    let condition_filter_defs =
+        block_condition_filter_definitions(condition_context.definition, condition_context.block);
+    let condition_filter_values = block_condition_filter_values(
+        condition_context.block,
+        condition_context.resolved_filters,
+        condition_context.block_request,
+    );
+    let context = format!("block '{}' table column source", condition_context.block.id);
+    if let Some(condition) = resolve_optional_report_condition(
+        source.condition.as_ref(),
+        &condition_filter_defs,
+        &condition_filter_values,
+        &context,
+    )? {
+        conditions.push(condition);
     }
     for join in &source.join {
         let Some(value) = row.get(&join.parent_field) else {
@@ -3234,7 +3707,7 @@ fn build_table_column_condition(
             conditions.push(condition);
         }
     }
-    combine_conditions(conditions)
+    Ok(combine_conditions(conditions))
 }
 
 fn condition_from_table_column_join(
@@ -4420,6 +4893,165 @@ mod tests {
             op: op.to_string(),
             arguments: Some(args),
         }
+    }
+
+    fn report_filter(
+        id: &str,
+        filter_type: ReportFilterType,
+        required: bool,
+    ) -> ReportFilterDefinition {
+        ReportFilterDefinition {
+            id: id.to_string(),
+            label: humanize_label(id),
+            filter_type,
+            default: None,
+            required,
+            options: None,
+            applies_to: vec![],
+        }
+    }
+
+    fn filter_ref(filter_id: &str, path: &str) -> Value {
+        json!({
+            "filter": filter_id,
+            "path": path,
+        })
+    }
+
+    #[test]
+    fn report_condition_resolves_scalar_filter_ref() {
+        let filters = vec![report_filter("status", ReportFilterType::Select, true)];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("status".to_string(), json!("open"))]);
+
+        let resolved = resolve_report_condition_values(
+            &cond("EQ", vec![json!("status"), filter_ref("status", "value")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.arguments.unwrap(),
+            vec![json!("status"), json!("open")]
+        );
+    }
+
+    #[test]
+    fn report_condition_resolves_multi_select_filter_ref() {
+        let filters = vec![report_filter(
+            "vendors",
+            ReportFilterType::MultiSelect,
+            false,
+        )];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("vendors".to_string(), json!(["HPE", "Cisco"]))]);
+
+        let resolved = resolve_report_condition_values(
+            &cond("IN", vec![json!("vendor"), filter_ref("vendors", "values")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.arguments.unwrap(),
+            vec![json!("vendor"), json!(["HPE", "Cisco"])]
+        );
+    }
+
+    #[test]
+    fn report_condition_resolves_time_and_number_range_filter_refs() {
+        let filters = vec![
+            report_filter("period", ReportFilterType::TimeRange, true),
+            report_filter("quantity", ReportFilterType::NumberRange, true),
+        ];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([
+            (
+                "period".to_string(),
+                json!({"from": "2026-01-01T00:00:00Z", "to": "2026-02-01T00:00:00Z"}),
+            ),
+            ("quantity".to_string(), json!({"min": 10, "max": 50})),
+        ]);
+
+        let from = resolve_report_condition_values(
+            &cond(
+                "GTE",
+                vec![json!("created_at"), filter_ref("period", "from")],
+            ),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+        let max = resolve_report_condition_values(
+            &cond("LTE", vec![json!("qty"), filter_ref("quantity", "max")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            from.arguments.unwrap(),
+            vec![json!("created_at"), json!("2026-01-01T00:00:00Z")]
+        );
+        assert_eq!(max.arguments.unwrap(), vec![json!("qty"), json!(50)]);
+    }
+
+    #[test]
+    fn report_condition_rejects_in_operator_with_scalar_filter_ref() {
+        let filters = vec![report_filter("status", ReportFilterType::Select, true)];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+        let values = HashMap::from([("status".to_string(), json!("open"))]);
+
+        let error = resolve_report_condition_values(
+            &cond("IN", vec![json!("status"), filter_ref("status", "value")]),
+            &filter_defs,
+            &values,
+            "test",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires an array value"));
+    }
+
+    #[test]
+    fn report_condition_rejects_unknown_filter_ref() {
+        let filter_defs = HashMap::new();
+
+        let error = resolve_report_condition_values(
+            &cond("EQ", vec![json!("status"), filter_ref("missing", "value")]),
+            &filter_defs,
+            &HashMap::new(),
+            "test",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown filter 'missing'"));
+    }
+
+    #[test]
+    fn report_condition_prunes_optional_empty_filter_ref() {
+        let filters = vec![report_filter("status", ReportFilterType::Select, false)];
+        let filter_defs = report_filter_definitions_by_id(&filters);
+
+        let resolved = resolve_report_condition_values(
+            &cond("EQ", vec![json!("status"), filter_ref("status", "value")]),
+            &filter_defs,
+            &HashMap::new(),
+            "test",
+        )
+        .unwrap();
+
+        assert!(resolved.is_none());
     }
 
     #[test]

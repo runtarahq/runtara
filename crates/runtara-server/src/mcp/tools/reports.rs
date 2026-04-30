@@ -1484,6 +1484,8 @@ fn collect_report_definition_authoring_issues(definition: &Value) -> Vec<Authori
         }
     }
 
+    collect_dynamic_condition_filter_ref_authoring_issues(definition, &mut issues);
+
     issues
 }
 
@@ -2765,6 +2767,239 @@ fn collect_interaction_issues(path: &str, interaction: &Value, issues: &mut Vec<
     }
 }
 
+fn collect_dynamic_condition_filter_ref_authoring_issues(
+    definition: &Value,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let report_filters = collect_condition_filter_metadata(
+        definition
+            .get("filters")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice),
+    );
+
+    if let Some(filters) = definition.get("filters").and_then(Value::as_array) {
+        for (index, filter) in filters.iter().enumerate() {
+            if let Some(condition) = filter
+                .get("options")
+                .and_then(Value::as_object)
+                .and_then(|options| options.get("condition"))
+            {
+                collect_condition_filter_ref_issues(
+                    &format!("$.filters[{index}].options.condition"),
+                    condition,
+                    &report_filters,
+                    issues,
+                );
+            }
+        }
+    }
+
+    let Some(blocks) = definition.get("blocks").and_then(Value::as_array) else {
+        return;
+    };
+    for (block_index, block) in blocks.iter().enumerate() {
+        let mut block_filters = report_filters.clone();
+        block_filters.extend(collect_condition_filter_metadata(
+            block
+                .get("filters")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+        ));
+
+        if let Some(condition) = block
+            .get("source")
+            .and_then(Value::as_object)
+            .and_then(|source| source.get("condition"))
+        {
+            collect_condition_filter_ref_issues(
+                &format!("$.blocks[{block_index}].source.condition"),
+                condition,
+                &block_filters,
+                issues,
+            );
+        }
+
+        let Some(columns) = block
+            .get("table")
+            .and_then(Value::as_object)
+            .and_then(|table| table.get("columns"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for (column_index, column) in columns.iter().enumerate() {
+            if let Some(condition) = column
+                .get("source")
+                .and_then(Value::as_object)
+                .and_then(|source| source.get("condition"))
+            {
+                collect_condition_filter_ref_issues(
+                    &format!(
+                        "$.blocks[{block_index}].table.columns[{column_index}].source.condition"
+                    ),
+                    condition,
+                    &block_filters,
+                    issues,
+                );
+            }
+        }
+    }
+}
+
+fn collect_condition_filter_metadata(filters: Option<&[Value]>) -> HashMap<String, Option<String>> {
+    filters
+        .into_iter()
+        .flatten()
+        .filter_map(|filter| {
+            let id = filter.get("id").and_then(Value::as_str)?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some((
+                id.to_string(),
+                filter
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ))
+        })
+        .collect()
+}
+
+fn collect_condition_filter_ref_issues(
+    path: &str,
+    condition: &Value,
+    filter_metadata: &HashMap<String, Option<String>>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    let Some(arguments) = condition.get("arguments").and_then(Value::as_array) else {
+        return;
+    };
+
+    for (index, argument) in arguments.iter().enumerate() {
+        let argument_path = format!("{path}.arguments[{index}]");
+        if let Some(reference) = parse_condition_filter_ref(argument, &argument_path, issues) {
+            match filter_metadata.get(&reference.filter_id) {
+                Some(filter_type) => {
+                    collect_condition_filter_ref_path_issues(
+                        &argument_path,
+                        &reference,
+                        filter_type.as_deref(),
+                        issues,
+                    );
+                }
+                None => issues.push(error(
+                    format!("{argument_path}.filter"),
+                    "UNKNOWN_CONDITION_FILTER_REF",
+                    format!(
+                        "Report source condition references unknown filter '{}'.",
+                        reference.filter_id
+                    ),
+                )),
+            }
+        }
+        if is_condition_object(argument) {
+            collect_condition_filter_ref_issues(&argument_path, argument, filter_metadata, issues);
+        }
+    }
+}
+
+struct ConditionFilterRef {
+    filter_id: String,
+    path: String,
+}
+
+fn parse_condition_filter_ref(
+    argument: &Value,
+    path: &str,
+    issues: &mut Vec<AuthoringIssue>,
+) -> Option<ConditionFilterRef> {
+    let object = argument.as_object()?;
+    if !object.contains_key("filter") {
+        return None;
+    }
+    let Some(filter_id) = object.get("filter").and_then(Value::as_str).map(str::trim) else {
+        issues.push(error(
+            format!("{path}.filter"),
+            "INVALID_CONDITION_FILTER_REF",
+            "Report source condition filter refs must include a string filter.",
+        ));
+        return None;
+    };
+    if filter_id.is_empty() {
+        issues.push(error(
+            format!("{path}.filter"),
+            "INVALID_CONDITION_FILTER_REF",
+            "Report source condition filter refs must include a non-empty filter.",
+        ));
+        return None;
+    }
+    let Some(path_value) = object.get("path").and_then(Value::as_str).map(str::trim) else {
+        issues.push(error(
+            format!("{path}.path"),
+            "INVALID_CONDITION_FILTER_REF_PATH",
+            "Report source condition filter refs must include path.",
+        ));
+        return None;
+    };
+    Some(ConditionFilterRef {
+        filter_id: filter_id.to_string(),
+        path: path_value.to_string(),
+    })
+}
+
+fn collect_condition_filter_ref_path_issues(
+    path: &str,
+    reference: &ConditionFilterRef,
+    filter_type: Option<&str>,
+    issues: &mut Vec<AuthoringIssue>,
+) {
+    if !is_known_condition_filter_ref_path(&reference.path) {
+        issues.push(error(
+            format!("{path}.path"),
+            "INVALID_CONDITION_FILTER_REF_PATH",
+            format!(
+                "Report source condition filter ref path '{}' is not supported. Use one of: value, values, from, to, min, max.",
+                reference.path
+            ),
+        ));
+        return;
+    }
+
+    let Some(filter_type) = filter_type else {
+        return;
+    };
+    let allowed_paths = condition_filter_ref_paths_for_type(filter_type);
+    if allowed_paths.contains(&reference.path.as_str()) {
+        return;
+    }
+    issues.push(error(
+        format!("{path}.path"),
+        "INVALID_CONDITION_FILTER_REF_PATH",
+        format!(
+            "Filter '{}' has type '{}' and supports condition paths: {}.",
+            reference.filter_id,
+            filter_type,
+            allowed_paths.join(", ")
+        ),
+    ));
+}
+
+fn condition_filter_ref_paths_for_type(filter_type: &str) -> &'static [&'static str] {
+    match filter_type {
+        "multi_select" => &["values"],
+        "time_range" => &["from", "to"],
+        "number_range" => &["min", "max"],
+        "select" | "radio" | "checkbox" | "text" | "search" => &["value"],
+        _ => &["value", "values", "from", "to", "min", "max"],
+    }
+}
+
+fn is_known_condition_filter_ref_path(path: &str) -> bool {
+    matches!(path, "value" | "values" | "from" | "to" | "min" | "max")
+}
+
 fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<AuthoringIssue>) {
     collect_unknown_keys(path, condition, &["op", "arguments"], issues);
     if condition.get("op").and_then(Value::as_str).is_none() {
@@ -2792,7 +3027,7 @@ fn collect_condition_issues(path: &str, condition: &Value, issues: &mut Vec<Auth
             issues.push(error(
                 argument_path,
                 "UNSUPPORTED_CONDITION_MAPPING_VALUE",
-                "Report source conditions do not evaluate workflow MappingValue reference/template objects. Use filterMappings, appliesTo, or literal Object Model condition arguments.",
+                "Report source conditions do not evaluate workflow MappingValue reference/template objects. Use filterMappings, appliesTo, {\"filter\":\"...\",\"path\":\"...\"}, or literal Object Model condition arguments.",
             ));
         } else if is_condition_object(argument) {
             collect_condition_issues(&argument_path, argument, issues);
@@ -3288,6 +3523,75 @@ mod tests {
         let codes = issue_codes(&issues);
 
         assert!(codes.contains(&"UNSUPPORTED_CONDITION_MAPPING_VALUE"));
+    }
+
+    #[test]
+    fn report_authoring_accepts_condition_filter_ref() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "filters": [{
+                "id": "vendor_filter",
+                "label": "Vendor",
+                "type": "select"
+            }],
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "TDProduct",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": [
+                            "vendor",
+                            {"filter": "vendor_filter", "path": "value"}
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(!codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
+        assert!(!codes.contains(&"INVALID_CONDITION_FILTER_REF_PATH"));
+    }
+
+    #[test]
+    fn report_authoring_rejects_unknown_condition_filter_ref() {
+        let definition = json!({
+            "definitionVersion": 1,
+            "markdown": "{{ block.products }}",
+            "filters": [{
+                "id": "vendor_filter",
+                "label": "Vendor",
+                "type": "select"
+            }],
+            "blocks": [{
+                "id": "products",
+                "type": "table",
+                "source": {
+                    "schema": "TDProduct",
+                    "mode": "filter",
+                    "condition": {
+                        "op": "EQ",
+                        "arguments": [
+                            "vendor",
+                            {"filter": "missing_filter", "path": "value"}
+                        ]
+                    }
+                },
+                "table": {"columns": [{"field": "sku"}]}
+            }]
+        });
+
+        let issues = collect_report_definition_authoring_issues(&definition);
+        let codes = issue_codes(&issues);
+
+        assert!(codes.contains(&"UNKNOWN_CONDITION_FILTER_REF"));
     }
 
     fn issue_codes(issues: &[AuthoringIssue]) -> Vec<&'static str> {
