@@ -22,6 +22,9 @@ type RuntimeConfig = {
   /** Configured tenant — injected when the server runs without an IdP that
    * would otherwise supply `org_id` via JWT claims. */
   tenantId?: string;
+  /** When "true", stop prefixing /api/runtime/ paths with org_id. Set by the
+   * server from RUNTARA_UI_STRIP_ORG_ID for single-tenant deployments. */
+  stripOrgId?: string;
 };
 
 declare global {
@@ -59,6 +62,9 @@ export const config = {
     pick(runtime.authMode, import.meta.env.VITE_RUNTARA_AUTH_MODE)
   ),
   tenantId: pick(runtime.tenantId, import.meta.env.VITE_RUNTARA_TENANT_ID),
+  stripOrgId:
+    clean(runtime.stripOrgId) === 'true' ||
+    import.meta.env.VITE_STRIP_ORG_ID === 'true',
   oidc: {
     authority: pick(runtime.oidcAuthority, import.meta.env.VITE_OIDC_AUTHORITY),
     clientId: pick(runtime.oidcClientId, import.meta.env.VITE_OIDC_CLIENT_ID),

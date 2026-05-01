@@ -15,12 +15,12 @@ export const createAuthHeaders = (token: string) => ({
 /**
  * Returns the Runtime API base URL with org_id prefix.
  * For use in raw fetch() calls (Axios calls are handled by the interceptor).
- * Respects the VITE_STRIP_ORG_ID env var for local development.
+ * Strip is controlled by config.stripOrgId (build-time VITE_STRIP_ORG_ID or
+ * server-injected RUNTARA_UI_STRIP_ORG_ID).
  */
 export function getRuntimeBaseUrl(): string {
   const base = config.apiBaseUrl.replace(/\/$/, '');
-  const stripOrgId = import.meta.env.VITE_STRIP_ORG_ID === 'true';
   const orgId = useAuthStore.getState().orgId;
-  const orgSegment = orgId && !stripOrgId ? `/${orgId}` : '';
+  const orgSegment = orgId && !config.stripOrgId ? `/${orgId}` : '';
   return `${base}/api/runtime${orgSegment}`;
 }

@@ -26,17 +26,17 @@ export const RuntimeREST = new RuntimeAPI.Api({
   baseURL: API_BASE_URL,
 });
 
-// Interceptor: insert org_id into /api/runtime/ paths (skipped when VITE_STRIP_ORG_ID is set)
-const stripOrgId = import.meta.env.VITE_STRIP_ORG_ID === 'true';
-RuntimeREST.instance.interceptors.request.use((config) => {
+// Interceptor: insert org_id into /api/runtime/ paths (skipped when stripOrgId
+// is set — by build-time VITE_STRIP_ORG_ID or runtime RUNTARA_UI_STRIP_ORG_ID).
+RuntimeREST.instance.interceptors.request.use((requestConfig) => {
   const orgId = useAuthStore.getState().orgId;
-  if (orgId && config.url && !stripOrgId) {
-    config.url = config.url.replace(
+  if (orgId && requestConfig.url && !config.stripOrgId) {
+    requestConfig.url = requestConfig.url.replace(
       /\/api\/runtime\//,
       `/api/runtime/${orgId}/`
     );
   }
-  return config;
+  return requestConfig;
 });
 
 // Interceptor: detect 503 (Service Unavailable) and activate maintenance mode

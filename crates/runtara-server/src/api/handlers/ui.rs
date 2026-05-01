@@ -174,6 +174,18 @@ fn runtime_config_json() -> String {
         entries.push(("tenantId".to_string(), tenant));
     }
 
+    // Operator switch: when set, the SPA stops prefixing /api/runtime/ with the
+    // org_id. Use this for single-tenant deployments where the server already
+    // resolves the tenant from auth context. Accepts truthy "1"/"true"/"yes".
+    if let Ok(raw) = std::env::var("RUNTARA_UI_STRIP_ORG_ID")
+        && matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    {
+        entries.push(("stripOrgId".to_string(), "true".to_string()));
+    }
+
     let mut out = String::from("{");
     for (i, (key, val)) in entries.iter().enumerate() {
         if i > 0 {
