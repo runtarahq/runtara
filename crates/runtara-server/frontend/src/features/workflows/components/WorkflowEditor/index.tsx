@@ -14,6 +14,7 @@ import {
   OnConnectEnd,
 } from '@xyflow/react';
 import { ListTree, Network } from 'lucide-react';
+import { v4 as uuidv4 } from 'uuid';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { toast } from '@/shared/hooks/useToast';
@@ -959,7 +960,7 @@ function WorkflowEditorContent({
     (result: StepPickerResult) => {
       if (!createStepContext) return;
 
-      const newNodeId = crypto.randomUUID();
+      const newNodeId = uuidv4();
       const uniqueName = generateUniqueStepName(result.name, nodes);
       const data = {
         ...form.initialValues,
