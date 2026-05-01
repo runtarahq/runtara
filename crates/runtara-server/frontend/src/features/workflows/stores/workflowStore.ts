@@ -37,6 +37,91 @@ interface HistoryEntry {
   edges: Edge[];
 }
 
+type TimelineMovePlacement = 'before' | 'after';
+
+type TimelineMoveContext = {
+  type: 'scope' | 'lane';
+  parentId?: string;
+  branchSourceId?: string;
+  branchSourceHandle?: string;
+  orderedNodeIds: string[];
+  subtreeNodeIdsByRoot: Record<string, string[]>;
+};
+
+type SwitchCaseMoveDirection = 'up' | 'down';
+
+type TimelineEdgeRoute = 'true' | 'false' | `case-${number}`;
+
+type TimelineInputMappingItem = {
+  type?: string;
+  value?: unknown;
+  [key: string]: unknown;
+};
+
+function normalizeTimelineRouteLabel(label: string): string {
+  const normalized = label.trim().toLowerCase();
+  if (normalized === 'true' || normalized === 'false') return normalized;
+
+  const caseHandleMatch = /^case-(\d+)$/.exec(normalized);
+  if (caseHandleMatch) return `case-${Number(caseHandleMatch[1])}`;
+
+  const caseLabelMatch = /^case\s+(\d+)$/.exec(normalized);
+  if (caseLabelMatch) return `case-${Number(caseLabelMatch[1]) - 1}`;
+
+  return label;
+}
+
+function getTimelineEdgeRoute(edge: Edge): string {
+  if (edge.sourceHandle && edge.sourceHandle !== 'source') {
+    return edge.sourceHandle;
+  }
+  if (typeof edge.label === 'string') {
+    return normalizeTimelineRouteLabel(edge.label);
+  }
+  if (typeof edge.data?.label === 'string') {
+    return normalizeTimelineRouteLabel(edge.data.label);
+  }
+  return 'source';
+}
+
+function setTimelineEdgeRoute(edge: Edge, route: TimelineEdgeRoute) {
+  const previousRoute = getTimelineEdgeRoute(edge);
+
+  edge.sourceHandle = route;
+
+  if (
+    typeof edge.label === 'string' &&
+    normalizeTimelineRouteLabel(edge.label) === previousRoute
+  ) {
+    edge.label = route;
+  }
+
+  if (
+    typeof edge.data?.label === 'string' &&
+    normalizeTimelineRouteLabel(edge.data.label) === previousRoute
+  ) {
+    edge.data = {
+      ...edge.data,
+      label: route,
+    };
+  }
+}
+
+function getSwitchCaseItems(node: Node): TimelineInputMappingItem[] | null {
+  const inputMapping = node.data?.inputMapping;
+  if (!Array.isArray(inputMapping)) return null;
+
+  const casesField = inputMapping.find(
+    (item): item is TimelineInputMappingItem =>
+      typeof item === 'object' &&
+      item !== null &&
+      (item as TimelineInputMappingItem).type === 'cases'
+  );
+
+  if (!Array.isArray(casesField?.value)) return null;
+  return casesField.value as TimelineInputMappingItem[];
+}
+
 interface WorkflowState {
   // Core workflow data (backend format)
   executionGraph: ExecutionGraphDto | null;
@@ -148,6 +233,18 @@ interface WorkflowState {
     newStepData: Partial<ExecutionGraphStepDto>,
     position: { x: number; y: number }
   ) => void;
+  moveTimelineItem: (params: {
+    draggedNodeId: string;
+    targetNodeId: string;
+    placement: TimelineMovePlacement;
+    context: TimelineMoveContext;
+  }) => void;
+  flipConditionalBranches: (nodeId: string) => void;
+  moveSwitchCase: (params: {
+    nodeId: string;
+    caseIndex: number;
+    direction: SwitchCaseMoveDirection;
+  }) => void;
 
   // Actions - React Flow Integration
   onNodesChange: (changes: NodeChange[]) => void;
@@ -855,6 +952,348 @@ export const useWorkflowStore = create<WorkflowState>()(
                   height: Math.max(requiredHeight, currentHeight),
                 };
               }
+            }
+          }
+
+          state.isDirty = true;
+          state.isStructurallyDirty = true;
+          state.saveToHistory();
+        }),
+
+      moveTimelineItem: ({ draggedNodeId, targetNodeId, placement, context }) =>
+        set((state) => {
+          if (draggedNodeId === targetNodeId) return;
+
+          const orderedNodeIds = context.orderedNodeIds.filter((nodeId) =>
+            state.nodes.some((node) => node.id === nodeId)
+          );
+          if (
+            !orderedNodeIds.includes(draggedNodeId) ||
+            !orderedNodeIds.includes(targetNodeId)
+          ) {
+            return;
+          }
+
+          const nextOrder = orderedNodeIds.filter(
+            (nodeId) => nodeId !== draggedNodeId
+          );
+          const targetIndex = nextOrder.indexOf(targetNodeId);
+          if (targetIndex === -1) return;
+
+          nextOrder.splice(
+            placement === 'after' ? targetIndex + 1 : targetIndex,
+            0,
+            draggedNodeId
+          );
+
+          if (nextOrder.join('\u0000') === orderedNodeIds.join('\u0000')) {
+            return;
+          }
+
+          const nodesById = new Map(state.nodes.map((node) => [node.id, node]));
+          const rootSet = new Set(orderedNodeIds);
+          const rootByNodeId = new Map<string, string>();
+
+          for (const rootId of orderedNodeIds) {
+            rootByNodeId.set(rootId, rootId);
+            for (const nodeId of context.subtreeNodeIdsByRoot[rootId] ?? []) {
+              if (nodesById.has(nodeId)) {
+                rootByNodeId.set(nodeId, rootId);
+              }
+            }
+          }
+
+          const normalizeHandle = (handle?: string | null) =>
+            !handle || handle === 'source' ? 'source' : handle;
+
+          const exitTemplatesByRoot = new Map<string, Edge[]>();
+
+          for (const edge of state.edges) {
+            const sourceRoot = rootByNodeId.get(edge.source);
+            if (!sourceRoot || !rootSet.has(edge.target)) continue;
+            if (sourceRoot === edge.target) continue;
+
+            const templates = exitTemplatesByRoot.get(sourceRoot) ?? [];
+            templates.push(edge);
+            exitTemplatesByRoot.set(sourceRoot, templates);
+          }
+
+          const getFallbackExitTemplates = (rootId: string): Edge[] => {
+            const ownedNodeIds = new Set([
+              rootId,
+              ...(context.subtreeNodeIdsByRoot[rootId] ?? []),
+            ]);
+            const rootNode = nodesById.get(rootId);
+            const rootParentId = rootNode?.parentId;
+            const terminalNodeIds = [...ownedNodeIds].filter((nodeId) => {
+              const node = nodesById.get(nodeId);
+              if (!node || node.parentId !== rootParentId) return false;
+              if (node.data?.stepType === 'Finish') return false;
+              return !state.edges.some(
+                (edge) =>
+                  edge.source === nodeId && ownedNodeIds.has(edge.target)
+              );
+            });
+
+            return terminalNodeIds.map(
+              (nodeId) =>
+                ({
+                  id: '',
+                  source: nodeId,
+                  target: '',
+                  sourceHandle: 'source',
+                  targetHandle: 'target',
+                }) as Edge
+            );
+          };
+
+          const nextEdges = state.edges.filter((edge) => {
+            const sourceRoot = rootByNodeId.get(edge.source);
+            const isInterGroupEdge =
+              sourceRoot &&
+              rootSet.has(edge.target) &&
+              sourceRoot !== edge.target;
+
+            if (isInterGroupEdge) return false;
+
+            if (
+              context.type === 'lane' &&
+              context.branchSourceId &&
+              edge.source === context.branchSourceId &&
+              rootSet.has(edge.target) &&
+              normalizeHandle(edge.sourceHandle) ===
+                normalizeHandle(context.branchSourceHandle)
+            ) {
+              return false;
+            }
+
+            return true;
+          });
+
+          const edgeExists = (
+            source: string,
+            target: string,
+            sourceHandle: string
+          ) =>
+            nextEdges.some(
+              (edge) =>
+                edge.source === source &&
+                edge.target === target &&
+                normalizeHandle(edge.sourceHandle) === sourceHandle
+            );
+
+          const addTimelineEdge = (
+            source: string,
+            target: string,
+            sourceHandle = 'source',
+            targetHandle = 'target'
+          ) => {
+            const normalizedSourceHandle = normalizeHandle(sourceHandle);
+            if (edgeExists(source, target, normalizedSourceHandle)) return true;
+
+            const validation = validateConnection(
+              nextEdges,
+              state.nodes,
+              source,
+              target
+            );
+            if (!validation.isValid) {
+              console.error(
+                `Timeline move rejected: ${validation.errorMessage}`
+              );
+              return false;
+            }
+
+            const existingIds = new Set(nextEdges.map((edge) => edge.id));
+            const baseId = `${source}-${target}-${normalizedSourceHandle}`;
+            let edgeId = baseId;
+            let counter = 1;
+            while (existingIds.has(edgeId)) {
+              edgeId = `${baseId}-${counter}`;
+              counter += 1;
+            }
+
+            nextEdges.push({
+              id: edgeId,
+              source,
+              target,
+              sourceHandle: normalizedSourceHandle,
+              targetHandle,
+            });
+            return true;
+          };
+
+          if (context.type === 'lane') {
+            if (!context.branchSourceId || nextOrder.length === 0) return;
+            const branchHandle = normalizeHandle(context.branchSourceHandle);
+            if (
+              !addTimelineEdge(
+                context.branchSourceId,
+                nextOrder[0],
+                branchHandle
+              )
+            ) {
+              return;
+            }
+          }
+
+          for (let index = 0; index < nextOrder.length - 1; index += 1) {
+            const sourceRootId = nextOrder[index];
+            const targetRootId = nextOrder[index + 1];
+            const exitTemplates =
+              exitTemplatesByRoot.get(sourceRootId) ??
+              getFallbackExitTemplates(sourceRootId);
+
+            for (const template of exitTemplates) {
+              if (
+                !addTimelineEdge(
+                  template.source,
+                  targetRootId,
+                  normalizeHandle(template.sourceHandle),
+                  template.targetHandle || 'target'
+                )
+              ) {
+                return;
+              }
+            }
+          }
+
+          const slotPositions = orderedNodeIds.map(
+            (nodeId) => nodesById.get(nodeId)?.position
+          );
+          const positionUpdates = new Map<string, { x: number; y: number }>();
+
+          const hasAncestorInSet = (node: Node, nodeIds: Set<string>) => {
+            let parentId = node.parentId;
+            while (parentId) {
+              if (nodeIds.has(parentId)) return true;
+              parentId = nodesById.get(parentId)?.parentId;
+            }
+            return false;
+          };
+
+          nextOrder.forEach((rootId, index) => {
+            const rootNode = nodesById.get(rootId);
+            const slotPosition = slotPositions[index];
+            if (!rootNode || !slotPosition) return;
+
+            const deltaX = slotPosition.x - rootNode.position.x;
+            const deltaY = slotPosition.y - rootNode.position.y;
+            if (deltaX === 0 && deltaY === 0) return;
+
+            const ownedNodeIds = new Set([
+              rootId,
+              ...(context.subtreeNodeIdsByRoot[rootId] ?? []),
+            ]);
+
+            for (const nodeId of ownedNodeIds) {
+              const node = nodesById.get(nodeId);
+              if (!node) continue;
+              if (nodeId !== rootId && hasAncestorInSet(node, ownedNodeIds)) {
+                continue;
+              }
+              positionUpdates.set(nodeId, {
+                x: node.position.x + deltaX,
+                y: node.position.y + deltaY,
+              });
+            }
+          });
+
+          state.edges = nextEdges;
+          for (const node of state.nodes) {
+            const position = positionUpdates.get(node.id);
+            if (position) {
+              node.position = snapPositionToGrid(position);
+            }
+          }
+
+          state.isDirty = true;
+          state.isStructurallyDirty = true;
+          state.saveToHistory();
+        }),
+
+      flipConditionalBranches: (nodeId) =>
+        set((state) => {
+          const node = state.nodes.find((candidate) => candidate.id === nodeId);
+          if (node?.data?.stepType !== 'Conditional') return;
+
+          let changed = false;
+
+          for (const edge of state.edges) {
+            if (edge.source !== nodeId) continue;
+
+            const route = getTimelineEdgeRoute(edge);
+            if (route === 'true') {
+              setTimelineEdgeRoute(edge, 'false');
+              changed = true;
+            } else if (route === 'false') {
+              setTimelineEdgeRoute(edge, 'true');
+              changed = true;
+            }
+          }
+
+          if (!changed) return;
+
+          state.isDirty = true;
+          state.isStructurallyDirty = true;
+          state.saveToHistory();
+        }),
+
+      moveSwitchCase: ({ nodeId, caseIndex, direction }) =>
+        set((state) => {
+          const node = state.nodes.find((candidate) => candidate.id === nodeId);
+          if (node?.data?.stepType !== 'Switch') return;
+
+          const cases = getSwitchCaseItems(node);
+          if (!cases) return;
+
+          const nextIndex = direction === 'up' ? caseIndex - 1 : caseIndex + 1;
+          if (
+            caseIndex < 0 ||
+            nextIndex < 0 ||
+            caseIndex >= cases.length ||
+            nextIndex >= cases.length
+          ) {
+            return;
+          }
+
+          const nextCases = [...cases];
+          [nextCases[caseIndex], nextCases[nextIndex]] = [
+            nextCases[nextIndex],
+            nextCases[caseIndex],
+          ];
+
+          const inputMapping = Array.isArray(node.data.inputMapping)
+            ? node.data.inputMapping
+            : [];
+          node.data = {
+            ...node.data,
+            inputMapping: inputMapping.map((item) => {
+              if (
+                typeof item === 'object' &&
+                item !== null &&
+                (item as TimelineInputMappingItem).type === 'cases'
+              ) {
+                return {
+                  ...(item as TimelineInputMappingItem),
+                  value: nextCases,
+                };
+              }
+              return item;
+            }),
+          };
+
+          const currentRoute = `case-${caseIndex}` as TimelineEdgeRoute;
+          const nextRoute = `case-${nextIndex}` as TimelineEdgeRoute;
+
+          for (const edge of state.edges) {
+            if (edge.source !== nodeId) continue;
+
+            const route = getTimelineEdgeRoute(edge);
+            if (route === currentRoute) {
+              setTimelineEdgeRoute(edge, nextRoute);
+            } else if (route === nextRoute) {
+              setTimelineEdgeRoute(edge, currentRoute);
             }
           }
 

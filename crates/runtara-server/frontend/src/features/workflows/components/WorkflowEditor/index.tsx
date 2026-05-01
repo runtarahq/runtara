@@ -1,11 +1,4 @@
-import {
-  MouseEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   Connection,
@@ -15,12 +8,22 @@ import {
   Node,
   NodeTypes,
   ReactFlow,
+  ReactFlowProvider,
   useReactFlow,
+  useStoreApi,
   OnConnectEnd,
 } from '@xyflow/react';
+import { ListTree, Network } from 'lucide-react';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore.ts';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { toast } from '@/shared/hooks/useToast';
+import { cn } from '@/lib/utils.ts';
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '@/shared/components/ui/tabs';
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
@@ -30,10 +33,7 @@ import {
   SNAP_GRID_SIZE,
   snapPositionToGrid,
 } from '@/features/workflows/config/workflow-editor.ts';
-import {
-  validateConnection,
-  getDownstreamNodes,
-} from '@/features/workflows/utils/graph-validation';
+import { validateConnection } from '@/features/workflows/utils/graph-validation';
 import { ExecutionGraphStepDto } from '@/features/workflows/types/execution-graph';
 
 import * as form from './NodeForm/NodeFormItem.tsx';
@@ -55,12 +55,16 @@ import {
 } from './CustomNodes';
 import {
   getNodePositionInsideParent,
-  sortNodes,
+  getLayoutedElements,
 } from './CustomNodes/utils.tsx';
 import { NodeConfigDialog } from './NodeConfigDialog';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from './NodeForm/StepPickerModal';
 import { NodeConfigProvider } from './NodeConfigContext';
+import {
+  type TimelineAddStepRequest,
+  WorkflowTimelineView,
+} from './TimelineView';
 
 // Re-export CreateStepContext type for external use
 export interface CreateStepContext {
@@ -155,7 +159,17 @@ type WorkflowEditorProps = {
   onResetNodeChanges?: (nodeId: string) => void;
 };
 
-export function WorkflowEditor({
+type WorkflowEditorView = 'canvas' | 'timeline';
+
+export function WorkflowEditor(props: WorkflowEditorProps) {
+  return (
+    <ReactFlowProvider>
+      <WorkflowEditorContent {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function WorkflowEditorContent({
   nodes: initialNodes,
   edges: initialEdges,
   readOnly = false,
@@ -175,6 +189,7 @@ export function WorkflowEditor({
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showStepPicker, setShowStepPicker] = useState(false);
+  const [editorView, setEditorView] = useState<WorkflowEditorView>('timeline');
 
   // Callback for child node components to open config dialogs (including hidden nodes)
   const openNodeConfig = useCallback(
@@ -197,35 +212,6 @@ export function WorkflowEditor({
   );
 
   const ref = useRef(null);
-
-  // Shift-drag context for moving connected nodes together
-  const shiftDragRef = useRef<{
-    isActive: boolean;
-    draggedNodeId: string;
-    connectedNodeIds: Set<string>;
-    initialPositions: Map<string, { x: number; y: number }>;
-  } | null>(null);
-
-  // Track Alt key state globally for connected node movement
-  const modifierKeyRef = useRef(false);
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.altKey) {
-        modifierKeyRef.current = true;
-      }
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (!e.altKey) {
-        modifierKeyRef.current = false;
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, []);
 
   // Get state from Zustand store
   const nodes = useWorkflowStore((state) => state.nodes);
@@ -262,6 +248,7 @@ export function WorkflowEditor({
     setCenter,
     getZoom,
   } = useReactFlow();
+  const reactFlowStore = useStoreApi();
 
   // Show step picker when createStepContext changes
   useEffect(() => {
@@ -410,8 +397,61 @@ export function WorkflowEditor({
     return entryPointNode?.id || null;
   }, [nodes, edges]);
 
+  // Identify AI Agent tool/memory nodes and edges to hide from canvas.
+  // Tool steps are rendered inline in the AI Agent card, so their separate
+  // nodes and connecting edges should not appear on the canvas.
+  const { hiddenNodeIds, hiddenEdgeIds } = useMemo(() => {
+    const hiddenNodes = new Set<string>();
+    const hiddenEdges = new Set<string>();
+
+    // Find all AI Agent nodes
+    const aiAgentNodes = nodes.filter((n) => n.type === NODE_TYPES.AiAgentNode);
+
+    for (const agentNode of aiAgentNodes) {
+      // Find edges from this AI Agent whose sourceHandle is a tool name or 'memory'
+      // (any handle that is NOT the standard 'source' output)
+      for (const edge of edges) {
+        if (
+          edge.source === agentNode.id &&
+          edge.sourceHandle &&
+          edge.sourceHandle !== 'source'
+        ) {
+          hiddenEdges.add(edge.id);
+          hiddenNodes.add(edge.target);
+        }
+      }
+    }
+
+    return { hiddenNodeIds: hiddenNodes, hiddenEdgeIds: hiddenEdges };
+  }, [nodes, edges]);
+
+  const visibleCanvasNodes = useMemo(
+    () =>
+      hiddenNodeIds.size > 0
+        ? nodes.filter((node) => !hiddenNodeIds.has(node.id))
+        : nodes,
+    [hiddenNodeIds, nodes]
+  );
+
+  const visibleCanvasEdges = useMemo(
+    () => edges.filter((edge) => !hiddenEdgeIds.has(edge.id)),
+    [edges, hiddenEdgeIds]
+  );
+
+  const layoutedCanvasNodes = useMemo(() => {
+    const { nodes: layoutedNodes } = getLayoutedElements(
+      visibleCanvasNodes,
+      visibleCanvasEdges
+    );
+
+    return layoutedNodes.map((node) => ({
+      ...node,
+      draggable: false,
+    }));
+  }, [visibleCanvasEdges, visibleCanvasNodes]);
+
   const entryPointNode = entryPointId
-    ? nodes.find((n) => n.id === entryPointId)
+    ? layoutedCanvasNodes.find((n) => n.id === entryPointId)
     : null;
 
   const startIndicatorNode: Node | null = useMemo(() => {
@@ -491,53 +531,24 @@ export function WorkflowEditor({
     };
   }, [entryPointId]);
 
-  // Identify AI Agent tool/memory nodes and edges to hide from canvas.
-  // Tool steps are rendered inline in the AI Agent card, so their separate
-  // nodes and connecting edges should not appear on the canvas.
-  const { hiddenNodeIds, hiddenEdgeIds } = useMemo(() => {
-    const hiddenNodes = new Set<string>();
-    const hiddenEdges = new Set<string>();
-
-    // Find all AI Agent nodes
-    const aiAgentNodes = nodes.filter((n) => n.type === NODE_TYPES.AiAgentNode);
-
-    for (const agentNode of aiAgentNodes) {
-      // Find edges from this AI Agent whose sourceHandle is a tool name or 'memory'
-      // (any handle that is NOT the standard 'source' output)
-      for (const edge of edges) {
-        if (
-          edge.source === agentNode.id &&
-          edge.sourceHandle &&
-          edge.sourceHandle !== 'source'
-        ) {
-          hiddenEdges.add(edge.id);
-          hiddenNodes.add(edge.target);
-        }
-      }
-    }
-
-    return { hiddenNodeIds: hiddenNodes, hiddenEdgeIds: hiddenEdges };
-  }, [nodes, edges]);
-
   const nodesWithStartIndicator = useMemo(() => {
-    // Filter out hidden tool/memory nodes
-    const visibleNodes =
-      hiddenNodeIds.size > 0
-        ? nodes.filter((n) => !hiddenNodeIds.has(n.id))
-        : nodes;
-    if (!startIndicatorNode) return visibleNodes;
-    return [startIndicatorNode, ...visibleNodes];
-  }, [nodes, startIndicatorNode, hiddenNodeIds]);
+    if (!startIndicatorNode) return layoutedCanvasNodes;
+    return [startIndicatorNode, ...layoutedCanvasNodes];
+  }, [layoutedCanvasNodes, startIndicatorNode]);
 
   const edgesWithStartIndicator = useMemo(() => {
+    const visibleNodeIds = new Set(layoutedCanvasNodes.map((node) => node.id));
     // Create a set of node IDs that are inside a container (have parentId)
     const nodesInsideContainer = new Set(
-      nodes.filter((n) => n.parentId).map((n) => n.id)
+      layoutedCanvasNodes.filter((n) => n.parentId).map((n) => n.id)
     );
 
     // Filter out hidden tool/memory edges and apply selection
-    const edgesWithSelection = edges
-      .filter((edge) => !hiddenEdgeIds.has(edge.id))
+    const edgesWithSelection = visibleCanvasEdges
+      .filter(
+        (edge) =>
+          visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
+      )
       .map((edge) => {
         // Check if this edge connects nodes inside a container
         const isInsideContainer =
@@ -546,6 +557,8 @@ export function WorkflowEditor({
 
         return {
           ...edge,
+          type: edge.type || 'default',
+          targetHandle: edge.targetHandle || 'target',
           selected: edge.id === selectedEdgeId,
           // Edges inside containers need higher zIndex to appear above the container background
           zIndex: isInsideContainer ? 1001 : 1,
@@ -561,11 +574,16 @@ export function WorkflowEditor({
       },
       ...edgesWithSelection,
     ];
-  }, [edges, nodes, startIndicatorEdge, selectedEdgeId, hiddenEdgeIds]);
+  }, [
+    layoutedCanvasNodes,
+    selectedEdgeId,
+    startIndicatorEdge,
+    visibleCanvasEdges,
+  ]);
 
   // Initialize store with provided nodes and edges
   const lastSyncedDataRef = useRef<string>('');
-  const hasInitializedViewRef = useRef(false);
+  const lastFittedCanvasLayoutRef = useRef<string | null>(null);
 
   useEffect(() => {
     const dataHash = JSON.stringify({
@@ -581,31 +599,118 @@ export function WorkflowEditor({
     if (dataHash !== lastSyncedDataRef.current) {
       syncFromReactFlow(initialNodes, initialEdges);
       lastSyncedDataRef.current = dataHash;
-      // Reset view initialization flag when data changes (e.g., version switch)
-      hasInitializedViewRef.current = false;
-
-      if (initialNodes.length > 0) {
-        setTimeout(() => {
-          fitView({ duration: 200 });
-          hasInitializedViewRef.current = true;
-        }, 100);
-      }
     }
-  }, [initialNodes, initialEdges, syncFromReactFlow, fitView]);
+  }, [initialNodes, initialEdges, syncFromReactFlow]);
 
-  // Center viewport on virtual start step for new/empty workflows
+  const canvasLayoutKey = useMemo(
+    () =>
+      JSON.stringify({
+        nodes: nodesWithStartIndicator.map((node) => ({
+          id: node.id,
+          type: node.type,
+          parentId: node.parentId,
+          position: node.position,
+          width: node.width ?? node.style?.width,
+          height: node.height ?? node.style?.height,
+        })),
+        edges: edgesWithStartIndicator.map((edge) => ({
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle,
+        })),
+      }),
+    [edgesWithStartIndicator, nodesWithStartIndicator]
+  );
+
+  // Initialize the canvas viewport only while the canvas is visible. React Flow
+  // measures a hidden canvas poorly, which leaves the workflow in a corner on
+  // first switch from the timeline.
   useEffect(() => {
-    if (!hasInitializedViewRef.current && initialNodes.length === 0) {
-      const startIndicatorSize = NODE_TYPE_SIZES[NODE_TYPES.StartIndicatorNode];
-      const startCenterX = startIndicatorSize.width / 2;
-      const startCenterY = startIndicatorSize.height / 2;
-
-      setTimeout(() => {
-        setCenter(startCenterX, startCenterY, { zoom: 1, duration: 200 });
-        hasInitializedViewRef.current = true;
-      }, 100);
+    if (editorView !== 'canvas') {
+      lastFittedCanvasLayoutRef.current = null;
     }
-  }, [initialNodes.length, setCenter]);
+  }, [editorView]);
+
+  useEffect(() => {
+    if (
+      editorView !== 'canvas' ||
+      lastFittedCanvasLayoutRef.current === canvasLayoutKey
+    ) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (visibleCanvasNodes.length > 0) {
+        fitView({ duration: 200, padding: 0.2 });
+      } else {
+        const startIndicatorSize =
+          NODE_TYPE_SIZES[NODE_TYPES.StartIndicatorNode];
+        const startCenterX = startIndicatorSize.width / 2;
+        const startCenterY = startIndicatorSize.height / 2;
+        setCenter(startCenterX, startCenterY, { zoom: 1, duration: 200 });
+      }
+
+      lastFittedCanvasLayoutRef.current = canvasLayoutKey;
+    }, 100);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    canvasLayoutKey,
+    editorView,
+    fitView,
+    setCenter,
+    visibleCanvasNodes.length,
+  ]);
+
+  useEffect(() => {
+    if (editorView !== 'canvas') return;
+
+    // React Flow needs handle bounds before it can draw edges. In the locked
+    // auto-layout canvas, those measurements are render-only and must not flow
+    // back into the workflow store.
+    const refreshNodeInternals = () => {
+      const { domNode, updateNodeInternals } = reactFlowStore.getState();
+      if (!domNode) return;
+
+      const nodeElements = new Map<string, HTMLDivElement>();
+      domNode
+        .querySelectorAll<HTMLDivElement>('.react-flow__node[data-id]')
+        .forEach((nodeElement) => {
+          const nodeId = nodeElement.getAttribute('data-id');
+          if (nodeId) {
+            nodeElements.set(nodeId, nodeElement);
+          }
+        });
+
+      const updates = new Map();
+      nodesWithStartIndicator.forEach((node) => {
+        const nodeElement = nodeElements.get(node.id);
+        if (nodeElement) {
+          updates.set(node.id, {
+            id: node.id,
+            nodeElement,
+            force: true,
+          });
+        }
+      });
+
+      if (updates.size > 0) {
+        updateNodeInternals(updates, { triggerFitView: false });
+      }
+    };
+
+    const animationFrameId = window.requestAnimationFrame(refreshNodeInternals);
+    const timeoutIds = [50, 250, 750].map((delay) =>
+      window.setTimeout(refreshNodeInternals, delay)
+    );
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    };
+  }, [canvasLayoutKey, editorView, nodesWithStartIndicator, reactFlowStore]);
 
   const onConnect = useCallback(
     (connection: Edge | Connection) => {
@@ -729,6 +834,124 @@ export function WorkflowEditor({
       });
     },
     []
+  );
+
+  const handleTimelineAddStep = useCallback(
+    (request: TimelineAddStepRequest) => {
+      const sourceNode = request.sourceNodeId
+        ? nodes.find((node) => node.id === request.sourceNodeId)
+        : undefined;
+      const targetNode = request.targetNodeId
+        ? nodes.find((node) => node.id === request.targetNodeId)
+        : undefined;
+
+      const getAbsolutePosition = (node: Node): { x: number; y: number } => {
+        if (!node.parentId) return node.position;
+
+        const parent = nodes.find(
+          (candidate) => candidate.id === node.parentId
+        );
+        if (!parent) return node.position;
+
+        const parentPosition = getAbsolutePosition(parent);
+        return {
+          x: parentPosition.x + node.position.x,
+          y: parentPosition.y + node.position.y,
+        };
+      };
+
+      const getNodeSize = (node: Node): { width: number; height: number } => {
+        const nodeType = node.type || NODE_TYPES.BasicNode;
+        const fallbackSize = NODE_TYPE_SIZES[nodeType] || {
+          width: 180,
+          height: 48,
+        };
+
+        return {
+          width:
+            typeof node.style?.width === 'number'
+              ? node.style.width
+              : typeof node.width === 'number'
+                ? node.width
+                : fallbackSize.width,
+          height:
+            typeof node.style?.height === 'number'
+              ? node.style.height
+              : typeof node.height === 'number'
+                ? node.height
+                : fallbackSize.height,
+        };
+      };
+
+      let position = snapPositionToGrid({ x: 0, y: 0 });
+
+      if (sourceNode && targetNode) {
+        const sourcePosition = getAbsolutePosition(sourceNode);
+        const targetPosition = getAbsolutePosition(targetNode);
+        const sourceSize = getNodeSize(sourceNode);
+        const targetSize = getNodeSize(targetNode);
+
+        position = snapPositionToGrid({
+          x: (sourcePosition.x + sourceSize.width + targetPosition.x) / 2,
+          y:
+            targetPosition.y +
+            targetSize.height / 2 -
+            (NODE_TYPE_SIZES[NODE_TYPES.BasicNode]?.height || 48) / 2,
+        });
+
+        setCreateStepContext({
+          position,
+          insertionEdge: {
+            source: sourceNode.id,
+            target: targetNode.id,
+            sourceHandle: request.sourceHandle || 'source',
+          },
+        });
+        return;
+      }
+
+      if (sourceNode) {
+        const sourcePosition = getAbsolutePosition(sourceNode);
+        const sourceSize = getNodeSize(sourceNode);
+
+        position = snapPositionToGrid({
+          x: sourcePosition.x + sourceSize.width + 180,
+          y: sourcePosition.y,
+        });
+
+        setCreateStepContext({
+          position,
+          connection: {
+            source: sourceNode.id,
+            sourceHandle: request.sourceHandle || 'source',
+          },
+        });
+        return;
+      }
+
+      if (targetNode) {
+        const targetPosition = getAbsolutePosition(targetNode);
+        position = snapPositionToGrid({
+          x: Math.max(0, targetPosition.x - 288),
+          y: targetPosition.y,
+        });
+
+        setCreateStepContext({
+          position,
+          insertionEdge: {
+            source: '__start_indicator__',
+            target: targetNode.id,
+            sourceHandle: 'source',
+          },
+        });
+        return;
+      }
+
+      setCreateStepContext({
+        position,
+      });
+    },
+    [nodes]
   );
 
   // Handle step picker selection - stores pending node for user confirmation
@@ -1019,276 +1242,163 @@ export function WorkflowEditor({
     setPendingNewNode(null);
   }, [setPendingNewNode]);
 
-  // Node drag handlers
-  const onNodeDragStart = useCallback(
-    (_event: MouseEvent, node: Node) => {
-      const connectedNodeIds = getDownstreamNodes(edges, node.id);
-
-      const initialPositions = new Map<string, { x: number; y: number }>();
-      initialPositions.set(node.id, { ...node.position });
-
-      nodes.forEach((n) => {
-        if (connectedNodeIds.has(n.id)) {
-          initialPositions.set(n.id, { ...n.position });
-        }
-      });
-
-      shiftDragRef.current = {
-        isActive: false,
-        draggedNodeId: node.id,
-        connectedNodeIds,
-        initialPositions,
-      };
-    },
-    [edges, nodes]
-  );
-
   const handleNodesChange = useCallback(
     (changes: import('@xyflow/react').NodeChange[]) => {
-      const context = shiftDragRef.current;
-
-      if (
-        context &&
-        modifierKeyRef.current &&
-        context.connectedNodeIds.size > 0
-      ) {
-        const draggedNodeChange = changes.find(
-          (c) =>
-            c.type === 'position' &&
-            c.id === context.draggedNodeId &&
-            (c as any).position
-        ) as
-          | {
-              type: 'position';
-              id: string;
-              position?: { x: number; y: number };
-            }
-          | undefined;
-
-        if (draggedNodeChange?.position) {
-          const initialPos = context.initialPositions.get(
-            context.draggedNodeId
-          );
-          if (initialPos) {
-            const deltaX = draggedNodeChange.position.x - initialPos.x;
-            const deltaY = draggedNodeChange.position.y - initialPos.y;
-
-            const connectedChanges = Array.from(context.connectedNodeIds)
-              .map((nodeId) => {
-                const nodeInitialPos = context.initialPositions.get(nodeId);
-                if (nodeInitialPos) {
-                  return {
-                    type: 'position' as const,
-                    id: nodeId,
-                    position: {
-                      x: nodeInitialPos.x + deltaX,
-                      y: nodeInitialPos.y + deltaY,
-                    },
-                  };
-                }
-                return null;
-              })
-              .filter(Boolean);
-
-            onNodesChange([
-              ...changes,
-              ...connectedChanges,
-            ] as import('@xyflow/react').NodeChange[]);
-            return;
-          }
-        }
+      const structuralChanges = changes.filter(
+        (change) => change.type !== 'position' && change.type !== 'dimensions'
+      );
+      if (structuralChanges.length > 0) {
+        onNodesChange(structuralChanges);
       }
-
-      onNodesChange(changes);
     },
     [onNodesChange]
   );
 
-  const onNodeDrag = useCallback(
-    (event: MouseEvent, node: Node) => {
-      modifierKeyRef.current = event.altKey;
-
-      if (node.type === NODE_TYPES.ContainerNode) return;
-      if (!node.parentId && node.type !== NODE_TYPES.ContainerNode) return;
-
-      const intersections = getIntersectingNodes(node).filter(
-        (n) => n.type === NODE_TYPES.ContainerNode
-      );
-
-      const groupNode = intersections[intersections.length - 1];
-      const shouldHighlight =
-        intersections.length && node.parentId !== groupNode?.id;
-
-      const changes = nodes
-        .filter((n) => n.type === NODE_TYPES.ContainerNode)
-        .map((n) => ({
-          id: n.id,
-          type: 'className' as const,
-          className: shouldHighlight ? 'active' : '',
-        }));
-
-      if (changes.length > 0) {
-        onNodesChange(changes as any);
-      }
-    },
-    [getIntersectingNodes, nodes, onNodesChange]
-  );
-
-  const onNodeDragStop = useCallback(
-    (_: MouseEvent, node: Node) => {
-      shiftDragRef.current = null;
-
-      if (node.type === NODE_TYPES.ContainerNode && !node.parentId) return;
-
-      const intersections = getIntersectingNodes(node).filter((n) => {
-        if (n.type === NODE_TYPES.ContainerNode && n.id === node.parentId) {
-          return n;
-        } else if (node.type !== NODE_TYPES.ContainerNode) {
-          return n;
-        }
-      });
-
-      const groupNode = intersections[intersections.length - 1];
-
-      if (intersections.length && node.parentId !== groupNode.id) {
-        const nextNodes: Node[] = nodes
-          .map((n) => {
-            if (n.id === node.id) {
-              const position = getNodePositionInsideParent(n, groupNode) ?? {
-                x: 0,
-                y: 0,
-              };
-
-              return {
-                ...n,
-                position,
-                parentId: groupNode.id,
-                expandParent: true,
-                extent: 'parent',
-              } as Node;
-            }
-
-            return n;
-          })
-          .sort(sortNodes);
-
-        syncFromReactFlow(nextNodes, edges);
-      }
-    },
-    [getIntersectingNodes, nodes, edges, syncFromReactFlow]
-  );
-
   return (
     <>
-      {/* Full width container - no sidebar */}
-      <div className="relative w-full h-full">
-        {/* ReactFlow Canvas */}
-        <NodeConfigProvider value={nodeConfigContextValue}>
-          <EdgeContextProvider
-            onInsertClick={handleEdgeInsertClick}
-            allEdges={edges}
+      <div className="relative h-full w-full">
+        <Tabs
+          value={editorView}
+          onValueChange={(value) => setEditorView(value as WorkflowEditorView)}
+          className="h-full"
+        >
+          <div className="pointer-events-none absolute left-4 top-4 z-20">
+            <TabsList className="pointer-events-auto shadow-sm">
+              <TabsTrigger value="canvas" className="gap-2">
+                <Network className="size-4" aria-hidden="true" />
+                Canvas
+              </TabsTrigger>
+              <TabsTrigger value="timeline" className="gap-2">
+                <ListTree className="size-4" aria-hidden="true" />
+                Timeline
+              </TabsTrigger>
+            </TabsList>
+          </div>
+
+          <TabsContent
+            value="canvas"
+            className={cn('m-0 h-full', editorView !== 'canvas' && 'hidden')}
           >
-            <ReactFlow
-              ref={ref}
-              nodes={nodesWithStartIndicator}
-              edges={edgesWithStartIndicator}
-              edgeTypes={edgeTypes}
-              nodeTypes={nodeTypes}
-              onNodesChange={handleNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={readOnly ? undefined : onConnect}
-              onConnectEnd={readOnly ? undefined : onConnectEnd}
-              isValidConnection={readOnly ? undefined : isValidConnection}
-              proOptions={{ hideAttribution: true }}
-              defaultEdgeOptions={{ zIndex: 1 }}
-              onNodeDragStart={readOnly ? undefined : onNodeDragStart}
-              onNodeDrag={readOnly ? undefined : onNodeDrag}
-              onNodeDragStop={readOnly ? undefined : onNodeDragStop}
-              onNodeDoubleClick={(_event, node) => {
-                // Don't open dialog for special nodes
-                if (
-                  node.type === NODE_TYPES.CreateNode ||
-                  node.type === NODE_TYPES.NoteNode ||
-                  node.type === NODE_TYPES.StartIndicatorNode
-                ) {
-                  return;
-                }
-                // Open dialog for editing on double-click
-                if (workflow && !readOnly) {
-                  setEditingNodeId(node.id);
-                }
-              }}
-              onNodeClick={(event, node) => {
-                // Don't select special nodes
-                if (
-                  node.type === NODE_TYPES.CreateNode ||
-                  node.type === NODE_TYPES.NoteNode ||
-                  node.type === NODE_TYPES.StartIndicatorNode
-                ) {
-                  setSelectedNodeId(null);
-                  setSelectedEdgeId(null);
-                  return;
-                }
-                // Don't select if clicking on a button
-                const target = event.target as HTMLElement;
-                if (target.closest('button')) {
-                  return;
-                }
-                // In debug inspect mode, allow selecting executed nodes only
-                if (debugInspectMode) {
-                  const nodeStatus = useExecutionStore
-                    .getState()
-                    .nodeExecutionStatus.get(node.id);
-                  if (nodeStatus) {
-                    setSelectedNodeId(node.id);
-                    setSelectedEdgeId(null);
-                  }
-                  return;
-                }
-                // Select node on single click (for moving, keyboard delete, etc.)
-                if (workflow && !readOnly) {
-                  setSelectedNodeId(node.id);
-                  setSelectedEdgeId(null);
-                }
-              }}
-              onEdgeClick={(_event, edge) => {
-                setSelectedEdgeId(edge.id);
-                setSelectedNodeId(null);
-              }}
-              onPaneClick={() => {
-                const { selectedNodeId: currentSelectedNodeId } =
-                  useWorkflowStore.getState();
-                if (currentSelectedNodeId) {
-                  setSelectedNodeId(null);
-                }
-                if (selectedEdgeId) {
-                  setSelectedEdgeId(null);
-                }
-              }}
-              snapToGrid={true}
-              snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
-              elevateEdgesOnSelect={true}
-              edgesReconnectable={false}
-              disableKeyboardA11y={true}
-              elementsSelectable={!readOnly || debugInspectMode}
-              nodesDraggable={!readOnly}
-              nodesConnectable={!readOnly}
-              nodesFocusable={!readOnly}
-              edgesFocusable={!readOnly}
-            >
-              <Controls />
-              <Background
-                gap={SNAP_GRID_SIZE}
-                size={1}
-                color={
-                  document.documentElement.classList.contains('dark')
-                    ? '#262626'
-                    : undefined
-                }
+            <NodeConfigProvider value={nodeConfigContextValue}>
+              <EdgeContextProvider
+                onInsertClick={handleEdgeInsertClick}
+                allEdges={edges}
+              >
+                <ReactFlow
+                  ref={ref}
+                  nodes={nodesWithStartIndicator}
+                  edges={edgesWithStartIndicator}
+                  edgeTypes={edgeTypes}
+                  nodeTypes={nodeTypes}
+                  onNodesChange={handleNodesChange}
+                  onEdgesChange={onEdgesChange}
+                  onConnect={readOnly ? undefined : onConnect}
+                  onConnectEnd={readOnly ? undefined : onConnectEnd}
+                  isValidConnection={readOnly ? undefined : isValidConnection}
+                  proOptions={{ hideAttribution: true }}
+                  defaultEdgeOptions={{ zIndex: 1 }}
+                  onNodeDoubleClick={(_event, node) => {
+                    // Don't open dialog for special nodes
+                    if (
+                      node.type === NODE_TYPES.CreateNode ||
+                      node.type === NODE_TYPES.NoteNode ||
+                      node.type === NODE_TYPES.StartIndicatorNode
+                    ) {
+                      return;
+                    }
+                    // Open dialog for editing on double-click
+                    if (workflow && !readOnly) {
+                      setEditingNodeId(node.id);
+                    }
+                  }}
+                  onNodeClick={(event, node) => {
+                    // Don't select special nodes
+                    if (
+                      node.type === NODE_TYPES.CreateNode ||
+                      node.type === NODE_TYPES.NoteNode ||
+                      node.type === NODE_TYPES.StartIndicatorNode
+                    ) {
+                      setSelectedNodeId(null);
+                      setSelectedEdgeId(null);
+                      return;
+                    }
+                    // Don't select if clicking on a button
+                    const target = event.target as HTMLElement;
+                    if (target.closest('button')) {
+                      return;
+                    }
+                    // In debug inspect mode, allow selecting executed nodes only
+                    if (debugInspectMode) {
+                      const nodeStatus = useExecutionStore
+                        .getState()
+                        .nodeExecutionStatus.get(node.id);
+                      if (nodeStatus) {
+                        setSelectedNodeId(node.id);
+                        setSelectedEdgeId(null);
+                      }
+                      return;
+                    }
+                    // Select node on single click (for moving, keyboard delete, etc.)
+                    if (workflow && !readOnly) {
+                      setSelectedNodeId(node.id);
+                      setSelectedEdgeId(null);
+                    }
+                  }}
+                  onEdgeClick={(_event, edge) => {
+                    setSelectedEdgeId(edge.id);
+                    setSelectedNodeId(null);
+                  }}
+                  onPaneClick={() => {
+                    const { selectedNodeId: currentSelectedNodeId } =
+                      useWorkflowStore.getState();
+                    if (currentSelectedNodeId) {
+                      setSelectedNodeId(null);
+                    }
+                    if (selectedEdgeId) {
+                      setSelectedEdgeId(null);
+                    }
+                  }}
+                  snapToGrid={true}
+                  snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
+                  elevateEdgesOnSelect={true}
+                  edgesReconnectable={false}
+                  disableKeyboardA11y={true}
+                  elementsSelectable={!readOnly || debugInspectMode}
+                  nodesDraggable={false}
+                  nodesConnectable={!readOnly}
+                  nodesFocusable={!readOnly}
+                  edgesFocusable={!readOnly}
+                >
+                  <Controls />
+                  <Background
+                    gap={SNAP_GRID_SIZE}
+                    size={1}
+                    color={
+                      document.documentElement.classList.contains('dark')
+                        ? '#262626'
+                        : undefined
+                    }
+                  />
+                </ReactFlow>
+              </EdgeContextProvider>
+            </NodeConfigProvider>
+          </TabsContent>
+
+          <TabsContent
+            forceMount
+            value="timeline"
+            className={cn('m-0 h-full', editorView !== 'timeline' && 'hidden')}
+          >
+            <NodeConfigProvider value={nodeConfigContextValue}>
+              <WorkflowTimelineView
+                readOnly={readOnly}
+                debugInspectMode={debugInspectMode}
+                onEditNode={openNodeConfig}
+                onAddStep={handleTimelineAddStep}
               />
-            </ReactFlow>
-          </EdgeContextProvider>
-        </NodeConfigProvider>
+            </NodeConfigProvider>
+          </TabsContent>
+        </Tabs>
       </div>
 
       {/* Step Picker Modal */}
