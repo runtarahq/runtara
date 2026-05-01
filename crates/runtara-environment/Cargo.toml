@@ -66,5 +66,5 @@ futures = "0.3"
 # Needed for agent capability validation in tests (inventory metadata)
 runtara-agents = { path = "../runtara-agents", version = "3.0" }
 # Testcontainers for automatic PostgreSQL setup in tests
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }

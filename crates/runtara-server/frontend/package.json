@@ -144,7 +144,8 @@
   "overrides": {
     "flatted": "3.4.2",
     "dompurify": "^3.4.0",
-    "serialize-javascript": "7.0.5"
+    "serialize-javascript": "7.0.5",
+    "uuid": "^14.0.0"
   },
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.21.2",
