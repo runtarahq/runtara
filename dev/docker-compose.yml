@@ -50,6 +50,23 @@ services:
             timeout: 5s
             retries: 10
 
+    # All-in-one observability stack: OTel Collector + Tempo (traces) +
+    # Prometheus/Mimir (metrics) + Loki (logs) + Grafana with datasources
+    # pre-wired. The server's OTLP exporter defaults to localhost:4317,
+    # so no extra env vars are needed when running the server natively.
+    # Grafana UI: http://localhost:3000 (anonymous admin access).
+    otel-lgtm:
+        image: grafana/otel-lgtm:latest
+        container_name: runtara-dev-otel-lgtm
+        restart: unless-stopped
+        ports:
+            - "3000:3000"   # Grafana UI
+            - "4317:4317"   # OTLP gRPC
+            - "4318:4318"   # OTLP HTTP
+        volumes:
+            - otel_lgtm_data:/data
+
 volumes:
     postgres_data:
     valkey_data:
+    otel_lgtm_data:
