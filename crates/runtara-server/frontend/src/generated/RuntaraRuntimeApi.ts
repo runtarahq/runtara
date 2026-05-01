@@ -351,6 +351,8 @@ export interface AiAgentConfig {
    * The step output `response` will be a parsed JSON object instead of a string.
    */
   outputSchema?: Partial<Record<string, SchemaField>> | null;
+  /** LLM provider to use for the agent brain. */
+  provider: 'openai' | 'bedrock';
   /** System prompt / instructions for the LLM */
   systemPrompt: MappingValue;
   /**

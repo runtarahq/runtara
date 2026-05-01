@@ -33,6 +33,7 @@ runtara-environment = { path = "../runtara-environment" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }
+runtara-ai = { path = "../runtara-ai" }
 
 # Database
 sqlx = { version = "0.8.6", features = [

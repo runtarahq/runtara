@@ -244,8 +244,25 @@ pub async fn handle_register_image(
         });
     }
 
-    // Generate image ID
-    let image_id = uuid::Uuid::new_v4().to_string();
+    let image_registry = ImageRegistry::new(state.pool.clone());
+    let existing_image = match image_registry
+        .get_by_name(&request.tenant_id, &request.name)
+        .await
+    {
+        Ok(image) => image,
+        Err(e) => {
+            error!(error = %e, "Failed to look up existing image");
+            return Ok(RegisterImageResponse {
+                success: false,
+                image_id: String::new(),
+                error: Some(format!("Failed to look up existing image: {}", e)),
+            });
+        }
+    };
+    let replacing_existing = existing_image.is_some();
+    let image_id = existing_image
+        .map(|image| image.image_id)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Create directories
     let images_dir = state.data_dir.join("images").join(&image_id);
@@ -286,7 +303,9 @@ pub async fn handle_register_image(
     let bundle_path_str = if request.runner_type == RunnerType::Oci {
         if let Err(e) = create_bundle_at_path(&bundle_path, &binary_path) {
             error!(error = %e, "Failed to create OCI bundle");
-            let _ = std::fs::remove_dir_all(&images_dir);
+            if !replacing_existing {
+                let _ = std::fs::remove_dir_all(&images_dir);
+            }
             return Ok(RegisterImageResponse {
                 success: false,
                 image_id: String::new(),
@@ -322,10 +341,11 @@ pub async fn handle_register_image(
     image.image_id = image_id.clone();
 
     // Register in database
-    let image_registry = ImageRegistry::new(state.pool.clone());
     if let Err(e) = image_registry.register(&image).await {
         error!(error = %e, "Failed to register image in database");
-        let _ = std::fs::remove_dir_all(&images_dir);
+        if !replacing_existing {
+            let _ = std::fs::remove_dir_all(&images_dir);
+        }
         return Ok(RegisterImageResponse {
             success: false,
             image_id: String::new(),

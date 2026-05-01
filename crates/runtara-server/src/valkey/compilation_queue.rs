@@ -11,15 +11,18 @@
 //! - Polling support: for waiting until compilation completes
 
 use redis::{AsyncCommands, Script};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// A compilation request in the queue
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CompilationRequest {
     pub tenant_id: String,
     pub workflow_id: String,
     pub version: i32,
+    #[serde(default)]
+    pub force_recompile: bool,
 }
 
 impl CompilationRequest {
@@ -28,12 +31,32 @@ impl CompilationRequest {
             tenant_id,
             workflow_id,
             version,
+            force_recompile: false,
+        }
+    }
+
+    pub fn new_with_force(
+        tenant_id: String,
+        workflow_id: String,
+        version: i32,
+        force_recompile: bool,
+    ) -> Self {
+        Self {
+            tenant_id,
+            workflow_id,
+            version,
+            force_recompile,
         }
     }
 
     /// Create a unique key for this request (used for deduplication)
     pub fn unique_key(&self) -> String {
         format!("{}:{}:{}", self.tenant_id, self.workflow_id, self.version)
+    }
+
+    /// Serialize the full request for the queue payload store.
+    pub fn payload(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 
     /// Parse from unique key
@@ -44,10 +67,18 @@ impl CompilationRequest {
                 tenant_id: parts[0].to_string(),
                 workflow_id: parts[1].to_string(),
                 version: parts[2].parse().ok()?,
+                force_recompile: false,
             })
         } else {
             None
         }
+    }
+
+    /// Parse a full queue payload. Falls back to the legacy key format.
+    pub fn from_payload(payload: &str) -> Option<Self> {
+        serde_json::from_str(payload)
+            .ok()
+            .or_else(|| Self::from_unique_key(payload))
     }
 }
 
@@ -66,6 +97,8 @@ impl CompilationQueue {
     const QUEUE_KEY: &'static str = "runtara:compilation:queue";
     /// Set key for tracking pending compilations (deduplication)
     const PENDING_KEY: &'static str = "runtara:compilation:pending";
+    /// Hash key storing full request payloads by dedupe key.
+    const REQUESTS_KEY: &'static str = "runtara:compilation:requests";
 
     /// Create a new compilation queue
     ///
@@ -98,24 +131,36 @@ impl CompilationQueue {
         let mut conn = self.get_connection().await?;
 
         let key = request.unique_key();
+        let payload = request
+            .payload()
+            .map_err(|e| CompilationQueueError::ParseError(e.to_string()))?;
+        let force_recompile = if request.force_recompile { "1" } else { "0" };
 
         // Lua script for atomic enqueue with deduplication:
         // 1. Check if key exists in pending set
         // 2. If not, add to pending set and push to queue
-        // 3. Return 1 if added, 0 if already pending
+        // 3. Store full payload separately so options like force_recompile survive worker restarts
+        // 4. Return 1 if added, 0 if already pending
         let script = Script::new(
             r#"
             local pending_key = KEYS[1]
             local queue_key = KEYS[2]
+            local requests_key = KEYS[3]
             local request_key = ARGV[1]
+            local request_payload = ARGV[2]
+            local force_recompile = ARGV[3]
 
             -- Check if already pending
             if redis.call('SISMEMBER', pending_key, request_key) == 1 then
+                if force_recompile == '1' then
+                    redis.call('HSET', requests_key, request_key, request_payload)
+                end
                 return 0
             end
 
             -- Add to pending set and queue
             redis.call('SADD', pending_key, request_key)
+            redis.call('HSET', requests_key, request_key, request_payload)
             redis.call('RPUSH', queue_key, request_key)
             return 1
             "#,
@@ -124,7 +169,10 @@ impl CompilationQueue {
         let added: i32 = script
             .key(Self::PENDING_KEY)
             .key(Self::QUEUE_KEY)
+            .key(Self::REQUESTS_KEY)
             .arg(&key)
+            .arg(&payload)
+            .arg(force_recompile)
             .invoke_async(&mut conn)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
@@ -134,6 +182,7 @@ impl CompilationQueue {
                 tenant_id = %request.tenant_id,
                 workflow_id = %request.workflow_id,
                 version = request.version,
+                force_recompile = request.force_recompile,
                 "Enqueued compilation request"
             );
             Ok(true)
@@ -142,6 +191,7 @@ impl CompilationQueue {
                 tenant_id = %request.tenant_id,
                 workflow_id = %request.workflow_id,
                 version = request.version,
+                force_recompile = request.force_recompile,
                 "Compilation request already pending (deduped)"
             );
             Ok(false)
@@ -167,13 +217,21 @@ impl CompilationQueue {
 
         match result {
             Some((_queue_name, key)) => {
-                let request = CompilationRequest::from_unique_key(&key)
+                let payload: Option<String> = conn
+                    .hget(Self::REQUESTS_KEY, &key)
+                    .await
+                    .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+                let request = payload
+                    .as_deref()
+                    .and_then(CompilationRequest::from_payload)
+                    .or_else(|| CompilationRequest::from_payload(&key))
                     .ok_or_else(|| CompilationQueueError::ParseError(key.clone()))?;
 
                 debug!(
                     tenant_id = %request.tenant_id,
                     workflow_id = %request.workflow_id,
                     version = request.version,
+                    force_recompile = request.force_recompile,
                     "Dequeued compilation request"
                 );
 
@@ -199,11 +257,16 @@ impl CompilationQueue {
             .srem(Self::PENDING_KEY, &key)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+        let _: () = conn
+            .hdel(Self::REQUESTS_KEY, &key)
+            .await
+            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
         info!(
             tenant_id = %request.tenant_id,
             workflow_id = %request.workflow_id,
             version = request.version,
+            force_recompile = request.force_recompile,
             "Marked compilation as complete"
         );
 
@@ -367,6 +430,7 @@ mod tests {
         assert_eq!(parsed.tenant_id, "tenant-1");
         assert_eq!(parsed.workflow_id, "workflow-123");
         assert_eq!(parsed.version, 42);
+        assert!(!parsed.force_recompile);
     }
 
     #[test]
@@ -383,6 +447,25 @@ mod tests {
         assert_eq!(parsed.tenant_id, "org_abc123");
         assert_eq!(parsed.workflow_id, "d93b2a2f-d4a9-427f-ad1a-3dae942ffb9a");
         assert_eq!(parsed.version, 1);
+        assert!(!parsed.force_recompile);
+    }
+
+    #[test]
+    fn test_payload_roundtrip_with_force_recompile() {
+        let request = CompilationRequest::new_with_force(
+            "tenant-1".to_string(),
+            "workflow-123".to_string(),
+            42,
+            true,
+        );
+
+        let payload = request.payload().unwrap();
+        let parsed = CompilationRequest::from_payload(&payload).unwrap();
+
+        assert_eq!(parsed.tenant_id, "tenant-1");
+        assert_eq!(parsed.workflow_id, "workflow-123");
+        assert_eq!(parsed.version, 42);
+        assert!(parsed.force_recompile);
     }
 
     // =========================================================================

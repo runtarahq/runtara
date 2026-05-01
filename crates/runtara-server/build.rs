@@ -14,6 +14,8 @@ fn main() {
     // Sibling crates (relative to this crate)
     let stdlib_src = crate_dir.join("../runtara-workflow-stdlib/src");
     let agents_integrations = crate_dir.join("../runtara-agents/src/agents/integrations");
+    let ai_src = crate_dir.join("../runtara-ai/src");
+    let http_src = crate_dir.join("../runtara-http/src");
 
     // Rerun if stdlib or agents source changes
     if stdlib_src.exists() {
@@ -21,6 +23,12 @@ fn main() {
     }
     if agents_integrations.exists() {
         println!("cargo:rerun-if-changed={}", agents_integrations.display());
+    }
+    if ai_src.exists() {
+        println!("cargo:rerun-if-changed={}", ai_src.display());
+    }
+    if http_src.exists() {
+        println!("cargo:rerun-if-changed={}", http_src.display());
     }
     println!("cargo:rerun-if-env-changed=NATIVE_BUILD");
 
@@ -37,7 +45,7 @@ fn main() {
         precompile_native_libraries(&stable_cache_dir, workspace_root);
     } else {
         println!("cargo:warning=   ⚡ Native library compilation skipped (default)");
-        println!("cargo:warning=   Run ./scripts/build_native_library.sh manually when needed");
+        println!("cargo:warning=   Run NATIVE_BUILD=1 cargo build -p runtara-server when needed");
     }
 
     // Generate specs — these go to OUT_DIR since they're embedded via include_str!
@@ -390,6 +398,8 @@ fn can_skip_build(final_cache_dir: &Path, workspace_root: &Path) -> bool {
         workspace_root.join("crates/runtara-workflow-stdlib/src"),
         workspace_root.join("crates/runtara-agents/src"),
         workspace_root.join("crates/runtara-sdk/src"),
+        workspace_root.join("crates/runtara-ai/src"),
+        workspace_root.join("crates/runtara-http/src"),
     ];
 
     for src_dir in &src_dirs {

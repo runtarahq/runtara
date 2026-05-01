@@ -31,6 +31,7 @@ import {
 } from './InputMappingField/MappingValueInput';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
+import { getRuntimeBaseUrl } from '@/shared/queries/utils';
 import { getConnections } from '@/features/connections/queries';
 import { getPlatformIcon, getPlatformName } from '@/shared/utils/platform-info';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore';
@@ -41,9 +42,19 @@ import {
 
 const LLM_INTEGRATION_IDS = new Set([
   'openai_api_key',
-  'anthropic_api_key',
   'aws_credentials',
 ]);
+
+type AiProvider = 'openai' | 'bedrock';
+
+const PROVIDER_OPTIONS: Array<{
+  value: AiProvider;
+  label: string;
+  integrationId: string;
+}> = [
+  { value: 'openai', label: 'OpenAI', integrationId: 'openai_api_key' },
+  { value: 'bedrock', label: 'AWS Bedrock', integrationId: 'aws_credentials' },
+];
 
 interface ModelOption {
   value: string;
@@ -61,41 +72,39 @@ const OPENAI_MODELS: ModelOption[] = [
   { value: 'o4-mini', label: 'o4 Mini' },
 ];
 
-const ANTHROPIC_MODELS: ModelOption[] = [
-  { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
-  { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku' },
-];
+interface LlmModelMetadata {
+  provider?: string;
+  modelName?: string;
+  modelId: string;
+  recommendedForAiAgent?: boolean;
+}
 
-const BEDROCK_MODELS: ModelOption[] = [
-  {
-    value: 'anthropic.claude-sonnet-4-20250514-v1:0',
-    label: 'Claude Sonnet 4',
-  },
-  {
-    value: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
-    label: 'Claude 3.5 Sonnet v2',
-  },
-  {
-    value: 'anthropic.claude-3-5-haiku-20241022-v1:0',
-    label: 'Claude 3.5 Haiku',
-  },
-  { value: 'anthropic.claude-3-opus-20240229-v1:0', label: 'Claude 3 Opus' },
-  { value: 'amazon.nova-pro-v1:0', label: 'Amazon Nova Pro' },
-  { value: 'amazon.nova-lite-v1:0', label: 'Amazon Nova Lite' },
-  { value: 'amazon.nova-micro-v1:0', label: 'Amazon Nova Micro' },
-];
+interface LlmModelsResponse {
+  models?: LlmModelMetadata[];
+}
 
-function getModelsForIntegration(integrationId: string | null): ModelOption[] {
-  switch (integrationId) {
-    case 'openai_api_key':
-      return OPENAI_MODELS;
-    case 'anthropic_api_key':
-      return ANTHROPIC_MODELS;
-    case 'aws_credentials':
-      return BEDROCK_MODELS;
-    default:
-      return [];
+async function getLlmModels(token: string | undefined, context?: any) {
+  const provider = String(context?.queryKey?.[1] || 'bedrock');
+  const response = await fetch(
+    `${getRuntimeBaseUrl()}/metadata/llm-models?provider=${encodeURIComponent(
+      provider
+    )}`,
+    {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch LLM models: ${response.statusText}`);
   }
+  const data = (await response.json()) as LlmModelsResponse;
+  return (data.models ?? []).map((model) => ({
+    value: model.modelId,
+    label: model.modelName
+      ? model.provider
+        ? `${model.provider} ${model.modelName}`
+        : model.modelName
+      : model.modelId,
+  }));
 }
 
 const RESERVED_HANDLE_IDS = new Set([
@@ -135,13 +144,45 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     placeholderData: [],
   });
 
+  // Watch the inputMapping array to make fields reactive
+  const inputMapping = useWatch({
+    name,
+    control: form.control,
+    defaultValue: [],
+  });
+
+  const selectedConnectionIntegrationId = useMemo(() => {
+    if (!connectionId) return null;
+    const allConnections = connectionsQuery.data ?? [];
+    const selected = allConnections.find(
+      (conn: any) => conn.id === connectionId
+    );
+    return selected?.integrationId ?? null;
+  }, [connectionId, connectionsQuery.data]);
+
+  const selectedProvider: AiProvider | undefined = useMemo(() => {
+    const providerField = (inputMapping || []).find(
+      (item: any) => item.type === 'provider'
+    )?.value;
+    if (providerField === 'bedrock' || providerField === 'openai') {
+      return providerField;
+    }
+    return undefined;
+  }, [inputMapping]);
+
   const llmConnections = useMemo(() => {
     const allConnections = connectionsQuery.data ?? [];
+    const expectedIntegrationId = PROVIDER_OPTIONS.find(
+      (option) => option.value === selectedProvider
+    )?.integrationId;
+    if (!expectedIntegrationId) return [];
     return allConnections.filter(
       (conn: any) =>
-        conn.integrationId && LLM_INTEGRATION_IDS.has(conn.integrationId)
+        conn.integrationId &&
+        LLM_INTEGRATION_IDS.has(conn.integrationId) &&
+        conn.integrationId === expectedIntegrationId
     );
-  }, [connectionsQuery.data]);
+  }, [connectionsQuery.data, selectedProvider]);
 
   const connectionOptions = useMemo(() => {
     const noneOption = {
@@ -159,7 +200,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     return [noneOption, ...options];
   }, [llmConnections]);
 
-  // Resolve selected connection's integrationId and get matching models
+  // Resolve selected connection's integrationId
   const selectedIntegrationId = useMemo(() => {
     if (!connectionId) return null;
     const selected = connectionOptions.find(
@@ -168,10 +209,22 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     return selected?.integrationId ?? null;
   }, [connectionId, connectionOptions]);
 
-  const modelOptions = useMemo(
-    () => getModelsForIntegration(selectedIntegrationId),
-    [selectedIntegrationId]
-  );
+  const bedrockModelsQuery = useCustomQuery<ModelOption[]>({
+    queryKey: queryKeys.llmModels.byProvider('bedrock'),
+    queryFn: getLlmModels,
+    placeholderData: [],
+    enabled: selectedProvider === 'bedrock',
+  });
+
+  const modelOptions = useMemo(() => {
+    if (selectedProvider === 'bedrock') {
+      return bedrockModelsQuery.data ?? [];
+    }
+    if (!selectedProvider) {
+      return [];
+    }
+    return OPENAI_MODELS;
+  }, [bedrockModelsQuery.data, selectedProvider]);
 
   // Get tool edges from workflow store
   const edges = useWorkflowStore((state) => state.edges);
@@ -209,6 +262,12 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     if (currentMapping.length === 0) {
       form.setValue(name, [
         {
+          type: 'provider',
+          value: 'openai',
+          typeHint: 'string',
+          valueType: 'immediate',
+        },
+        {
           type: 'systemPrompt',
           value: '',
           typeHint: 'string',
@@ -242,13 +301,6 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepType, nodeId]);
-
-  // Watch the inputMapping array to make fields reactive
-  const inputMapping = useWatch({
-    name,
-    control: form.control,
-    defaultValue: [],
-  });
 
   // Merge tool names from inputMapping with connected edges
   // NOTE: must be called before early return to satisfy Rules of Hooks
@@ -541,11 +593,56 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
 
   return (
     <div className="space-y-4">
+      {/* Provider Selector */}
+      <FormItem>
+        <FormLabel>Provider *</FormLabel>
+        <FormDescription>Select the LLM provider for this agent</FormDescription>
+        <Select
+          value={selectedProvider}
+          onValueChange={(value) => {
+            const provider = value as AiProvider;
+            updateField('provider', provider);
+            updateField('model', '');
+            const expectedIntegrationId = PROVIDER_OPTIONS.find(
+              (option) => option.value === provider
+            )?.integrationId;
+            if (
+              connectionId &&
+              selectedConnectionIntegrationId &&
+              selectedConnectionIntegrationId !== expectedIntegrationId
+            ) {
+              form.setValue('connectionId', '', {
+                shouldDirty: true,
+                shouldTouch: true,
+                shouldValidate: true,
+              });
+            }
+          }}
+        >
+          <FormControl>
+            <SelectTrigger>
+              <SelectValue placeholder="Select provider" />
+            </SelectTrigger>
+          </FormControl>
+          <SelectContent>
+            {PROVIDER_OPTIONS.map((provider) => (
+              <SelectItem key={provider.value} value={provider.value}>
+                {provider.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </FormItem>
+
       {/* Connection Selector */}
       <FormItem>
         <FormLabel>LLM Connection *</FormLabel>
         <FormDescription>
-          Select the LLM provider connection (OpenAI, Anthropic, etc.)
+          {selectedProvider
+            ? `Select a compatible ${
+                selectedProvider === 'bedrock' ? 'AWS Bedrock' : 'OpenAI'
+              } connection`
+            : 'Select a provider first'}
         </FormDescription>
         <Select
           value={connectionId === '' ? '__none__' : connectionId || '__none__'}
@@ -556,7 +653,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
               shouldValidate: true,
             });
           }}
-          disabled={connectionsQuery.isFetching}
+          disabled={!selectedProvider || connectionsQuery.isFetching}
         >
           <FormControl>
             <SelectTrigger>
@@ -665,9 +762,11 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
       <FormItem>
         <FormLabel>Model</FormLabel>
         <FormDescription>
-          {selectedIntegrationId
-            ? 'Select a model or type a custom identifier'
-            : 'Select a connection first to see available models'}
+          {!selectedProvider
+            ? 'Select a provider first'
+            : selectedIntegrationId
+              ? 'Select a model or type a custom identifier'
+              : 'Select a connection first to see available models'}
         </FormDescription>
         {modelOptions.length > 0 ? (
           <Select

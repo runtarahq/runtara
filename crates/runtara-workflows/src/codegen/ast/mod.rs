@@ -32,6 +32,13 @@ pub enum CodegenError {
         /// The child workflow ID that was not found.
         child_workflow_id: String,
     },
+    /// A step is missing required configuration for code generation.
+    InvalidStepConfig {
+        /// The step ID with invalid configuration.
+        step_id: String,
+        /// Human-readable validation message.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for CodegenError {
@@ -46,6 +53,13 @@ impl std::fmt::Display for CodegenError {
                     "Missing child workflow '{}' for step '{}'. \
                     Ensure the child workflow exists and is passed to compilation.",
                     child_workflow_id, step_id
+                )
+            }
+            CodegenError::InvalidStepConfig { step_id, message } => {
+                write!(
+                    f,
+                    "Invalid configuration for step '{}': {}",
+                    step_id, message
                 )
             }
         }

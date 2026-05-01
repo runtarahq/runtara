@@ -221,6 +221,7 @@ pub async fn update_workflow_handler(
             &tenant_id,
             &workflow_id,
             version_num,
+            false,
         )
         .await
         {
@@ -705,6 +706,7 @@ pub async fn compile_workflow_handler(
             &tenant_id,
             &workflow_id,
             version_num,
+            force_recompile,
         )
         .await
         {
@@ -809,7 +811,7 @@ pub async fn compile_workflow_handler(
     );
 
     match compilation_service
-        .compile_workflow(&tenant_id, &workflow_id, version_num)
+        .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)
         .await
     {
         Ok(result) => {

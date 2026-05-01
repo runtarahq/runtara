@@ -726,7 +726,22 @@ async fn handle_register_image_upload(
     }
 
     // Now create the image using the same logic as handle_register_image_stream in server.rs
-    let image_id = uuid::Uuid::new_v4().to_string();
+    let image_registry = ImageRegistry::new(state.pool.clone());
+    let existing_image = match image_registry.get_by_name(&tenant_id, &name).await {
+        Ok(image) => image,
+        Err(e) => {
+            return error_response(
+                "REGISTER_IMAGE_ERROR",
+                &format!("Failed to look up existing image: {}", e),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .into_response();
+        }
+    };
+    let replacing_existing = existing_image.is_some();
+    let image_id = existing_image
+        .map(|image| image.image_id)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let images_dir = state.data_dir.join("images").join(&image_id);
     let binary_path = images_dir.join("binary");
     let bundle_path = images_dir.join("bundle");
@@ -743,7 +758,9 @@ async fn handle_register_image_upload(
 
     if let Err(e) = std::fs::File::create(&binary_path).and_then(|mut f| f.write_all(&binary)) {
         error!(error = %e, "Failed to write binary");
-        let _ = std::fs::remove_dir_all(&images_dir);
+        if !replacing_existing {
+            let _ = std::fs::remove_dir_all(&images_dir);
+        }
         return error_response(
             "IO_ERROR",
             &format!("Failed to write binary: {}", e),
@@ -767,7 +784,9 @@ async fn handle_register_image_upload(
 
     let bundle_path_str = if runner_type == RunnerType::Oci {
         if let Err(e) = crate::runner::oci::create_bundle_at_path(&bundle_path, &binary_path) {
-            let _ = std::fs::remove_dir_all(&images_dir);
+            if !replacing_existing {
+                let _ = std::fs::remove_dir_all(&images_dir);
+            }
             return error_response(
                 "BUNDLE_ERROR",
                 &format!("Failed to create OCI bundle: {}", e),
@@ -799,9 +818,10 @@ async fn handle_register_image_upload(
     image.image_id = image_id.clone();
 
     // Register in database
-    let image_registry = ImageRegistry::new(state.pool.clone());
     if let Err(e) = image_registry.register(&image).await {
-        let _ = std::fs::remove_dir_all(&images_dir);
+        if !replacing_existing {
+            let _ = std::fs::remove_dir_all(&images_dir);
+        }
         return error_response(
             "REGISTER_IMAGE_ERROR",
             &format!("Failed to register image: {}", e),

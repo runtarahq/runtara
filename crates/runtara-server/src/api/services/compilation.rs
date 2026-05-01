@@ -69,11 +69,12 @@ impl CompilationService {
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
+        force_recompile: bool,
     ) -> Result<CompilationResultDto, ServiceError> {
         let compile_start = std::time::Instant::now();
         info!(
-            "Starting compilation for workflow {} version {}",
-            workflow_id, version
+            force_recompile = force_recompile,
+            "Starting compilation for workflow {} version {}", workflow_id, version
         );
 
         // 1. Fetch workflow definition and track-events mode
@@ -131,17 +132,20 @@ impl CompilationService {
             connection_service_url: self.connection_service_url.clone(),
         };
 
-        // 5. Check if already registered BEFORE compiling
-        // This prevents FK constraint violations when re-compiling workflows that are already registered
+        // 5. Check if already registered BEFORE compiling, unless a rebuild was requested.
+        // This prevents FK constraint violations when re-compiling workflows that are already registered.
         let step_start = std::time::Instant::now();
         debug!("compile: step 5 - checking if already registered in database");
-        let existing_image_id = self
-            .repository
-            .get_registered_image_id(tenant_id, workflow_id, version)
-            .await
-            .map_err(|e| {
-                ServiceError::DatabaseError(format!("Failed to check existing image: {}", e))
-            })?;
+        let existing_image_id = if force_recompile {
+            None
+        } else {
+            self.repository
+                .get_registered_image_id(tenant_id, workflow_id, version)
+                .await
+                .map_err(|e| {
+                    ServiceError::DatabaseError(format!("Failed to check existing image: {}", e))
+                })?
+        };
         debug!(
             duration_ms = step_start.elapsed().as_millis(),
             found = existing_image_id.is_some(),
@@ -167,8 +171,8 @@ impl CompilationService {
         }
 
         // 5b. Also check runtara-environment directly in case we have an orphaned image
-        // (image exists in runtara but no local record due to failed registration save)
-        if let Some(client) = &self.runtime_client {
+        // (image exists in runtara but no local record due to failed registration save).
+        if !force_recompile && let Some(client) = &self.runtime_client {
             let image_name = format!("{}:{}", workflow_id, version);
             let step_start = std::time::Instant::now();
             debug!("compile: step 5b - checking runtara-environment for existing image");

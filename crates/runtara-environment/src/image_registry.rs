@@ -95,7 +95,6 @@ impl ImageRegistry {
                 runner_type, created_at, updated_at, metadata
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (tenant_id, name) DO UPDATE SET
-                image_id = EXCLUDED.image_id,
                 description = EXCLUDED.description,
                 binary_path = EXCLUDED.binary_path,
                 bundle_path = EXCLUDED.bundle_path,

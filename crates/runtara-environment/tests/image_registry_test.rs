@@ -163,7 +163,6 @@ async fn test_duplicate_name_updates() {
     let image2 = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary-2").build();
 
     let image_id1 = image1.image_id.clone();
-    let image_id2 = image2.image_id.clone();
 
     // Register first
     registry
@@ -184,17 +183,14 @@ async fn test_duplicate_name_updates() {
         .expect("Failed to get image")
         .expect("Image not found");
 
-    // The image_id should be from the second image (due to EXCLUDED.image_id)
-    assert_eq!(retrieved.image_id, image_id2);
+    // The image row keeps its stable primary key so instance_images references remain valid.
+    assert_eq!(retrieved.image_id, image_id1);
     assert_eq!(retrieved.binary_path, "/tmp/test-binary-2");
 
-    // Cleanup - delete by the new id
     registry
-        .delete(&image_id2)
+        .delete(&image_id1)
         .await
         .expect("Failed to delete image");
-    // Try to delete old id too (may not exist)
-    registry.delete(&image_id1).await.ok();
 }
 
 #[tokio::test]

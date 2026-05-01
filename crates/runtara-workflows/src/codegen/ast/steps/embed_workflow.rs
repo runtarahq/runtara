@@ -656,6 +656,7 @@ mod tests {
                 assert_eq!(step_id, "start-child");
                 assert_eq!(child_workflow_id, "child-workflow-id");
             }
+            other => panic!("Expected MissingChildWorkflow error, got {other:?}"),
         }
     }
 

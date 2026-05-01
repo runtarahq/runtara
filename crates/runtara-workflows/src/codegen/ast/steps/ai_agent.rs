@@ -93,6 +93,14 @@ pub fn emit(
         .unwrap_or(0.7);
     let max_tokens: Option<u64> = step.config.as_ref().and_then(|c| c.max_tokens);
     let model_id: Option<&str> = step.config.as_ref().and_then(|c| c.model.as_deref());
+    let provider_id: &str = step
+        .config
+        .as_ref()
+        .map(|c| c.provider.as_str())
+        .ok_or_else(|| CodegenError::InvalidStepConfig {
+            step_id: step_id.clone(),
+            message: "AI Agent provider is required".to_string(),
+        })?;
     let output_schema = step.config.as_ref().and_then(|c| c.output_schema.as_ref());
 
     // Do all mutable operations first
@@ -200,6 +208,8 @@ pub fn emit(
     } else {
         quote! { None::<&str> }
     };
+
+    let provider_tokens = quote! { #provider_id };
 
     // Max tokens tokens
     let max_tokens_tokens = if let Some(mt) = max_tokens {
@@ -689,7 +699,7 @@ pub fn emit(
 
                     match __ai_llm_durable(
                         &__compact_key,
-                        __ai_integration_id.clone(),
+                        __ai_provider_id.clone(),
                         __ai_conn_params.clone(),
                         __ai_connection_id.clone(),
                         __ai_model_id.clone(),
@@ -1010,10 +1020,12 @@ pub fn emit(
             use #stdlib::ai::message::{Message as RigMessage, AssistantContent, UserContent};
             use #stdlib::ai::OneOrMany;
 
-            // Store connection info for passing to durable LLM calls
-            let __ai_integration_id = __ai_conn.integration_id.clone();
+            // Store connection info for passing to durable LLM calls. Provider
+            // routing is explicit workflow configuration; connection metadata
+            // is not used to infer the provider.
             let __ai_conn_params = serde_json::json!(__ai_conn.parameters);
             let __ai_connection_id = __ai_conn.connection_id.clone();
+            let __ai_provider_id = #provider_tokens.to_string();
             let __ai_model_id: Option<String> = #model_tokens.map(|s: &str| s.to_string());
             let __ai_max_tokens: Option<u64> = #max_tokens_tokens;
             let __ai_output_schema_json: Option<String> = #output_schema_tokens;
@@ -1167,7 +1179,7 @@ pub fn emit(
                     .map_err(|e| format!("AI Agent step '{}': failed to serialize tools: {}", #step_id, e))?;
                 let __cached_choice = __ai_llm_durable(
                     &__llm_cache_key,
-                    __ai_integration_id.clone(),
+                    __ai_provider_id.clone(),
                     __ai_conn_params.clone(),
                     __ai_connection_id.clone(),
                     __ai_model_id.clone(),
@@ -1948,6 +1960,7 @@ mod tests {
                 user_prompt: MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("Hello"),
                 }),
+                provider: runtara_dsl::AiAgentProvider::OpenAi,
                 model: Some("gpt-4o".to_string()),
                 max_iterations: Some(5),
                 temperature: Some(0.7),
@@ -2222,6 +2235,7 @@ mod tests {
                     user_prompt: MappingValue::Immediate(ImmediateValue {
                         value: serde_json::json!("user"),
                     }),
+                    provider: runtara_dsl::AiAgentProvider::OpenAi,
                     model: None,
                     max_iterations: None, // Should default to 10
                     temperature: None,    // Should default to 0.7
@@ -2276,6 +2290,7 @@ mod tests {
                 user_prompt: MappingValue::Immediate(ImmediateValue {
                     value: serde_json::json!("user"),
                 }),
+                provider: runtara_dsl::AiAgentProvider::OpenAi,
                 model: None,
                 max_iterations: None,
                 temperature: None,

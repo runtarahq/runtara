@@ -183,16 +183,14 @@ fn describe_connection_auth(
             }
         }
         "aws_credentials" | "s3_compatible" => {
-            let access_key_id = params["access_key_id"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let secret_access_key = params["secret_access_key"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let region = params["region"].as_str().unwrap_or("us-east-1").to_string();
-            let session_token = params["session_token"].as_str().map(|s| s.to_string());
+            let access_key_id = first_string_param(params, &["access_key_id", "aws_access_key_id"])
+                .unwrap_or_default();
+            let secret_access_key =
+                first_string_param(params, &["secret_access_key", "aws_secret_access_key"])
+                    .unwrap_or_default();
+            let region = first_string_param(params, &["region", "aws_region"])
+                .unwrap_or_else(|| "us-east-1".to_string());
+            let session_token = first_string_param(params, &["session_token", "aws_session_token"]);
 
             let (base_url, service) = if integration_id == "s3_compatible" {
                 let endpoint = params["endpoint"]
@@ -201,8 +199,14 @@ fn describe_connection_auth(
                     .unwrap_or_else(|| format!("https://s3.{}.amazonaws.com", region));
                 (Some(endpoint), "s3".to_string())
             } else {
-                let svc = params["service"].as_str().unwrap_or("s3").to_string();
-                let base = params["endpoint"].as_str().map(normalize_endpoint);
+                let svc = params["service"].as_str().unwrap_or("bedrock").to_string();
+                let base = params["endpoint"]
+                    .as_str()
+                    .map(normalize_endpoint)
+                    .or_else(|| {
+                        (svc == "bedrock")
+                            .then(|| format!("https://bedrock-runtime.{}.amazonaws.com", region))
+                    });
                 (base, svc)
             };
 
@@ -315,6 +319,16 @@ fn collect_shopify_scopes(params: &Value) -> String {
         .join(",")
 }
 
+fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        params[*key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn normalize_endpoint(endpoint: &str) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
@@ -340,5 +354,47 @@ mod tests {
             collect_shopify_scopes(&params),
             "read_products,read_inventory"
         );
+    }
+
+    #[test]
+    fn aws_credentials_defaults_to_bedrock_runtime_and_accepts_aws_field_names() {
+        let params = json!({
+            "aws_access_key_id": "AKIA_TEST",
+            "aws_secret_access_key": "secret",
+            "aws_region": "eu-central-1",
+            "aws_session_token": "token"
+        });
+        let mut headers = HashMap::new();
+
+        let descriptor = describe_connection_auth("conn", "aws_credentials", &params, &mut headers);
+
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://bedrock-runtime.eu-central-1.amazonaws.com")
+        );
+        let aws = descriptor.aws_signing.expect("aws signing params");
+        assert_eq!(aws.access_key_id, "AKIA_TEST");
+        assert_eq!(aws.secret_access_key, "secret");
+        assert_eq!(aws.region, "eu-central-1");
+        assert_eq!(aws.service, "bedrock");
+        assert_eq!(aws.session_token.as_deref(), Some("token"));
+    }
+
+    #[test]
+    fn aws_credentials_ignores_blank_optional_session_token() {
+        let params = json!({
+            "aws_access_key_id": "AKIA_TEST",
+            "aws_secret_access_key": "secret",
+            "aws_region": "ap-southeast-2",
+            "aws_session_token": ""
+        });
+        let mut headers = HashMap::new();
+
+        let descriptor = describe_connection_auth("conn", "aws_credentials", &params, &mut headers);
+        let aws = descriptor.aws_signing.expect("aws signing params");
+
+        assert_eq!(aws.access_key_id, "AKIA_TEST");
+        assert_eq!(aws.region, "ap-southeast-2");
+        assert!(aws.session_token.is_none());
     }
 }

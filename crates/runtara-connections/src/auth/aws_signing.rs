@@ -44,12 +44,7 @@ pub fn sign_request_v4(
         host.to_string()
     };
 
-    // Canonical URI (URL-encoded path)
-    let canonical_uri = if url.path().is_empty() {
-        "/".to_string()
-    } else {
-        url.path().to_string()
-    };
+    let canonical_uri = canonical_uri(url);
 
     // Canonical query string (sorted)
     let canonical_querystring = {
@@ -147,4 +142,34 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
+}
+
+fn canonical_uri(url: &url::Url) -> String {
+    let path = url.path();
+    if path.is_empty() {
+        return "/".to_string();
+    }
+
+    path.split('/')
+        .map(|segment| urlencoding::encode(segment).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_uri_encodes_reserved_chars_inside_segments() {
+        let url = url::Url::parse(
+            "https://bedrock-runtime.ap-southeast-2.amazonaws.com/model/openai.gpt-oss-120b-1:0/converse",
+        )
+        .unwrap();
+
+        assert_eq!(
+            canonical_uri(&url),
+            "/model/openai.gpt-oss-120b-1%3A0/converse"
+        );
+    }
 }

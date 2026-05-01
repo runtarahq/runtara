@@ -1413,6 +1413,7 @@ impl ExecutionEngine {
                         tenant_id,
                         workflow_id,
                         version,
+                        false,
                     )
                     .await
                     {
@@ -1514,6 +1515,7 @@ impl ExecutionEngine {
                 tenant_id,
                 workflow_id,
                 version,
+                false,
             )
             .await
             {

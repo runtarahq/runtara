@@ -110,37 +110,42 @@ pub async fn run(
                     tenant_id = %request.tenant_id,
                     workflow_id = %request.workflow_id,
                     version = request.version,
+                    force_recompile = request.force_recompile,
                     "Processing compilation request"
                 );
 
                 // Check if already compiled (skip if successful compilation exists)
-                let should_compile = match check_compilation_status(
-                    &pool,
-                    &request.tenant_id,
-                    &request.workflow_id,
-                    request.version,
-                )
-                .await
-                {
-                    Ok(CompilationStatus::Success) => {
-                        info!(
-                            tenant_id = %request.tenant_id,
-                            workflow_id = %request.workflow_id,
-                            version = request.version,
-                            "Workflow already compiled, skipping"
-                        );
-                        false
-                    }
-                    Ok(CompilationStatus::NotCompiled) | Ok(CompilationStatus::Failed) => true,
-                    Err(e) => {
-                        error!(
-                            tenant_id = %request.tenant_id,
-                            workflow_id = %request.workflow_id,
-                            version = request.version,
-                            error = %e,
-                            "Failed to check compilation status, will attempt compilation"
-                        );
-                        true
+                let should_compile = if request.force_recompile {
+                    true
+                } else {
+                    match check_compilation_status(
+                        &pool,
+                        &request.tenant_id,
+                        &request.workflow_id,
+                        request.version,
+                    )
+                    .await
+                    {
+                        Ok(CompilationStatus::Success) => {
+                            info!(
+                                tenant_id = %request.tenant_id,
+                                workflow_id = %request.workflow_id,
+                                version = request.version,
+                                "Workflow already compiled, skipping"
+                            );
+                            false
+                        }
+                        Ok(CompilationStatus::NotCompiled) | Ok(CompilationStatus::Failed) => true,
+                        Err(e) => {
+                            error!(
+                                tenant_id = %request.tenant_id,
+                                workflow_id = %request.workflow_id,
+                                version = request.version,
+                                error = %e,
+                                "Failed to check compilation status, will attempt compilation"
+                            );
+                            true
+                        }
                     }
                 };
 
@@ -158,7 +163,12 @@ pub async fn run(
 
                     // Perform compilation (target determined by RUNTARA_COMPILE_TARGET env var)
                     let compile_result = compilation_service
-                        .compile_workflow(&request.tenant_id, &request.workflow_id, request.version)
+                        .compile_workflow(
+                            &request.tenant_id,
+                            &request.workflow_id,
+                            request.version,
+                            request.force_recompile,
+                        )
                         .await;
 
                     // Record metrics
@@ -327,9 +337,15 @@ pub async fn enqueue_compilation(
     tenant_id: &str,
     workflow_id: &str,
     version: i32,
+    force_recompile: bool,
 ) -> Result<bool, crate::valkey::compilation_queue::CompilationQueueError> {
     let queue = CompilationQueue::new(redis_url.to_string())?;
-    let request = CompilationRequest::new(tenant_id.to_string(), workflow_id.to_string(), version);
+    let request = CompilationRequest::new_with_force(
+        tenant_id.to_string(),
+        workflow_id.to_string(),
+        version,
+        force_recompile,
+    );
     queue.enqueue(&request).await
 }
 

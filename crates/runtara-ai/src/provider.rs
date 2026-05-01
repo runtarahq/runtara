@@ -5,7 +5,7 @@
 //! Creates `CompletionModel` instances from connection parameters,
 //! dispatching based on `integration_id`.
 
-use crate::providers::openai;
+use crate::providers::{bedrock, openai};
 use serde_json::{Value, json};
 
 /// Errors that can occur during provider creation.
@@ -79,7 +79,7 @@ pub fn create_openai_model_with_connection(
 /// best-effort via prompt instructions).
 pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Option<Value> {
     match integration_id {
-        "openai_api_key" => Some(json!({
+        "openai" | "openai_api_key" => Some(json!({
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
@@ -95,14 +95,29 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
                 "schema": json_schema
             }
         })),
+        "bedrock" | "aws_credentials" => Some(json!({
+            "outputConfig": {
+                "textFormat": {
+                    "type": "json_schema",
+                    "structure": {
+                        "jsonSchema": {
+                            "name": "structured_response",
+                            "description": "Structured response for the AI Agent step",
+                            "schema": serde_json::to_string(&json_schema).unwrap_or_else(|_| "{}".to_string())
+                        }
+                    }
+                }
+            }
+        })),
         _ => None,
     }
 }
 
-/// Dispatch to the appropriate LLM provider based on `integration_id`.
+/// Dispatch to the appropriate LLM provider based on provider or integration id.
 ///
 /// Currently supports:
-/// - `openai_api_key` → OpenAI
+/// - `openai` / `openai_api_key` → OpenAI-compatible chat completions
+/// - `bedrock` / `aws_credentials` → Amazon Bedrock Converse
 ///
 /// Returns a boxed `CompletionModel` so the caller doesn't need to know
 /// which concrete provider type is in use.
@@ -116,28 +131,38 @@ pub fn create_completion_model(
 
 /// Dispatch to the appropriate LLM provider, optionally using the proxy pattern.
 ///
-/// When `connection_id` is set, the proxy handles credential injection and
-/// provider routing server-side. The client just sends requests with the
-/// connection ID header — the proxy resolves the actual provider, API key, etc.
+/// The first argument is the explicit provider id for AI Agent calls, but this
+/// function also accepts legacy connection integration ids for direct callers.
 pub fn create_completion_model_with_connection(
     integration_id: &str,
     parameters: &Value,
     model: Option<&str>,
     connection_id: Option<&str>,
 ) -> Result<Box<dyn crate::CompletionModel>, ProviderError> {
-    // When connection_id is set, always use proxy mode.
-    // The proxy handles credential injection and provider routing.
-    if connection_id.is_some_and(|id| !id.is_empty()) {
-        let m = create_openai_model_with_connection(parameters, model, connection_id)?;
-        return Ok(Box::new(m));
-    }
-
-    // Direct mode (no connection_id) — dispatch by integration_id
     match integration_id {
-        "openai_api_key" => {
+        "bedrock" | "aws_credentials" => {
+            let conn_id = connection_id
+                .filter(|id| !id.is_empty())
+                .ok_or(ProviderError::MissingConnection)?;
+            let m = bedrock::Client::from_connection_id(conn_id).completion_model(model);
+            Ok(Box::new(m))
+        }
+        "openai" | "openai_api_key" => {
             let m = create_openai_model_with_connection(parameters, model, connection_id)?;
             Ok(Box::new(m))
         }
         other => Err(ProviderError::UnsupportedProvider(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bedrock_structured_output_uses_converse_shape() {
+        let params =
+            structured_output_params("bedrock", json!({"type": "object"})).expect("bedrock params");
+        assert_eq!(params["outputConfig"]["textFormat"]["type"], "json_schema");
     }
 }

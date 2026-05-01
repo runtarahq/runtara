@@ -1112,6 +1112,28 @@ pub struct AiAgentStep {
     pub durable: Option<bool>,
 }
 
+/// LLM provider used by an AI Agent step.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AiAgentProvider {
+    /// OpenAI-compatible chat completions provider.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Amazon Bedrock Converse provider.
+    #[serde(rename = "bedrock")]
+    Bedrock,
+}
+
+impl AiAgentProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AiAgentProvider::OpenAi => "openai",
+            AiAgentProvider::Bedrock => "bedrock",
+        }
+    }
+}
+
 /// Configuration for the AI Agent step.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1122,6 +1144,9 @@ pub struct AiAgentConfig {
 
     /// User message / request to process
     pub user_prompt: MappingValue,
+
+    /// LLM provider to use for the agent brain.
+    pub provider: AiAgentProvider,
 
     /// LLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514")
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -2,7 +2,8 @@
 //!
 //! Provides endpoints for workflow metadata including step types and step-specific metadata
 
-use axum::{http::StatusCode, response::Json};
+use axum::{extract::Query, http::StatusCode, response::Json};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
@@ -231,4 +232,41 @@ pub async fn get_workflow_step_types_handler() -> (StatusCode, Json<Value>) {
         "timestamp": chrono::Utc::now().to_rfc3339()
     });
     (StatusCode::OK, Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LlmModelsQuery {
+    pub provider: Option<String>,
+}
+
+/// Get static LLM model metadata for AI Agent configuration.
+pub async fn get_llm_models_handler(
+    Query(query): Query<LlmModelsQuery>,
+) -> (StatusCode, Json<Value>) {
+    match query.provider.as_deref().unwrap_or("bedrock") {
+        "bedrock" | "aws_credentials" => {
+            let catalog = runtara_ai::providers::bedrock_models::catalog_json();
+            (StatusCode::OK, Json(catalog))
+        }
+        "openai" | "openai_api_key" => (
+            StatusCode::OK,
+            Json(json!({
+                "generatedAt": null,
+                "source": "static OpenAI AI Agent defaults",
+                "models": [
+                    {"provider": "OpenAI", "modelName": "GPT-4.1", "modelId": "gpt-4.1", "recommendedForAiAgent": true},
+                    {"provider": "OpenAI", "modelName": "GPT-4.1 Mini", "modelId": "gpt-4.1-mini", "recommendedForAiAgent": true},
+                    {"provider": "OpenAI", "modelName": "GPT-4o", "modelId": "gpt-4o", "recommendedForAiAgent": true},
+                    {"provider": "OpenAI", "modelName": "GPT-4o Mini", "modelId": "gpt-4o-mini", "recommendedForAiAgent": true}
+                ]
+            })),
+        ),
+        other => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("Unsupported LLM provider: {}", other),
+                "models": []
+            })),
+        ),
+    }
 }

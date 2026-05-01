@@ -1286,6 +1286,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             "/api/runtime/metadata/workflow/step-types",
             get(api::metadata::get_workflow_step_types_handler),
         )
+        .route(
+            "/api/runtime/metadata/llm-models",
+            get(api::metadata::get_llm_models_handler),
+        )
         // Specification endpoints (serve pre-generated specs)
         .route(
             "/api/runtime/specs/versions",
