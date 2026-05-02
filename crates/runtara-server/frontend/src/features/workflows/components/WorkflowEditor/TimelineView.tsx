@@ -1,5 +1,6 @@
 import {
   Fragment,
+  type ReactNode,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -49,6 +50,10 @@ type WorkflowTimelineViewProps = {
   readOnly?: boolean;
   debugInspectMode?: boolean;
   onEditNode?: (nodeId: string) => void;
+  editingNodeId?: string | null;
+  renderInlineEditor?: (nodeId: string) => ReactNode;
+  activeAddStepRequest?: TimelineAddStepRequest | null;
+  renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
 };
 
@@ -124,6 +129,19 @@ type TimelineRouteController = {
     direction: 'up' | 'down'
   ) => void;
 };
+
+function areTimelineAddRequestsEqual(
+  first: TimelineAddStepRequest | null | undefined,
+  second: TimelineAddStepRequest | null | undefined
+) {
+  return (
+    Boolean(first && second) &&
+    first?.sourceNodeId === second?.sourceNodeId &&
+    first?.sourceHandle === second?.sourceHandle &&
+    first?.targetNodeId === second?.targetNodeId &&
+    first?.parentId === second?.parentId
+  );
+}
 
 type StepData = Partial<ExecutionGraphStepDto> & {
   content?: string;
@@ -892,13 +910,34 @@ function collectTimelineListContexts(
 function TimelineInsertionPoint({
   request,
   depth,
+  activeAddStepRequest,
+  renderInlineAddStep,
   onAddStep,
 }: {
   request: TimelineAddStepRequest | null;
   depth: number;
+  activeAddStepRequest?: TimelineAddStepRequest | null;
+  renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
 }) {
   if (!request || !onAddStep) return null;
+
+  const inlineAddStep = areTimelineAddRequestsEqual(
+    request,
+    activeAddStepRequest
+  )
+    ? renderInlineAddStep?.(request)
+    : null;
+
+  if (inlineAddStep) {
+    return (
+      <div className="py-1" style={{ marginLeft: depth * 24 }}>
+        <div className="overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
+          {inlineAddStep}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -937,6 +976,10 @@ function TimelineItemList({
   expandedContainers,
   onToggleContainer,
   onEditNode,
+  editingNodeId,
+  renderInlineEditor,
+  activeAddStepRequest,
+  renderInlineAddStep,
   onAddStep,
   dragController,
   routeController,
@@ -950,6 +993,10 @@ function TimelineItemList({
   expandedContainers: Record<string, boolean>;
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
+  editingNodeId?: string | null;
+  renderInlineEditor?: (nodeId: string) => ReactNode;
+  activeAddStepRequest?: TimelineAddStepRequest | null;
+  renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
@@ -963,6 +1010,8 @@ function TimelineItemList({
         <TimelineInsertionPoint
           request={createInsertionRequest(items, 0, listContext, endTargetNode)}
           depth={depth}
+          activeAddStepRequest={activeAddStepRequest}
+          renderInlineAddStep={renderInlineAddStep}
           onAddStep={onAddStep}
         />
       )}
@@ -977,6 +1026,10 @@ function TimelineItemList({
             expandedContainers={expandedContainers}
             onToggleContainer={onToggleContainer}
             onEditNode={onEditNode}
+            editingNodeId={editingNodeId}
+            renderInlineEditor={renderInlineEditor}
+            activeAddStepRequest={activeAddStepRequest}
+            renderInlineAddStep={renderInlineAddStep}
             onAddStep={onAddStep}
             dragController={dragController}
             routeController={routeController}
@@ -990,6 +1043,8 @@ function TimelineItemList({
                 endTargetNode
               )}
               depth={depth}
+              activeAddStepRequest={activeAddStepRequest}
+              renderInlineAddStep={renderInlineAddStep}
               onAddStep={onAddStep}
             />
           )}
@@ -1009,6 +1064,10 @@ function BranchLaneGroups({
   expandedContainers,
   onToggleContainer,
   onEditNode,
+  editingNodeId,
+  renderInlineEditor,
+  activeAddStepRequest,
+  renderInlineAddStep,
   onAddStep,
   dragController,
   routeController,
@@ -1022,6 +1081,10 @@ function BranchLaneGroups({
   expandedContainers: Record<string, boolean>;
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
+  editingNodeId?: string | null;
+  renderInlineEditor?: (nodeId: string) => ReactNode;
+  activeAddStepRequest?: TimelineAddStepRequest | null;
+  renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
@@ -1158,6 +1221,10 @@ function BranchLaneGroups({
                 expandedContainers={expandedContainers}
                 onToggleContainer={onToggleContainer}
                 onEditNode={onEditNode}
+                editingNodeId={editingNodeId}
+                renderInlineEditor={renderInlineEditor}
+                activeAddStepRequest={activeAddStepRequest}
+                renderInlineAddStep={renderInlineAddStep}
                 onAddStep={onAddStep}
                 dragController={dragController}
                 routeController={routeController}
@@ -1183,6 +1250,10 @@ function WorkflowTimelineItem({
   expandedContainers,
   onToggleContainer,
   onEditNode,
+  editingNodeId,
+  renderInlineEditor,
+  activeAddStepRequest,
+  renderInlineAddStep,
   onAddStep,
   dragController,
   routeController,
@@ -1195,6 +1266,10 @@ function WorkflowTimelineItem({
   expandedContainers: Record<string, boolean>;
   onToggleContainer: (nodeId: string) => void;
   onEditNode?: (nodeId: string) => void;
+  editingNodeId?: string | null;
+  renderInlineEditor?: (nodeId: string) => ReactNode;
+  activeAddStepRequest?: TimelineAddStepRequest | null;
+  renderInlineAddStep?: (request: TimelineAddStepRequest) => ReactNode;
   onAddStep?: (request: TimelineAddStepRequest) => void;
   dragController: TimelineDragController;
   routeController: TimelineRouteController;
@@ -1210,6 +1285,7 @@ function WorkflowTimelineItem({
   const stepType = getStepType(node);
   const StepIcon = getStepIcon(stepType);
   const isSelected = selectedNodeId === node.id;
+  const isEditingInline = editingNodeId === node.id;
   const isContainer = item.children.length > 0;
   const isExpanded = expandedContainers[node.id] ?? true;
   const nestedItemCount = countItems(item.children);
@@ -1255,12 +1331,13 @@ function WorkflowTimelineItem({
       )}
       <div
         className={cn(
-          'relative flex gap-3 rounded-md border bg-background p-3 transition-colors',
+          'relative overflow-hidden rounded-md border bg-background transition-colors',
           hasValidationError
             ? 'border-destructive ring-2 ring-destructive/30'
             : executionStatus
               ? getExecutionBorderClass(executionStatus.status)
-              : isSelected && 'border-primary bg-primary/5',
+              : (isSelected || isEditingInline) &&
+                'border-primary bg-primary/5',
           executionStatus?.status === ExecutionStatus.Suspended &&
             'border-2 animate-glow-pulse',
           !canInspectInDebug && 'opacity-60',
@@ -1271,126 +1348,138 @@ function WorkflowTimelineItem({
         )}
         style={{ marginLeft: depth * 24 }}
       >
-        {!readOnly && !debugInspectMode && (
-          <button
-            type="button"
-            className="mt-1 flex size-6 shrink-0 cursor-grab items-center justify-center rounded-sm text-muted-foreground hover:bg-muted active:cursor-grabbing"
-            onClick={(event) => event.stopPropagation()}
-            onPointerDown={(event) =>
-              dragController.onPointerDown(event, item, listContext)
-            }
-            onMouseDown={(event) =>
-              dragController.onMouseDown(event, item, listContext)
-            }
-            aria-label={`Move ${getStepName(node)} with nested steps`}
-          >
-            <GripVertical className="size-4" aria-hidden="true" />
-          </button>
-        )}
-        <div className="flex flex-col items-center">
-          <button
-            type="button"
-            className={cn(
-              'flex size-8 items-center justify-center rounded-full border bg-muted text-muted-foreground',
-              isSelected && 'border-primary text-primary',
-              getExecutionIconClass(executionStatus?.status, hasValidationError)
-            )}
-            onClick={handleSelect}
-            aria-label={`Select ${getStepName(node)}`}
-          >
-            <StepIcon className="size-4" aria-hidden="true" />
-          </button>
-          {isContainer && (
-            <div
-              className="mt-2 h-full min-h-6 w-px bg-border"
-              aria-hidden="true"
-            />
+        <div className="flex gap-3 p-3">
+          {!readOnly && !debugInspectMode && (
+            <button
+              type="button"
+              className="mt-1 flex size-6 shrink-0 cursor-grab items-center justify-center rounded-sm text-muted-foreground hover:bg-muted active:cursor-grabbing"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) =>
+                dragController.onPointerDown(event, item, listContext)
+              }
+              onMouseDown={(event) =>
+                dragController.onMouseDown(event, item, listContext)
+              }
+              aria-label={`Move ${getStepName(node)} with nested steps`}
+            >
+              <GripVertical className="size-4" aria-hidden="true" />
+            </button>
           )}
-        </div>
-
-        <div
-          role="button"
-          tabIndex={canInspectInDebug ? 0 : -1}
-          className="min-w-0 flex-1 cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          onClick={handleSelect}
-          onDoubleClick={readOnly ? undefined : handleEdit}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              handleSelect();
-            }
-          }}
-        >
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="flex flex-col items-center">
+            <button
+              type="button"
+              className={cn(
+                'flex size-8 items-center justify-center rounded-full border bg-muted text-muted-foreground',
+                isSelected && 'border-primary text-primary',
+                getExecutionIconClass(
+                  executionStatus?.status,
+                  hasValidationError
+                )
+              )}
+              onClick={handleSelect}
+              aria-label={`Select ${getStepName(node)}`}
+            >
+              <StepIcon className="size-4" aria-hidden="true" />
+            </button>
             {isContainer && (
-              <button
-                type="button"
-                className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onToggleContainer(node.id);
-                }}
-                aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${getStepName(node)}`}
-              >
-                {isExpanded ? (
-                  <ChevronDown className="size-4" aria-hidden="true" />
-                ) : (
-                  <ChevronRight className="size-4" aria-hidden="true" />
-                )}
-              </button>
-            )}
-            <h3 className="truncate text-sm font-semibold text-foreground">
-              {getStepName(node)}
-            </h3>
-            <Badge variant={getStepBadgeVariant(stepType)}>{stepType}</Badge>
-            {executionBadge && ExecutionIcon && (
-              <Badge variant={executionBadge.variant}>
-                <ExecutionIcon
-                  className={cn('mr-1 size-3', executionBadge.iconClassName)}
-                  aria-hidden="true"
-                />
-                {executionBadge.label}
-              </Badge>
-            )}
-            {hasValidationError && (
-              <Badge variant="destructive">
-                <AlertCircle className="mr-1 size-3" aria-hidden="true" />
-                Problem
-              </Badge>
+              <div
+                className="mt-2 h-full min-h-6 w-px bg-border"
+                aria-hidden="true"
+              />
             )}
           </div>
 
-          <p
-            className={cn(
-              'mt-1 line-clamp-2 text-xs text-muted-foreground',
-              executionStatus?.error && 'text-destructive'
-            )}
+          <div
+            role="button"
+            tabIndex={canInspectInDebug ? 0 : -1}
+            className="min-w-0 flex-1 cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            onClick={handleSelect}
+            onDoubleClick={readOnly ? undefined : handleEdit}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                handleSelect();
+              }
+            }}
           >
-            {executionStatus?.error || getStepDescription(node)}
-          </p>
-
-          {item.children.length > 0 && (
-            <div className="mt-3">
-              <Badge variant="secondary">
-                <ListTree className="mr-1 size-3" aria-hidden="true" />
-                {nestedItemCount} nested
-              </Badge>
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {isContainer && (
+                <button
+                  type="button"
+                  className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onToggleContainer(node.id);
+                  }}
+                  aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${getStepName(node)}`}
+                >
+                  {isExpanded ? (
+                    <ChevronDown className="size-4" aria-hidden="true" />
+                  ) : (
+                    <ChevronRight className="size-4" aria-hidden="true" />
+                  )}
+                </button>
+              )}
+              <h3 className="truncate text-sm font-semibold text-foreground">
+                {getStepName(node)}
+              </h3>
+              <Badge variant={getStepBadgeVariant(stepType)}>{stepType}</Badge>
+              {executionBadge && ExecutionIcon && (
+                <Badge variant={executionBadge.variant}>
+                  <ExecutionIcon
+                    className={cn('mr-1 size-3', executionBadge.iconClassName)}
+                    aria-hidden="true"
+                  />
+                  {executionBadge.label}
+                </Badge>
+              )}
+              {hasValidationError && (
+                <Badge variant="destructive">
+                  <AlertCircle className="mr-1 size-3" aria-hidden="true" />
+                  Problem
+                </Badge>
+              )}
             </div>
+
+            <p
+              className={cn(
+                'mt-1 line-clamp-2 text-xs text-muted-foreground',
+                executionStatus?.error && 'text-destructive'
+              )}
+            >
+              {executionStatus?.error || getStepDescription(node)}
+            </p>
+
+            {item.children.length > 0 && (
+              <div className="mt-3">
+                <Badge variant="secondary">
+                  <ListTree className="mr-1 size-3" aria-hidden="true" />
+                  {nestedItemCount} nested
+                </Badge>
+              </div>
+            )}
+          </div>
+
+          {!readOnly && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleEdit}
+              aria-label={`Edit ${getStepName(node)}`}
+              aria-expanded={isEditingInline}
+            >
+              <PenLine aria-hidden="true" />
+              {isEditingInline ? 'Editing' : 'Edit'}
+            </Button>
           )}
         </div>
 
-        {!readOnly && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={handleEdit}
-            aria-label={`Edit ${getStepName(node)}`}
-          >
-            <PenLine aria-hidden="true" />
-            Edit
-          </Button>
+        {isEditingInline && renderInlineEditor && (
+          <div className="border-t bg-card/60">
+            {renderInlineEditor(node.id)}
+          </div>
         )}
       </div>
 
@@ -1404,6 +1493,10 @@ function WorkflowTimelineItem({
         expandedContainers={expandedContainers}
         onToggleContainer={onToggleContainer}
         onEditNode={onEditNode}
+        editingNodeId={editingNodeId}
+        renderInlineEditor={renderInlineEditor}
+        activeAddStepRequest={activeAddStepRequest}
+        renderInlineAddStep={renderInlineAddStep}
         onAddStep={onAddStep}
         dragController={dragController}
         routeController={routeController}
@@ -1420,6 +1513,10 @@ function WorkflowTimelineItem({
             expandedContainers={expandedContainers}
             onToggleContainer={onToggleContainer}
             onEditNode={onEditNode}
+            editingNodeId={editingNodeId}
+            renderInlineEditor={renderInlineEditor}
+            activeAddStepRequest={activeAddStepRequest}
+            renderInlineAddStep={renderInlineAddStep}
             onAddStep={onAddStep}
             dragController={dragController}
             routeController={routeController}
@@ -1440,6 +1537,10 @@ export function WorkflowTimelineView({
   readOnly = false,
   debugInspectMode = false,
   onEditNode,
+  editingNodeId,
+  renderInlineEditor,
+  activeAddStepRequest,
+  renderInlineAddStep,
   onAddStep,
 }: WorkflowTimelineViewProps) {
   const nodes = useWorkflowStore((state) => state.nodes);
@@ -1716,28 +1817,38 @@ export function WorkflowTimelineView({
   );
 
   if (items.length === 0) {
+    const inlineAddStep = activeAddStepRequest
+      ? renderInlineAddStep?.(activeAddStepRequest)
+      : null;
+
     return (
       <div className="flex h-full items-center justify-center bg-background p-6">
-        <div className="max-w-sm rounded-md border bg-card p-6 text-center">
-          <Workflow
-            className="mx-auto size-10 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <h2 className="mt-4 text-base font-semibold">No workflow steps</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Add the first step to see the automation timeline.
-          </p>
-          {!readOnly && !debugInspectMode && onAddStep && (
-            <Button
-              type="button"
-              className="mt-4"
-              onClick={() => onAddStep({})}
-            >
-              <Plus aria-hidden="true" />
-              Add step
-            </Button>
-          )}
-        </div>
+        {inlineAddStep ? (
+          <div className="w-full max-w-3xl overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
+            {inlineAddStep}
+          </div>
+        ) : (
+          <div className="max-w-sm rounded-md border bg-card p-6 text-center">
+            <Workflow
+              className="mx-auto size-10 text-muted-foreground"
+              aria-hidden="true"
+            />
+            <h2 className="mt-4 text-base font-semibold">No workflow steps</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Add the first step to see the automation timeline.
+            </p>
+            {!readOnly && !debugInspectMode && onAddStep && (
+              <Button
+                type="button"
+                className="mt-4"
+                onClick={() => onAddStep({})}
+              >
+                <Plus aria-hidden="true" />
+                Add step
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -1769,6 +1880,10 @@ export function WorkflowTimelineView({
           expandedContainers={expandedContainers}
           onToggleContainer={toggleContainer}
           onEditNode={onEditNode}
+          editingNodeId={editingNodeId}
+          renderInlineEditor={renderInlineEditor}
+          activeAddStepRequest={activeAddStepRequest}
+          renderInlineAddStep={renderInlineAddStep}
           onAddStep={onAddStep}
           dragController={dragController}
           routeController={routeController}

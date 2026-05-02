@@ -19,6 +19,8 @@ type Props = {
   onChange?: (data: form.SchemaType) => void;
   onReset?: () => void;
   onDelete?: () => void;
+  contentScrollable?: boolean;
+  hideActions?: boolean;
 };
 
 export function NodeForm({
@@ -29,6 +31,8 @@ export function NodeForm({
   onChange,
   onReset,
   onDelete,
+  contentScrollable = true,
+  hideActions = false,
 }: Props) {
   const { stepTypes, agents, isLoading } = useContext(NodeFormContext);
 
@@ -133,12 +137,14 @@ export function NodeForm({
     <FormContentWrapper
       isLoading={isLoading}
       fieldsConfig={filteredFieldsConfig}
+      contentScrollable={contentScrollable}
     />
   );
 
-  const renderActions = () => (
-    <FormActions isEdit={isEdit} onReset={handleReset} onDelete={onDelete} />
-  );
+  const renderActions = () =>
+    hideActions ? null : (
+      <FormActions isEdit={isEdit} onReset={handleReset} onDelete={onDelete} />
+    );
 
   return (
     <TabProvider>
@@ -243,13 +249,15 @@ function FormActions({
 function FormContentWrapper({
   isLoading,
   fieldsConfig,
+  contentScrollable,
 }: {
   isLoading: boolean;
   fieldsConfig: any[];
+  contentScrollable?: boolean;
 }) {
   return (
     <div className="flex flex-col h-full min-h-0">
-      <SheetBase loading={isLoading}>
+      <SheetBase loading={isLoading} contentScrollable={contentScrollable}>
         <FormContent fieldsConfig={fieldsConfig} />
       </SheetBase>
     </div>

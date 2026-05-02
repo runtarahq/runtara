@@ -60,12 +60,17 @@ import {
 } from './CustomNodes/utils.tsx';
 import { NodeConfigDialog } from './NodeConfigDialog';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
-import { StepPickerModal, StepPickerResult } from './NodeForm/StepPickerModal';
+import {
+  StepPickerModal,
+  StepPickerPanel,
+  StepPickerResult,
+} from './NodeForm/StepPickerModal';
 import { NodeConfigProvider } from './NodeConfigContext';
 import {
   type TimelineAddStepRequest,
   WorkflowTimelineView,
 } from './TimelineView';
+import { TimelineNodeConfigPanel } from './TimelineNodeConfigPanel';
 
 // Re-export CreateStepContext type for external use
 export interface CreateStepContext {
@@ -161,6 +166,7 @@ type WorkflowEditorProps = {
 };
 
 type WorkflowEditorView = 'canvas' | 'timeline';
+type NodeEditSurface = 'dialog' | 'timeline';
 
 export function WorkflowEditor(props: WorkflowEditorProps) {
   return (
@@ -183,12 +189,21 @@ function WorkflowEditorContent({
   // Context for creating new steps
   const [createStepContext, setCreateStepContext] =
     useState<CreateStepContext | null>(null);
+  const [createStepSurface, setCreateStepSurface] =
+    useState<NodeEditSurface | null>(null);
+  const [pendingNodeSurface, setPendingNodeSurface] =
+    useState<NodeEditSurface | null>(null);
+  const [timelineAddStepRequest, setTimelineAddStepRequest] =
+    useState<TimelineAddStepRequest | null>(null);
 
   // Track selected edge ID for showing "+" button
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editingSurface, setEditingSurface] = useState<NodeEditSurface | null>(
+    null
+  );
   const [showStepPicker, setShowStepPicker] = useState(false);
   const [editorView, setEditorView] = useState<WorkflowEditorView>('timeline');
 
@@ -196,14 +211,36 @@ function WorkflowEditorContent({
   const openNodeConfig = useCallback(
     (nodeId: string) => {
       if (workflow && !readOnly) {
+        setCreateStepContext(null);
+        setCreateStepSurface(null);
+        setTimelineAddStepRequest(null);
+        setPendingNodeSurface(null);
         setEditingNodeId(nodeId);
+        setEditingSurface('dialog');
       }
     },
     [workflow, readOnly]
   );
+  const openTimelineNodeConfig = useCallback(
+    (nodeId: string) => {
+      if (workflow && !readOnly && !debugInspectMode) {
+        setCreateStepContext(null);
+        setCreateStepSurface(null);
+        setTimelineAddStepRequest(null);
+        setPendingNodeSurface(null);
+        setEditingNodeId(nodeId);
+        setEditingSurface('timeline');
+      }
+    },
+    [debugInspectMode, workflow, readOnly]
+  );
   const nodeConfigContextValue = useMemo(
     () => ({ openNodeConfig }),
     [openNodeConfig]
+  );
+  const timelineNodeConfigContextValue = useMemo(
+    () => ({ openNodeConfig: openTimelineNodeConfig }),
+    [openTimelineNodeConfig]
   );
 
   // Pending new node state from store (for deferred creation until user confirms)
@@ -253,12 +290,12 @@ function WorkflowEditorContent({
 
   // Show step picker when createStepContext changes
   useEffect(() => {
-    if (createStepContext && !readOnly) {
+    if (createStepContext && !readOnly && createStepSurface !== 'timeline') {
       setShowStepPicker(true);
     } else {
       setShowStepPicker(false);
     }
-  }, [createStepContext, readOnly]);
+  }, [createStepContext, createStepSurface, readOnly]);
 
   // Get editing node data
   const editingNodeData = useMemo(() => {
@@ -272,6 +309,20 @@ function WorkflowEditorContent({
       originalData: node.data as form.SchemaType,
     };
   }, [editingNodeId, nodes, stagedNodeChanges]);
+
+  const closeNodeConfig = useCallback(() => {
+    setEditingNodeId(null);
+    setEditingSurface(null);
+  }, []);
+
+  const closeCreateStep = useCallback(() => {
+    setCreateStepContext(null);
+    setCreateStepSurface(null);
+    setTimelineAddStepRequest(null);
+    setPendingNodeSurface(null);
+    setSelectedEdgeId(null);
+    setShowStepPicker(false);
+  }, []);
 
   // Handle backspace/delete key to remove selected node
   useEffect(() => {
@@ -497,6 +548,8 @@ function WorkflowEditorContent({
         hasEntryPoint: false,
         onAddFirstStep: () => {
           const defaultNodeHeight = 48;
+          setCreateStepSurface('dialog');
+          setTimelineAddStepRequest(null);
           setCreateStepContext({
             position: {
               x: startIndicatorSize.width + 60,
@@ -804,6 +857,8 @@ function WorkflowEditorContent({
             y: verticalPosition,
           });
 
+          setCreateStepSurface('dialog');
+          setTimelineAddStepRequest(null);
           setCreateStepContext({
             position: calculatedPosition,
             connection: {
@@ -825,6 +880,8 @@ function WorkflowEditorContent({
       sourceHandle: string;
       position: { x: number; y: number };
     }) => {
+      setCreateStepSurface('dialog');
+      setTimelineAddStepRequest(null);
       setCreateStepContext({
         position: edgeData.position,
         insertionEdge: {
@@ -845,6 +902,12 @@ function WorkflowEditorContent({
       const targetNode = request.targetNodeId
         ? nodes.find((node) => node.id === request.targetNodeId)
         : undefined;
+
+      setCreateStepSurface('timeline');
+      setPendingNodeSurface(null);
+      setPendingNewNode(null);
+      setTimelineAddStepRequest(request);
+      closeNodeConfig();
 
       const getAbsolutePosition = (node: Node): { x: number; y: number } => {
         if (!node.parentId) return node.position;
@@ -952,7 +1015,7 @@ function WorkflowEditorContent({
         position,
       });
     },
-    [nodes]
+    [nodes, setPendingNewNode, closeNodeConfig]
   );
 
   // Handle step picker selection - stores pending node for user confirmation
@@ -969,6 +1032,14 @@ function WorkflowEditorContent({
         agentId: result.agentId || '',
         capabilityId: result.capabilityId || '',
       } as form.SchemaType;
+      const setPendingNodeForCurrentSurface = (
+        node: Exclude<Parameters<typeof setPendingNewNode>[0], null>
+      ) => {
+        setPendingNewNode(node);
+        setPendingNodeSurface(
+          createStepSurface === 'timeline' ? 'timeline' : 'dialog'
+        );
+      };
 
       // Check if we're inserting between nodes via edge click
       if (createStepContext.insertionEdge) {
@@ -993,7 +1064,7 @@ function WorkflowEditorContent({
             });
 
             // Store as pending node instead of creating immediately
-            setPendingNewNode({
+            setPendingNodeForCurrentSurface({
               id: newNodeId,
               data: data as any,
               position: newPosition,
@@ -1008,7 +1079,7 @@ function WorkflowEditorContent({
         }
 
         // Regular insertion between nodes
-        setPendingNewNode({
+        setPendingNodeForCurrentSurface({
           id: newNodeId,
           data: data as any,
           position: createStepContext.position,
@@ -1071,7 +1142,7 @@ function WorkflowEditorContent({
         }
 
         // Store as pending node instead of creating immediately
-        setPendingNewNode({
+        setPendingNodeForCurrentSurface({
           id: newNodeId,
           data: data as any,
           position: finalPosition,
@@ -1118,7 +1189,7 @@ function WorkflowEditorContent({
       }
 
       // Store as pending node instead of creating immediately
-      setPendingNewNode({
+      setPendingNodeForCurrentSurface({
         id: newNodeId,
         data: data as any,
         position: finalPosition,
@@ -1129,33 +1200,38 @@ function WorkflowEditorContent({
       setSelectedEdgeId(null);
       setShowStepPicker(false);
     },
-    [createStepContext, getIntersectingNodes, nodes, setPendingNewNode]
+    [
+      createStepContext,
+      createStepSurface,
+      getIntersectingNodes,
+      nodes,
+      setPendingNewNode,
+    ]
   );
 
   const handleCancelCreate = useCallback(() => {
-    setCreateStepContext(null);
-    setSelectedEdgeId(null);
-    setShowStepPicker(false);
+    closeCreateStep();
+    setPendingNewNode(null);
     setSelectedNodeId(null);
-  }, [setSelectedNodeId]);
+  }, [closeCreateStep, setPendingNewNode, setSelectedNodeId]);
 
   // Node config dialog handlers
   const handleNodeSave = useCallback(
     (nodeId: string, data: form.SchemaType) => {
       updateNode(nodeId, data as unknown as Partial<ExecutionGraphStepDto>);
       onResetNodeChanges?.(nodeId);
-      setEditingNodeId(null);
+      closeNodeConfig();
     },
-    [updateNode, onResetNodeChanges]
+    [updateNode, onResetNodeChanges, closeNodeConfig]
   );
 
   const handleNodeDelete = useCallback(
     (nodeId: string) => {
       removeNode(nodeId);
       setSelectedNodeId(null);
-      setEditingNodeId(null);
+      closeNodeConfig();
     },
-    [removeNode, setSelectedNodeId]
+    [removeNode, setSelectedNodeId, closeNodeConfig]
   );
 
   // Pending new node handlers
@@ -1226,6 +1302,9 @@ function WorkflowEditorContent({
       }
 
       setPendingNewNode(null);
+      setPendingNodeSurface(null);
+      setTimelineAddStepRequest(null);
+      setCreateStepSurface(null);
     },
     [
       pendingNewNode,
@@ -1241,7 +1320,96 @@ function WorkflowEditorContent({
 
   const handlePendingNodeCancel = useCallback(() => {
     setPendingNewNode(null);
+    setPendingNodeSurface(null);
+    setTimelineAddStepRequest(null);
+    setCreateStepSurface(null);
   }, [setPendingNewNode]);
+
+  const renderTimelineInlineEditor = useCallback(
+    (nodeId: string) => {
+      if (!workflow || !editingNodeData || editingNodeData.id !== nodeId) {
+        return null;
+      }
+
+      return (
+        <TimelineNodeConfigPanel
+          nodeId={editingNodeData.id}
+          parentNodeId={editingNodeData.parentId}
+          nodeData={editingNodeData.data}
+          originalNodeData={editingNodeData.originalData}
+          outputSchemaFields={workflow.outputSchemaFields}
+          inputSchemaFields={workflow.inputSchemaFields}
+          variables={workflow.variables}
+          onSave={handleNodeSave}
+          onReset={onResetNodeChanges}
+          onDelete={handleNodeDelete}
+          onCancel={closeNodeConfig}
+        />
+      );
+    },
+    [
+      workflow,
+      editingNodeData,
+      handleNodeSave,
+      onResetNodeChanges,
+      handleNodeDelete,
+      closeNodeConfig,
+    ]
+  );
+
+  const renderTimelineInlineAddStep = useCallback(() => {
+    if (!workflow) return null;
+
+    if (pendingNewNode && pendingNodeSurface === 'timeline') {
+      return (
+        <TimelineNodeConfigPanel
+          nodeId={pendingNewNode.id}
+          nodeData={pendingNewNode.data as unknown as form.SchemaType}
+          originalNodeData={pendingNewNode.data as unknown as form.SchemaType}
+          outputSchemaFields={workflow.outputSchemaFields}
+          inputSchemaFields={workflow.inputSchemaFields}
+          variables={workflow.variables}
+          onSave={handlePendingNodeSave}
+          onCancel={handlePendingNodeCancel}
+          isCreate
+          parentNodeId={
+            pendingNewNode.sourceNodeId || pendingNewNode.insertionEdge?.source
+          }
+        />
+      );
+    }
+
+    if (createStepSurface !== 'timeline' || !createStepContext) return null;
+
+    return (
+      <NodeFormProvider
+        isAddingBefore={nodes.length === 0}
+        parentNodeId={
+          createStepContext.connection?.source ||
+          createStepContext.insertionEdge?.source
+        }
+      >
+        <StepPickerPanel
+          active
+          onSelect={handleStepPickerSelect}
+          onCancel={handleCancelCreate}
+          allowFinish={!createStepContext.insertionEdge}
+          contentScrollable={false}
+        />
+      </NodeFormProvider>
+    );
+  }, [
+    workflow,
+    pendingNewNode,
+    pendingNodeSurface,
+    handlePendingNodeSave,
+    handlePendingNodeCancel,
+    createStepSurface,
+    createStepContext,
+    nodes.length,
+    handleStepPickerSelect,
+    handleCancelCreate,
+  ]);
 
   const handleNodesChange = useCallback(
     (changes: import('@xyflow/react').NodeChange[]) => {
@@ -1310,6 +1478,7 @@ function WorkflowEditorContent({
                     // Open dialog for editing on double-click
                     if (workflow && !readOnly) {
                       setEditingNodeId(node.id);
+                      setEditingSurface('dialog');
                     }
                   }}
                   onNodeClick={(event, node) => {
@@ -1390,11 +1559,17 @@ function WorkflowEditorContent({
             value="timeline"
             className={cn('m-0 h-full', editorView !== 'timeline' && 'hidden')}
           >
-            <NodeConfigProvider value={nodeConfigContextValue}>
+            <NodeConfigProvider value={timelineNodeConfigContextValue}>
               <WorkflowTimelineView
                 readOnly={readOnly}
                 debugInspectMode={debugInspectMode}
-                onEditNode={openNodeConfig}
+                onEditNode={openTimelineNodeConfig}
+                editingNodeId={
+                  editingSurface === 'timeline' ? editingNodeId : null
+                }
+                renderInlineEditor={renderTimelineInlineEditor}
+                activeAddStepRequest={timelineAddStepRequest}
+                renderInlineAddStep={renderTimelineInlineAddStep}
                 onAddStep={handleTimelineAddStep}
               />
             </NodeConfigProvider>
@@ -1419,15 +1594,16 @@ function WorkflowEditorContent({
           }}
           onSelect={handleStepPickerSelect}
           allowFinish={!createStepContext?.insertionEdge}
+          closeOnSelect={false}
         />
       </NodeFormProvider>
 
       {/* Node Config Dialog - for editing existing nodes */}
-      {editingNodeData && workflow && (
+      {editingNodeData && workflow && editingSurface === 'dialog' && (
         <NodeConfigDialog
           open={!!editingNodeId}
           onOpenChange={(open) => {
-            if (!open) setEditingNodeId(null);
+            if (!open) closeNodeConfig();
           }}
           nodeId={editingNodeData.id}
           parentNodeId={editingNodeData.parentId}
@@ -1444,7 +1620,7 @@ function WorkflowEditorContent({
       )}
 
       {/* Node Config Dialog - for creating new nodes */}
-      {pendingNewNode && workflow && (
+      {pendingNewNode && workflow && pendingNodeSurface !== 'timeline' && (
         <NodeConfigDialog
           open={!!pendingNewNode}
           onOpenChange={(open) => {

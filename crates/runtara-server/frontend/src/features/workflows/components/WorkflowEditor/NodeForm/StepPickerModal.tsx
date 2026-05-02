@@ -1,10 +1,12 @@
-import { useState, useMemo, useContext, useEffect } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import {
   Bot,
   ChevronLeft,
   ChevronRight,
-  Search,
   Loader2,
+  Search,
+  X,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -16,10 +18,7 @@ import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import { Input } from '@/shared/components/ui/input';
 import { cn } from '@/lib/utils';
 import { ExtendedAgent } from '@/features/workflows/queries';
-import {
-  CapabilityInfo,
-  StepTypeInfo,
-} from '@/generated/RuntaraRuntimeApi';
+import { CapabilityInfo, StepTypeInfo } from '@/generated/RuntaraRuntimeApi';
 import { NodeFormContext } from './NodeFormContext';
 import { useMultipleAgentDetails } from '@/features/workflows/hooks';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
@@ -46,32 +45,21 @@ interface StepPickerModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSelect: (result: StepPickerResult) => void;
-  /** Allow selecting Finish step (for outgoing connections). Defaults to true. */
   allowFinish?: boolean;
-  /**
-   * Filter mode for the picker:
-   * - 'all' (default): show everything
-   * - 'tool': only Agent capabilities + WaitForSignal, EmbedWorkflow step types
-   * - 'memory': only Agent capabilities (memory providers)
-   */
   mode?: 'all' | 'tool' | 'memory';
+  closeOnSelect?: boolean;
 }
 
-// Normalize step type names from backend format (with spaces) to internal camelCase
-function normalizeStepType(stepType: string): string {
-  // Map known backend formats that don't normalize correctly with simple space removal
-  const knownMappings: Record<string, string> = {
-    'AI Agent': 'AiAgent',
-    'Wait for Signal': 'WaitForSignal',
-  };
-  return knownMappings[stepType] ?? stepType.replace(/\s+/g, '');
+interface StepPickerPanelProps {
+  active?: boolean;
+  onSelect: (result: StepPickerResult) => void;
+  onCancel?: () => void;
+  allowFinish?: boolean;
+  mode?: 'all' | 'tool' | 'memory';
+  contentScrollable?: boolean;
+  autoFocus?: boolean;
 }
 
-/**
- * Unified modal for selecting step type and operation with searchable interface
- * Combines step type selection and operator/operation selection into one flow
- */
-// Step types allowed when picking a tool for an AI Agent (lowercase for case-insensitive matching)
 const TOOL_STEP_TYPES = new Set([
   'waitforsignal',
   'wait for signal',
@@ -79,13 +67,23 @@ const TOOL_STEP_TYPES = new Set([
   'start workflow',
 ]);
 
-export function StepPickerModal({
-  open,
-  onOpenChange,
+function normalizeStepType(stepType: string): string {
+  const knownMappings: Record<string, string> = {
+    'AI Agent': 'AiAgent',
+    'Wait for Signal': 'WaitForSignal',
+  };
+  return knownMappings[stepType] ?? stepType.replace(/\s+/g, '');
+}
+
+export function StepPickerPanel({
+  active = true,
   onSelect,
+  onCancel,
   allowFinish = true,
   mode = 'all',
-}: StepPickerModalProps) {
+  contentScrollable = true,
+  autoFocus = true,
+}: StepPickerPanelProps) {
   const { agents, stepTypes } = useContext(NodeFormContext);
   const [viewMode, setViewMode] = useState<ViewMode>('browse');
   const [selectedAgent, setSelectedAgent] = useState<{
@@ -94,55 +92,49 @@ export function StepPickerModal({
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Filter out deprecated and invalid step types
-  // - Start: deprecated (cannot be added manually)
-  // - Agent: deprecated (use operators instead)
-  // - Finish: optionally allowed for outgoing connections
   const filteredStepTypes = useMemo(() => {
-    return (stepTypes || []).filter((st) => {
-      if (st.name === 'Start' || st.name === 'Agent') return false;
-      if (st.name === 'Finish' && !allowFinish) return false;
-      // In tool mode, only allow WaitForSignal and EmbedWorkflow
+    return (stepTypes || []).filter((stepType) => {
+      if (stepType.name === 'Start' || stepType.name === 'Agent') return false;
+      if (stepType.name === 'Finish' && !allowFinish) return false;
       if (
         mode === 'tool' &&
-        !TOOL_STEP_TYPES.has((st.name || '').toLowerCase())
-      )
+        !TOOL_STEP_TYPES.has((stepType.name || '').toLowerCase())
+      ) {
         return false;
-      // In memory mode, no step types — only agents
+      }
       if (mode === 'memory') return false;
       return true;
     });
   }, [stepTypes, allowFinish, mode]);
 
-  // In memory mode, filter to only agents that have both memory:read and memory:write tags
   const filteredAgents = useMemo(() => {
-    const all = (agents || []) as ExtendedAgent[];
-    if (mode !== 'memory') return all;
-    return all.filter((agent) => {
+    const allAgents = (agents || []) as ExtendedAgent[];
+    if (mode !== 'memory') return allAgents;
+
+    return allAgents.filter((agent) => {
       let hasRead = false;
       let hasWrite = false;
-      for (const cap of Object.values(agent.supportedCapabilities)) {
-        if (cap.tags?.includes('memory:read')) hasRead = true;
-        if (cap.tags?.includes('memory:write')) hasWrite = true;
+
+      for (const capability of Object.values(agent.supportedCapabilities)) {
+        if (capability.tags?.includes('memory:read')) hasRead = true;
+        if (capability.tags?.includes('memory:write')) hasWrite = true;
       }
+
       return hasRead && hasWrite;
     });
   }, [agents, mode]);
 
-  // Get agent IDs for fetching details
   const agentIds = useMemo(
-    () => ((agents || []) as ExtendedAgent[]).map((a) => a.id || ''),
+    () => ((agents || []) as ExtendedAgent[]).map((agent) => agent.id || ''),
     [agents]
   );
 
-  // Fetch details for ALL agents to enable global search
   const {
     agentDetailsMap,
     allLoaded: allAgentsLoaded,
     isLoading: someLoading,
-  } = useMultipleAgentDetails(agentIds, { enabled: open });
+  } = useMultipleAgentDetails(agentIds, { enabled: active });
 
-  // Build a map of agent id to their capabilities
   const agentCapabilitiesMap = useMemo(() => {
     const map = new Map<
       string,
@@ -151,6 +143,7 @@ export function StepPickerModal({
         capabilities: CapabilityInfo[];
       }
     >();
+
     for (const [agentId, details] of agentDetailsMap) {
       if (details) {
         map.set(agentId, {
@@ -159,59 +152,51 @@ export function StepPickerModal({
         });
       }
     }
+
     return map;
   }, [agentDetailsMap]);
 
-  // Fetch agent details when agent is selected
   const selectedAgentData = useMemo(() => {
     if (!selectedAgent) return null;
     return agentCapabilitiesMap.get(selectedAgent.id);
   }, [selectedAgent, agentCapabilitiesMap]);
 
-  // Reset state when modal closes
-  const handleOpenChange = (newOpen: boolean) => {
-    onOpenChange(newOpen);
-    if (!newOpen) {
+  useEffect(() => {
+    if (!active) {
       setViewMode('browse');
       setSelectedAgent(null);
       setSearchQuery('');
     }
-  };
+  }, [active]);
 
-  // Update view mode based on search query
   useEffect(() => {
     if (searchQuery.trim()) {
       setViewMode('search');
     } else if (viewMode === 'search') {
       setViewMode('browse');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- viewMode is read but shouldn't trigger re-run
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- viewMode is read but should not trigger this effect
   }, [searchQuery]);
 
-  // Global search across step types, agents and capabilities
   const searchResults = useMemo(() => {
-    if (!searchQuery.trim())
+    if (!searchQuery.trim()) {
       return { stepTypes: [], agents: [], capabilities: [] };
+    }
 
     const query = searchQuery.toLowerCase();
-
-    // Search step types (excluding Agent and Start)
-    const matchingStepTypes = filteredStepTypes.filter(
-      (st) =>
-        st.name?.toLowerCase().includes(query) ||
-        st.description?.toLowerCase().includes(query)
-    );
-
-    // Search agents (in memory mode, only search memory-capable agents)
     const searchableAgents =
       mode === 'memory' ? filteredAgents : ((agents || []) as ExtendedAgent[]);
-    const matchingAgents = searchableAgents.filter(
-      (ag) =>
-        ag.name?.toLowerCase().includes(query) ||
-        ag.description?.toLowerCase().includes(query)
-    );
 
-    // Search capabilities across all agents (in memory mode, only memory-capable agents)
+    const matchingStepTypes = filteredStepTypes.filter(
+      (stepType) =>
+        stepType.name?.toLowerCase().includes(query) ||
+        stepType.description?.toLowerCase().includes(query)
+    );
+    const matchingAgents = searchableAgents.filter(
+      (agent) =>
+        agent.name?.toLowerCase().includes(query) ||
+        agent.description?.toLowerCase().includes(query)
+    );
     const matchingCapabilities: CapabilitySearchResult[] = [];
 
     if (allAgentsLoaded) {
@@ -254,60 +239,48 @@ export function StepPickerModal({
   ]);
 
   const handleAgentSelect = (agentId: string, agentName: string) => {
-    // In memory mode, auto-select the best memory capability — never drill into capabilities
     if (mode === 'memory') {
-      let capId: string | undefined;
-
-      // 1. Try detailed capabilities: prefer cap with both tags, fall back to any memory tag
+      let capabilityId: string | undefined;
       const agentData = agentCapabilitiesMap.get(agentId);
+
       if (agentData?.capabilities.length) {
-        const bothTags = agentData.capabilities.find((cap) => {
-          const tags = (cap as any).tags as string[] | undefined;
-          return (
-            tags?.includes('memory:read') && tags?.includes('memory:write')
-          );
-        });
-        if (bothTags) {
-          capId = bothTags.id;
-        } else {
-          const anyMemoryTag = agentData.capabilities.find((cap) => {
-            const tags = (cap as any).tags as string[] | undefined;
-            return tags?.some((t: string) => t.startsWith('memory:'));
-          });
-          capId = anyMemoryTag?.id ?? agentData.capabilities[0]?.id;
-        }
+        const bothTags = agentData.capabilities.find(
+          (capability) =>
+            capability.tags?.includes('memory:read') &&
+            capability.tags?.includes('memory:write')
+        );
+        const anyMemoryTag = agentData.capabilities.find((capability) =>
+          capability.tags?.some((tag) => tag.startsWith('memory:'))
+        );
+        capabilityId =
+          bothTags?.id ?? anyMemoryTag?.id ?? agentData.capabilities[0]?.id;
       }
 
-      // 2. Fallback to supportedCapabilities (basic agent info)
-      if (!capId) {
-        const agent = filteredAgents.find((a) => a.id === agentId);
+      if (!capabilityId) {
+        const agent = filteredAgents.find(
+          (candidate) => candidate.id === agentId
+        );
         if (agent) {
-          const caps = Object.values(agent.supportedCapabilities);
-          const bothTags = caps.find((cap) => {
-            const tags = (cap as any).tags as string[] | undefined;
-            return (
-              tags?.includes('memory:read') && tags?.includes('memory:write')
-            );
-          });
-          if (bothTags) {
-            capId = bothTags.id;
-          } else {
-            const anyMemoryTag = caps.find((cap) => {
-              const tags = (cap as any).tags as string[] | undefined;
-              return tags?.some((t: string) => t.startsWith('memory:'));
-            });
-            capId = anyMemoryTag?.id ?? caps[0]?.id;
-          }
+          const capabilities = Object.values(agent.supportedCapabilities);
+          const bothTags = capabilities.find(
+            (capability) =>
+              capability.tags?.includes('memory:read') &&
+              capability.tags?.includes('memory:write')
+          );
+          const anyMemoryTag = capabilities.find((capability) =>
+            capability.tags?.some((tag) => tag.startsWith('memory:'))
+          );
+          capabilityId =
+            bothTags?.id ?? anyMemoryTag?.id ?? capabilities[0]?.id;
         }
       }
 
       onSelect({
         stepType: 'Agent',
         agentId,
-        capabilityId: capId || '',
+        capabilityId: capabilityId || '',
         name: agentName,
       });
-      handleOpenChange(false);
       return;
     }
 
@@ -321,22 +294,20 @@ export function StepPickerModal({
       stepType: normalizeStepType(stepType.name || ''),
       name: stepType.name || '',
     });
-    handleOpenChange(false);
   };
 
   const handleCapabilitySelect = (agentId: string, capabilityId: string) => {
     const agentData = agentCapabilitiesMap.get(agentId);
     const capability = agentData?.capabilities.find(
-      (cap) => cap.id === capabilityId
+      (candidate) => candidate.id === capabilityId
     );
 
     onSelect({
       stepType: 'Agent',
-      agentId: agentId,
-      capabilityId: capabilityId,
+      agentId,
+      capabilityId,
       name: capability?.displayName || capability?.name || 'New capability',
     });
-    handleOpenChange(false);
   };
 
   const handleBack = () => {
@@ -345,365 +316,452 @@ export function StepPickerModal({
     setSearchQuery('');
   };
 
-  const getTitle = () => {
-    if (viewMode === 'search') return 'Search Results';
-    if (viewMode === 'capabilities')
-      return `${selectedAgent?.name} Capabilities`;
-    if (mode === 'tool') return 'Add Tool';
-    if (mode === 'memory') return 'Add Memory Provider';
-    return 'Add Step';
-  };
+  const title =
+    viewMode === 'search'
+      ? 'Search Results'
+      : viewMode === 'capabilities'
+        ? `${selectedAgent?.name} Capabilities`
+        : mode === 'tool'
+          ? 'Add Tool'
+          : mode === 'memory'
+            ? 'Add Memory Provider'
+            : 'Add Step';
+  const subtitle =
+    viewMode === 'search'
+      ? 'Matching steps and capabilities'
+      : viewMode === 'capabilities'
+        ? 'Choose a capability to perform'
+        : mode === 'tool'
+          ? 'Choose agent capability, WaitForSignal, or EmbedWorkflow'
+          : mode === 'memory'
+            ? 'Choose an agent to provide memory'
+            : 'Search or browse step types and agents';
 
-  const getSubtitle = () => {
-    if (viewMode === 'search') return 'Matching steps and capabilities';
-    if (viewMode === 'capabilities') return 'Choose a capability to perform';
-    if (mode === 'tool')
-      return 'Choose agent capability, WaitForSignal, or EmbedWorkflow';
-    if (mode === 'memory') return 'Choose an agent to provide memory';
-    return 'Search or browse step types and agents';
+  return (
+    <>
+      <div className="flex items-center gap-2 border-b p-4">
+        {viewMode === 'capabilities' && (
+          <button
+            type="button"
+            onClick={handleBack}
+            className="rounded p-1 hover:bg-muted"
+            aria-label="Back to step list"
+          >
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+        )}
+        <div className="flex-1">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          <p className="text-sm text-muted-foreground">{subtitle}</p>
+        </div>
+        {onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded p-1 hover:bg-muted"
+            aria-label="Cancel adding step"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+
+      <div className="border-b p-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search steps or operations..."
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            className="pl-9"
+            autoFocus={autoFocus}
+          />
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          'p-4',
+          contentScrollable && 'max-h-[400px] overflow-y-auto'
+        )}
+      >
+        {viewMode === 'search' ? (
+          <SearchResults
+            loading={someLoading}
+            searchQuery={searchQuery}
+            results={searchResults}
+            onStepTypeSelect={handleStepTypeSelect}
+            onAgentSelect={handleAgentSelect}
+            onCapabilitySelect={handleCapabilitySelect}
+          />
+        ) : viewMode === 'capabilities' ? (
+          <CapabilityList
+            selectedAgentId={selectedAgent?.id}
+            selectedAgentData={selectedAgentData}
+            onCapabilitySelect={handleCapabilitySelect}
+          />
+        ) : (
+          <BrowseList
+            mode={mode}
+            stepTypes={filteredStepTypes}
+            agents={filteredAgents}
+            onStepTypeSelect={handleStepTypeSelect}
+            onAgentSelect={handleAgentSelect}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function SearchResults({
+  loading,
+  searchQuery,
+  results,
+  onStepTypeSelect,
+  onAgentSelect,
+  onCapabilitySelect,
+}: {
+  loading: boolean;
+  searchQuery: string;
+  results: {
+    stepTypes: StepTypeInfo[];
+    agents: ExtendedAgent[];
+    capabilities: CapabilitySearchResult[];
+  };
+  onStepTypeSelect: (stepType: StepTypeInfo) => void;
+  onAgentSelect: (agentId: string, agentName: string) => void;
+  onCapabilitySelect: (agentId: string, capabilityId: string) => void;
+}) {
+  const hasResults =
+    results.stepTypes.length > 0 ||
+    results.agents.length > 0 ||
+    results.capabilities.length > 0;
+
+  if (!hasResults) {
+    return (
+      <div className="space-y-4">
+        {loading && <LoadingMore />}
+        <div className="py-8 text-center text-muted-foreground">
+          No results found for "{searchQuery}"
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {loading && <LoadingMore />}
+      {results.stepTypes.length > 0 && (
+        <StepTypeSection
+          stepTypes={results.stepTypes}
+          onStepTypeSelect={onStepTypeSelect}
+        />
+      )}
+      {results.agents.length > 0 && (
+        <AgentSection agents={results.agents} onAgentSelect={onAgentSelect} />
+      )}
+      {results.capabilities.length > 0 && (
+        <CapabilitySearchSection
+          results={results.capabilities}
+          onCapabilitySelect={onCapabilitySelect}
+        />
+      )}
+    </div>
+  );
+}
+
+function BrowseList({
+  mode,
+  stepTypes,
+  agents,
+  onStepTypeSelect,
+  onAgentSelect,
+}: {
+  mode: 'all' | 'tool' | 'memory';
+  stepTypes: StepTypeInfo[];
+  agents: ExtendedAgent[];
+  onStepTypeSelect: (stepType: StepTypeInfo) => void;
+  onAgentSelect: (agentId: string, agentName: string) => void;
+}) {
+  return (
+    <div className="space-y-6">
+      {stepTypes.length > 0 && (
+        <StepTypeSection
+          stepTypes={stepTypes}
+          onStepTypeSelect={onStepTypeSelect}
+        />
+      )}
+      {agents.length > 0 && (
+        <AgentSection
+          title={mode === 'memory' ? 'Memory Providers' : 'Agents'}
+          agents={agents}
+          onAgentSelect={onAgentSelect}
+        />
+      )}
+    </div>
+  );
+}
+
+function StepTypeSection({
+  stepTypes,
+  onStepTypeSelect,
+}: {
+  stepTypes: StepTypeInfo[];
+  onStepTypeSelect: (stepType: StepTypeInfo) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <Zap className="h-5 w-5 text-muted-foreground" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Step Types
+        </span>
+      </div>
+      <div className="space-y-1">
+        {stepTypes.map((stepType) => (
+          <button
+            key={stepType.name}
+            type="button"
+            onClick={() => onStepTypeSelect(stepType)}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
+          >
+            <StepTypeIcon
+              className="h-5 w-5 text-muted-foreground"
+              type={stepType.name || ''}
+            />
+            <div>
+              <div className="font-medium">{stepType.name}</div>
+              {stepType.description && (
+                <div
+                  className="line-clamp-2 text-xs text-muted-foreground"
+                  title={stepType.description}
+                >
+                  {stepType.description}
+                </div>
+              )}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AgentSection({
+  title = 'Agents',
+  agents,
+  onAgentSelect,
+}: {
+  title?: string;
+  agents: ExtendedAgent[];
+  onAgentSelect: (agentId: string, agentName: string) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <Bot className="h-5 w-5 text-muted-foreground" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {title}
+        </span>
+      </div>
+      <div className="space-y-1">
+        {agents.map((agent) => {
+          const AgentIcon = getAgentIcon(agent.id);
+
+          return (
+            <button
+              key={agent.id}
+              type="button"
+              onClick={() => onAgentSelect(agent.id || '', agent.name || '')}
+              className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
+            >
+              <div className="flex items-center gap-3">
+                <div className="flex h-5 w-5 shrink-0 items-center justify-center">
+                  <AgentIcon className="h-5 w-5 text-muted-foreground" />
+                </div>
+                <div>
+                  <div className="font-medium">{agent.name}</div>
+                  {agent.description && (
+                    <div
+                      className="line-clamp-2 text-xs text-muted-foreground"
+                      title={agent.description}
+                    >
+                      {agent.description}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CapabilitySearchSection({
+  results,
+  onCapabilitySelect,
+}: {
+  results: CapabilitySearchResult[];
+  onCapabilitySelect: (agentId: string, capabilityId: string) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Capabilities
+      </div>
+      <div className="space-y-1">
+        {results.map((result) => {
+          const AgentIcon = result.agentIcon;
+
+          return (
+            <button
+              key={`${result.agentId}-${result.capability.id}`}
+              type="button"
+              onClick={() =>
+                result.isSupported &&
+                onCapabilitySelect(result.agentId, result.capability.id)
+              }
+              disabled={!result.isSupported}
+              className={cn(
+                'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors',
+                result.isSupported
+                  ? 'hover:bg-muted'
+                  : 'cursor-not-allowed opacity-50'
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div className="flex h-4 w-4 shrink-0 items-center justify-center">
+                  <AgentIcon className="h-3.5 w-3.5 text-muted-foreground" />
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {result.agentName}
+                </span>
+                <span className="text-muted-foreground">→</span>
+                <span className="font-medium">
+                  {result.capability.displayName || result.capability.name}
+                </span>
+                {!result.isSupported && (
+                  <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700">
+                    Coming Soon
+                  </span>
+                )}
+              </div>
+              {result.capability.description && (
+                <p
+                  className="ml-6 line-clamp-2 text-xs text-muted-foreground"
+                  title={result.capability.description}
+                >
+                  {result.capability.description}
+                </p>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CapabilityList({
+  selectedAgentId,
+  selectedAgentData,
+  onCapabilitySelect,
+}: {
+  selectedAgentId?: string;
+  selectedAgentData?: { capabilities: CapabilityInfo[] } | null;
+  onCapabilitySelect: (agentId: string, capabilityId: string) => void;
+}) {
+  if (!selectedAgentData || !selectedAgentId) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <span className="ml-2 text-muted-foreground">
+          Loading capabilities...
+        </span>
+      </div>
+    );
+  }
+
+  if ((selectedAgentData.capabilities || []).length === 0) {
+    return (
+      <div className="py-8 text-center text-muted-foreground">
+        No capabilities found
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      {(selectedAgentData.capabilities || []).map((capability) => (
+        <button
+          key={capability.id}
+          type="button"
+          onClick={() => onCapabilitySelect(selectedAgentId, capability.id)}
+          className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted"
+        >
+          <div className="flex items-center gap-2">
+            <span className="font-medium">
+              {capability.displayName || capability.name}
+            </span>
+          </div>
+          {capability.description && (
+            <p
+              className="line-clamp-2 text-xs text-muted-foreground"
+              title={capability.description}
+            >
+              {capability.description}
+            </p>
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function LoadingMore() {
+  return (
+    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      Loading more results...
+    </div>
+  );
+}
+
+export function StepPickerModal({
+  open,
+  onOpenChange,
+  onSelect,
+  allowFinish = true,
+  mode = 'all',
+  closeOnSelect = true,
+}: StepPickerModalProps) {
+  const handleSelect = (result: StepPickerResult) => {
+    onSelect(result);
+    if (closeOnSelect) {
+      onOpenChange(false);
+    }
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="sm:max-w-[500px] p-0 gap-0"
         hideCloseButton
         aria-describedby={undefined}
       >
-        {/* Visually hidden title for screen readers */}
         <VisuallyHidden>
-          <DialogTitle>{getTitle()}</DialogTitle>
+          <DialogTitle>Add Step</DialogTitle>
         </VisuallyHidden>
-
-        {/* Header */}
-        <div className="flex items-center gap-2 p-4 border-b">
-          {viewMode === 'capabilities' && (
-            <button
-              type="button"
-              onClick={handleBack}
-              className="p-1 rounded hover:bg-muted"
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-          )}
-          <div className="flex-1">
-            <h2 className="text-lg font-semibold">{getTitle()}</h2>
-            <p className="text-sm text-muted-foreground">{getSubtitle()}</p>
-          </div>
-        </div>
-
-        {/* Search */}
-        <div className="p-4 border-b">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search steps or operations..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9"
-              autoFocus
-            />
-          </div>
-        </div>
-
-        {/* Content */}
-        <div className="max-h-[400px] overflow-y-auto p-4">
-          {viewMode === 'search' ? (
-            // Search Results View
-            <div className="space-y-4">
-              {someLoading && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading more results...
-                </div>
-              )}
-
-              {searchResults.stepTypes.length === 0 &&
-              searchResults.agents.length === 0 &&
-              searchResults.capabilities.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  No results found for "{searchQuery}"
-                </div>
-              ) : (
-                <>
-                  {/* Matching Step Types */}
-                  {searchResults.stepTypes.length > 0 && (
-                    <div>
-                      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        Step Types
-                      </div>
-                      <div className="space-y-1">
-                        {searchResults.stepTypes.map((stepType) => (
-                          <button
-                            key={stepType.name}
-                            type="button"
-                            onClick={() => handleStepTypeSelect(stepType)}
-                            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
-                          >
-                            <StepTypeIcon
-                              className="w-5 h-5 text-muted-foreground"
-                              type={stepType.name || ''}
-                            />
-                            <div>
-                              <div className="font-medium">{stepType.name}</div>
-                              {stepType.description && (
-                                <div
-                                  className="text-xs text-muted-foreground line-clamp-2"
-                                  title={stepType.description}
-                                >
-                                  {stepType.description}
-                                </div>
-                              )}
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Matching Agents */}
-                  {searchResults.agents.length > 0 && (
-                    <div>
-                      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        Agents
-                      </div>
-                      <div className="space-y-1">
-                        {searchResults.agents.map((agent) => {
-                          const AgentIcon = getAgentIcon(agent.id);
-                          return (
-                            <button
-                              key={agent.id}
-                              type="button"
-                              onClick={() =>
-                                handleAgentSelect(
-                                  agent.id || '',
-                                  agent.name || ''
-                                )
-                              }
-                              className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className="w-5 h-5 flex items-center justify-center shrink-0">
-                                  <AgentIcon className="w-5 h-5 text-muted-foreground" />
-                                </div>
-                                <div>
-                                  <div className="font-medium">
-                                    {agent.name}
-                                  </div>
-                                  {agent.description && (
-                                    <div
-                                      className="text-xs text-muted-foreground line-clamp-2"
-                                      title={agent.description}
-                                    >
-                                      {agent.description}
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Matching Capabilities */}
-                  {searchResults.capabilities.length > 0 && (
-                    <div>
-                      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                        Capabilities
-                      </div>
-                      <div className="space-y-1">
-                        {searchResults.capabilities.map((result) => (
-                          <button
-                            key={`${result.agentId}-${result.capability.id}`}
-                            type="button"
-                            onClick={() =>
-                              result.isSupported &&
-                              handleCapabilitySelect(
-                                result.agentId,
-                                result.capability.id
-                              )
-                            }
-                            disabled={!result.isSupported}
-                            className={cn(
-                              'w-full flex flex-col gap-1 px-3 py-3 rounded-lg text-left transition-colors',
-                              result.isSupported
-                                ? 'hover:bg-muted'
-                                : 'opacity-50 cursor-not-allowed'
-                            )}
-                          >
-                            <div className="flex items-center gap-2">
-                              <div className="w-4 h-4 flex items-center justify-center shrink-0">
-                                <result.agentIcon className="w-3.5 h-3.5 text-muted-foreground" />
-                              </div>
-                              <span className="text-xs text-muted-foreground">
-                                {result.agentName}
-                              </span>
-                              <span className="text-muted-foreground">→</span>
-                              <span className="font-medium">
-                                {result.capability.displayName ||
-                                  result.capability.name}
-                              </span>
-                              {!result.isSupported && (
-                                <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-yellow-100 text-yellow-700">
-                                  Coming Soon
-                                </span>
-                              )}
-                            </div>
-                            {result.capability.description && (
-                              <p
-                                className="text-xs text-muted-foreground line-clamp-2 ml-6"
-                                title={result.capability.description}
-                              >
-                                {result.capability.description}
-                              </p>
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          ) : viewMode === 'capabilities' ? (
-            // Capabilities List View
-            !selectedAgentData ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                <span className="ml-2 text-muted-foreground">
-                  Loading capabilities...
-                </span>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {(selectedAgentData.capabilities || []).length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    No capabilities found
-                  </div>
-                ) : (
-                  (selectedAgentData.capabilities || []).map(
-                    (capability: CapabilityInfo) => {
-                      return (
-                        <button
-                          key={capability.id}
-                          type="button"
-                          onClick={() =>
-                            handleCapabilitySelect(
-                              selectedAgent!.id,
-                              capability.id
-                            )
-                          }
-                          className="w-full flex flex-col gap-1 px-3 py-3 rounded-lg text-left transition-colors hover:bg-muted"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">
-                              {capability.displayName || capability.name}
-                            </span>
-                          </div>
-                          {capability.description && (
-                            <p
-                              className="text-xs text-muted-foreground line-clamp-2"
-                              title={capability.description}
-                            >
-                              {capability.description}
-                            </p>
-                          )}
-                        </button>
-                      );
-                    }
-                  )
-                )}
-              </div>
-            )
-          ) : (
-            // Browse View - Step Types + Operators
-            <div className="space-y-6">
-              {/* Step Types Section */}
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">⚡</span>
-                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                    Step Types
-                  </span>
-                </div>
-                <div className="space-y-1">
-                  {filteredStepTypes.map((stepType) => (
-                    <button
-                      key={stepType.name}
-                      type="button"
-                      onClick={() => handleStepTypeSelect(stepType)}
-                      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
-                    >
-                      <StepTypeIcon
-                        className="w-5 h-5 text-muted-foreground"
-                        type={stepType.name || ''}
-                      />
-                      <div>
-                        <div className="font-medium">{stepType.name}</div>
-                        {stepType.description && (
-                          <div
-                            className="text-xs text-muted-foreground line-clamp-2"
-                            title={stepType.description}
-                          >
-                            {stepType.description}
-                          </div>
-                        )}
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Agents Section */}
-              {filteredAgents.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-2 mb-2">
-                    <Bot className="w-5 h-5 text-muted-foreground" />
-                    <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                      {mode === 'memory' ? 'Memory Providers' : 'Agents'}
-                    </span>
-                  </div>
-                  <div className="space-y-1">
-                    {filteredAgents.map((agent) => {
-                      const AgentIcon = getAgentIcon(agent.id);
-                      return (
-                        <button
-                          key={agent.id}
-                          type="button"
-                          onClick={() =>
-                            handleAgentSelect(agent.id || '', agent.name || '')
-                          }
-                          className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg text-left transition-colors hover:bg-muted"
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className="w-5 h-5 flex items-center justify-center shrink-0">
-                              <AgentIcon className="w-5 h-5 text-muted-foreground" />
-                            </div>
-                            <div>
-                              <div className="font-medium">{agent.name}</div>
-                              {agent.description && (
-                                <div
-                                  className="text-xs text-muted-foreground line-clamp-2"
-                                  title={agent.description}
-                                >
-                                  {agent.description}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        <StepPickerPanel
+          active={open}
+          onSelect={handleSelect}
+          allowFinish={allowFinish}
+          mode={mode}
+        />
       </DialogContent>
     </Dialog>
   );
