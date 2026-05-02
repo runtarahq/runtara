@@ -570,7 +570,11 @@ pub const BUILTIN_AGENT_MODULES: &[AgentModuleConfig] = &[
         description: "HTTP capabilities for making web requests with JSON/text/binary support (has side effects)",
         has_side_effects: true,
         supports_connections: true,
-        integration_ids: &["http_bearer", "http_api_key"],
+        integration_ids: &[
+            "http_bearer",
+            "http_api_key",
+            "microsoft_entra_client_credentials",
+        ],
         secure: true,
     },
     AgentModuleConfig {

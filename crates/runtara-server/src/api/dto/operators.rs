@@ -78,5 +78,11 @@ mod tests {
             "missing openai_api_key, got: {:?}",
             http.integration_ids
         );
+        assert!(
+            http.integration_ids
+                .contains(&"microsoft_entra_client_credentials".to_string()),
+            "missing microsoft_entra_client_credentials, got: {:?}",
+            http.integration_ids
+        );
     }
 }

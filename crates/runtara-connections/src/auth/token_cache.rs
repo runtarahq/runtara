@@ -15,6 +15,7 @@ pub(crate) struct CachedAccessToken {
 
 pub(crate) enum TokenRequestBody {
     Json(Value),
+    FormUrlEncoded(Vec<(String, String)>),
 }
 
 pub(crate) enum DeferredAuth {
@@ -22,6 +23,7 @@ pub(crate) enum DeferredAuth {
         cache_key: String,
         token_url: String,
         header_name: String,
+        header_value_prefix: Option<String>,
         request_body: TokenRequestBody,
         default_ttl_seconds: i64,
     },
@@ -48,6 +50,7 @@ pub(crate) async fn resolve_deferred_auth(
             cache_key,
             token_url,
             header_name,
+            header_value_prefix,
             request_body,
             default_ttl_seconds,
         } => {
@@ -61,7 +64,11 @@ pub(crate) async fn resolve_deferred_auth(
                 .await
             })
             .await?;
-            Ok((header_name, token))
+            let header_value = match header_value_prefix {
+                Some(prefix) => format!("{}{}", prefix, token),
+                None => token,
+            };
+            Ok((header_name, header_value))
         }
         DeferredAuth::OAuth2RefreshToken {
             cache_key,
@@ -128,6 +135,10 @@ async fn exchange_client_credentials_token(
             .post(token_url)
             .header("Content-Type", "application/json")
             .json(&body),
+        TokenRequestBody::FormUrlEncoded(fields) => client
+            .post(token_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form_urlencoded(&fields)),
     };
 
     let response = request
@@ -305,5 +316,22 @@ mod tests {
         let resolved = resolve_deferred_auth(&client, auth).await.unwrap();
         assert_eq!(resolved.0, "Authorization");
         assert_eq!(resolved.1, "Bearer existing-token");
+    }
+
+    #[test]
+    fn form_urlencoded_encodes_keys_and_values() {
+        let encoded = form_urlencoded(&[
+            ("grant_type".to_string(), "client_credentials".to_string()),
+            (
+                "scope".to_string(),
+                "https://api.businesscentral.dynamics.com/.default".to_string(),
+            ),
+            ("client secret".to_string(), "value+with space".to_string()),
+        ]);
+
+        assert_eq!(
+            encoded,
+            "grant_type=client_credentials&scope=https%3A%2F%2Fapi.businesscentral.dynamics.com%2F.default&client%20secret=value%2Bwith%20space"
+        );
     }
 }

@@ -486,6 +486,124 @@ pub struct TeamsBotParams {
 }
 
 // ============================================================================
+// Microsoft Entra OAuth2 Client Credentials Connection Type
+// ============================================================================
+
+/// Parameters for Microsoft Entra OAuth2 client credentials authentication.
+///
+/// This is intentionally resource-agnostic: callers provide the resource scope
+/// and API base URL, so the same connection type can be used for Microsoft Graph,
+/// Dynamics 365 Business Central, or another API protected by Microsoft Entra ID.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "microsoft_entra_client_credentials",
+    display_name = "Microsoft Entra OAuth2 (Client Credentials)",
+    description = "Connect to Microsoft Entra-protected APIs using OAuth2 client credentials",
+    category = "api",
+    service_id = "microsoft_entra",
+    auth_type = "oauth2_client_credentials"
+)]
+pub struct MicrosoftEntraClientCredentialsParams {
+    /// Microsoft Entra tenant ID or tenant domain.
+    #[field(
+        display_name = "Tenant ID",
+        description = "Microsoft Entra tenant ID or tenant domain",
+        placeholder = "00000000-0000-0000-0000-000000000000"
+    )]
+    pub tenant_id: String,
+
+    /// Microsoft Entra application client ID.
+    #[field(
+        display_name = "Client ID",
+        description = "Application (client) ID from the Microsoft Entra app registration",
+        placeholder = "00000000-0000-0000-0000-000000000000"
+    )]
+    pub client_id: String,
+
+    /// Microsoft Entra application client secret.
+    #[field(
+        display_name = "Client Secret",
+        description = "Client secret from the Microsoft Entra app registration",
+        secret
+    )]
+    pub client_secret: String,
+
+    /// OAuth2 client credentials scope for the target resource.
+    #[field(
+        display_name = "Scope",
+        description = "OAuth2 scope for the target resource, for example https://graph.microsoft.com/.default or https://api.businesscentral.dynamics.com/.default",
+        placeholder = "https://graph.microsoft.com/.default"
+    )]
+    pub scope: String,
+
+    /// Base URL for proxied API requests.
+    #[field(
+        display_name = "Base URL",
+        description = "Base URL for API requests, for example https://graph.microsoft.com/v1.0 or https://api.businesscentral.dynamics.com/v2.0/production/api/v2.0",
+        placeholder = "https://graph.microsoft.com/v1.0"
+    )]
+    pub base_url: String,
+
+    /// Microsoft identity authority host.
+    #[serde(default = "default_microsoft_entra_authority_host")]
+    #[field(
+        display_name = "Authority Host",
+        description = "Microsoft identity authority host",
+        default = "https://login.microsoftonline.com"
+    )]
+    pub authority_host: String,
+}
+
+fn default_microsoft_entra_authority_host() -> String {
+    "https://login.microsoftonline.com".to_string()
+}
+
+/// HTTP extractor for Microsoft Entra client credentials connections.
+///
+/// The bearer token is not resolved here. Workflows forward the connection ID
+/// and the host-side proxy exchanges the token and injects Authorization.
+pub struct MicrosoftEntraClientCredentialsExtractor;
+
+impl HttpConnectionExtractor for MicrosoftEntraClientCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "microsoft_entra_client_credentials"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: MicrosoftEntraClientCredentialsParams = serde_json::from_value(params.clone())
+            .map_err(|e| {
+                format!(
+                    "Invalid microsoft_entra_client_credentials connection parameters: {}",
+                    e
+                )
+            })?;
+
+        let base_url = p.base_url.trim();
+        if base_url.is_empty() {
+            return Err(
+                "Invalid microsoft_entra_client_credentials connection: missing base_url"
+                    .to_string(),
+            );
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: base_url.trim_end_matches('/').to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+inventory::submit! {
+    &MicrosoftEntraClientCredentialsExtractor as &'static dyn HttpConnectionExtractor
+}
+
+// ============================================================================
 // Mailgun Connection Type
 // ============================================================================
 

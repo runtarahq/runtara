@@ -90,6 +90,11 @@ fn describe_connection_auth(
             aws_signing: None,
             deferred_auth: describe_shopify_client_credentials_auth(connection_id, params),
         },
+        "microsoft_entra_client_credentials" => ConnectionAuthDescriptor {
+            base_url: first_string_param(params, &["base_url"]),
+            aws_signing: None,
+            deferred_auth: describe_microsoft_entra_client_credentials_auth(connection_id, params),
+        },
         "hubspot_access_token" => {
             if let Some(token) = params["access_token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
@@ -276,7 +281,46 @@ fn describe_shopify_client_credentials_auth(
         ]),
         token_url: format!("https://{shop_domain}/admin/oauth/access_token"),
         header_name: "X-Shopify-Access-Token".to_string(),
+        header_value_prefix: None,
         request_body: TokenRequestBody::Json(Value::Object(body)),
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
+}
+
+fn describe_microsoft_entra_client_credentials_auth(
+    connection_id: &str,
+    params: &Value,
+) -> Option<DeferredAuth> {
+    let _base_url = first_string_param(params, &["base_url"])?;
+    let tenant_id = first_string_param(params, &["tenant_id"])?
+        .trim_matches('/')
+        .to_string();
+    let client_id = first_string_param(params, &["client_id"])?;
+    let client_secret = first_string_param(params, &["client_secret"])?;
+    let scope = first_string_param(params, &["scope"])?;
+    let authority_host = first_string_param(params, &["authority_host"])
+        .unwrap_or_else(|| "https://login.microsoftonline.com".to_string())
+        .trim_end_matches('/')
+        .to_string();
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(&[
+            "microsoft_entra_client_credentials",
+            connection_id,
+            &authority_host,
+            &tenant_id,
+            &client_id,
+            &scope,
+        ]),
+        token_url: format!("{authority_host}/{tenant_id}/oauth2/v2.0/token"),
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::FormUrlEncoded(vec![
+            ("grant_type".to_string(), "client_credentials".to_string()),
+            ("client_id".to_string(), client_id),
+            ("client_secret".to_string(), client_secret),
+            ("scope".to_string(), scope),
+        ]),
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
 }
@@ -354,6 +398,75 @@ mod tests {
             collect_shopify_scopes(&params),
             "read_products,read_inventory"
         );
+    }
+
+    #[test]
+    fn microsoft_entra_client_credentials_builds_form_token_request() {
+        let params = json!({
+            "tenant_id": "contoso.onmicrosoft.com",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "scope": "https://api.businesscentral.dynamics.com/.default",
+            "base_url": "https://api.businesscentral.dynamics.com/v2.0/production/api/v2.0"
+        });
+        let mut headers = HashMap::new();
+
+        let descriptor = describe_connection_auth(
+            "conn-bc",
+            "microsoft_entra_client_credentials",
+            &params,
+            &mut headers,
+        );
+
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api.businesscentral.dynamics.com/v2.0/production/api/v2.0")
+        );
+        assert!(headers.is_empty());
+
+        let auth = descriptor.deferred_auth.expect("deferred auth");
+        match auth {
+            DeferredAuth::OAuth2ClientCredentials {
+                token_url,
+                header_name,
+                header_value_prefix,
+                request_body,
+                ..
+            } => {
+                assert_eq!(
+                    token_url,
+                    "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
+                );
+                assert_eq!(header_name, "Authorization");
+                assert_eq!(header_value_prefix.as_deref(), Some("Bearer "));
+
+                match request_body {
+                    TokenRequestBody::FormUrlEncoded(fields) => {
+                        assert!(fields.contains(&(
+                            "grant_type".to_string(),
+                            "client_credentials".to_string()
+                        )));
+                        assert!(
+                            fields.contains(&("client_id".to_string(), "client-id".to_string()))
+                        );
+                        assert!(
+                            fields.contains(&(
+                                "client_secret".to_string(),
+                                "client-secret".to_string()
+                            ))
+                        );
+                        assert!(fields.contains(&(
+                            "scope".to_string(),
+                            "https://api.businesscentral.dynamics.com/.default".to_string()
+                        )));
+                    }
+                    TokenRequestBody::Json(_) => panic!("expected form-encoded token body"),
+                }
+            }
+            DeferredAuth::OAuth2RefreshToken { .. } => {
+                panic!("expected client credentials auth")
+            }
+        }
     }
 
     #[test]
