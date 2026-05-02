@@ -75,10 +75,10 @@ src/operators_lib/target/
 # Generated specification files (created during build)
 specs/
 
-# Claude Code configuration (user-specific)
-.claude/
-CLAUDE.md
-agents.md
+# Claude Code — ignore user-specific state, track team-shared files
+.claude/settings.local.json
+.claude/worktrees/
+.claude/launch.json
 
 # QEMU VM test artifacts
 .qemu-cache/
