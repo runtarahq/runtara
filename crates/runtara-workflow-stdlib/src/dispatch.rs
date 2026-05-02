@@ -420,6 +420,9 @@ pub fn execute_capability(
         // smo-stdlib capabilities
         // =====================================================================
         // --- ai_tools ---
+        ("ai_tools", "ai-embed-text") => {
+            (runtara_agents::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_EMBED_TEXT.execute)(input)
+        }
         ("ai_tools", "ai-image-generation") => {
             (runtara_agents::integrations::ai_tools::__CAPABILITY_EXECUTOR_AI_IMAGE_GENERATION.execute)(input)
         }
@@ -619,6 +622,9 @@ pub fn execute_capability(
         }
         ("object_model", "query-instances") => {
             (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_QUERY_INSTANCES.execute)(input)
+        }
+        ("object_model", "query-aggregate") => {
+            (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_QUERY_AGGREGATE.execute)(input)
         }
         ("object_model", "save-memory") => {
             (runtara_agents::integrations::object_model::__CAPABILITY_EXECUTOR_SAVE_MEMORY.execute)(input)
