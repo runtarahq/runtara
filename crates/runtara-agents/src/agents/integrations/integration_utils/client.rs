@@ -38,10 +38,20 @@ use crate::types::{self, AgentError};
 /// Default timeout applied to every proxy request unless overridden.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// Reusable, connection-bound HTTP client that calls the host's HTTP boundary
-/// with structured error mapping.
+/// Reusable HTTP client that calls the host's HTTP boundary with structured
+/// error mapping.
+///
+/// Two modes:
+/// * **Connection-bound** (`new`) — a `RawConnection` is forwarded so the proxy
+///   injects credentials and prefixes the connection's base URL. Per-request
+///   paths are relative to that base URL.
+/// * **No-connection** (`without_connection`) — no `X-Runtara-Connection-Id`
+///   header is sent and no auth is injected. Per-request URLs MUST be
+///   absolute. Used for callbacks like Microsoft Graph upload sessions
+///   (Azure Blob URL) or async-operation monitor URLs that travel back to the
+///   caller pre-signed and must not be re-authenticated.
 pub struct ProxyHttpClient<'a> {
-    connection: &'a RawConnection,
+    connection: Option<&'a RawConnection>,
     integration_prefix: &'static str,
     default_timeout_ms: u64,
     extra_headers: Vec<(String, String)>,
@@ -54,7 +64,23 @@ impl<'a> ProxyHttpClient<'a> {
     /// `"HUBSPOT"` -> `HUBSPOT_UNAUTHORIZED`).
     pub fn new(connection: &'a RawConnection, integration_prefix: &'static str) -> Self {
         Self {
-            connection,
+            connection: Some(connection),
+            integration_prefix,
+            default_timeout_ms: DEFAULT_TIMEOUT_MS,
+            extra_headers: Vec::new(),
+            base_path: "",
+        }
+    }
+
+    /// Create a client that sends no `X-Runtara-Connection-Id` header.
+    ///
+    /// The proxy forwards the request as-is (no credential injection, no
+    /// base URL rewriting). Per-request URLs MUST be absolute — a relative
+    /// path is rejected at request-build time with
+    /// `{PREFIX}_ABSOLUTE_URL_REQUIRED`.
+    pub fn without_connection(integration_prefix: &'static str) -> Self {
+        Self {
+            connection: None,
             integration_prefix,
             default_timeout_ms: DEFAULT_TIMEOUT_MS,
             extra_headers: Vec::new(),
@@ -228,7 +254,7 @@ impl<'c> ProxyRequest<'c> {
     /// parsing. Still maps non-2xx into `AgentError`.
     pub fn send_raw(self) -> Result<HttpResponse, AgentError> {
         let prefix = self.client.integration_prefix;
-        let input = self.into_http_input();
+        let input = self.into_http_input()?;
 
         let response = match http::http_request(input) {
             Ok(r) => r,
@@ -249,13 +275,30 @@ impl<'c> ProxyRequest<'c> {
         Ok(response)
     }
 
-    fn into_http_input(self) -> HttpRequestInput {
-        let connection_id = self.client.connection.connection_id.clone();
+    fn into_http_input(self) -> Result<HttpRequestInput, AgentError> {
+        let prefix = self.client.integration_prefix;
 
         let mut headers: HashMap<String, String> = HashMap::new();
-        // Always forward the connection id so the proxy can inject credentials.
-        if !connection_id.is_empty() {
-            headers.insert("X-Runtara-Connection-Id".to_string(), connection_id);
+        // Forward the connection id (if any) so the proxy can inject credentials.
+        if let Some(conn) = self.client.connection {
+            let connection_id = conn.connection_id.clone();
+            if !connection_id.is_empty() {
+                headers.insert("X-Runtara-Connection-Id".to_string(), connection_id);
+            }
+        } else {
+            // No-connection mode: enforce absolute URL. The proxy itself
+            // would reject a relative path with no connection (see
+            // `runtara-server/src/api/handlers/internal_proxy.rs`), but
+            // failing client-side gives a clearer error and saves a hop.
+            if self.path.starts_with('/') || self.path.is_empty() {
+                return Err(AgentError::permanent(
+                    format!("{}_ABSOLUTE_URL_REQUIRED", prefix),
+                    format!(
+                        "{} client constructed without a connection requires an absolute URL, got: {:?}",
+                        prefix, self.path
+                    ),
+                ));
+            }
         }
         // Client-wide headers come next; per-request headers override below.
         for (k, v) in &self.client.extra_headers {
@@ -296,7 +339,7 @@ impl<'c> ProxyRequest<'c> {
             format!("{}{}", self.client.base_path, self.path)
         };
 
-        HttpRequestInput {
+        Ok(HttpRequestInput {
             method: self.method,
             url,
             headers,
@@ -305,9 +348,9 @@ impl<'c> ProxyRequest<'c> {
             body_type,
             response_type: ResponseType::Json,
             timeout_ms: self.timeout_ms,
-            _connection: Some(self.client.connection.clone()),
+            _connection: self.client.connection.cloned(),
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -412,7 +455,7 @@ mod tests {
     fn base_path_is_prepended_to_request_path() {
         let c = conn();
         let client = ProxyHttpClient::new(&c, "STRIPE").with_base_path("/v1");
-        let input = client.get("/customers").into_http_input();
+        let input = client.get("/customers").into_http_input().unwrap();
         assert_eq!(input.url, "/v1/customers");
     }
 
@@ -420,7 +463,10 @@ mod tests {
     fn base_path_empty_by_default_preserves_path_verbatim() {
         let c = conn();
         let client = ProxyHttpClient::new(&c, "HUBSPOT");
-        let input = client.get("/crm/v3/objects/contacts").into_http_input();
+        let input = client
+            .get("/crm/v3/objects/contacts")
+            .into_http_input()
+            .unwrap();
         assert_eq!(input.url, "/crm/v3/objects/contacts");
     }
 
@@ -435,13 +481,53 @@ mod tests {
             ..conn()
         };
         let client = ProxyHttpClient::new(&c, "OPENAI");
-        let input = client.post("/chat/completions").into_http_input();
+        let input = client.post("/chat/completions").into_http_input().unwrap();
 
         let injected = input
             ._connection
             .expect("proxy request should preserve raw connection");
         assert_eq!(injected.connection_id, "conn-1");
         assert_eq!(injected.integration_id, "openai_api_key");
+    }
+
+    #[test]
+    fn without_connection_omits_connection_header_for_absolute_url() {
+        let client = ProxyHttpClient::without_connection("SHAREPOINT_UPLOAD");
+        let input = client
+            .put("https://upload.example.com/session/abc")
+            .header("Content-Range", "bytes 0-9/10")
+            .into_http_input()
+            .unwrap();
+        assert!(!input.headers.contains_key("X-Runtara-Connection-Id"));
+        assert_eq!(input.headers.get("Content-Range").unwrap(), "bytes 0-9/10");
+        assert!(input._connection.is_none());
+        assert_eq!(input.url, "https://upload.example.com/session/abc");
+    }
+
+    #[test]
+    fn without_connection_rejects_relative_url() {
+        let client = ProxyHttpClient::without_connection("SHAREPOINT_UPLOAD");
+        let err = client.get("/relative/path").into_http_input().unwrap_err();
+        assert_eq!(err.code, "SHAREPOINT_UPLOAD_ABSOLUTE_URL_REQUIRED");
+    }
+
+    #[test]
+    fn without_connection_rejects_empty_url() {
+        let client = ProxyHttpClient::without_connection("SHAREPOINT_COPY_STATUS");
+        let err = client.get("").into_http_input().unwrap_err();
+        assert_eq!(err.code, "SHAREPOINT_COPY_STATUS_ABSOLUTE_URL_REQUIRED");
+    }
+
+    #[test]
+    fn without_connection_carries_binary_body() {
+        let client = ProxyHttpClient::without_connection("SHAREPOINT_UPLOAD");
+        let input = client
+            .put("https://upload.example.com/session/abc")
+            .body_binary(vec![1, 2, 3, 4])
+            .into_http_input()
+            .unwrap();
+        // Binary path uses the BodyType::Binary contract — value is base64.
+        assert!(matches!(input.body_type, BodyType::Binary));
     }
 
     fn err_to_json(err: AgentError) -> serde_json::Value {

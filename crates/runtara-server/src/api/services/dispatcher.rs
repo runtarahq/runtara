@@ -180,7 +180,10 @@ pub const DISPATCHER_WORKFLOW_ID: &str = "__agent_dispatcher__";
 /// v23: Load input from runtara-core via SDK instead of /data/input.json (WASM has no filesystem)
 /// v24: Use static dispatch table instead of inventory registry (inventory unavailable in WASM)
 /// v28: Add missing dispatch entries for ai_tools/ai-embed-text and object_model/query-aggregate
-pub const DISPATCHER_VERSION: u32 = 28;
+/// v29: Add SharePoint integration agent (file CRUD via Microsoft Graph) and percent-encode the search query path
+/// v30: Add sharepoint_search_global capability using Microsoft Search API for app-only-friendly search
+/// v31: Make sharepoint_search query optional (empty = list everything via Graph's q='' semantic)
+pub const DISPATCHER_VERSION: u32 = 31;
 
 /// Service for managing the agent dispatcher binary
 pub struct DispatcherService {

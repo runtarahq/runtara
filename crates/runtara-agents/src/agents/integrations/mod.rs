@@ -14,6 +14,8 @@ pub mod object_model;
 pub mod openai;
 pub mod s3_client;
 pub mod s3_storage;
+pub mod sharepoint;
+pub mod sharepoint_client;
 pub mod shopify;
 pub mod slack;
 pub mod stripe;
