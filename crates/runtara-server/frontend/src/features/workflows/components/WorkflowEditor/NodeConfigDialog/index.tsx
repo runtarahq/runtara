@@ -141,7 +141,12 @@ export function NodeConfigDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0">
+      <DialogContent
+        className="max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0"
+        data-testid="node-config-dialog"
+        data-node-id={nodeId}
+        data-step-type={stepType}
+      >
         <DialogHeader className="px-6 py-4 border-b shrink-0">
           <DialogTitle className="text-lg font-semibold">
             {dialogTitle}

@@ -167,6 +167,12 @@ function getStepType(node: Node): string {
   return data.stepType || 'Step';
 }
 
+function isScopeStepType(stepType: string): boolean {
+  return (
+    stepType === 'Split' || stepType === 'While' || stepType === 'RepeatUntil'
+  );
+}
+
 function getStepDescription(node: Node): string {
   const data = getStepData(node);
 
@@ -955,6 +961,11 @@ function TimelineInsertionPoint({
         className="h-7 border-dashed bg-background px-2 text-xs text-muted-foreground shadow-none transition-colors group-hover:border-primary/60 group-hover:text-foreground"
         onClick={() => onAddStep(request)}
         aria-label="Add step here"
+        data-testid="timeline-add-step"
+        data-source-node-id={request.sourceNodeId}
+        data-source-handle={request.sourceHandle}
+        data-target-node-id={request.targetNodeId}
+        data-parent-node-id={request.parentId}
       >
         <Plus className="size-3.5" aria-hidden="true" />
         Add step
@@ -1286,7 +1297,7 @@ function WorkflowTimelineItem({
   const StepIcon = getStepIcon(stepType);
   const isSelected = selectedNodeId === node.id;
   const isEditingInline = editingNodeId === node.id;
-  const isContainer = item.children.length > 0;
+  const isContainer = isScopeStepType(stepType) || item.children.length > 0;
   const isExpanded = expandedContainers[node.id] ?? true;
   const nestedItemCount = countItems(item.children);
   const executionStatus = useTimelineNodeExecutionStatus(node);
@@ -1322,6 +1333,10 @@ function WorkflowTimelineItem({
       className="relative"
       data-timeline-context-key={listContext.key}
       data-timeline-node-id={node.id}
+      data-testid="timeline-step"
+      data-step-name={getStepName(node)}
+      data-step-type={stepType}
+      data-parent-node-id={node.parentId}
     >
       {isDropBefore && (
         <span
@@ -1822,7 +1837,10 @@ export function WorkflowTimelineView({
       : null;
 
     return (
-      <div className="flex h-full items-center justify-center bg-background p-6">
+      <div
+        className="flex h-full items-center justify-center bg-background p-6"
+        data-testid="workflow-timeline-empty"
+      >
         {inlineAddStep ? (
           <div className="w-full max-w-3xl overflow-hidden rounded-md border border-dashed border-primary/50 bg-card shadow-sm">
             {inlineAddStep}
@@ -1842,6 +1860,7 @@ export function WorkflowTimelineView({
                 type="button"
                 className="mt-4"
                 onClick={() => onAddStep({})}
+                data-testid="timeline-add-step"
               >
                 <Plus aria-hidden="true" />
                 Add step
@@ -1854,7 +1873,10 @@ export function WorkflowTimelineView({
   }
 
   return (
-    <div className="h-full overflow-auto bg-background">
+    <div
+      className="h-full overflow-auto bg-background"
+      data-testid="workflow-timeline"
+    >
       <div className="mx-auto flex max-w-5xl flex-col gap-4 p-6 pt-28">
         <div className="rounded-md border bg-card p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">

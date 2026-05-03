@@ -192,6 +192,7 @@ function FormActions({
             variant="outline"
             className="px-6 text-destructive hover:text-destructive hover:bg-destructive/10"
             onClick={onDelete}
+            data-testid="node-form-delete"
           >
             <Trash2 className="mr-2 h-4 w-4" />
             Delete
@@ -201,6 +202,7 @@ function FormActions({
             variant="outline"
             className="px-6"
             onClick={onReset}
+            data-testid="node-form-reset"
           >
             <RotateCcw className="mr-2 h-4 w-4" />
             Reset
@@ -211,7 +213,11 @@ function FormActions({
     // Create mode - show Save button
     return (
       <div className="flex justify-end pt-4 mt-auto border-t">
-        <Button type="submit" className="px-6">
+        <Button
+          type="submit"
+          className="px-6"
+          data-testid="node-form-create-save"
+        >
           Save
         </Button>
       </div>

@@ -249,6 +249,7 @@ function ConditionalNodeComponent({
               className="w-3.5 h-3.5 rounded-full [&_svg]:size-1.5 shadow-sm pointer-events-auto nodrag nopan"
               variant="outline"
               size="icon"
+              aria-label={`Add true branch from ${data.name || id || 'conditional'}`}
               onClick={(e) => {
                 e.stopPropagation(); // Prevent node selection when clicking "+"
                 setActiveSource(SOURCE_TRUE);
@@ -284,6 +285,7 @@ function ConditionalNodeComponent({
               className="w-3.5 h-3.5 rounded-full [&_svg]:size-1.5 shadow-sm pointer-events-auto nodrag nopan"
               variant="outline"
               size="icon"
+              aria-label={`Add false branch from ${data.name || id || 'conditional'}`}
               onClick={(e) => {
                 e.stopPropagation(); // Prevent node selection when clicking "+"
                 setActiveSource(SOURCE_FALSE);

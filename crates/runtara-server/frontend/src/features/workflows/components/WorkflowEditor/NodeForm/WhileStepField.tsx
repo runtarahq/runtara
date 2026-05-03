@@ -9,9 +9,9 @@ type WhileStepFieldProps = {
   name: string;
 };
 
-export function WhileStepField(_props: WhileStepFieldProps) {
+export function WhileStepField({ name }: WhileStepFieldProps) {
   const form = useFormContext();
-  const { previousSteps, nodeId } = useContext(NodeFormContext);
+  const { previousSteps } = useContext(NodeFormContext);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const whileCondition = useWatch({
     name: 'whileCondition',
@@ -40,10 +40,10 @@ export function WhileStepField(_props: WhileStepFieldProps) {
     []
   );
 
-  // Initialize defaults for new While steps
+  // Initialize missing defaults for While steps.
+  // Timeline creation already has a node id, so missing-field checks are safer than nodeId.
   useEffect(() => {
     if (stepType !== 'While') return;
-    if (nodeId) return; // Don't reset in edit mode
     if (hasInitializedRef.current) return;
 
     hasInitializedRef.current = true;
@@ -54,14 +54,7 @@ export function WhileStepField(_props: WhileStepFieldProps) {
     if (whileMaxIterations === undefined || whileMaxIterations === null) {
       form.setValue('whileMaxIterations', 10);
     }
-  }, [
-    stepType,
-    nodeId,
-    whileCondition,
-    whileMaxIterations,
-    form,
-    defaultCondition,
-  ]);
+  }, [stepType, whileCondition, whileMaxIterations, form, defaultCondition]);
 
   if (stepType !== 'While') {
     return null;
@@ -81,7 +74,7 @@ export function WhileStepField(_props: WhileStepFieldProps) {
     : JSON.stringify(defaultCondition);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-field-name={name}>
       {/* Loop Condition */}
       <div className="space-y-2">
         <Label className="text-sm font-medium">Loop Condition</Label>

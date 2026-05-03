@@ -18,6 +18,9 @@ const mockedAuthFile = path.join(__dirname, 'e2e/.auth/mocked-user.json');
 // Vite dev server serves HTTP by default (no HTTPS plugin configured);
 // preview builds (npm run preview) also serve HTTP.
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:8081';
+const isLocalUiRun = process.env.E2E_LOCAL_UI === 'true';
+const localUiDevServerCommand =
+  'VITE_RUNTARA_AUTH_MODE=local VITE_RUNTARA_TENANT_ID=Organity VITE_STRIP_ORG_ID=true VITE_RUNTARA_API_BASE_URL=http://localhost:7001 npm run dev -- --host 127.0.0.1 --port 8081';
 
 export default defineConfig({
   // Test directory
@@ -78,6 +81,7 @@ export default defineConfig({
       testIgnore: [
         /auth\.setup\.ts/,
         /auth\.mocked\.setup\.ts/,
+        /.*\.local\.e2e\.spec\.ts/,
         /tests\/mocked\//,
       ],
     },
@@ -98,6 +102,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.e2e\.spec\.ts/,
+      testIgnore: /.*\.local\.e2e\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
         storageState: authFile,
@@ -106,6 +111,19 @@ export default defineConfig({
       },
       dependencies: ['setup'],
       timeout: 120000, // 120s for full-stack round trips
+    },
+
+    // Local UI-only workflow-builder tests. Uses frontend local auth mode and
+    // drives workflow setup/cleanup through browser interactions only.
+    {
+      name: 'local-ui',
+      testMatch: /.*\.local\.e2e\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1920, height: 1080 },
+        video: { mode: 'on', size: { width: 1920, height: 1080 } },
+      },
+      timeout: 120000,
     },
 
     // ----- Mocked project (PR gate) -----
@@ -134,8 +152,8 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_BASE_URL
     ? undefined
     : {
-        command: 'npm run dev',
-        url: 'http://localhost:8081',
+        command: isLocalUiRun ? localUiDevServerCommand : 'npm run dev',
+        url: baseURL,
         reuseExistingServer: true,
         timeout: 120 * 1000,
       },

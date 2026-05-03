@@ -493,19 +493,37 @@ export const useWorkflowStore = create<WorkflowState>()(
 
       removeNode: (nodeId) =>
         set((state) => {
+          const removedNodes = new Set([nodeId]);
+          let foundDescendant = true;
+
+          while (foundDescendant) {
+            foundDescendant = false;
+            for (const node of state.nodes) {
+              if (
+                node.parentId &&
+                removedNodes.has(node.parentId) &&
+                !removedNodes.has(node.id)
+              ) {
+                removedNodes.add(node.id);
+                foundDescendant = true;
+              }
+            }
+          }
+
           // Collect hidden tool/memory target nodes that will become orphaned.
-          // These are targets of edges from this node with non-standard sourceHandles
-          // (tool names or 'memory') that have no other incoming edges.
+          // These are targets of edges from removed nodes with non-standard
+          // sourceHandles (tool names or 'memory') that have no other incoming
+          // edges from nodes that will remain.
           const outgoingHiddenTargets = new Set<string>();
           for (const edge of state.edges) {
             if (
-              edge.source === nodeId &&
+              removedNodes.has(edge.source) &&
               edge.sourceHandle &&
               edge.sourceHandle !== 'source'
             ) {
               const targetId = edge.target;
               const hasOtherIncoming = state.edges.some(
-                (e) => e.target === targetId && e.source !== nodeId
+                (e) => e.target === targetId && !removedNodes.has(e.source)
               );
               if (!hasOtherIncoming) {
                 outgoingHiddenTargets.add(targetId);
@@ -513,16 +531,16 @@ export const useWorkflowStore = create<WorkflowState>()(
             }
           }
 
-          // Remove the node, its children, and orphaned tool/memory targets
+          outgoingHiddenTargets.forEach((targetId) =>
+            removedNodes.add(targetId)
+          );
+
+          // Remove the node, its descendants, and orphaned tool/memory targets
           state.nodes = state.nodes.filter(
-            (n) =>
-              n.id !== nodeId &&
-              n.parentId !== nodeId &&
-              !outgoingHiddenTargets.has(n.id)
+            (node) => !removedNodes.has(node.id)
           );
 
           // Remove edges connected to any of the removed nodes
-          const removedNodes = new Set([nodeId, ...outgoingHiddenTargets]);
           state.edges = state.edges.filter(
             (e) => !removedNodes.has(e.source) && !removedNodes.has(e.target)
           );

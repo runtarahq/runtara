@@ -222,6 +222,7 @@ function Container({
               variant="outline"
               size="sm"
               onClick={handleOpenCreateInside}
+              aria-label={`Add first nested step inside ${data.name || id || 'container'}`}
             >
               <Plus className="mr-2 h-4 w-4" />
               Add first step
@@ -249,6 +250,7 @@ function Container({
           variant="outline"
           size="icon"
           onClick={handleOpenCreate}
+          aria-label={`Add step after ${data.name || id || 'container'}`}
         >
           <Plus />
         </Button>

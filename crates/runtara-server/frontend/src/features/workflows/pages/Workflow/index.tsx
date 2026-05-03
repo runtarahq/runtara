@@ -58,6 +58,30 @@ function normalizeNodeDataForStagingComparison(
   };
 }
 
+function getWorkflowStoreContentHash(): string {
+  const { nodes, edges } = useWorkflowStore.getState();
+
+  return JSON.stringify({
+    nodes: nodes
+      .map((node) => ({
+        id: node.id,
+        parentId: node.parentId,
+        type: node.type,
+        data: node.data,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    edges: edges
+      .map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle,
+        targetHandle: edge.targetHandle,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  });
+}
+
 export function Workflow() {
   const { workflowId } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -280,9 +304,12 @@ export function Workflow() {
   // Clear dirty flag after workflow data is loaded and rendered
   useEffect(() => {
     if (!isFetching) {
+      const loadedContentHash = getWorkflowStoreContentHash();
       // Use a small timeout to ensure React Flow has finished initializing
       const timer = setTimeout(() => {
-        useWorkflowStore.getState().clearDirtyFlag();
+        if (getWorkflowStoreContentHash() === loadedContentHash) {
+          useWorkflowStore.getState().clearDirtyFlag();
+        }
       }, 100);
       return () => clearTimeout(timer);
     }

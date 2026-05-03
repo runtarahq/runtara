@@ -275,11 +275,12 @@ export function validateWorkflowStructure(
     errors.push(`Finish steps cannot have outgoing connections: ${names}`);
   }
 
-  // Check for orphaned nodes (nodes not connected to any other node)
-  // Exclude nodes that have a parentId - they are inside a container and don't need edge connections
-  if (workflowNodes.length > 1) {
-    const orphanedNodes = workflowNodes.filter(
-      (n) => !connectedNodes.has(n.id) && !n.parentId
+  // Check for orphaned root nodes (nodes not connected to any other root node).
+  // Nested nodes belong to their container subgraph and are validated in that scope.
+  const rootWorkflowNodes = workflowNodes.filter((n) => !n.parentId);
+  if (rootWorkflowNodes.length > 1) {
+    const orphanedNodes = rootWorkflowNodes.filter(
+      (n) => !connectedNodes.has(n.id)
     );
 
     if (orphanedNodes.length > 0) {

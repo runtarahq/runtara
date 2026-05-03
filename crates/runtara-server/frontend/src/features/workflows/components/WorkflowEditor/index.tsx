@@ -75,6 +75,7 @@ import { TimelineNodeConfigPanel } from './TimelineNodeConfigPanel';
 // Re-export CreateStepContext type for external use
 export interface CreateStepContext {
   position: { x: number; y: number };
+  parentId?: string;
   insertionEdge?: {
     source: string;
     target: string;
@@ -1013,6 +1014,7 @@ function WorkflowEditorContent({
 
       setCreateStepContext({
         position,
+        parentId: request.parentId,
       });
     },
     [nodes, setPendingNewNode, closeNodeConfig]
@@ -1161,7 +1163,7 @@ function WorkflowEditorContent({
       const type = STEP_TYPES[data.stepType] || NODE_TYPES.BasicNode;
       const style = NODE_TYPE_SIZES[type];
 
-      let parentId: string | undefined;
+      let parentId: string | undefined = createStepContext.parentId;
       let finalPosition = createStepContext.position;
 
       const tempNode: Node = {
@@ -1180,7 +1182,7 @@ function WorkflowEditorContent({
 
       const groupNode = intersections[intersections.length - 1];
 
-      if (groupNode) {
+      if (!parentId && groupNode) {
         finalPosition = getNodePositionInsideParent(tempNode, groupNode) ?? {
           x: 0,
           y: 0,
@@ -1394,7 +1396,6 @@ function WorkflowEditorContent({
           onSelect={handleStepPickerSelect}
           onCancel={handleCancelCreate}
           allowFinish={!createStepContext.insertionEdge}
-          contentScrollable={false}
         />
       </NodeFormProvider>
     );
@@ -1433,11 +1434,19 @@ function WorkflowEditorContent({
         >
           <div className="pointer-events-none absolute left-4 top-4 z-20">
             <TabsList className="pointer-events-auto shadow-sm">
-              <TabsTrigger value="canvas" className="gap-2">
+              <TabsTrigger
+                value="canvas"
+                className="gap-2"
+                data-testid="workflow-view-canvas"
+              >
                 <Network className="size-4" aria-hidden="true" />
                 Canvas
               </TabsTrigger>
-              <TabsTrigger value="timeline" className="gap-2">
+              <TabsTrigger
+                value="timeline"
+                className="gap-2"
+                data-testid="workflow-view-timeline"
+              >
                 <ListTree className="size-4" aria-hidden="true" />
                 Timeline
               </TabsTrigger>

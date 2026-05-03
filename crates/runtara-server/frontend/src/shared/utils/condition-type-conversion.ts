@@ -254,7 +254,7 @@ export function convertConditionArguments(
     if (isConditionArgument(arg)) {
       // For reference types, don't do type conversion - keep as ConditionArgument
       if (arg.valueType === 'reference') {
-        return arg;
+        return { valueType: 'reference', value: arg.value };
       }
       // For immediate types, apply type conversion to the value
       const inferredType = inferOperandType(
@@ -264,9 +264,7 @@ export function convertConditionArguments(
         fieldDataType
       );
       const convertedValue = convertOperandValue(arg.value, inferredType);
-      // If the converted value is the same type as original, return ConditionArgument
-      // Otherwise, return the converted primitive value
-      return { ...arg, value: convertedValue };
+      return { valueType: 'immediate', value: convertedValue };
     }
 
     // Recursively handle nested conditions

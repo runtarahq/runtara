@@ -67,12 +67,22 @@ const TOOL_STEP_TYPES = new Set([
   'start workflow',
 ]);
 
-function normalizeStepType(stepType: string): string {
+function toTestIdPart(value: string | undefined): string {
+  return (value || 'unknown')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function normalizeStepType(stepType: StepTypeInfo): string {
+  if (stepType.id) return stepType.id;
+
+  const name = stepType.name || '';
   const knownMappings: Record<string, string> = {
     'AI Agent': 'AiAgent',
     'Wait for Signal': 'WaitForSignal',
   };
-  return knownMappings[stepType] ?? stepType.replace(/\s+/g, '');
+  return knownMappings[name] ?? name.replace(/\s+/g, '');
 }
 
 export function StepPickerPanel({
@@ -291,7 +301,7 @@ export function StepPickerPanel({
 
   const handleStepTypeSelect = (stepType: StepTypeInfo) => {
     onSelect({
-      stepType: normalizeStepType(stepType.name || ''),
+      stepType: normalizeStepType(stepType),
       name: stepType.name || '',
     });
   };
@@ -524,6 +534,7 @@ function StepTypeSection({
             key={stepType.name}
             type="button"
             onClick={() => onStepTypeSelect(stepType)}
+            data-testid={`step-picker-step-type-${toTestIdPart(normalizeStepType(stepType))}`}
             className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
           >
             <StepTypeIcon
@@ -574,6 +585,7 @@ function AgentSection({
               key={agent.id}
               type="button"
               onClick={() => onAgentSelect(agent.id || '', agent.name || '')}
+              data-testid={`step-picker-agent-${toTestIdPart(agent.id)}`}
               className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted"
             >
               <div className="flex items-center gap-3">
@@ -626,6 +638,7 @@ function CapabilitySearchSection({
                 onCapabilitySelect(result.agentId, result.capability.id)
               }
               disabled={!result.isSupported}
+              data-testid={`step-picker-capability-${toTestIdPart(result.agentId)}-${toTestIdPart(result.capability.id)}`}
               className={cn(
                 'flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors',
                 result.isSupported
@@ -701,6 +714,7 @@ function CapabilityList({
           key={capability.id}
           type="button"
           onClick={() => onCapabilitySelect(selectedAgentId, capability.id)}
+          data-testid={`step-picker-capability-${toTestIdPart(selectedAgentId)}-${toTestIdPart(capability.id)}`}
           className="flex w-full flex-col gap-1 rounded-lg px-3 py-3 text-left transition-colors hover:bg-muted"
         >
           <div className="flex items-center gap-2">

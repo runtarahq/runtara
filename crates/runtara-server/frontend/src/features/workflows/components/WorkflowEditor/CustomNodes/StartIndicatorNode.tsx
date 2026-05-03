@@ -56,6 +56,7 @@ function StartIndicatorNodeComponent({ data }: NodeProps) {
             className="w-5 h-5 rounded-full [&_svg]:size-3 shadow-md pointer-events-auto nodrag nopan"
             variant="outline"
             size="icon"
+            aria-label="Add first workflow step"
             onClick={(e) => {
               e.stopPropagation();
               onAddFirstStep?.();

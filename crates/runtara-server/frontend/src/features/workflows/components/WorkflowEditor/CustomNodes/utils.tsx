@@ -24,6 +24,7 @@ import {
   migrateStartStep,
   needsStartStepMigration,
 } from '@/features/workflows/utils/start-step-migration';
+import { convertConditionArguments } from '@/shared/utils/condition-type-conversion';
 
 // Base dimensions - must be multiples of SNAP_GRID_SIZE (12px) for proper alignment
 export const BASE_WIDTH = 132; // 11 * 12 - compact pill shape
@@ -1012,6 +1013,16 @@ export function composeExecutionGraph(
   });
 
   nds.forEach((node) => {
+    const stepType = node.data?.stepType;
+    if (stepType === 'Split' || stepType === 'While') {
+      const containerStep = nodesMap.get(node.id);
+      if (containerStep && !containerStep.subgraph) {
+        containerStep.subgraph = { steps: {} };
+      }
+    }
+  });
+
+  nds.forEach((node) => {
     if (node.parentId) {
       const parent = nodesMap.get(node.parentId);
       if (parent) {
@@ -1179,7 +1190,7 @@ function addStarts(executionGraph: ExecutionGraphDto) {
     }
 
     if (candidates.length === 0) {
-      return undefined;
+      return '';
     }
 
     // If multiple candidates, pick the leftmost one (smallest x position)
@@ -1235,6 +1246,19 @@ function coerceValueToType(value: any, typeHint?: string): any {
 // Check if a typeHint is a valid ValueType
 function isValidValueType(typeHint?: string): typeHint is ValueType {
   return typeHint !== undefined && VALID_VALUE_TYPES.has(typeHint as ValueType);
+}
+
+function normalizeConditionExpression(condition: any): any {
+  if (!condition || typeof condition !== 'object') return condition;
+  if (!('op' in condition) || !Array.isArray(condition.arguments)) {
+    return condition;
+  }
+
+  return {
+    ...condition,
+    type: condition.type || 'operation',
+    arguments: convertConditionArguments(condition.op, condition.arguments),
+  };
 }
 
 function cleanNodeData(steps: Record<string, any>) {
@@ -1632,6 +1656,13 @@ function cleanNodeData(steps: Record<string, any>) {
       cleaned[id].subgraph = data.subgraph;
     }
 
+    if (restData.stepType === 'Conditional' && (restData as any).condition) {
+      delete cleaned[id].inputMapping;
+      cleaned[id].condition = normalizeConditionExpression(
+        (restData as any).condition
+      );
+    }
+
     // Ensure EmbedWorkflow has childWorkflowId and childVersion at root level (DSL v2.0.0 requirement)
     if (restData.stepType === 'EmbedWorkflow') {
       if (childWorkflowId) {
@@ -1905,7 +1936,7 @@ function cleanNodeData(steps: Record<string, any>) {
 
       // Add condition from form data
       if (filterCondition) {
-        filterConfig.condition = filterCondition;
+        filterConfig.condition = normalizeConditionExpression(filterCondition);
       }
 
       // Only add config if it has the required fields
@@ -1923,7 +1954,7 @@ function cleanNodeData(steps: Record<string, any>) {
 
       // Set condition at root level (API expects WhileStep.condition)
       if (whileCondition) {
-        cleaned[id].condition = whileCondition;
+        cleaned[id].condition = normalizeConditionExpression(whileCondition);
       }
 
       // Build config object

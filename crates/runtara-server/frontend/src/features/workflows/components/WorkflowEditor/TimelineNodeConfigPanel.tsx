@@ -67,7 +67,12 @@ export function TimelineNodeConfigPanel({
   const stepType = nodeData?.stepType || 'step';
 
   return (
-    <div className="bg-card">
+    <div
+      className="bg-card"
+      data-testid="timeline-node-config-panel"
+      data-node-id={nodeId}
+      data-step-type={stepType}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2">
         <div className="min-w-0">
           <p className="text-xs text-muted-foreground">
@@ -108,11 +113,20 @@ export function TimelineNodeConfigPanel({
       </div>
 
       <div className="flex justify-end gap-2 border-t px-4 py-3">
-        <Button type="button" variant="outline" onClick={onCancel}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={onCancel}
+          data-testid="timeline-node-config-cancel"
+        >
           <X aria-hidden="true" />
           Cancel
         </Button>
-        <Button type="button" onClick={handleSave}>
+        <Button
+          type="button"
+          onClick={handleSave}
+          data-testid="timeline-node-config-save"
+        >
           <Check aria-hidden="true" />
           Save
         </Button>

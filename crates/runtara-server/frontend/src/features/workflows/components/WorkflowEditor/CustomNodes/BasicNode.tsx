@@ -400,6 +400,7 @@ function BasicNodeComponent({
               variant="outline"
               size="icon"
               onClick={handleOpenCreate}
+              aria-label={`Add step after ${data.name || id || 'step'}`}
             >
               <Plus />
             </Button>
@@ -421,6 +422,7 @@ function BasicNodeComponent({
               variant="outline"
               size="icon"
               onClick={handleOpenCreateBefore}
+              aria-label={`Add step before ${data.name || id || 'step'}`}
             >
               <Plus />
             </Button>
