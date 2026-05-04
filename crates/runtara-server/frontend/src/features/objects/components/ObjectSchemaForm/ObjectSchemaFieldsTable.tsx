@@ -23,6 +23,7 @@ import {
 } from '@/shared/components/ui/popover';
 import { TagInput } from '@/shared/components/ui/tag-input';
 import { Plus, Trash2, Settings2 } from 'lucide-react';
+import type { VectorIndexMethod } from '@/generated/RuntaraRuntimeApi';
 
 export type FieldDefinition = {
   __id: string;
@@ -34,13 +35,19 @@ export type FieldDefinition = {
     | 'decimal'
     | 'timestamp'
     | 'json'
-    | 'enum';
+    | 'enum'
+    | 'tsvector'
+    | 'vector';
   nullable: boolean;
   unique: boolean;
   default?: string;
   precision?: number;
   scale?: number;
   values?: string[];
+  sourceColumn?: string;
+  language?: string;
+  dimension?: number;
+  indexMethod?: VectorIndexMethod | null;
 };
 
 const FIELD_TYPES = [
@@ -51,6 +58,8 @@ const FIELD_TYPES = [
   { value: 'timestamp', label: 'Timestamp', abbr: 'ts' },
   { value: 'json', label: 'JSON', abbr: 'json' },
   { value: 'enum', label: 'Enum', abbr: 'enum' },
+  { value: 'tsvector', label: 'Text Search', abbr: 'tsv' },
+  { value: 'vector', label: 'Vector', abbr: 'vec' },
 ];
 
 const getTypeAbbreviation = (type: string): string => {
@@ -73,7 +82,26 @@ interface FieldRowProps {
 }
 
 function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
-  const hasConfig = field.dataType === 'decimal' || field.dataType === 'enum';
+  const hasConfig =
+    field.dataType === 'decimal' ||
+    field.dataType === 'enum' ||
+    field.dataType === 'tsvector' ||
+    field.dataType === 'vector';
+
+  const handleDataTypeChange = (dataType: FieldDefinition['dataType']) => {
+    onUpdate('dataType', dataType);
+
+    if (dataType === 'decimal') {
+      onUpdate('precision', field.precision || 19);
+      onUpdate('scale', field.scale || 4);
+    } else if (dataType === 'tsvector') {
+      onUpdate('language', field.language || 'english');
+      onUpdate('sourceColumn', field.sourceColumn || '');
+    } else if (dataType === 'vector') {
+      onUpdate('dimension', field.dimension || 1536);
+      onUpdate('indexMethod', field.indexMethod ?? null);
+    }
+  };
 
   return (
     <TableRow className="hover:bg-muted/30 group">
@@ -102,7 +130,7 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
         <Select
           value={field.dataType}
           onValueChange={(value: FieldDefinition['dataType']) =>
-            onUpdate('dataType', value)
+            handleDataTypeChange(value)
           }
         >
           <SelectTrigger className="h-9 rounded-lg w-full">
@@ -235,6 +263,102 @@ function FieldRow({ field, onUpdate, onRemove }: FieldRowProps) {
                     <p className="text-xs text-muted-foreground">
                       Add allowed values. Press Enter after each.
                     </p>
+                  </div>
+                )}
+                {field.dataType === 'tsvector' && (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <span className="font-medium text-sm">
+                        Text Search Configuration
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Source Column
+                      </label>
+                      <Input
+                        value={field.sourceColumn || ''}
+                        onChange={(e) =>
+                          onUpdate('sourceColumn', e.target.value)
+                        }
+                        placeholder="title"
+                        className="h-9"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        String or enum column used to build the search vector.
+                      </p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Language
+                      </label>
+                      <Input
+                        value={field.language || 'english'}
+                        onChange={(e) => onUpdate('language', e.target.value)}
+                        className="h-9"
+                      />
+                    </div>
+                  </div>
+                )}
+                {field.dataType === 'vector' && (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2">
+                      <Settings2 className="h-4 w-4 text-muted-foreground" />
+                      <span className="font-medium text-sm">
+                        Vector Configuration
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Dimensions
+                      </label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max="16000"
+                        value={field.dimension || 1536}
+                        onChange={(e) =>
+                          onUpdate(
+                            'dimension',
+                            parseInt(e.target.value, 10) || 1536
+                          )
+                        }
+                        className="h-9"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        Embedding length (1-16000).
+                      </p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Index
+                      </label>
+                      <Select
+                        value={field.indexMethod?.type || 'none'}
+                        onValueChange={(value) => {
+                          if (value === 'hnsw') {
+                            onUpdate('indexMethod', { type: 'hnsw' });
+                          } else if (value === 'ivfflat') {
+                            onUpdate('indexMethod', {
+                              type: 'ivfflat',
+                              lists: 100,
+                            });
+                          } else {
+                            onUpdate('indexMethod', null);
+                          }
+                        }}
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">None</SelectItem>
+                          <SelectItem value="hnsw">HNSW</SelectItem>
+                          <SelectItem value="ivfflat">IVFFlat</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                 )}
               </PopoverContent>

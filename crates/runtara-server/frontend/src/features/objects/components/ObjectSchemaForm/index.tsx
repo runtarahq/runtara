@@ -66,6 +66,12 @@ const mapColumnsToFields = (
       base.scale = col.scale;
     } else if (col.type === 'enum') {
       base.values = col.values;
+    } else if (col.type === 'tsvector') {
+      base.sourceColumn = col.sourceColumn;
+      base.language = col.language;
+    } else if (col.type === 'vector') {
+      base.dimension = col.dimension;
+      base.indexMethod = col.indexMethod;
     }
 
     return base;
@@ -89,6 +95,10 @@ const mapFieldTypeToPostgresType = (field: FieldDefinition): string => {
       return 'JSONB';
     case 'enum':
       return 'TEXT'; // With CHECK constraint (handled separately)
+    case 'tsvector':
+      return 'TSVECTOR';
+    case 'vector':
+      return `VECTOR(${field.dimension || 1536})`;
     default:
       return 'TEXT';
   }
@@ -132,6 +142,20 @@ const convertFieldsToColumns = (
             ...base,
             type: 'enum' as const,
             values: field.values || [],
+          };
+        case 'tsvector':
+          return {
+            ...base,
+            type: 'tsvector' as const,
+            sourceColumn: field.sourceColumn || '',
+            language: field.language || 'english',
+          };
+        case 'vector':
+          return {
+            ...base,
+            type: 'vector' as const,
+            dimension: field.dimension || 1536,
+            indexMethod: field.indexMethod ?? null,
           };
         default:
           return { ...base, type: 'string' as const };
@@ -234,6 +258,18 @@ export function ObjectSchemaDtoForm({
         }
         if (field.scale && field.precision && field.scale > field.precision) {
           return `Column ${i + 1}: Scale cannot be greater than precision`;
+        }
+      } else if (field.dataType === 'tsvector') {
+        if (!field.sourceColumn?.trim()) {
+          return `Column ${i + 1}: Text search source column is required`;
+        }
+      } else if (field.dataType === 'vector') {
+        if (
+          !field.dimension ||
+          field.dimension < 1 ||
+          field.dimension > 16000
+        ) {
+          return `Column ${i + 1}: Vector dimensions must be between 1 and 16000`;
         }
       }
     }
