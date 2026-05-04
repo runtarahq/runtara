@@ -6,11 +6,17 @@ import { useAuthStore } from '@/shared/stores/authStore.ts';
  * @param token - The bearer token for authentication
  * @returns Headers object with Authorization header
  */
-export const createAuthHeaders = (token: string) => ({
-  headers: {
-    Authorization: `Bearer ${token}`,
-  },
-});
+export const createAuthHeaders = (token?: string | null) => {
+  const hasToken = token && token !== 'undefined' && token !== 'null';
+
+  return {
+    headers: hasToken
+      ? {
+          Authorization: `Bearer ${token}`,
+        }
+      : {},
+  };
+};
 
 /**
  * Returns the Runtime API base URL with org_id prefix.
