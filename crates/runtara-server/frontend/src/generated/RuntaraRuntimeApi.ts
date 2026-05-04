@@ -52,6 +52,17 @@ export enum TriggerType {
   CHANNEL = "CHANNEL",
 }
 
+/**
+ * Optional secondary text-index annotation for string-typed columns.
+ *
+ * `Trigram` causes a `gin_trgm_ops` GIN index to be created alongside the
+ * table, which speeds up `SIMILARITY_GTE` and `similarity()` scoring.
+ */
+export enum TextIndexKind {
+  None = "none",
+  Trigram = "trigram",
+}
+
 /** Termination type providing context for why an execution terminated */
 export enum TerminationType {
   NormalCompletion = "normal_completion",
@@ -82,6 +93,12 @@ export enum SwitchMatchType {
   IS_NOT_EMPTY = "IS_NOT_EMPTY",
   BETWEEN = "BETWEEN",
   RANGE = "RANGE",
+}
+
+/** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
+export enum SortDirection {
+  ASC = "ASC",
+  DESC = "DESC",
 }
 
 /**
@@ -236,12 +253,51 @@ export enum ConditionOperator {
   IS_DEFINED = "IS_DEFINED",
   IS_EMPTY = "IS_EMPTY",
   IS_NOT_EMPTY = "IS_NOT_EMPTY",
+  SIMILARITY_GTE = "SIMILARITY_GTE",
+  MATCH = "MATCH",
+  COSINE_DISTANCE_LTE = "COSINE_DISTANCE_LTE",
+  L2_DISTANCE_LTE = "L2_DISTANCE_LTE",
 }
 
 /** Strategy for compacting conversation memory. */
 export enum CompactionStrategy {
   Summarize = "summarize",
   SlidingWindow = "slidingWindow",
+}
+
+/** Behavior on per-row validation failure for bulk-create. */
+export enum BulkValidationMode {
+  Stop = "stop",
+  Skip = "skip",
+}
+
+/** Behavior on unique-key conflict for bulk-create. */
+export enum BulkConflictMode {
+  Error = "error",
+  Skip = "skip",
+  Upsert = "upsert",
+}
+
+/** LLM provider used by an AI Agent step. */
+export enum AiAgentProvider {
+  Openai = "openai",
+  Bedrock = "bedrock",
+}
+
+/** Aggregate function. JSON encoding is SCREAMING_SNAKE_CASE. */
+export enum AggregateFn {
+  COUNT = "COUNT",
+  SUM = "SUM",
+  AVG = "AVG",
+  MIN = "MIN",
+  MAX = "MAX",
+  FIRST_VALUE = "FIRST_VALUE",
+  LAST_VALUE = "LAST_VALUE",
+  PERCENTILE_CONT = "PERCENTILE_CONT",
+  PERCENTILE_DISC = "PERCENTILE_DISC",
+  STDDEV_SAMP = "STDDEV_SAMP",
+  VAR_SAMP = "VAR_SAMP",
+  EXPR = "EXPR",
 }
 
 /** API-compatible agent info */
@@ -309,6 +365,59 @@ export interface AgentSummary {
   name: string;
 }
 
+export interface AggregateOrderBy {
+  column: string;
+  /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
+  direction?: SortDirection;
+}
+
+export interface AggregateRequest {
+  aggregates: AggregateSpec[];
+  condition?: null | Condition;
+  groupBy?: string[];
+  /** @format int64 */
+  limit?: number | null;
+  /** @format int64 */
+  offset?: number | null;
+  orderBy?: AggregateOrderBy[];
+}
+
+export interface AggregateResponse {
+  columns: string[];
+  error?: string | null;
+  /** @format int64 */
+  groupCount: number;
+  rows: any[][];
+  success: boolean;
+}
+
+export interface AggregateSpec {
+  /** Output column name. Must match `[a-zA-Z_][a-zA-Z0-9_]*` and be unique. */
+  alias: string;
+  /**
+   * Source column. Optional for COUNT (COUNT(*)); required otherwise.
+   * Must be omitted for EXPR.
+   */
+  column?: string | null;
+  /** Apply DISTINCT. Only valid with `fn = COUNT` and a non-null `column`. */
+  distinct?: boolean;
+  /**
+   * Required for EXPR — an expression tree referencing prior aliases and
+   * constants. Rejected for every other function.
+   */
+  expression?: any;
+  /** Aggregate function. One of COUNT, SUM, MIN, MAX, FIRST_VALUE, LAST_VALUE, EXPR. */
+  fn: AggregateFn;
+  /** Required for FIRST_VALUE / LAST_VALUE; rejected for others. */
+  orderBy?: AggregateOrderBy[];
+  /**
+   * Fraction in `[0.0, 1.0]` for `PERCENTILE_CONT` / `PERCENTILE_DISC`.
+   * Required for those functions, rejected otherwise.
+   * @format double
+   */
+  percentile?: number | null;
+}
+
 /** Configuration for the AI Agent step. */
 export interface AiAgentConfig {
   /**
@@ -352,7 +461,7 @@ export interface AiAgentConfig {
    */
   outputSchema?: Partial<Record<string, SchemaField>> | null;
   /** LLM provider to use for the agent brain. */
-  provider: 'openai' | 'bedrock';
+  provider: AiAgentProvider;
   /** System prompt / instructions for the LLM */
   systemPrompt: MappingValue;
   /**
@@ -696,6 +805,65 @@ export interface BucketDto {
   name: string;
 }
 
+/**
+ * Bulk create request supporting two input shapes.
+ *
+ * **Object form** — each record as a JSON object:
+ * ```jsonc
+ * { "instances": [ { "sku": "A", "qty": 1 }, ... ] }
+ * ```
+ *
+ * **Columnar form** — column names once, rows as arrays of values. Optional
+ * `constants` are merged into every row (row values win on overlap). Use for
+ * large, uniform payloads (snapshots, CSV-style writes) to avoid repeating
+ * column keys.
+ * ```jsonc
+ * {
+ *   "columns": ["sku", "qty"],
+ *   "rows":    [["A", 1], ["B", 2]],
+ *   "constants":          { "snapshot_date": "2026-04-18" },
+ *   "nullifyEmptyStrings": true
+ * }
+ * ```
+ *
+ * Exactly one of (`instances`) or (`columns` + `rows`) must be provided.
+ */
+export interface BulkCreateRequest {
+  /** Columnar form — column names (length N). Must be paired with `rows`. */
+  columns?: string[] | null;
+  /** Columns used to detect conflicts. Required when `onConflict` is `skip` or `upsert`. */
+  conflictColumns?: string[];
+  /**
+   * Columnar form — fields merged into every row. Row cell values take
+   * precedence over constants when both provide the same column.
+   */
+  constants?: Partial<Record<string, any>>;
+  /** Object form — array of JSON objects, one per record. */
+  instances?: any[] | null;
+  /**
+   * Columnar form — when true, empty strings in non-string columns are
+   * converted to `null` before validation. Useful when ingesting from
+   * sources (CSV, SFTP) where missing values come through as "".
+   */
+  nullifyEmptyStrings?: boolean;
+  /** How to handle unique-key conflicts (default `error`). */
+  onConflict?: BulkConflictMode;
+  /** How to handle per-row validation failures (default `stop`). */
+  onError?: BulkValidationMode;
+  /** Columnar form — each row is an array of values aligned to `columns`. */
+  rows?: any[][] | null;
+}
+
+export interface BulkCreateResponse {
+  /** @format int64 */
+  createdCount: number;
+  errors?: BulkRowError[];
+  message: string;
+  /** @format int64 */
+  skippedCount?: number;
+  success: boolean;
+}
+
 export interface BulkDeleteRequest {
   instanceIds: string[];
 }
@@ -705,6 +873,40 @@ export interface BulkDeleteResponse {
   deletedCount: number;
   message: string;
   success: boolean;
+}
+
+export interface BulkRowError {
+  /** @min 0 */
+  index: number;
+  reason: string;
+}
+
+export interface BulkUpdateByIdEntry {
+  id: string;
+  properties: any;
+}
+
+/**
+ * Bulk update request. The `mode` field selects between two semantics:
+ * - `byCondition` — apply the same `properties` to every row matching `condition`.
+ * - `byIds` — apply per-row `properties` to each listed `id`.
+ */
+export type BulkUpdateRequest =
+  | {
+      condition: Condition;
+      mode: "byCondition";
+      properties: any;
+    }
+  | {
+      mode: "byIds";
+      updates: BulkUpdateByIdEntry[];
+    };
+
+export interface BulkUpdateResponse {
+  message: string;
+  success: boolean;
+  /** @format int64 */
+  updatedCount: number;
 }
 
 /**
@@ -821,6 +1023,11 @@ export type ColumnDefinition = ColumnType & {
   name: string;
   /** Whether the column allows NULL values (default: true) */
   nullable?: boolean;
+  /**
+   * Optional secondary text index. Only valid for `string` / `enum`
+   * columns; rejected at validation otherwise.
+   */
+  textIndex?: TextIndexKind;
   /** Whether the column has a UNIQUE constraint (default: false) */
   unique?: boolean;
 };
@@ -861,6 +1068,27 @@ export type ColumnType =
       type: "enum";
       /** List of allowed string values */
       values: string[];
+    }
+  | {
+      /** Postgres text-search configuration. Defaults to `"english"`. */
+      language?: string;
+      /**
+       * Name of the text column to derive the tsvector from. Must be a
+       * `String` or `Enum` column declared in the same schema.
+       */
+      sourceColumn: string;
+      type: "tsvector";
+    }
+  | {
+      /**
+       * Number of dimensions. Range: 1..=16000.
+       * @format int32
+       * @min 0
+       */
+      dimension: number;
+      /** Optional approximate-nearest-neighbor index. None ⇒ no index. */
+      indexMethod?: null | VectorIndexMethod;
+      type: "vector";
     };
 
 /** Controls how conversation memory is compacted when it grows too large. */
@@ -1726,6 +1954,13 @@ export interface FilterRequest {
   limit?: number;
   /** @format int64 */
   offset?: number;
+  /** Optional ORDER BY entries. When set, supersedes `sortBy` / `sortOrder`. */
+  orderBy?: OrderByEntry[] | null;
+  /**
+   * Optional computed score column. Adds `<expression> AS <alias>` to
+   * the SELECT and surfaces under `instance.computed[alias]`.
+   */
+  scoreExpression?: null | ScoreExpression;
   /** Fields to sort by (e.g., ["createdAt", "name"]). Supports system fields (id, createdAt, updatedAt) and schema-defined columns. */
   sortBy?: string[] | null;
   /** Sort order for each field (e.g., ["desc", "asc"]). Defaults to "asc" for unspecified fields. */
@@ -1768,13 +2003,29 @@ export interface FilterStep {
   name?: string | null;
 }
 
-/** Exit point step - defines workflow outputs */
+/**
+ * Exit point step - defines workflow outputs.
+ *
+ * The Finish step's `inputMapping` IS the workflow's (or, when nested in a
+ * Split subgraph, the iteration's) output: each map key becomes a field on
+ * the resulting object, and the values reference workflow data via the
+ * standard mapping system (`data.*`, `steps.<id>.outputs.*`, `variables.*`).
+ *
+ * There is no `outputMapping` field — Finish only takes `inputMapping`.
+ */
 export interface FinishStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
   /** Unique step identifier */
   id: string;
-  /** Maps workflow data to output values */
+  /**
+   * Defines the workflow's final output (or a Split iteration's per-item
+   * result when nested in a Split subgraph). Each map key becomes a field
+   * on the resulting object; values reference workflow data via the
+   * standard mapping system (`data.*`, `steps.<id>.outputs.*`,
+   * `variables.*`). Finish has no `outputMapping` — `inputMapping` *is*
+   * the output.
+   */
   inputMapping?: null | HashMap;
   /** Human-readable step name */
   name?: string | null;
@@ -1918,6 +2169,11 @@ export interface IndexDefinition {
 }
 
 export interface Instance {
+  /**
+   * Computed columns (e.g. `score_expression` output). Absent when
+   * no score expression was requested.
+   */
+  computed?: Partial<Record<string, any>> | null;
   createdAt: string;
   id: string;
   properties: any;
@@ -2257,6 +2513,22 @@ export interface OAuthConfigDto {
   /** Provider's token endpoint */
   tokenUrl: string;
 }
+
+export interface OrderByEntry {
+  /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
+  direction?: SortDirection;
+  expression: OrderByTarget;
+}
+
+export type OrderByTarget =
+  | {
+      kind: "column";
+      name: string;
+    }
+  | {
+      kind: "alias";
+      name: string;
+    };
 
 /**
  * API-compatible output field info.
@@ -2678,6 +2950,17 @@ export interface SchemaField {
   visibleWhen?: null | VisibleWhen;
 }
 
+export interface ScoreExpression {
+  /** Output alias. Must be `[a-zA-Z_][a-zA-Z0-9_]*`. */
+  alias: string;
+  /**
+   * Expression tree. Same shape as aggregate `EXPR`, plus the
+   * whitelisted function-call form `{fn: "SIMILARITY"|"GREATEST"|"LEAST",
+   * arguments: [...]}`.
+   */
+  expression: any;
+}
+
 /**
  * Configuration for a Split step.
  * Defines the array to iterate over and execution options.
@@ -2689,6 +2972,20 @@ export interface SplitConfig {
    * When false, null input raises an error.
    */
   allowNull?: boolean | null;
+  /**
+   * Batch size for grouping array elements into sub-arrays before iteration.
+   *
+   * When 0 or unset (the default), the array is split element-by-element —
+   * `[1,2,3,4,5]` yields five iterations with items `1, 2, 3, 4, 5`.
+   *
+   * When > 0, elements are grouped into chunks of `batch_size` (last chunk
+   * may be shorter). For example with `batch_size: 2`, `[1,2,3,4,5]` yields
+   * three iterations with items `[1,2]`, `[3,4]`, `[5]`. Each iteration's
+   * subgraph receives an array value instead of an individual element.
+   * @format int32
+   * @min 0
+   */
+  batchSize?: number | null;
   /**
    * Convert single values to a single-element array (default: false).
    * When true, non-array values are wrapped in an array.
@@ -2730,7 +3027,16 @@ export interface SplitConfig {
   variables?: null | HashMap;
 }
 
-/** Iterates over an array, executing subgraph for each item */
+/**
+ * Iterates over an array, executing subgraph for each item.
+ *
+ * Each iteration's outer-array entry is whatever the subgraph's reachable
+ * `Finish` step returns (via its `inputMapping`). If `output_schema` is
+ * non-empty, the per-iteration result is checked for required fields before
+ * being collected — extra fields are allowed, missing required fields fail
+ * the iteration. Likewise `input_schema` validates each iteration's `data`
+ * (the array element) before the subgraph runs.
+ */
 export interface SplitStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
@@ -2748,6 +3054,10 @@ export interface SplitStep {
   /**
    * Schema defining the expected shape of each item in the array.
    * Keys are field names, values define the field type and constraints.
+   *
+   * Validation is permissive: required fields must be present and
+   * type-compatible; extra fields are allowed. A missing required field
+   * causes the iteration to fail (see `SplitConfig.dontStopOnFailed`).
    */
   inputSchema?: Partial<Record<string, SchemaField>>;
   /** Human-readable step name */
@@ -2755,6 +3065,10 @@ export interface SplitStep {
   /**
    * Schema defining the expected output from each iteration.
    * Keys are field names, values define the field type and constraints.
+   *
+   * Validation is permissive: required fields must be present and
+   * type-compatible in the iteration's result; extra fields are allowed.
+   * The result is whatever the subgraph's reachable Finish step returned.
    */
   outputSchema?: Partial<Record<string, SchemaField>>;
   /** Nested execution graph for each iteration */
@@ -3309,6 +3623,20 @@ export interface Variable {
   /** The actual value (must match the declared type) */
   value: any;
 }
+
+/** Mirror of `runtara_object_store::VectorIndexMethod` for the HTTP DTO. */
+export type VectorIndexMethod =
+  | {
+      type: "hnsw";
+    }
+  | {
+      /**
+       * @format int32
+       * @min 0
+       */
+      lists: number;
+      type: "ivfflat";
+    };
 
 /** Response containing schemas from a specific workflow version's execution graph */
 export interface VersionSchemasResponse {
@@ -4991,6 +5319,33 @@ export class Api<
       }),
 
     /**
+     * No description
+     *
+     * @tags object-model
+     * @name AggregateInstances
+     * @summary Aggregate instances with GROUP BY for a specific schema.
+     * @request POST:/api/runtime/object-model/instances/schema/{name}/aggregate
+     */
+    aggregateInstances: (
+      name: string,
+      data: AggregateRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<AggregateResponse, any>({
+        path: `/api/runtime/object-model/instances/schema/${name}/aggregate`,
+        method: "POST",
+        query: query,
+        body: data,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
      * @description Exports filtered and sorted instances from a schema as a CSV file. Supports column selection and all existing filter/sort capabilities.
      *
      * @tags api::handlers::csv_import_export
@@ -5126,6 +5481,35 @@ export class Api<
       }),
 
     /**
+     * @description Creates multiple instances in a single transaction. If any validation fails, no rows are inserted.
+     *
+     * @tags object-model
+     * @name BulkCreateInstances
+     * @summary Bulk create instances
+     * @request POST:/api/runtime/object-model/instances/{schema_id}/bulk
+     * @secure
+     */
+    bulkCreateInstances: (
+      schemaId: string,
+      data: BulkCreateRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<BulkCreateResponse, any>({
+        path: `/api/runtime/object-model/instances/${schemaId}/bulk`,
+        method: "POST",
+        query: query,
+        body: data,
+        secure: true,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
      * @description Soft deletes multiple instances in a single operation.
      *
      * @tags object-model
@@ -5146,6 +5530,35 @@ export class Api<
       this.request<BulkDeleteResponse, any>({
         path: `/api/runtime/object-model/instances/${schemaId}/bulk`,
         method: "DELETE",
+        query: query,
+        body: data,
+        secure: true,
+        type: ContentType.Json,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * @description Updates multiple instances in a single transaction. Supports two modes: `byCondition` applies the same properties to every row matching the condition; `byIds` applies per-row properties to each listed id.
+     *
+     * @tags object-model
+     * @name BulkUpdateInstances
+     * @summary Bulk update instances
+     * @request PATCH:/api/runtime/object-model/instances/{schema_id}/bulk
+     * @secure
+     */
+    bulkUpdateInstances: (
+      schemaId: string,
+      data: BulkUpdateRequest,
+      query?: {
+        /** Optional connection ID for database selection */
+        connectionId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<BulkUpdateResponse, any>({
+        path: `/api/runtime/object-model/instances/${schemaId}/bulk`,
+        method: "PATCH",
         query: query,
         body: data,
         secure: true,
